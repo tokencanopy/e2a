@@ -1,0 +1,1 @@
+{"error":{"code":"duplicate_recipient","message":"same recipient address appears in more than one batch item","request_id":"req_fixture","details":{"address":"alice@example.com","item_indices":[3,17]}}}

@@ -12,27 +12,15 @@
 
 import { HttpFile } from '../http/http.js';
 
-export class PayloadTooLargeDetails {
+export class TooManyMessagesDetails {
     /**
-    * Observed byte count. Exact when Content-Length or decoded content is available; for chunked request bodies this is the lower bound observed before rejection.
+    * Maximum BatchMessage items per batch request.
     */
-    'actualBytes': number;
+    'maxMessages': number;
     /**
-    * Attachment filename when scope is attachment.
+    * Item count supplied by the caller.
     */
-    'filename'?: string;
-    /**
-    * For batch-send: the offending item\'s index in messages[]. Absent for single-send responses and for batch-wide scope violations.
-    */
-    'itemIndex'?: number;
-    /**
-    * Maximum bytes accepted for this scope.
-    */
-    'maxBytes': number;
-    /**
-    * Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body, batch (batch-send total attachment bytes across all items).
-    */
-    'scope': string;
+    'provided': number;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -40,38 +28,20 @@ export class PayloadTooLargeDetails {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "actualBytes",
-            "baseName": "actual_bytes",
+            "name": "maxMessages",
+            "baseName": "max_messages",
             "type": "number",
             "format": "int64"
         },
         {
-            "name": "filename",
-            "baseName": "filename",
-            "type": "string",
-            "format": ""
-        },
-        {
-            "name": "itemIndex",
-            "baseName": "item_index",
+            "name": "provided",
+            "baseName": "provided",
             "type": "number",
             "format": "int64"
-        },
-        {
-            "name": "maxBytes",
-            "baseName": "max_bytes",
-            "type": "number",
-            "format": "int64"
-        },
-        {
-            "name": "scope",
-            "baseName": "scope",
-            "type": "string",
-            "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return PayloadTooLargeDetails.attributeTypeMap;
+        return TooManyMessagesDetails.attributeTypeMap;
     }
 
     public constructor() {

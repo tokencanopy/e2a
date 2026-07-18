@@ -12,27 +12,15 @@
 
 import { HttpFile } from '../http/http.js';
 
-export class PayloadTooLargeDetails {
+export class DuplicateRecipientDetails {
     /**
-    * Observed byte count. Exact when Content-Length or decoded content is available; for chunked request bodies this is the lower bound observed before rejection.
+    * The recipient address that appears in more than one item\'s to.
     */
-    'actualBytes': number;
+    'address': string;
     /**
-    * Attachment filename when scope is attachment.
+    * Positions in the request\'s messages[] where the address appears in to. Length ≥ 2.
     */
-    'filename'?: string;
-    /**
-    * For batch-send: the offending item\'s index in messages[]. Absent for single-send responses and for batch-wide scope violations.
-    */
-    'itemIndex'?: number;
-    /**
-    * Maximum bytes accepted for this scope.
-    */
-    'maxBytes': number;
-    /**
-    * Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body, batch (batch-send total attachment bytes across all items).
-    */
-    'scope': string;
+    'itemIndices': Array<number>;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -40,38 +28,20 @@ export class PayloadTooLargeDetails {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "actualBytes",
-            "baseName": "actual_bytes",
-            "type": "number",
-            "format": "int64"
-        },
-        {
-            "name": "filename",
-            "baseName": "filename",
+            "name": "address",
+            "baseName": "address",
             "type": "string",
             "format": ""
         },
         {
-            "name": "itemIndex",
-            "baseName": "item_index",
-            "type": "number",
+            "name": "itemIndices",
+            "baseName": "item_indices",
+            "type": "Array<number>",
             "format": "int64"
-        },
-        {
-            "name": "maxBytes",
-            "baseName": "max_bytes",
-            "type": "number",
-            "format": "int64"
-        },
-        {
-            "name": "scope",
-            "baseName": "scope",
-            "type": "string",
-            "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return PayloadTooLargeDetails.attributeTypeMap;
+        return DuplicateRecipientDetails.attributeTypeMap;
     }
 
     public constructor() {
