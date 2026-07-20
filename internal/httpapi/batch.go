@@ -147,6 +147,121 @@ func (s *Server) registerSendBatch() {
 			"default": s.errorEnvelopeResponse(),
 		},
 	}, s.handleSendBatch)
+
+	huma.Register(s.API, huma.Operation{
+		OperationID: "getBatch",
+		Method:      http.MethodGet,
+		Path:        "/v1/batches/{batch_id}",
+		Summary:     "Get a batch's header and delivery-status rollup",
+		Tags:        []string{"messages"},
+		Description:  "Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.",
+		Security:    []map[string][]string{{"bearer": {}}},
+		Responses: map[string]*huma.Response{
+			"200":     s.jsonResponse(reflect.TypeOf(BatchView{}), "BatchView", "The batch header + per-status rollup."),
+			"404":     s.errorEnvelopeResponse(),
+			"default": s.errorEnvelopeResponse(),
+		},
+	}, s.handleGetBatch)
+}
+
+// BatchIDParam is the path input for GET /v1/batches/{batch_id}.
+type BatchIDParam struct {
+	BatchID string `path:"batch_id" doc:"The batch id, e.g. bat_abc123."`
+}
+
+// BatchStatusRollupView is the per-delivery-status count of a batch's child
+// messages. Statuses with no rows read as zero. Mirrors the message-lifecycle
+// vocabulary (accepted → sending → sent → delivered | deferred | bounced |
+// complained | failed).
+type BatchStatusRollupView struct {
+	Accepted   int `json:"accepted"`
+	Sending    int `json:"sending"`
+	Sent       int `json:"sent"`
+	Delivered  int `json:"delivered"`
+	Deferred   int `json:"deferred"`
+	Bounced    int `json:"bounced"`
+	Complained int `json:"complained"`
+	Failed     int `json:"failed"`
+}
+
+// BatchView is the GET /v1/batches/{batch_id} response body.
+type BatchView struct {
+	BatchID      string                  `json:"batch_id"`
+	AgentID      string                  `json:"agent_id" doc:"The sending agent's address."`
+	Requested    int                     `json:"requested" doc:"Number of items in the original request (accepted + suppressed)."`
+	Accepted     int                     `json:"accepted" doc:"Number of items durably accepted (each has a message_id + delivery pipeline entry)."`
+	Suppressed   []BatchSuppressedItem   `json:"suppressed" nullable:"false" doc:"Items dropped by the suppression filter at accept time. Empty when none were dropped."`
+	CreatedAt    string                  `json:"created_at" doc:"RFC3339 timestamp of when the batch was accepted."`
+	StatusRollup BatchStatusRollupView   `json:"status_rollup" doc:"Live per-delivery-status count of the batch's child messages, computed on read."`
+}
+
+// BatchSuppressedItem is one dropped-item record in a BatchView. item_index is
+// the position in the original request's messages[] array.
+type BatchSuppressedItem struct {
+	ItemIndex int    `json:"item_index"`
+	Address   string `json:"address"`
+	Reason    string `json:"reason"`
+}
+
+// batchViewOutput bridges the handler to Huma.
+type batchViewOutput struct {
+	Body BatchView
+}
+
+// handleGetBatch implements GET /v1/batches/{batch_id} (§7.1). Ownership is
+// enforced by comparing the batch's user_id to the caller and conflating a
+// foreign or missing batch to 404 (the resolveOwnedAgent convention).
+func (s *Server) handleGetBatch(ctx context.Context, in *BatchIDParam) (*batchViewOutput, error) {
+	user, uerr := s.requireUser(ctx)
+	if uerr != nil {
+		return nil, uerr
+	}
+	if s.deps.GetBatch == nil || s.deps.BatchStatusRollup == nil {
+		return nil, NewError(http.StatusNotImplemented, "not_implemented", "batch send is not enabled on this deployment")
+	}
+	batch, err := s.deps.GetBatch(ctx, in.BatchID)
+	if err != nil {
+		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to load batch")
+	}
+	// Foreign or missing batch → 404 (do not leak existence across accounts).
+	if batch == nil || batch.UserID != user.ID {
+		return nil, NewError(http.StatusNotFound, "not_found", "batch not found")
+	}
+	rollup, err := s.deps.BatchStatusRollup(ctx, in.BatchID)
+	if err != nil {
+		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to compute batch rollup")
+	}
+	return &batchViewOutput{Body: batchViewFrom(batch, rollup)}, nil
+}
+
+// batchViewFrom maps the store types into the wire BatchView.
+func batchViewFrom(b *identity.Batch, r *identity.BatchStatusRollup) BatchView {
+	suppressed, _ := b.DecodeSuppressed()
+	items := make([]BatchSuppressedItem, 0, len(suppressed))
+	for _, s := range suppressed {
+		items = append(items, BatchSuppressedItem{ItemIndex: s.ItemIndex, Address: s.Address, Reason: s.Reason})
+	}
+	view := BatchView{
+		BatchID:    b.BatchID,
+		AgentID:    b.AgentID,
+		Requested:  b.Requested,
+		Accepted:   b.Accepted,
+		Suppressed: items,
+		CreatedAt:  b.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+	}
+	if r != nil {
+		view.StatusRollup = BatchStatusRollupView{
+			Accepted:   r.Accepted,
+			Sending:    r.Sending,
+			Sent:       r.Sent,
+			Delivered:  r.Delivered,
+			Deferred:   r.Deferred,
+			Bounced:    r.Bounced,
+			Complained: r.Complained,
+			Failed:     r.Failed,
+		}
+	}
+	return view
 }
 
 // ---------------------------------------------------------------------------

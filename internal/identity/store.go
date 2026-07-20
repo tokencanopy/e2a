@@ -420,6 +420,15 @@ type Message struct {
 	// Reply-To points at a different mailbox. Outbound-irrelevant.
 	ReplyTo []string `json:"reply_to,omitempty"`
 
+	// BatchID links an outbound message to the batches row it was created
+	// under (POST /v1/agents/{email}/batches). Empty for single-sends and
+	// every inbound row. Populated by the read paths that need it (the
+	// delivery-feedback UPDATE...RETURNING that builds email.sent /
+	// email.failed events, so batch children carry batch_id on those
+	// events — docs/design/batch-send.md §7.3). Source: messages.batch_id
+	// (migration 067).
+	BatchID string `json:"batch_id,omitempty"`
+
 	// Labels are user-applied string tags (`urgent`, `follow-up`, …).
 	// Always lowercase, charset `[a-z0-9:_-]+`, ≤ 64 chars per label,
 	// capped at 100 per message. Empty slice means no labels — the DB
@@ -4144,6 +4153,7 @@ type MessageListFilter struct {
 	From            string
 	SubjectContains string
 	ConversationID  string    // exact match
+	BatchID         string    // exact match; child messages of a batch send (migration 067)
 	Since           time.Time // created_at >= Since
 	Until           time.Time // created_at <  Until
 	// Labels filters rows where ALL given labels are present on the
@@ -4265,6 +4275,10 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 	if f.ConversationID != "" {
 		query += fmt.Sprintf(` AND m.conversation_id = $%d`, len(args)+1)
 		args = append(args, f.ConversationID)
+	}
+	if f.BatchID != "" {
+		query += fmt.Sprintf(` AND m.batch_id = $%d`, len(args)+1)
+		args = append(args, f.BatchID)
 	}
 	if !f.Since.IsZero() {
 		query += fmt.Sprintf(` AND m.created_at >= $%d`, len(args)+1)

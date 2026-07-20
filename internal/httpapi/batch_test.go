@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -376,6 +377,96 @@ func TestSendBatch_ReplyToDefault(t *testing.T) {
 	}
 	if gotItems[1].ReplyTo != "special@acme.com" {
 		t.Errorf("item 1 ReplyTo = %q, want special@acme.com (per-item wins)", gotItems[1].ReplyTo)
+	}
+}
+
+// --- getBatch ---
+
+func TestGetBatch_HappyPath(t *testing.T) {
+	created := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	deps := Deps{
+		Authenticator: func(r *http.Request) (*identity.User, error) { return &identity.User{ID: "u_1"}, nil },
+		GetBatch: func(ctx context.Context, batchID string) (*identity.Batch, error) {
+			if batchID != "bat_x" {
+				return nil, nil
+			}
+			return &identity.Batch{
+				BatchID: "bat_x", UserID: "u_1", AgentID: "bot@acme.com",
+				Requested: 3, Accepted: 2, CreatedAt: created,
+				SuppressedJSON: []byte(`[{"item_index":1,"address":"b@x.com","reason":"bounce"}]`),
+			}, nil
+		},
+		BatchStatusRollup: func(ctx context.Context, batchID string) (*identity.BatchStatusRollup, error) {
+			return &identity.BatchStatusRollup{Accepted: 1, Sent: 1}, nil
+		},
+	}
+	srv := httptest.NewServer(New(deps))
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/batches/bat_x", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["batch_id"] != "bat_x" {
+		t.Errorf("batch_id = %v", out["batch_id"])
+	}
+	if out["requested"].(float64) != 3 || out["accepted"].(float64) != 2 {
+		t.Errorf("counts wrong: %v", out)
+	}
+	supp, _ := out["suppressed"].([]any)
+	if len(supp) != 1 {
+		t.Fatalf("suppressed len = %d, want 1", len(supp))
+	}
+	rollup, _ := out["status_rollup"].(map[string]any)
+	if rollup["sent"].(float64) != 1 || rollup["accepted"].(float64) != 1 {
+		t.Errorf("rollup = %v", rollup)
+	}
+}
+
+func TestGetBatch_NotFoundAndForeign(t *testing.T) {
+	deps := Deps{
+		Authenticator: func(r *http.Request) (*identity.User, error) { return &identity.User{ID: "u_1"}, nil },
+		GetBatch: func(ctx context.Context, batchID string) (*identity.Batch, error) {
+			switch batchID {
+			case "bat_missing":
+				return nil, nil
+			case "bat_foreign":
+				return &identity.Batch{BatchID: "bat_foreign", UserID: "u_OTHER"}, nil
+			}
+			return nil, nil
+		},
+		BatchStatusRollup: func(ctx context.Context, batchID string) (*identity.BatchStatusRollup, error) {
+			return &identity.BatchStatusRollup{}, nil
+		},
+	}
+	srv := httptest.NewServer(New(deps))
+	t.Cleanup(srv.Close)
+
+	for _, id := range []string{"bat_missing", "bat_foreign"} {
+		req, _ := http.NewRequest("GET", srv.URL+"/v1/batches/"+id, nil)
+		req.Header.Set("Authorization", "Bearer good")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404 (foreign must not leak existence)", id, resp.StatusCode)
+		}
+		errObj, _ := out["error"].(map[string]any)
+		if errObj["code"] != "not_found" {
+			t.Errorf("%s: code = %v, want not_found", id, errObj["code"])
+		}
 	}
 }
 

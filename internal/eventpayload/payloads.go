@@ -108,14 +108,19 @@ type EmailSentData struct {
 	// from the e2a message_id, and the correlation key for the async
 	// delivered/bounced/complained feedback events. Omitted for providerless
 	// local loopback delivery.
-	ProviderMessageID    string                                        `json:"provider_message_id,omitempty"`
-	Method               string                                        `json:"method" doc:"Transport used for the send. Open set; tolerate unknown values. Known values: smtp, loopback."`
-	From                 string                                        `json:"from"`
-	To                   []string                                      `json:"to" nullable:"false"`
-	CC                   []string                                      `json:"cc,omitempty" nullable:"false"`
-	BCC                  []string                                      `json:"bcc,omitempty" nullable:"false"`
-	Subject              string                                        `json:"subject"`
-	MessageType          string                                        `json:"message_type" doc:"Send kind. Open set; tolerate unknown values. Known values: send, reply, forward."`
+	ProviderMessageID string   `json:"provider_message_id,omitempty"`
+	Method            string   `json:"method" doc:"Transport used for the send. Open set; tolerate unknown values. Known values: smtp, loopback."`
+	From              string   `json:"from"`
+	To                []string `json:"to" nullable:"false"`
+	CC                []string `json:"cc,omitempty" nullable:"false"`
+	BCC               []string `json:"bcc,omitempty" nullable:"false"`
+	Subject           string   `json:"subject"`
+	MessageType       string   `json:"message_type" doc:"Send kind. Open set; tolerate unknown values. Known values: send, reply, forward."`
+	// BatchID correlates this send to the batch it was submitted under
+	// (POST /v1/agents/{email}/batches). Omitted for single sends. Lets a
+	// subscriber group per-recipient delivery outcomes back to the batch
+	// call (docs/design/batch-send.md §7.3).
+	BatchID              string                                        `json:"batch_id,omitempty"`
 	LifecycleTransitions []messagelifecycle.MessageLifecycleTransition `json:"lifecycle_transitions,omitempty" nullable:"false"`
 }
 
@@ -135,6 +140,10 @@ type EmailFailedData struct {
 	BCC            []string `json:"bcc,omitempty" nullable:"false"`
 	Subject        string   `json:"subject"`
 	MessageType    string   `json:"message_type" doc:"Send kind. Open set; tolerate unknown values. Known values: send, reply, forward."`
+	// BatchID correlates this failure to the batch it was submitted under
+	// (POST /v1/agents/{email}/batches). Omitted for single sends
+	// (docs/design/batch-send.md §7.3).
+	BatchID string `json:"batch_id,omitempty"`
 	// Reason is the human-readable terminal failure diagnostic (e.g. the SMTP
 	// response of a permanent reject).
 	Reason string `json:"reason"`

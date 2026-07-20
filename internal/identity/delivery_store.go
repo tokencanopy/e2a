@@ -818,9 +818,9 @@ func (s *Store) MarkOutboundSentTx(ctx context.Context, tx pgx.Tx, messageID, pr
 		  WHERE m.id = $1 AND m.direction = 'outbound'
 		    AND m.agent_id = a.id
 		    AND m.delivery_status = 'sending'
-		 RETURNING m.agent_id, m.subject, m.message_type, m.method, m.conversation_id, m.sender, m.to_recipients, m.cc, m.bcc`,
+		 RETURNING m.agent_id, m.subject, m.message_type, m.method, m.conversation_id, m.sender, m.to_recipients, m.cc, m.bcc, COALESCE(m.batch_id, '')`,
 		messageID, providerMessageID, rfcMessageIDKey,
-	).Scan(&m.AgentID, &m.Subject, &m.Type, &m.Method, &m.ConversationID, &m.Sender, &m.ToRecipients, &m.CC, &m.BCC)
+	).Scan(&m.AgentID, &m.Subject, &m.Type, &m.Method, &m.ConversationID, &m.Sender, &m.ToRecipients, &m.CC, &m.BCC, &m.BatchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -900,10 +900,10 @@ func (s *Store) ResolveOutboundProviderAcceptedTx(ctx context.Context, tx pgx.Tx
 		         (m.delivery_status='failed' AND COALESCE(m.delivery_failure_source,'local')='local'))
 		    AND m.provider_accepted_at IS NOT NULL
 		 RETURNING m.agent_id, m.subject, m.message_type, m.method, m.conversation_id, m.sender,
-		           m.to_recipients, m.cc, m.bcc, COALESCE(m.provider_message_id, ''),m.provider_accepted_at`,
+		           m.to_recipients, m.cc, m.bcc, COALESCE(m.provider_message_id, ''), COALESCE(m.batch_id, ''), m.provider_accepted_at`,
 		messageID,
 	).Scan(&m.AgentID, &m.Subject, &m.Type, &m.Method, &m.ConversationID, &m.Sender,
-		&m.ToRecipients, &m.CC, &m.BCC, &providerMessageID, &providerAcceptedAt)
+		&m.ToRecipients, &m.CC, &m.BCC, &providerMessageID, &m.BatchID, &providerAcceptedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", nil
 	}
@@ -990,10 +990,10 @@ func (s *Store) MarkOutboundFailedTx(ctx context.Context, tx pgx.Tx, messageID, 
 		    AND m.delivery_status IN ('accepted', 'sending')
 		    AND m.provider_accepted_at IS NULL
 		 RETURNING m.agent_id, m.subject, m.message_type, m.method, m.conversation_id, m.sender, m.to_recipients, m.cc, m.bcc,
-		           COALESCE(m.delivery_detail, '')`,
+		           COALESCE(m.delivery_detail, ''), COALESCE(m.batch_id, '')`,
 		messageID, nullIfEmpty(detail), string(source),
 	).Scan(&m.AgentID, &m.Subject, &m.Type, &m.Method, &m.ConversationID, &m.Sender, &m.ToRecipients, &m.CC, &m.BCC,
-		&m.DeliveryDetail)
+		&m.DeliveryDetail, &m.BatchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

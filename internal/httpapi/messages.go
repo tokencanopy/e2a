@@ -382,6 +382,7 @@ type ListMessagesInput struct {
 	From            string   `query:"from" doc:"Case-insensitive substring match on sender."`
 	SubjectContains string   `query:"subject_contains" doc:"Case-insensitive substring match on subject."`
 	ConversationID  string   `query:"conversation_id"`
+	BatchID         string   `query:"batch_id" doc:"Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123."`
 	Labels          []string `query:"labels" doc:"Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label."`
 	Since           string   `query:"since" doc:"RFC3339; created_at >= since."`
 	Until           string   `query:"until" doc:"RFC3339; created_at < until."`
@@ -408,6 +409,7 @@ type messagesCursor struct {
 	From            string    `json:"f,omitempty"`
 	SubjectContains string    `json:"sc,omitempty"`
 	ConversationID  string    `json:"cv,omitempty"`
+	BatchID         string    `json:"bt,omitempty"`
 	Since           string    `json:"sn,omitempty"`
 	Until           string    `json:"un,omitempty"`
 	Labels          []string  `json:"lb,omitempty"`
@@ -757,7 +759,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 		}
 		if cur.AgentID != ag.ID || cur.Status != status || cur.Direction != direction || cur.Sort != sort ||
 			cur.From != in.From || cur.SubjectContains != in.SubjectContains ||
-			cur.ConversationID != in.ConversationID ||
+			cur.ConversationID != in.ConversationID || cur.BatchID != in.BatchID ||
 			cur.Since != rfc3339OrEmpty(since) || cur.Until != rfc3339OrEmpty(until) ||
 			cur.Filter != in.Filter ||
 			cur.Deleted != in.Deleted ||
@@ -786,6 +788,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 		From:            in.From,
 		SubjectContains: in.SubjectContains,
 		ConversationID:  in.ConversationID,
+		BatchID:         in.BatchID,
 		Since:           since,
 		Until:           until,
 		Labels:          labelsFilter,
@@ -813,7 +816,8 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 			CreatedAt: last.CreatedAt, ID: last.ID,
 			Status: status, Direction: direction, AgentID: ag.ID, Sort: sort,
 			From: in.From, SubjectContains: in.SubjectContains, ConversationID: in.ConversationID,
-			Since: rfc3339OrEmpty(since), Until: rfc3339OrEmpty(until), Labels: labelsFilter,
+			BatchID: in.BatchID,
+			Since:   rfc3339OrEmpty(since), Until: rfc3339OrEmpty(until), Labels: labelsFilter,
 			Filter:  in.Filter,
 			Deleted: in.Deleted,
 		})

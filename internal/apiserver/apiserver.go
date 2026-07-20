@@ -193,6 +193,8 @@ func BuildDeps(p Params) httpapi.Deps {
 		Idempotency:            p.Idempotency,
 		DeliverOutbound:        p.API.DeliverOutbound,
 		DeliverBatch:           p.API.DeliverBatch,
+		GetBatch:               p.Store.GetBatch,
+		BatchStatusRollup:      p.Store.BatchStatusRollupByID,
 		SendTest:               p.API.SendTestCore,
 		PollSendOutcome:        p.Store.GetSendOutcome,
 		ApprovePending:         p.API.ApprovePendingCore,

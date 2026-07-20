@@ -299,6 +299,71 @@ func TestCreateOutboundMessagesTx_MissingAgentIDFails(t *testing.T) {
 	}
 }
 
+// TestGetMessagesByAgent_BatchIDFilter verifies the batch_id list filter
+// (docs/design/batch-send.md §7.2): listing an agent's messages filtered by
+// batch_id returns only that batch's children.
+func TestGetMessagesByAgent_BatchIDFilter(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	userID, agentID := batchTestSetup(t, store, "batch-listfilter")
+
+	batchID := identity.NewBatchID()
+	err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := store.CreateBatchTx(ctx, tx, &identity.Batch{
+			BatchID: batchID, UserID: userID, AgentID: agentID, Requested: 2, Accepted: 2,
+		}); err != nil {
+			return err
+		}
+		// 2 messages in the batch...
+		if _, err := store.CreateOutboundMessagesTx(ctx, tx, []identity.OutboundMessageInput{
+			{AgentID: agentID, ToRecipients: []string{"in1@x.com"}, Subject: "in batch 1", MsgType: "send", Method: "smtp", DeliveryStatus: "accepted", BatchID: batchID},
+			{AgentID: agentID, ToRecipients: []string{"in2@x.com"}, Subject: "in batch 2", MsgType: "send", Method: "smtp", DeliveryStatus: "accepted", BatchID: batchID},
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup batch: %v", err)
+	}
+	// ...and 1 message NOT in the batch (single-send, batch_id empty).
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, e := store.CreateOutboundMessageTx(ctx, tx, agentID,
+			[]string{"solo@x.com"}, nil, nil, "single send", "send", "smtp", "", "", nil, "accepted", "", "")
+		return e
+	}); err != nil {
+		t.Fatalf("single send: %v", err)
+	}
+
+	// Filter by batch_id → only the 2 batch children.
+	filtered, err := store.GetMessagesByAgent(ctx, identity.MessageListFilter{
+		AgentID: agentID, Direction: "outbound", BatchID: batchID, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("list filtered: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("batch_id filter returned %d messages, want 2", len(filtered))
+	}
+	for _, m := range filtered {
+		if m.Recipient == "solo@x.com" {
+			t.Errorf("single-send leaked into batch_id filter")
+		}
+	}
+
+	// No filter → all 3.
+	all, err := store.GetMessagesByAgent(ctx, identity.MessageListFilter{
+		AgentID: agentID, Direction: "outbound", Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("unfiltered returned %d, want 3", len(all))
+	}
+}
+
 func TestNewBatchID_HasExpectedPrefix(t *testing.T) {
 	id := identity.NewBatchID()
 	if len(id) < 5 || id[:4] != "bat_" {
