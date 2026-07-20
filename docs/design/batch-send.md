@@ -175,19 +175,22 @@ Single-send offers `wait=sent` (poll up to 15s, up to 20s ceiling per async-send
 
 ```sql
 CREATE TABLE batches (
-  batch_id       TEXT PRIMARY KEY,          -- 'bat_<base32>'
-  account_id     UUID NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
-  agent_id       UUID NOT NULL REFERENCES agents(agent_id)     ON DELETE CASCADE,
-  requested      INTEGER NOT NULL,          -- len(request.messages)
-  accepted       INTEGER NOT NULL,          -- requested minus suppression drops
-  suppressed_json JSONB NOT NULL DEFAULT '[]',
+  batch_id        TEXT        PRIMARY KEY,                                         -- 'bat_<base32>'
+  user_id         TEXT        NOT NULL REFERENCES users(id) ON DELETE CASCADE,     -- batch owner
+  agent_id        TEXT        NOT NULL REFERENCES agent_identities(id) ON DELETE CASCADE,  -- sending agent
+  requested       INTEGER     NOT NULL,                                            -- len(request.messages)
+  accepted        INTEGER     NOT NULL,                                            -- requested minus suppression drops
+  suppressed_json JSONB       NOT NULL DEFAULT '[]',
     -- [{ item_index: int, address: str, reason: str }] captured at accept.
     -- Mirrors the response `results[]` slots whose shape is { suppressed }.
-  request_id     TEXT NOT NULL,             -- for audit trail
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  request_id      TEXT        NOT NULL DEFAULT '',                                 -- for audit trail
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX batches_user_created_at_idx  ON batches (user_id,  created_at DESC);
 CREATE INDEX batches_agent_created_at_idx ON batches (agent_id, created_at DESC);
 ```
+
+**Type corrections from the initial draft.** The initial draft referenced `accounts(account_id)` and `agents(agent_id)` with `UUID` FKs. Neither exists in this codebase — the actual ownership chain is `users.id` (TEXT, `usr_...`) → `agent_identities.id` (TEXT, `agt_...`); there is no `accounts` table (the word appears only in the /v1 `AccountView` API resource, which is a projection over users + limits + usage). The schema above uses the real column shapes and reference targets; migration `067_batches.sql` embeds this SQL.
 
 Rationale for storing `suppressed_json` on the batch row (not per-message): a suppressed item produces NO `messages` row, so there is no other durable place to record the drop. The batch row is the only place that remembers "item i was in your request but we skipped it because address X hit the suppression list."
 
