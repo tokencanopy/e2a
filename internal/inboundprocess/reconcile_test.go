@@ -89,6 +89,13 @@ func (f *fakeEnq) InsertTx(_ context.Context, _ pgx.Tx, _ river.JobArgs, _ *rive
 	return &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: f.n}}, nil
 }
 
+// InsertManyTx is unused by this test's fake — it only exercises single-job
+// enqueue paths — but is required by the widened jobs.Enqueuer interface
+// (see internal/jobs/jobs.go). Present to satisfy the interface only.
+func (f *fakeEnq) InsertManyTx(_ context.Context, _ pgx.Tx, _ []river.InsertManyParams) ([]*rivertype.JobInsertResult, error) {
+	panic("fakeEnq.InsertManyTx: not implemented in this test suite")
+}
+
 // TestReconcilePending covers the startup cutover: an accepted intake row with no job
 // (a crash between insert and enqueue, or a pre-async row) gets a job stamped, and a
 // re-run does not re-enqueue it (idempotent via the process_job_id IS NULL guard).

@@ -92,6 +92,17 @@ func (f *fakeOutboundEnqueuer) CancelTx(_ context.Context, _ pgx.Tx, jobID int64
 	return nil
 }
 
+// EnqueueBatchTx satisfies the widened OutboundEnqueuer interface. Batch
+// tests use a dedicated fake below; single-send fake tests never invoke
+// this method — a call would indicate a wiring mistake.
+func (f *fakeOutboundEnqueuer) EnqueueBatchTx(_ context.Context, _ pgx.Tx, messageIDs []string) ([]int64, error) {
+	ids := make([]int64, len(messageIDs))
+	for i := range ids {
+		ids[i] = f.jobID + int64(i)
+	}
+	return ids, nil
+}
+
 type txSentinelEnqueuer struct{}
 
 func (txSentinelEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error) {
@@ -102,6 +113,18 @@ func (txSentinelEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageI
 
 func (s txSentinelEnqueuer) EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, _ time.Time) (int64, error) {
 	return s.EnqueueSendTx(ctx, tx, messageID)
+}
+
+func (s txSentinelEnqueuer) EnqueueBatchTx(ctx context.Context, tx pgx.Tx, messageIDs []string) ([]int64, error) {
+	ids := make([]int64, len(messageIDs))
+	for i, mid := range messageIDs {
+		id, err := s.EnqueueSendTx(ctx, tx, mid)
+		if err != nil {
+			return nil, err
+		}
+		ids[i] = id
+	}
+	return ids, nil
 }
 
 func installTask6DurableJobs(t *testing.T, pool *pgxpool.Pool) {

@@ -34,6 +34,12 @@ func (f *fakeFanOutEnq) InsertTx(_ context.Context, _ pgx.Tx, args river.JobArgs
 	return f.record(args)
 }
 
+// InsertManyTx satisfies the widened jobs.Enqueuer interface. The fanout
+// worker enqueues single jobs, so bulk-insert isn't exercised here.
+func (f *fakeFanOutEnq) InsertManyTx(_ context.Context, _ pgx.Tx, _ []river.InsertManyParams) ([]*rivertype.JobInsertResult, error) {
+	panic("fakeFanOutEnq.InsertManyTx: not implemented in this test suite")
+}
+
 func (f *fakeFanOutEnq) record(args river.JobArgs) (*rivertype.JobInsertResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

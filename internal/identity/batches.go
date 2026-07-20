@@ -253,6 +253,7 @@ func (s *Store) CreateOutboundMessagesTx(ctx context.Context, tx pgx.Tx, inputs 
 			return nil, fmt.Errorf("batch item %d: empty agent_id", i)
 		}
 		id := "msg_" + generateID()
+		expiresAt := now.Add(7 * 24 * time.Hour)
 		var recipient string
 		if len(in.ToRecipients) > 0 {
 			recipient = in.ToRecipients[0]
@@ -268,7 +269,7 @@ func (s *Store) CreateOutboundMessagesTx(ctx context.Context, tx pgx.Tx, inputs 
 			ProviderMessageID: in.ProviderMessageID,
 			ConversationID:    in.ConversationID,
 			CreatedAt:         now,
-			ExpiresAt:         now.Add(MessageTTL),
+			ExpiresAt:         &expiresAt,
 			ToRecipients:      in.ToRecipients,
 			CC:                in.CC,
 			BCC:               in.BCC,

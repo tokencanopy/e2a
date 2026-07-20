@@ -82,6 +82,67 @@ func (l *Limiter) AllowWithRetryAfter(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// AllowN behaves like AllowWithRetryAfter but atomically reserves n slots
+// against the window. Returns (true, 0) when all n slots fit; (false,
+// retryAfter) when the reservation would overflow the window, without
+// recording any of the n hits. Used by batch-send accept-tx to charge N
+// against a per-agent throughput limit (docs/design/batch-send.md §4.2,
+// §14 Q4). n == 1 is behaviourally identical to AllowWithRetryAfter.
+// n == 0 is a no-op — returns (true, 0) without touching state. n < 0 is
+// treated as n == 0.
+//
+// Semantics: all-or-nothing on the reservation. A batch of 100 against a
+// window with 50 slots left is rejected outright — batch send never
+// consumes some but not all of its reservation, because a partial reserve
+// would silently degrade throughput accounting for the caller.
+func (l *Limiter) AllowN(key string, n int) (bool, time.Duration) {
+	if n <= 0 {
+		return true, 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+
+	// Prune expired entries in place (same shape as AllowWithRetryAfter).
+	valid := l.buckets[key][:0]
+	for _, t := range l.buckets[key] {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+
+	if len(valid)+n > l.max {
+		l.buckets[key] = valid
+		// If the bucket has no in-window hits yet, no oldest to age out —
+		// the caller's n itself exceeds l.max. Retry-after in that case
+		// clamps to the full window: no waiting can make an unbounded
+		// reservation fit.
+		var retryAfter time.Duration
+		if len(valid) == 0 {
+			retryAfter = l.window
+		} else {
+			retryAfter = valid[0].Add(l.window).Sub(now)
+		}
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		if retryAfter%time.Second != 0 {
+			retryAfter = retryAfter.Truncate(time.Second) + time.Second
+		}
+		return false, retryAfter
+	}
+
+	// Record n hits at the same timestamp — they all consumed one slot
+	// concurrently at accept-tx time, so they share `now`.
+	for i := 0; i < n; i++ {
+		valid = append(valid, now)
+	}
+	l.buckets[key] = valid
+	return true, 0
+}
+
 // AllowSnapshot behaves like AllowWithRetryAfter but also returns the IETF
 // RateLimit header values: the window quota (limit), the remaining quota after
 // this request, and the seconds until the window resets (when the oldest

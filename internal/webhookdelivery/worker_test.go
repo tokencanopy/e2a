@@ -150,6 +150,13 @@ func (f *fakeEnq) InsertTx(_ context.Context, _ pgx.Tx, _ river.JobArgs, _ *rive
 	return &rivertype.JobInsertResult{Job: &rivertype.JobRow{ID: f.n}}, nil
 }
 
+// InsertManyTx satisfies the widened jobs.Enqueuer interface. This test's
+// fake only exercises single-job enqueue paths, so bulk-insert is not
+// implemented here — a call would indicate a test-wiring mistake.
+func (f *fakeEnq) InsertManyTx(_ context.Context, _ pgx.Tx, _ []river.InsertManyParams) ([]*rivertype.JobInsertResult, error) {
+	panic("fakeEnq.InsertManyTx: not implemented in this test suite")
+}
+
 // TestReconcilePending: the one-shot migration enqueues a job + stamps job_id for
 // every pending row with no job, and a re-run is idempotent (no double-enqueue).
 // Uses a REAL River client: the reconciler also rescues rows whose stamped job is
