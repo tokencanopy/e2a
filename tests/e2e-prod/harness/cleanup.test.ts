@@ -11,9 +11,10 @@ import {
   track,
   untrack,
   getTracked,
-  disarmSafetyNet,
-  setSafetyNetDeps,
-  runSafetyNet,
+  armLeakReporter,
+  disarmLeakReporter,
+  setReporterDeps,
+  reportLeaks,
 } from "./cleanup.ts";
 
 /** A scripted response: an HTTP status, a thrown value, or a status + headers. */
@@ -63,17 +64,16 @@ function drainTracked(): void {
 beforeEach(() => {
   // The registry is module-level state shared across tests in this file.
   drainTracked();
-  // track() arms the real process-level net, whose default client is built
-  // from the ambient E2A_API_KEY. A Ctrl-C mid-run would otherwise fire real
-  // DELETEs at production for these synthetic ids. Disarm it; the tests that
-  // exercise the net re-enter it deliberately through injected deps.
-  disarmSafetyNet();
-  setSafetyNetDeps();
+  // track() arms the process-level leak reporter, whose signal handlers call
+  // process.exit(). Disarm between tests so a real Ctrl-C during the run can't
+  // fire it; the reporter tests re-arm deliberately through injected seams.
+  disarmLeakReporter();
+  setReporterDeps();
 });
 
 after(() => {
-  disarmSafetyNet();
-  setSafetyNetDeps();
+  disarmLeakReporter();
+  setReporterDeps();
 });
 
 test("cleanup deletes every tracked fixture and empties the registry", async () => {
@@ -302,105 +302,85 @@ test("cleanup on an empty registry is a no-op", async () => {
   assert.equal(calls.length, 0);
 });
 
-// --- abnormal-exit safety net --------------------------------------------
+// --- abnormal-exit leak reporter -----------------------------------------
 //
-// These drive runSafetyNet() directly with injected client/exit/stderr seams,
-// so nothing kills this process and no request leaves it. They deliberately do
-// NOT install signal handlers.
+// The reporter is intentionally synchronous and delete-free (see cleanup.ts
+// for why an async delete-on-crash net is a trap under node:test's per-suite
+// process isolation). These tests capture its stderr through an injected seam,
+// so nothing is written to a real fd and the process is never killed.
 
-/** Captures the net's exit code and stderr, and hands it a scripted client. */
-function netHarness(script: (path: string, attempt: number) => Outcome) {
-  const { client, calls } = fakeClient(script);
-  const exits: number[] = [];
+function captureReporter() {
   const lines: string[] = [];
-  setSafetyNetDeps({
-    resolveClient: () => Promise.resolve(client),
-    exit: (code) => exits.push(code),
-    write: (line) => lines.push(line),
-  });
-  return { calls, exits, out: () => lines.join("") };
+  const exits: number[] = [];
+  setReporterDeps({ write: (l) => lines.push(l), exit: (c) => exits.push(c) });
+  return { out: () => lines.join(""), exits };
 }
 
-test("safety net deletes tracked fixtures and exits non-zero", async () => {
-  track("agent", "doomed@x.dev");
-  track("domain", "doomed.x.dev");
-  const net = netHarness(() => 204);
-
-  await runSafetyNet("SIGINT", 130);
-
-  assert.equal(net.calls.length, 2, "both fixtures must be deleted before exit");
-  assert.equal(getTracked().length, 0);
-  assert.deepEqual(net.exits, [130], "the signal's exit code must be preserved");
-  assert.match(net.out(), /teardown net fired \(SIGINT\)/);
-  assert.match(net.out(), /2 deleted, 0 LEAKED/);
+test("armLeakReporter is idempotent — one listener per signal", () => {
+  disarmLeakReporter();
+  armLeakReporter();
+  armLeakReporter();
+  armLeakReporter();
+  assert.equal(process.listenerCount("SIGINT"), 1);
+  assert.equal(process.listenerCount("SIGTERM"), 1);
+  assert.equal(process.listenerCount("exit"), 1);
+  disarmLeakReporter();
+  assert.equal(process.listenerCount("SIGINT"), 0);
+  assert.equal(process.listenerCount("exit"), 0);
 });
 
-test("safety net names every fixture it could not delete", async () => {
-  track("agent", "stuck@x.dev");
-  const net = netHarness(() => 500);
-
-  await runSafetyNet("uncaughtException: boom", 1);
-
-  assert.deepEqual(net.exits, [1], "a crash must still exit non-zero");
-  assert.match(net.out(), /uncaughtException: boom/, "the crash cause must survive");
-  assert.match(net.out(), /LEAKED agent stuck@x\.dev: HTTP 500/);
-});
-
-test("safety net exits non-zero even with nothing tracked", async () => {
-  const net = netHarness(() => 204);
-  await runSafetyNet("SIGTERM", 143);
-  assert.equal(net.calls.length, 0);
-  assert.deepEqual(net.exits, [143]);
-});
-
-test("safety net survives a client that cannot even be constructed", async () => {
+test("reportLeaks names every still-tracked fixture, once", () => {
   track("agent", "orphan@x.dev");
-  const exits: number[] = [];
-  const lines: string[] = [];
-  setSafetyNetDeps({
-    // loadEnv() throws when E2A_API_KEY is unset — the net must still report.
-    resolveClient: () => Promise.reject(new Error("No API key found")),
-    exit: (code) => exits.push(code),
-    write: (line) => lines.push(line),
-  });
+  track("domain", "orphan.x.dev");
+  const cap = captureReporter();
 
-  await runSafetyNet("SIGINT", 130);
+  reportLeaks("exit");
+  reportLeaks("exit"); // idempotent: a signal's exit re-runs the exit handler
 
-  assert.deepEqual(exits, [130]);
-  assert.match(lines.join(""), /teardown net failed: No API key found/);
-  assert.match(lines.join(""), /LEAKED agent orphan@x\.dev/);
+  assert.match(cap.out(), /2 fixture\(s\) still tracked at exit/);
+  assert.match(cap.out(), /LEAKED agent orphan@x\.dev — delete manually/);
+  assert.match(cap.out(), /LEAKED domain orphan\.x\.dev — delete manually/);
+  // Printed exactly once despite two calls.
+  assert.equal(cap.out().match(/still tracked at exit/g)?.length, 1);
 });
 
-test("a second signal during a sweep reports the remainder instead of hanging", async () => {
-  // Regression guard for `process.once`: the first signal consumed the handler,
-  // so an impatient second Ctrl-C hit Node's default terminate and killed the
-  // sweep mid-flight — losing both the deletes and the leak report.
-  track("agent", "slow@x.dev");
-  const exits: number[] = [];
-  const lines: string[] = [];
-  let release!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  setSafetyNetDeps({
-    resolveClient: async () => {
-      await gate;
-      return fakeClient(() => 204).client;
-    },
-    exit: (code) => exits.push(code),
-    write: (line) => lines.push(line),
-  });
+test("reportLeaks is silent when teardown emptied the registry", () => {
+  track("agent", "cleaned@x.dev");
+  untrack("agent", "cleaned@x.dev");
+  const cap = captureReporter();
 
-  const first = runSafetyNet("SIGINT", 130);
-  // Second signal lands while the first sweep is still awaiting its client.
-  await runSafetyNet("SIGINT", 130);
+  reportLeaks("exit");
 
-  assert.deepEqual(exits, [130], "the second signal must exit immediately");
-  assert.match(lines.join(""), /teardown net interrupted \(SIGINT\)/);
-  assert.match(lines.join(""), /LEAKED agent slow@x\.dev/);
-  // And it must not have started a competing sweep.
-  assert.equal(lines.join("").match(/teardown net fired/g)?.length, 1);
+  assert.equal(cap.out(), "", "a clean run must print nothing on exit");
+});
 
-  release();
-  await first;
+test("the SIGINT handler translates the signal into a non-zero exit", () => {
+  disarmLeakReporter();
+  const cap = captureReporter();
+  armLeakReporter();
+
+  // Fire the actual registered handler, not an internal — proves the signal is
+  // wired to exit (which is what runs the exit-time reportLeaks).
+  process.emit("SIGINT");
+  process.emit("SIGTERM");
+
+  assert.deepEqual(cap.exits, [130, 143]);
+  disarmLeakReporter();
+});
+
+test("disarm removes only our handlers, not a foreign one", () => {
+  disarmLeakReporter();
+  const foreign = () => {};
+  process.on("SIGINT", foreign);
+  armLeakReporter();
+  assert.equal(process.listenerCount("SIGINT"), 2);
+
+  disarmLeakReporter();
+
+  // The foreign listener (a stand-in for node:test's own) must survive.
+  assert.equal(process.listenerCount("SIGINT"), 1);
+  assert.deepEqual(process.listeners("SIGINT"), [foreign]);
+  process.off("SIGINT", foreign);
 });
 
 test("a second cleanup pass retries what the first one failed", async () => {

@@ -50,12 +50,9 @@ const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 15_000;
 
 export function track(kind: Kind, id: string): void {
-  // Every teardown path in this harness is an `after()` hook, and `after()`
-  // does not run when the process dies abnormally — Ctrl-C on a long prod
-  // sweep, an unhandled rejection, an uncaught throw outside a test. Anything
-  // tracked at that moment leaks a REAL production resource, so arm a
-  // process-level net the first time a suite tracks anything.
-  armSafetyNet();
+  // Arm the leak reporter the first time a suite tracks anything, so a fixture
+  // that outlives teardown announces itself (see the reporter section below).
+  armLeakReporter();
   // Dedupe: suites now track a requested identity before the create, which can
   // name an id some other call site already tracked. Without this, one 5xx on
   // a duplicated id gets reported as LEAKED even though its twin deleted fine.
@@ -163,104 +160,92 @@ export function getTracked(): readonly Tracked[] {
   return tracked;
 }
 
-// --- abnormal-exit safety net --------------------------------------------
+// --- abnormal-exit leak reporter -----------------------------------------
+//
+// The reliable teardown path is the per-suite `after()` hook calling cleanup()
+// (with the retry/isolation above). `after()` does NOT run when the process
+// dies without finishing normally: a module-level throw, an unhandled
+// rejection, or a Ctrl-C. Anything still tracked at that point is a REAL
+// leaked production resource.
+//
+// This reporter deliberately does NOT try to DELETE on the way out. An earlier
+// version did, and it was a trap: `npm test` runs each suite in its own child
+// process (Node's `--test-isolation=process` default), so a terminal Ctrl-C
+// signals the whole process group — the node:test RUNNER parent has no signal
+// handler, exits in milliseconds, and tears the child down long before an
+// async, rate-limited DELETE sweep could finish. A net that deletes 1 of N
+// fixtures while claiming to be a safety net is worse than an honest reporter.
+// Deleting on crash needs a supervisor ABOVE the child (a wrapper that traps
+// the signal and reaps), which is out of scope for this module.
+//
+// So instead we surface the leak synchronously: print every still-tracked id
+// on the way out, in a form a human can act on. That directly serves the
+// manual-deletion follow-up leaked fixtures require, and it cannot hang, cannot
+// double-delete, and cannot stomp the runner's own handlers.
 
-/** Seams so the net is testable without actually killing the test process. */
-export interface SafetyNetDeps {
-  resolveClient: () => Promise<ApiClient>;
-  exit: (code: number) => void;
+/** Test seams: swap stderr and exit so a unit test never writes to a real fd. */
+export interface ReporterDeps {
   write: (line: string) => void;
+  exit: (code: number) => void;
 }
 
-// The net's own sweep must not crawl: defaultClient inherits E2E_RPS (default
-// 1 req/s), which on a large registry means a minute-plus of silence after
-// Ctrl-C — long enough that an operator presses it again. Its DELETEs are the
-// last requests the process makes, so a higher rate costs nothing downstream.
-const NET_RPS = 5;
-
-const defaultDeps: SafetyNetDeps = {
-  resolveClient: async () => {
-    // Imported lazily so this module stays free of env-loading side effects at
-    // import time (loadEnv() throws when the API key is unset).
-    const { ApiClient } = await import("./client.ts");
-    return new ApiClient(undefined, NET_RPS);
-  },
-  exit: (code) => process.exit(code),
+const defaultReporterDeps: ReporterDeps = {
   write: (line) => process.stderr.write(line),
+  exit: (code) => process.exit(code),
 };
 
-let deps: SafetyNetDeps = defaultDeps;
-let safetyNetArmed = false;
-let safetyNetRunning = false;
+let reporterDeps: ReporterDeps = defaultReporterDeps;
+let reporterArmed = false;
+let reported = false;
+
+// A signal fires no `process.on("exit")`, so translate the common ones into an
+// explicit exit — which DOES run the exit handler, and thus the reporter. Kept
+// as named references so disarm can remove exactly these, never the runner's.
+const onExit = () => reportLeaks("exit");
+const onSigint = () => reporterDeps.exit(130);
+const onSigterm = () => reporterDeps.exit(143);
+
+/** Idempotent; called automatically from track(). */
+export function armLeakReporter(): void {
+  if (reporterArmed) return;
+  reporterArmed = true;
+  process.on("exit", onExit);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+}
 
 /**
- * Arm process-level handlers that run a best-effort cleanup pass when the
- * process is about to die without reaching its `after()` hooks. Idempotent;
- * called automatically from track().
- *
- * The handlers always re-establish a non-zero exit, so a suite that crashed
- * still reports failure. Note the deliberate trade: handling uncaughtException
- * means node:test loses its "which test generated this" attribution, so the
- * cause (with stack) is written to stderr first. Deleting a real production
- * agent is worth more than one diagnostic line.
+ * Test-only: remove exactly the handlers armLeakReporter added. Uses `off`
+ * with retained references, NOT removeAllListeners — the latter would also
+ * tear out node:test's own uncaughtException/rejection handlers and silently
+ * break test attribution.
  */
-export function armSafetyNet(): void {
-  if (safetyNetArmed) return;
-  safetyNetArmed = true;
-  // `on`, not `once`: a second SIGINT must still be caught. With `once` the
-  // handler is consumed by the first signal and an impatient second Ctrl-C
-  // hits Node's default terminate, killing the sweep mid-flight and taking
-  // the leak report with it — strictly worse than not sweeping at all.
-  process.on("SIGINT", () => void runSafetyNet("SIGINT", 130));
-  process.on("SIGTERM", () => void runSafetyNet("SIGTERM", 143));
-  process.on("uncaughtException", (e) => void runSafetyNet(`uncaughtException: ${e?.stack ?? e}`, 1));
-  process.on("unhandledRejection", (e) => void runSafetyNet(`unhandledRejection: ${String(e)}`, 1));
+export function disarmLeakReporter(): void {
+  process.off("exit", onExit);
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
+  reporterArmed = false;
+  reported = false;
 }
 
-/** Test-only: drop the handlers so a unit test cannot fire a real sweep. */
-export function disarmSafetyNet(): void {
-  process.removeAllListeners("SIGINT");
-  process.removeAllListeners("SIGTERM");
-  process.removeAllListeners("uncaughtException");
-  process.removeAllListeners("unhandledRejection");
-  safetyNetArmed = false;
-  safetyNetRunning = false;
+/** Test-only: swap the write/exit seams. Pass nothing to restore the defaults. */
+export function setReporterDeps(d?: Partial<ReporterDeps>): void {
+  reporterDeps = d ? { ...defaultReporterDeps, ...d } : defaultReporterDeps;
 }
 
-/** Test-only: swap the net's client/exit/stderr seams. Pass nothing to restore. */
-export function setSafetyNetDeps(d?: Partial<SafetyNetDeps>): void {
-  deps = d ? { ...defaultDeps, ...d } : defaultDeps;
-}
-
-export async function runSafetyNet(cause: string, exitCode: number): Promise<void> {
-  if (safetyNetRunning) {
-    // Second signal while the first sweep is in flight. Don't start a second
-    // concurrent pass (it would double the request pressure on an already
-    // throttled account) — report what is still outstanding and go now, since
-    // the operator has asked twice.
-    deps.write(`[e2e-prod] teardown net interrupted (${cause}) — ${tracked.length} fixture(s) NOT deleted\n`);
-    for (const t of tracked) deps.write(`[e2e-prod]   LEAKED ${t.kind} ${t.id}\n`);
-    deps.exit(exitCode);
-    return;
+/**
+ * Synchronously print every still-tracked fixture. Runs at process exit (and
+ * is idempotent via `reported`, since a signal handler's explicit exit re-runs
+ * the exit handler). No-op when the registry is empty — a suite whose `after()`
+ * cleaned up prints nothing.
+ */
+export function reportLeaks(cause: string): void {
+  if (reported || tracked.length === 0) return;
+  reported = true;
+  reporterDeps.write(
+    `\n[e2e-prod] ${tracked.length} fixture(s) still tracked at ${cause} — teardown did not run to completion:\n`,
+  );
+  for (const t of tracked) {
+    reporterDeps.write(`[e2e-prod]   LEAKED ${t.kind} ${t.id} — delete manually\n`);
   }
-  safetyNetRunning = true;
-  // Print the cause first — handling uncaughtException suppresses Node's own
-  // crash report, and a silently-swallowed crash is worse than a leaked fixture.
-  deps.write(`\n[e2e-prod] teardown net fired (${cause})\n`);
-  if (tracked.length > 0) {
-    deps.write(`[e2e-prod] deleting ${tracked.length} tracked fixture(s) before exit — Ctrl-C again to abandon them\n`);
-    try {
-      // One attempt each: the process is already dying and may be on a signal
-      // deadline, so a full retry budget risks being killed mid-sweep.
-      const r = await cleanup(await deps.resolveClient(), { attempts: 1 });
-      deps.write(`[e2e-prod] teardown net: ${r.succeeded} deleted, ${r.failed.length} LEAKED\n`);
-      for (const f of r.failed) {
-        deps.write(`[e2e-prod]   LEAKED ${f.kind} ${f.id}: ${f.reason}\n`);
-      }
-    } catch (e) {
-      deps.write(`[e2e-prod] teardown net failed: ${errMessage(e)}\n`);
-      for (const t of tracked) deps.write(`[e2e-prod]   LEAKED ${t.kind} ${t.id}\n`);
-    }
-  }
-  deps.exit(exitCode);
 }
