@@ -23,6 +23,9 @@ before(async () => {
   if (c.status !== 201) {
     throw new Error(`shared-agent setup failed: ${c.status} ${c.raw.slice(0, 200)}`);
   }
+  if (c.body?.email !== sharedAgentEmail) {
+    throw new Error(`server echoed a different address: requested ${sharedAgentEmail}, got ${c.body?.email}`);
+  }
 });
 
 after(async () => {
