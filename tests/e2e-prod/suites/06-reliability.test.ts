@@ -12,15 +12,17 @@ let sharedAgentEmail = "";
 
 before(async () => {
   // Single agent shared across reliability tests to avoid hitting the agent-creation rate limit.
-  const slug = uniqueSlug("rel");
+  sharedAgentEmail = `${uniqueSlug("rel")}@${client.env.sharedDomain}`;
+  // Track before the create, not after: a create that succeeds server-side but
+  // whose response is lost (or malformed) would otherwise be invisible to
+  // teardown, and a throw here skips the rest of this hook entirely.
+  track("agent", sharedAgentEmail);
   const c = await client.post<{ email: string }>("/v1/agents", {
-    body: { email: `${slug}@${client.env.sharedDomain}`, name: "rel-shared" },
+    body: { email: sharedAgentEmail, name: "rel-shared" },
   });
   if (c.status !== 201) {
     throw new Error(`shared-agent setup failed: ${c.status} ${c.raw.slice(0, 200)}`);
   }
-  sharedAgentEmail = c.body!.email;
-  track("agent", sharedAgentEmail);
 });
 
 after(async () => {
