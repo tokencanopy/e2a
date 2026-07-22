@@ -552,6 +552,8 @@ describe("E2AClient", () => {
     expect(url.searchParams.get("filter")).toBe("label:urgent");
     expect(url.searchParams.has("q")).toBe(false);
     expect(url.searchParams.get("deleted")).toBe("true");
+    // batch_id (our addition) sits between conversation_id and labels in the
+    // generated positional signature, so filter is now the 15th arg.
     expect(listMessagesSpy).toHaveBeenCalledWith(
       "bot@test.dev",
       "all",
@@ -565,9 +567,18 @@ describe("E2AClient", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       true,
       "label:urgent",
     );
+  });
+
+  it("messages.list exposes batchId as the wire batch_id query", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+
+    await client.messages.list("bot@test.dev", { batchId: "bat_123" }).page();
+
+    expect(new URL(lastCall().url).searchParams.get("batch_id")).toBe("bat_123");
   });
 
   it("messages.list({ deleted: true }) lists the trash", async () => {

@@ -1048,6 +1048,14 @@ async def test_messages_list_deleted_lists_trash(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_messages_list_batch_id_filter(httpx_mock):
+    httpx_mock.add_response(json={"items": [], "next_cursor": None})
+    async with _client() as c:
+        await c.messages.list("bot@test.dev", batch_id="bat_123").page()
+    assert httpx_mock.get_requests()[-1].url.params["batch_id"] == "bat_123"
+
+
+@pytest.mark.anyio
 async def test_messages_delete_soft_by_default(httpx_mock):
     httpx_mock.add_response(json={"deleted": True, "id": "msg_1"})
     async with _client() as c:

@@ -18,16 +18,11 @@ export class Message {
     'agentEmail': string;
     'approvalExpiresAt'?: Date;
     'attachments'?: Array<AttachmentMetaView> | null;
-<<<<<<< HEAD
     /**
     * Inbound SMTP authentication evidence. Only dmarc.status=pass authenticates the RFC 5322 From domain; even a pass does not authenticate the mailbox local part, a person, or message content. Null means there was no authenticating inbound SMTP peer, as with outbound or providerless loopback delivery.
     */
     'authentication': Authentication | null;
-=======
-    'auth'?: AuthVerdict;
-    'authHeaders'?: { [key: string]: string; };
     'batchId'?: string;
->>>>>>> 7ef81607 (feat(batch-send): observability — getBatch, listMessages filter, batch_id events)
     'bcc'?: Array<string> | null;
     'cc'?: Array<string> | null;
     'conversationId'?: string;

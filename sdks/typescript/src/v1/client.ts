@@ -360,6 +360,7 @@ export interface ListMessagesParams {
   from_?: string;
   subjectContains?: string;
   conversationId?: string;
+  batchId?: string;
   labels?: string[];
   since?: string;
   until?: string;
@@ -385,6 +386,7 @@ class MessagesResource {
         params.from_,
         params.subjectContains,
         params.conversationId,
+        params.batchId,
         params.labels,
         params.since,
         params.until,
