@@ -17,6 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
 from typing_extensions import Annotated
@@ -35,6 +36,7 @@ class SendEmailRequest(BaseModel):
     conversation_id: Optional[Annotated[str, Field(strict=True, max_length=200)]] = Field(default=None, description="Caller-assigned conversation (thread) id. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.")
     html: Optional[Annotated[str, Field(strict=True, max_length=1048576)]] = Field(default=None, description="Literal HTML body. Mutually exclusive with template_id/template_alias.")
     reply_to: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address.")
+    send_at: Optional[datetime] = Field(default=None, description="Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). Note: scheduling does NOT survive a review hold — if the message is held for review, send_at is dropped and it sends on approval. Cancel a scheduled send by moving the message to trash.")
     subject: Optional[Annotated[str, Field(strict=True, max_length=2000)]] = Field(default=None, description="Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).")
     template_alias: Optional[StrictStr] = Field(default=None, description="Send using a stored template resolved by its per-user alias. Mutually exclusive with template_id and with literal subject/text/html. Beta: templates are unstable — their shape may change before they are declared stable.")
     template_data: Optional[Dict[str, Any]] = Field(default=None, description="Variables for the referenced template ({{name}}, dot paths into nested objects). Missing variables render as empty strings. Beta: templates are unstable — their shape may change before they are declared stable.")
@@ -43,7 +45,7 @@ class SendEmailRequest(BaseModel):
     to: List[Annotated[str, Field(strict=True, max_length=320)]] = Field(description="Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.")
     unsubscribe: Optional[UnsubscribeOptions] = Field(default=None, description="Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_to", "subject", "template_alias", "template_data", "template_id", "text", "to", "unsubscribe"]
+    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_to", "send_at", "subject", "template_alias", "template_data", "template_id", "text", "to", "unsubscribe"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -119,6 +121,7 @@ class SendEmailRequest(BaseModel):
             "conversation_id": obj.get("conversation_id"),
             "html": obj.get("html"),
             "reply_to": obj.get("reply_to"),
+            "send_at": obj.get("send_at"),
             "subject": obj.get("subject"),
             "template_alias": obj.get("template_alias"),
             "template_data": obj.get("template_data"),

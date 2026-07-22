@@ -74,6 +74,10 @@ export class MessageView {
     */
     'reviewStatus'?: string;
     /**
+    * Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash.
+    */
+    'scheduledAt'?: Date;
+    /**
     * From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.
     */
     'sentAs'?: string;
@@ -238,6 +242,12 @@ export class MessageView {
             "baseName": "review_status",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sentAs",

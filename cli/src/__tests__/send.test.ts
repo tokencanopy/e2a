@@ -136,6 +136,36 @@ describe("send/reply commands", () => {
     expect(mockSend.mock.calls[0][1].conversationId).toBe("conv-1");
   });
 
+  it("parses --send-at into a Date, exits OK, and notes the scheduled time", async () => {
+    const at = "2026-08-01T09:00:00Z";
+    mockSend.mockResolvedValue({
+      messageId: "msg_sched",
+      status: "scheduled",
+      scheduledAt: new Date(at),
+    });
+    const { send } = await import("../commands/send.js");
+    await send({ to: ["you@example.com"], subject: "s", body: "b", sendAt: at });
+
+    const bodyArg = mockSend.mock.calls[0][1];
+    expect(bodyArg.sendAt).toBeInstanceOf(Date);
+    expect((bodyArg.sendAt as Date).toISOString()).toBe(new Date(at).toISOString());
+    // Scheduled is a successful, intended acceptance: id printed, exit 0, note on stderr.
+    expect(mockStdout).toHaveBeenCalledWith("msg_sched\n");
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("scheduled"));
+    // The note renders the instant via toISOString() (millisecond precision).
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining(new Date(at).toISOString()));
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("exits USAGE (2) when --send-at is not a valid date-time", async () => {
+    const { send } = await import("../commands/send.js");
+    await expect(
+      send({ to: ["you@example.com"], subject: "s", body: "b", sendAt: "not-a-date" }),
+    ).rejects.toThrow("process.exit");
+    expect(mockExit).toHaveBeenCalledWith(2);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it("exits USAGE (2) when --to or --subject is missing", async () => {
     const { send } = await import("../commands/send.js");
     await expect(send({ to: [], subject: "s", body: "b" })).rejects.toThrow("process.exit");

@@ -52,6 +52,10 @@ export class MessageSummaryView {
     */
     'reviewStatus'?: string;
     /**
+    * Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows.
+    */
+    'scheduledAt'?: Date;
+    /**
     * From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.
     */
     'sentAs'?: string;
@@ -174,6 +178,12 @@ export class MessageSummaryView {
             "baseName": "review_status",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sentAs",

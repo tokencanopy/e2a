@@ -56,6 +56,7 @@ class MessageView(BaseModel):
     read_status: StrictStr
     reply_to: List[StrictStr] = Field(description="The parsed Reply-To header of an inbound message. Populated for inbound only; always empty for outbound (a Reply-To you SET on a send is a request-side field on the send/reply/forward body and is not echoed back here).")
     review_status: Optional[StrictStr] = Field(default=None, description="Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field.")
+    scheduled_at: Optional[datetime] = Field(default=None, description="Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash.")
     sent_as: Optional[StrictStr] = Field(default=None, description="From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.")
     size_bytes: Optional[StrictInt] = Field(default=None, description="RAW MIME byte length of the whole stored message (headers + bodies + encoded attachments as transported). Distinct from attachments[].size_bytes, which is one attachment's DECODED payload size. This value is the dominant term of the account's storage-quota accounting (usage.storage_bytes).")
     subject: StrictStr
@@ -64,7 +65,7 @@ class MessageView(BaseModel):
     webhook_error: Optional[StrictStr] = None
     webhook_status: Optional[StrictStr] = None
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["attachments", "authentication", "body", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "labels", "parsed", "protection", "raw_message", "read_status", "reply_to", "review_status", "sent_as", "size_bytes", "subject", "to", "verified_domain", "webhook_error", "webhook_status"]
+    __properties: ClassVar[List[str]] = ["attachments", "authentication", "body", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "labels", "parsed", "protection", "raw_message", "read_status", "reply_to", "review_status", "scheduled_at", "sent_as", "size_bytes", "subject", "to", "verified_domain", "webhook_error", "webhook_status"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -204,6 +205,7 @@ class MessageView(BaseModel):
             "read_status": obj.get("read_status"),
             "reply_to": obj.get("reply_to"),
             "review_status": obj.get("review_status"),
+            "scheduled_at": obj.get("scheduled_at"),
             "sent_as": obj.get("sent_as"),
             "size_bytes": obj.get("size_bytes"),
             "subject": obj.get("subject"),

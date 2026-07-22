@@ -17,6 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from typing import Any, ClassVar, Dict, List, Optional
 from typing_extensions import Annotated
@@ -36,10 +37,11 @@ class ReplyRequest(BaseModel):
     html: Optional[Annotated[str, Field(strict=True, max_length=1048576)]] = None
     reply_all: Optional[StrictBool] = None
     reply_to: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.")
+    send_at: Optional[datetime] = Field(default=None, description="Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). Scheduling does not survive a review hold. Cancel by moving the message to trash.")
     text: Annotated[str, Field(strict=True, max_length=1048576)]
     unsubscribe: Optional[UnsubscribeOptions] = Field(default=None, description="Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_all", "reply_to", "text", "unsubscribe"]
+    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_all", "reply_to", "send_at", "text", "unsubscribe"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -116,6 +118,7 @@ class ReplyRequest(BaseModel):
             "html": obj.get("html"),
             "reply_all": obj.get("reply_all"),
             "reply_to": obj.get("reply_to"),
+            "send_at": obj.get("send_at"),
             "text": obj.get("text"),
             "unsubscribe": UnsubscribeOptions.from_dict(obj["unsubscribe"]) if obj.get("unsubscribe") is not None else None
         })

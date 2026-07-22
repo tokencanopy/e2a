@@ -46,6 +46,10 @@ type ApproveIdemCompleter func(ctx context.Context, tx pgx.Tx, approved *identit
 // closed before provider I/O.
 type OutboundEnqueuer interface {
 	EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error)
+	// EnqueueScheduledSendTx enqueues the send job to run no earlier than `at`
+	// (scheduled send). Same outbox transaction as EnqueueSendTx; only the job's
+	// first-run time differs. *outboundsend.Jobs satisfies it.
+	EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error)
 }
 
 // outboundSendStore implements outboundsend.Store over identity.Store +

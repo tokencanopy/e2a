@@ -37,6 +37,10 @@ export class ReplyRequest {
     * Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent\'s own address.
     */
     'replyTo'?: string;
+    /**
+    * Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). Scheduling does not survive a review hold. Cancel by moving the message to trash.
+    */
+    'sendAt'?: Date;
     'text': string;
     /**
     * Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.
@@ -89,6 +93,12 @@ export class ReplyRequest {
             "baseName": "reply_to",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "sendAt",
+            "baseName": "send_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "text",

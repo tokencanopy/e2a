@@ -32,10 +32,11 @@ class SendResultView(BaseModel):
     message_id: StrictStr
     method: Optional[StrictStr] = Field(default=None, description="Send transport. Open set; tolerate unknown values. Known values: smtp, loopback.")
     provider_message_id: Optional[StrictStr] = Field(default=None, description="Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id.")
+    scheduled_at: Optional[datetime] = Field(default=None, description="Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash.")
     sent_as: Optional[StrictStr] = Field(default=None, description="From identity used. Open set; tolerate unknown values. Known values: own_address, relay.")
-    status: StrictStr = Field(description="Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code.")
+    status: StrictStr = Field(description="Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = accepted but deferred to a future send_at (see scheduled_at); it becomes accepted→sent at that time. failed = terminal failure. Always branch on this field, not the HTTP status code.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["approval_expires_at", "edited", "message_id", "method", "provider_message_id", "sent_as", "status"]
+    __properties: ClassVar[List[str]] = ["approval_expires_at", "edited", "message_id", "method", "provider_message_id", "scheduled_at", "sent_as", "status"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -100,6 +101,7 @@ class SendResultView(BaseModel):
             "message_id": obj.get("message_id"),
             "method": obj.get("method"),
             "provider_message_id": obj.get("provider_message_id"),
+            "scheduled_at": obj.get("scheduled_at"),
             "sent_as": obj.get("sent_as"),
             "status": obj.get("status")
         })

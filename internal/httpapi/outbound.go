@@ -123,11 +123,12 @@ type SendResultView struct {
 	// review_approved is the inbound-release outcome of POST .../approve (an
 	// inbound hold released to the agent's inbox — no send). sent/pending_review
 	// are the send/outbound-approve outcomes.
-	Status            string     `json:"status" doc:"Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code."`
+	Status            string     `json:"status" doc:"Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = accepted but deferred to a future send_at (see scheduled_at); it becomes accepted→sent at that time. failed = terminal failure. Always branch on this field, not the HTTP status code."`
 	MessageID         string     `json:"message_id"`
 	ProviderMessageID string     `json:"provider_message_id,omitempty" doc:"Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id."`
 	SentAs            string     `json:"sent_as,omitempty" doc:"From identity used. Open set; tolerate unknown values. Known values: own_address, relay."`
 	Method            string     `json:"method,omitempty" doc:"Send transport. Open set; tolerate unknown values. Known values: smtp, loopback."`
+	ScheduledAt       *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash."`
 	ApprovalExpiresAt *time.Time `json:"approval_expires_at,omitempty"`
 	// Edited is set only by approve (true/false = did the reviewer edit the
 	// draft before sending); omitted on the plain send path.
@@ -224,6 +225,34 @@ func recipientCountError(groups ...[]string) *ErrorEnvelope {
 	return nil
 }
 
+// maxScheduleHorizon caps how far into the future a send_at may be scheduled.
+// River retains a `scheduled` job indefinitely (pruning only touches finalized
+// jobs), so an unbounded send_at is a footgun that also stretches the
+// trash-cancel window; 90 days is a generous planning horizon well short of
+// "forever".
+const maxScheduleHorizon = 90 * 24 * time.Hour
+
+// scheduledInstant validates a caller-supplied send_at and returns the effective
+// future schedule instant (UTC), or nil to send immediately. A nil/zero value or
+// one at/before `now` is immediate (nil, nil). A value beyond maxScheduleHorizon
+// is rejected with 400 invalid_request. Keeping the "past = immediate" rule (vs
+// a hard error) is deliberate: minor client/server clock skew shouldn't turn an
+// intended-now send into an error.
+func scheduledInstant(sendAt *time.Time, now time.Time) (*time.Time, *ErrorEnvelope) {
+	if sendAt == nil || sendAt.IsZero() {
+		return nil, nil
+	}
+	if !sendAt.After(now) {
+		return nil, nil // at/before now — send immediately
+	}
+	if sendAt.After(now.Add(maxScheduleHorizon)) {
+		return nil, NewError(http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("send_at is too far in the future — at most %d days ahead", int(maxScheduleHorizon/(24*time.Hour))))
+	}
+	at := sendAt.UTC()
+	return &at, nil
+}
+
 // SendEmailRequest is the new-thread send body. `to` is required (RFC 5321
 // requires ≥1 recipient; From/Date are server-set). Content comes in one of
 // two mutually exclusive shapes: literal subject + text (+ optional
@@ -246,6 +275,7 @@ type SendEmailRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). Note: scheduling does NOT survive a review hold — if the message is held for review, send_at is dropped and it sends on approval. Cancel a scheduled send by moving the message to trash."`
 }
 
 // UnsubscribeOptions is the beta per-message opt-in to e2a-managed unsubscribe
@@ -395,6 +425,7 @@ type ReplyRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). Scheduling does not survive a review hold. Cancel by moving the message to trash."`
 }
 
 type replyInput struct {
@@ -541,6 +572,11 @@ func (s *Server) handleReply(ctx context.Context, in *replyInput) (*sendOutput, 
 	if env := recipientCountError(req.To, req.CC, req.BCC); env != nil {
 		return nil, env
 	}
+	sched, senv := scheduledInstant(b.SendAt, time.Now())
+	if senv != nil {
+		return nil, senv
+	}
+	req.ScheduledAt = sched
 	return s.deliver(ctx, user, ag, literalRequest(req), "reply", parentMessageID, "/v1/reply/"+in.ID, in.IdempotencyKey, in.Wait, in.RawBody, msg)
 }
 
@@ -584,6 +620,7 @@ type ForwardRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"Additional attachments to include alongside the forwarded message's original attachments, which are carried over automatically. Limits apply to the combined set (originals + these): at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). Scheduling does not survive a review hold. Cancel by moving the message to trash."`
 }
 
 type forwardInput struct {
@@ -636,6 +673,11 @@ func (s *Server) handleForward(ctx context.Context, in *forwardInput) (*sendOutp
 	}
 	req.CC = agent.StripAgentSelfAliases(req.CC, ag.EmailAddress())
 	req.BCC = agent.StripAgentSelfAliases(req.BCC, ag.EmailAddress())
+	sched, senv := scheduledInstant(b.SendAt, time.Now())
+	if senv != nil {
+		return nil, senv
+	}
+	req.ScheduledAt = sched
 	return s.deliver(ctx, user, ag, literalRequest(req), "forward", msg.ThreadMessageID(), "/v1/forward/"+in.ID, in.IdempotencyKey, in.Wait, in.RawBody, msg)
 }
 
@@ -918,6 +960,15 @@ func acceptedView(messageID string) SendResultView {
 	return SendResultView{Status: "accepted", MessageID: messageID, Method: "smtp"}
 }
 
+// scheduledView is the async-accept wire body for a scheduled send. Like
+// acceptedView it is built identically for the live response and the idempotency
+// cache entry (byte-identical replay), and it deliberately reports status
+// "scheduled" (not "accepted") so the wait=sent poll loop is skipped — a
+// scheduled send has no imminent outcome to wait for.
+func scheduledView(messageID string, at *time.Time) SendResultView {
+	return SendResultView{Status: "scheduled", MessageID: messageID, Method: "smtp", ScheduledAt: at}
+}
+
 // outboundResultView is shared by the live response and the same-transaction
 // idempotency completion. That keeps queue acceptance (202/accepted) distinct
 // from terminal providerless loopback delivery (200/sent) on every replay.
@@ -927,6 +978,9 @@ func outboundResultView(res *agent.OutboundResult) (int, SendResultView) {
 			Status: "pending_review", MessageID: res.PendingMessageID,
 			ApprovalExpiresAt: res.ApprovalExpiresAt,
 		}
+	}
+	if res.Status == "scheduled" {
+		return http.StatusAccepted, scheduledView(res.MessageID, res.ScheduledAt)
 	}
 	if res.Status == "accepted" {
 		return http.StatusAccepted, acceptedView(res.MessageID)
@@ -1006,6 +1060,10 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 		if env := validateReplyTo(b.ReplyTo); env != nil {
 			return outbound.SendRequest{}, env
 		}
+		sched, senv := scheduledInstant(b.SendAt, time.Now())
+		if senv != nil {
+			return outbound.SendRequest{}, senv
+		}
 		// The sender is the path agent (decision 3) — there is no body `from`;
 		// the agent is the path and auth scopes the sender, so no spoofing is
 		// possible.
@@ -1014,6 +1072,7 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 			Body: b.Body, HTMLBody: b.HTMLBody, ConversationID: b.ConversationID,
 			ReplyTo: b.ReplyTo, Attachments: b.Attachments,
 			Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
+			ScheduledAt: sched,
 		}, nil
 	}
 	// A cold send has no referenced inbound (nil) — it's not a reply/forward.

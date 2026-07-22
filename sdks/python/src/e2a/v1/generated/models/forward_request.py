@@ -17,6 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, ClassVar, Dict, List, Optional
 from typing_extensions import Annotated
@@ -35,11 +36,12 @@ class ForwardRequest(BaseModel):
     conversation_id: Optional[Annotated[str, Field(strict=True, max_length=200)]] = Field(default=None, description="Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.")
     html: Optional[Annotated[str, Field(strict=True, max_length=1048576)]] = None
     reply_to: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.")
+    send_at: Optional[datetime] = Field(default=None, description="Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). Scheduling does not survive a review hold. Cancel by moving the message to trash.")
     text: Annotated[str, Field(strict=True, max_length=1048576)]
     to: List[Annotated[str, Field(strict=True, max_length=320)]] = Field(description="Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.")
     unsubscribe: Optional[UnsubscribeOptions] = Field(default=None, description="Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_to", "text", "to", "unsubscribe"]
+    __properties: ClassVar[List[str]] = ["attachments", "bcc", "cc", "conversation_id", "html", "reply_to", "send_at", "text", "to", "unsubscribe"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -115,6 +117,7 @@ class ForwardRequest(BaseModel):
             "conversation_id": obj.get("conversation_id"),
             "html": obj.get("html"),
             "reply_to": obj.get("reply_to"),
+            "send_at": obj.get("send_at"),
             "text": obj.get("text"),
             "to": obj.get("to"),
             "unsubscribe": UnsubscribeOptions.from_dict(obj["unsubscribe"]) if obj.get("unsubscribe") is not None else None

@@ -1,0 +1,15 @@
+-- 079_messages_scheduled_at.sql
+-- Scheduled send: the future instant at which a queued outbound message should
+-- be submitted to the provider. NULL for immediate sends (the default, and the
+-- value for every pre-existing row).
+--
+-- A scheduled message is accepted and persisted exactly like an immediate send
+-- (delivery_status='accepted'); the ONLY difference is WHEN its River
+-- outbound_send job runs (river InsertOpts.ScheduledAt). A future-scheduled job
+-- sits in River state 'scheduled', so the terminal reconciler (which only sweeps
+-- 'accepted' rows whose job is missing/cancelled/discarded/completed) leaves it
+-- alone until it fires. No new delivery_status value is introduced.
+--
+-- Nullable, no default: a metadata-only ADD COLUMN, safe (non-rewriting) on the
+-- prod-sized messages table. Idempotent per the migration contract.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;

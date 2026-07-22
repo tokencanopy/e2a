@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/dkim"
@@ -78,6 +79,12 @@ type SendRequest struct {
 	ConversationID   string              `json:"conversation_id,omitempty"`
 	Attachments      []Attachment        `json:"attachments,omitempty"`
 	Unsubscribe      *UnsubscribeOptions `json:"unsubscribe,omitempty"`
+	// ScheduledAt, when non-nil, defers this send to a future instant: the
+	// message is accepted + queued immediately (delivery_status='accepted'), but
+	// its River outbound_send job is held until this time. Nil means send now.
+	// The API edge validates it (future + within the max horizon) and normalizes
+	// a nil/past value to nil before this reaches DeliverOutbound.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 }
 
 type UnsubscribeOptions struct {

@@ -2,6 +2,7 @@ package outboundsend
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -90,10 +91,32 @@ func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, e
 // the reconciler can find stranded rows (`accepted` with no job). Mirrors
 // webhookdelivery.EnqueueDeliveryTx.
 func (j *Jobs) EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error) {
-	res, err := j.enq.InsertTx(ctx, tx, OutboundSendArgs{MessageID: messageID}, &river.InsertOpts{
+	return j.enqueueSendTx(ctx, tx, messageID, time.Time{})
+}
+
+// EnqueueScheduledSendTx is EnqueueSendTx for a scheduled send: it enqueues the
+// same outbound_send job in the caller's transaction, but with
+// river.InsertOpts.ScheduledAt=at so River holds the job in state `scheduled`
+// and does not promote it to a worker until `at`. Everything downstream (claim,
+// suppression re-check, retry envelope, terminal reconciler) is byte-identical
+// to an immediate send — scheduling changes only WHEN the job first runs. A zero
+// `at` behaves exactly like EnqueueSendTx (immediate).
+func (j *Jobs) EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error) {
+	return j.enqueueSendTx(ctx, tx, messageID, at)
+}
+
+// enqueueSendTx is the shared outbox insert behind the immediate and scheduled
+// entry points. A non-zero `at` sets InsertOpts.ScheduledAt; a zero value omits
+// it (River defaults ScheduledAt to now, i.e. immediately available).
+func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error) {
+	opts := &river.InsertOpts{
 		Queue:       jobs.QueueOutbound,
 		MaxAttempts: MaxSendAttempts,
-	})
+	}
+	if !at.IsZero() {
+		opts.ScheduledAt = at
+	}
+	res, err := j.enq.InsertTx(ctx, tx, OutboundSendArgs{MessageID: messageID}, opts)
 	if err != nil {
 		return 0, err
 	}

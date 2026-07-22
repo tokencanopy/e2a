@@ -69,10 +69,20 @@ func eventLifecycle(t *testing.T, pool *pgxpool.Pool, messageID, eventType strin
 }
 
 // fakeOutboundEnqueuer stands in for the shared River client: it records the
-// in-tx enqueue and returns a stable job id the accept-tx stamps on the row.
-type fakeOutboundEnqueuer struct{ jobID int64 }
+// in-tx enqueue and returns a stable job id the accept-tx stamps on the row. For
+// a scheduled send it also records the requested run instant so tests can assert
+// the send_at was threaded through to the job.
+type fakeOutboundEnqueuer struct {
+	jobID       int64
+	scheduledAt time.Time // set when EnqueueScheduledSendTx was used
+}
 
 func (f *fakeOutboundEnqueuer) EnqueueSendTx(_ context.Context, _ pgx.Tx, _ string) (int64, error) {
+	return f.jobID, nil
+}
+
+func (f *fakeOutboundEnqueuer) EnqueueScheduledSendTx(_ context.Context, _ pgx.Tx, _ string, at time.Time) (int64, error) {
+	f.scheduledAt = at
 	return f.jobID, nil
 }
 
@@ -82,6 +92,10 @@ func (txSentinelEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageI
 	var id int64
 	err := tx.QueryRow(ctx, `INSERT INTO task6_durable_jobs (message_id) VALUES ($1) RETURNING id`, messageID).Scan(&id)
 	return id, err
+}
+
+func (s txSentinelEnqueuer) EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, _ time.Time) (int64, error) {
+	return s.EnqueueSendTx(ctx, tx, messageID)
 }
 
 func installTask6DurableJobs(t *testing.T, pool *pgxpool.Pool) {
@@ -329,6 +343,44 @@ func TestDeliverOutbound_QueueLifecycleFailureRollsBack(t *testing.T) {
 	}
 	if jobsCount != 0 || lifecycleAfter != lifecycleBaseline {
 		t.Fatalf("partial accept jobs=%d lifecycle before=%d after=%d", jobsCount, lifecycleBaseline, lifecycleAfter)
+	}
+}
+
+// TestDeliverOutbound_ScheduledAccept pins the scheduled-send accept path
+// (migration 079): a future ScheduledAt is accepted as status=scheduled, threads
+// the instant into the River enqueue (EnqueueScheduledSendTx), persists
+// scheduled_at on the row, and — deliberately — leaves delivery_status='accepted'
+// (no new status; a future-scheduled River job is invisible to the reconciler).
+func TestDeliverOutbound_ScheduledAccept(t *testing.T) {
+	api, store, _, enq := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "scheduledaccept")
+	at := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"alice@external.test"}, Subject: "later", Body: "scheduled body",
+		ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr != nil {
+		t.Fatalf("DeliverOutbound: %+v", oerr)
+	}
+	if res == nil || res.Status != "scheduled" || res.ScheduledAt == nil || !res.ScheduledAt.Equal(at) {
+		t.Fatalf("result = %+v, want status=scheduled with ScheduledAt=%v", res, at)
+	}
+	// The scheduled instant was threaded to the River enqueue (not the immediate path).
+	if !enq.scheduledAt.Equal(at) {
+		t.Fatalf("enqueued ScheduledAt = %v, want %v", enq.scheduledAt, at)
+	}
+	// The row persists scheduled_at and stays delivery_status='accepted'.
+	m, err := store.GetMessageWithContent(ctx, res.MessageID, ag.ID)
+	if err != nil {
+		t.Fatalf("GetMessageWithContent: %v", err)
+	}
+	if m.DeliveryStatus != "accepted" {
+		t.Errorf("delivery_status = %q, want accepted (scheduled rows stay accepted)", m.DeliveryStatus)
+	}
+	if m.ScheduledAt == nil || !m.ScheduledAt.Equal(at) {
+		t.Errorf("stored scheduled_at = %v, want %v", m.ScheduledAt, at)
 	}
 }
 

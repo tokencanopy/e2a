@@ -104,6 +104,8 @@ Usage:
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
         --conversation-id <id>     Thread id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
+        --send-at <rfc3339>        Schedule the send for a future time (e.g. 2026-08-01T09:00:00Z);
+                                   status=scheduled, sent "not before" then. Cancel by trashing it (dashboard/API)
         --idempotency-key <k>      Stable key so a retried invocation can't double-send
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
@@ -591,7 +593,7 @@ async function main() {
     case "send":
       checkFlags(args, [
         "--to", "--subject", "--body", "--body-file", "--html-file", "--attach",
-        "--conversation-id", "--conversation", "--reply-to", "--agent", "--idempotency-key", "--json",
+        "--conversation-id", "--conversation", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
       ]);
       getPositionals(args, 0, "usage: e2a send [options]");
       await send({
@@ -606,6 +608,7 @@ async function main() {
         // rejection) is shared via getConversationId — see FIX 3.
         conversationId: getConversationId(args),
         replyTo: getFlagChecked(args, "--reply-to"),
+        sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
         json: hasFlag(args, "--json"),
@@ -613,7 +616,7 @@ async function main() {
       break;
     case "reply":
       checkFlags(args, [
-        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--agent", "--idempotency-key", "--json",
+        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
       ]);
       await reply(getPositionals(args, 1, "usage: e2a reply <message-id> [options]")[0], {
         attach: getFlagsChecked(args, "--attach"),
@@ -621,6 +624,7 @@ async function main() {
         bodyFile: getFlagChecked(args, "--body-file"),
         htmlFile: getFlagChecked(args, "--html-file"),
         replyTo: getFlagChecked(args, "--reply-to"),
+        sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
         json: hasFlag(args, "--json"),

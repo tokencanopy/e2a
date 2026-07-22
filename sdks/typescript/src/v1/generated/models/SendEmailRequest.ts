@@ -40,6 +40,10 @@ export class SendEmailRequest {
     */
     'replyTo'?: string;
     /**
+    * Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler\'s poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). Note: scheduling does NOT survive a review hold — if the message is held for review, send_at is dropped and it sends on approval. Cancel a scheduled send by moving the message to trash.
+    */
+    'sendAt'?: Date;
+    /**
     * Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).
     */
     'subject'?: string;
@@ -108,6 +112,12 @@ export class SendEmailRequest {
             "baseName": "reply_to",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "sendAt",
+            "baseName": "send_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "subject",
