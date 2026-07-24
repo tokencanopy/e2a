@@ -152,7 +152,7 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 		if qerr != nil {
 			log.Printf("[outbound-send:%s] scheduled-send quota check failed, proceeding (fail open): %v", p.ID, qerr)
 		} else if over {
-			if failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+			if _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
 				"scheduled send canceled: monthly message limit exceeded at send time",
 				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
 				return nil, failErr

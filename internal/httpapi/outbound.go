@@ -508,7 +508,7 @@ func parentNotYetSubmitted(msg *identity.Message) *ErrorEnvelope {
 	if msg.ScheduledAt != nil && msg.ScheduledAt.After(time.Now()) {
 		return NewError(http.StatusConflict, "message_not_yet_delivered",
 			fmt.Sprintf("referenced message is scheduled to send at %s and has not been submitted yet — reply or forward once it sends (threading anchors on the parent's provider Message-ID, assigned only at submission)",
-				msg.ScheduledAt.UTC().Format(time.RFC3339)))
+				msg.ScheduledAt.UTC().Format(time.RFC3339Nano)))
 	}
 	return NewError(http.StatusConflict, "message_not_yet_delivered",
 		"referenced message not yet delivered — retry after it is sent, or use wait=sent on the original send")
