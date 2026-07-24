@@ -4471,18 +4471,32 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 // --- User management ---
 
 func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub string) (*User, error) {
+	u, _, err := s.CreateOrGetUserWithCreated(ctx, email, name, googleSub)
+	return u, err
+}
+
+// CreateOrGetUserWithCreated is CreateOrGetUser plus a created signal:
+// true when the upsert INSERTed a brand-new user row, false when the
+// ON CONFLICT branch matched an existing google_subject. Postgres gives
+// no direct created-vs-updated flag for upserts, so we read the system
+// column xmax: a freshly inserted (never-updated) row has xmax = 0,
+// while a row the DO UPDATE touched carries a non-zero xmax. Callers
+// that need to react to first-time signups (e.g. the OAuth callback's
+// signup hook) use this; everyone else keeps the plain wrapper.
+func (s *Store) CreateOrGetUserWithCreated(ctx context.Context, email, name, googleSub string) (*User, bool, error) {
 	u := &User{}
+	var created bool
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO users (id, email, name, google_subject)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (google_subject) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
-		 RETURNING id, email, name, google_subject, created_at`,
+		 RETURNING id, email, name, google_subject, created_at, (xmax = 0) AS inserted`,
 		generateID(), email, name, googleSub,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &created)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return u, nil
+	return u, created, nil
 }
 
 // SetAccountClass sets a user's account_class (standard|internal|system|demo).

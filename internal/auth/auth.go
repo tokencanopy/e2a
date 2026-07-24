@@ -1,14 +1,18 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -48,6 +52,9 @@ type UserAuth struct {
 	secure      bool   // true in production (Secure cookie flag)
 	baseURL     string // frontend origin for post-login redirect
 	userInfoURL string // Google userinfo endpoint (overridable for testing)
+
+	signupHookURL    string // optional; when set, HandleCallback POSTs an HMAC-signed new-user notice here (see SetSignupHook)
+	signupHookSecret string // shared HMAC secret signing the signup hook body (limits.internal_api_secret)
 }
 
 type cliLoginHandoff struct {
@@ -151,6 +158,64 @@ func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config
 		secure:      production,
 		baseURL:     baseURL,
 		userInfoURL: userInfoURL,
+	}
+}
+
+// SetSignupHook wires in the URL of an external service's new-user
+// endpoint plus the shared HMAC secret (limits.internal_api_secret)
+// that signs the payload. When a Google OAuth callback creates a
+// brand-new user, HandleCallback HMAC-signs a JSON notice and POSTs it
+// there asynchronously so the external service can run first-touch
+// provisioning (e.g. the hosted deployment's welcome email). When the
+// URL is empty (the self-host default), no hook fires. Returning users
+// never fire the hook, and neither do accounts created outside the
+// OAuth flow (prober seeds, -bootstrap-email, test harnesses).
+func (ua *UserAuth) SetSignupHook(url, secret string) {
+	ua.signupHookURL = url
+	ua.signupHookSecret = secret
+}
+
+// notifySignupHook HMAC-POSTs the new user's identity to the configured
+// signup hook. Runs in its own goroutine with its own timeout-bounded
+// context — never the request's, which is canceled the moment the login
+// response is written. Best-effort by design: any failure is logged and
+// dropped, because a welcome-email outage must never break or delay a
+// user's first login. Caller already checked ua.signupHookURL is
+// non-empty.
+func (ua *UserAuth) notifySignupHook(user *identity.User) {
+	body, err := json.Marshal(map[string]string{
+		"user_id": user.ID,
+		"email":   user.Email,
+		"name":    user.Name,
+	})
+	if err != nil {
+		log.Printf("[auth] signup hook marshal failed (continuing): user=%s err=%v", user.ID, err)
+		return
+	}
+	h := hmac.New(sha256.New, []byte(ua.signupHookSecret))
+	h.Write(body)
+	sig := hex.EncodeToString(h.Sum(nil))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ua.signupHookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[auth] signup hook request failed (continuing): user=%s err=%v", user.ID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-E2A-Internal-Signature", sig)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[auth] signup hook failed (continuing): user=%s err=%v", user.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		log.Printf("[auth] signup hook returned %d (continuing): user=%s body=%q", resp.StatusCode, user.ID, string(b))
 	}
 }
 
@@ -385,10 +450,20 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := ua.store.CreateOrGetUser(ctx, userInfo.Email, userInfo.Name, userInfo.Sub)
+	user, created, err := ua.store.CreateOrGetUserWithCreated(ctx, userInfo.Email, userInfo.Name, userInfo.Sub)
 	if err != nil {
 		http.Error(w, "failed to create user", http.StatusInternalServerError)
 		return
+	}
+
+	// First-time signup: fire the external provisioning hook (welcome
+	// email etc.) asynchronously. Best-effort — the goroutine logs and
+	// drops any failure, so login latency and success never depend on
+	// the hook endpoint. Deliberately placed here (not in the store
+	// upsert) so synthetic accounts — prober seeds, -bootstrap-email,
+	// test harnesses — never trigger it.
+	if created && ua.signupHookURL != "" {
+		go ua.notifySignupHook(user)
 	}
 
 	sessionToken, err := ua.store.CreateUserSession(ctx, user.ID)

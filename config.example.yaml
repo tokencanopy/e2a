@@ -185,6 +185,15 @@ limits:
   # docker compose deployment alongside the hosted billing sidecar:
   # billing_hook_url: "http://billing:9000/api/internal/billing/cancel"
   billing_hook_url: ""
+  # URL the OSS server POSTs (HMAC-signed with the same
+  # internal_api_secret) when a brand-new user account is created via
+  # OAuth signup, so an external service can run first-touch
+  # provisioning such as sending a welcome email. Returning logins
+  # never fire it. Empty disables the call (self-host without a
+  # provisioning service). Override with E2A_SIGNUP_HOOK_URL. Example
+  # for a docker compose deployment alongside a hosted sidecar:
+  # signup_hook_url: "http://billing:9000/api/internal/billing/signup"
+  signup_hook_url: ""
 
 # Per-user budget shared by authenticated message, conversation, and webhook
 # reads across every agent client and dashboard session on the account. The

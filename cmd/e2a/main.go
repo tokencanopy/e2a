@@ -483,6 +483,10 @@ func main() {
 
 	// User auth (Google OAuth for agent developers)
 	userAuth := auth.NewUserAuth(&cfg.OAuth, store, cfg.IsProduction())
+	// Optional new-user signup hook (hosted welcome email etc.), signed
+	// with the same internal secret the billing hook uses. Empty URL =
+	// disabled, the self-host default.
+	userAuth.SetSignupHook(cfg.Limits.SignupHookURL, cfg.Limits.InternalAPISecret)
 	// Generic OIDC Authorization Code login. Disabled configurations perform
 	// no discovery and leave both OIDC routes unregistered. Enabled
 	// configurations construct synchronously (no network call) and discover

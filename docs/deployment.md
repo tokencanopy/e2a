@@ -27,6 +27,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in values, or set the envir
 | `E2A_OIDC_CLIENT_SECRET` | if OIDC enabled | Confidential client secret |
 | `E2A_OIDC_REDIRECT_URL` | if OIDC enabled | Registered absolute callback URL |
 | `E2A_OIDC_USER_ID_CLAIM` | if OIDC enabled | ID-token claim naming an existing `users.id` — OIDC login never provisions new users |
+| `E2A_SIGNUP_HOOK_URL` | no (default empty) | URL the server POSTs (HMAC-signed with `E2A_INTERNAL_API_SECRET`, `X-E2A-Internal-Signature` header) when a brand-new user account is created via OAuth signup, so an external service can run first-touch provisioning such as a welcome email. Fired asynchronously and best-effort — login never blocks on it. Returning logins and accounts created outside the OAuth flow never fire it. Empty disables the hook. Mirrors `limits.signup_hook_url`. |
 | `E2A_OUTBOUND_SMTP_HOST` | for outbound | Upstream SMTP host (e.g. `email-smtp.us-east-1.amazonaws.com`) |
 | `E2A_OUTBOUND_SMTP_PORT` | for outbound | Upstream SMTP port (typically `587`) |
 | `E2A_OUTBOUND_SMTP_USERNAME` | for outbound | Upstream SMTP username |

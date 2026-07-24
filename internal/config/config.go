@@ -284,6 +284,14 @@ type LimitsConfig struct {
 	// — appropriate for self-host without billing. The same
 	// InternalAPISecret signs the POST body.
 	BillingHookURL string `yaml:"billing_hook_url"`
+	// SignupHookURL is the URL the OSS server POSTs to when a brand-new
+	// user account is created via OAuth signup, so an external service
+	// (e.g. the hosted deployment's billing sidecar) can run first-touch
+	// provisioning such as sending a welcome email. Returning users never
+	// fire the hook. Empty disables the call — appropriate for self-host.
+	// The same InternalAPISecret signs the POST body. Override with
+	// E2A_SIGNUP_HOOK_URL.
+	SignupHookURL string `yaml:"signup_hook_url"`
 }
 
 // RateLimitsConfig tunes server-side request rate limits. A zero value
@@ -439,6 +447,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_WEBHOOK_INTERNAL_SINK_URL"); v != "" {
 		cfg.Webhook.InternalSinkURL = v
+	}
+	if v := os.Getenv("E2A_SIGNUP_HOOK_URL"); v != "" {
+		cfg.Limits.SignupHookURL = v
 	}
 	if v := os.Getenv("E2A_OUTBOUND_SMTP_REQUIRE_TLS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
