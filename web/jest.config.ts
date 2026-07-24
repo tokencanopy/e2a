@@ -24,6 +24,18 @@ const config: Config = {
       },
     ],
   },
+  // Coverage gate (applies only when jest runs with --coverage, i.e.
+  // `npm run test:coverage` in CI). Floors sit ~2 points under current
+  // coverage (statements 87.5, branches 80.2, functions 85.3, lines 89.7).
+  // Ratchet up, never down.
+  coverageThreshold: {
+    global: {
+      statements: 85,
+      branches: 78,
+      functions: 83,
+      lines: 87,
+    },
+  },
 };
 
 export default config;
