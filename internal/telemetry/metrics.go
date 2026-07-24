@@ -138,7 +138,7 @@ type Metrics interface {
 
 	// WSHandshakeRejected counts pre-upgrade WebSocket handshake
 	// rejections. reason ∈ {unauthorized, not_found, forbidden,
-	// upgrade_failed}. Never label with emails or tokens.
+	// upgrade_failed, internal_error}. Never label with emails or tokens.
 	WSHandshakeRejected(reason string)
 
 	// WSDrained counts unread messages pushed during connect-drain.

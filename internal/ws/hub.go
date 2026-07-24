@@ -18,8 +18,8 @@ type Metrics interface {
 	WSConnected()
 	WSDisconnected(reason string) // reason ∈ {replaced, ping_timeout, client_close, error, shutdown}
 	// WSHandshakeRejected counts pre-upgrade handshake rejections.
-	// reason ∈ {unauthorized, not_found, forbidden, upgrade_failed}.
-	// Never pass emails or tokens.
+	// reason ∈ {unauthorized, not_found, forbidden, upgrade_failed,
+	// internal_error}. Never pass emails or tokens.
 	WSHandshakeRejected(reason string)
 	WSDrained(count int)
 	WSSendFailure()

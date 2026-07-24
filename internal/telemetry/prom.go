@@ -81,7 +81,7 @@ var (
 	whSet         = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	wsReasonSet = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
-	wsRejectSet = set("unauthorized", "not_found", "forbidden", "upgrade_failed")
+	wsRejectSet = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
 	inboundSet  = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")

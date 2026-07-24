@@ -53,14 +53,16 @@ func (noopMetrics) OutboundTerminal(string)         {}
 func (noopMetrics) OutboundTerminalLatency(float64) {}
 func (noopMetrics) OutboundAttempt(string, float64) {}
 
-// observeTerminalLatency records the acceptance→terminal latency for one
-// settled message. Call it ONLY where OutboundTerminal is emitted, with the
-// same occurred_at the terminal write used — the two instruments share one
-// exactly-once contract. A zero accepted_at (hand-built row) or a
-// non-positive delta (clock skew) records no sample — the terminal is still
-// counted, but no honest duration exists (same discipline as the
-// queue-wait guard).
-func observeTerminalLatency(m Metrics, acceptedAt, occurredAt time.Time) {
+// emitTerminal records one terminal outcome count AND its co-located
+// acceptance→terminal latency — the two instruments' exactly-once contract
+// lives in this single helper so no call site can emit one without the
+// other. occurredAt is the terminal write's EFFECTIVE occurred_at (what the
+// write actually did: the provider-accept evidence time on an evidence
+// settle, the caller's observation time otherwise); acceptedAt is
+// messages.created_at. A zero timestamp or non-positive delta records the
+// count but no latency sample (same discipline as the queue-wait guard).
+func emitTerminal(m Metrics, outcome string, acceptedAt, occurredAt time.Time) {
+	m.OutboundTerminal(outcome)
 	if acceptedAt.IsZero() || occurredAt.IsZero() {
 		return
 	}

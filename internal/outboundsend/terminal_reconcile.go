@@ -168,7 +168,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// fails it with provenance 'local' so later authoritative evidence can
 		// still correct it. The stored detail of a deferred final attempt is
 		// preferred over this generic sweep detail.
-		settled, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
+		settled, settledAt, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
 		if err != nil {
 			if processed > 0 {
 				log.Printf("[outbound-terminal-reconcile] processed %d candidates", processed)
@@ -179,18 +179,15 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// guarded write actually did. Evidence-settled rows (the reconciler's
 		// priority population: submitted, crashed before MarkSent) count as
 		// "sent", not as a false failure; a no-op (row already terminal)
-		// counts nothing. The latency observation is co-located with the
-		// terminal count and uses the same occurred_at the write used
-		// (finalized/failure time, else sweep time) against the row's
-		// acceptance time carried on the candidate.
+		// counts nothing. emitTerminal uses the write's EFFECTIVE occurred_at
+		// (settledAt — the provider-accept evidence time on an evidence
+		// settle), so the latency measures acceptance→provider-accept, not
+		// acceptance→sweep.
 		switch settled {
 		case delivery.StatusFailed:
-			w.metrics.OutboundTerminal(terminalOutcome(source, reason, candidate.failureBlockedRecipients))
+			emitTerminal(w.metrics, terminalOutcome(source, reason, candidate.failureBlockedRecipients), candidate.acceptedAt, settledAt)
 		case delivery.StatusSent:
-			w.metrics.OutboundTerminal(terminalSent)
-		}
-		if settled == delivery.StatusFailed || settled == delivery.StatusSent {
-			observeTerminalLatency(w.metrics, candidate.acceptedAt, occurredAt)
+			emitTerminal(w.metrics, terminalSent, candidate.acceptedAt, settledAt)
 		}
 		if w.ramp != nil {
 			if err := w.ramp.Resolve(ctx, candidate.messageID); err != nil {

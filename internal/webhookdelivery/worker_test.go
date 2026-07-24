@@ -486,3 +486,65 @@ func TestDeliverWorker_NextRetryMatchesEnvelope(t *testing.T) {
 		t.Errorf("retry envelope spans %v, want 29h21m", total)
 	}
 }
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedWhenFirstPostIsNotRiverAttemptOne(t *testing.T) {
+	// If a transient pre-POST error (e.g. a DB blip on the row load) consumes
+	// River attempt 1, the delivery's first HTTP attempt happens at job
+	// attempt 2 — it is STILL the first attempt and must be observed, or the
+	// slowest first attempts (the incident population) never reach the SLI.
+	id, sub, _, wh := seedEventLinked(t, "lat-att2", 45*time.Second, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 2)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 40 || got > 50 {
+		t.Errorf("first-attempt latency = %.1fs, want ~45s", got)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsSnoozedJobs(t *testing.T) {
+	// A disabled webhook snoozes the River job WITHOUT burning an attempt
+	// (River counts snoozes in job metadata), so the eventual first POST
+	// still runs at job attempt 1 — but its latency would be the customer's
+	// entire disabled window (hours to days), not e2a's event→attempt
+	// latency. Snoozed jobs never observe.
+	id, sub, _, wh := seedEventLinked(t, "lat-snoozed", 26*time.Hour, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	snoozedJob := job(id, 1)
+	snoozedJob.Metadata = []byte(`{"snoozes":3}`)
+	if err := w.Work(context.Background(), snoozedJob); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 0 {
+		t.Errorf("first-attempt latencies = %v, want none for a job that sat through a disabled window", fm.firstTry)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedDespiteBackoffSchedule(t *testing.T) {
+	// Chained PRE-POST failures (e.g. a DB blip on the row load) record no
+	// attempt, so the row still shows attempts == 0 when the true first POST
+	// finally runs — deep into the retry envelope (scheduled_at far past
+	// created_at). That first POST MUST observe: a schedule-shift heuristic
+	// would false-skip exactly the outage population this SLI exists to
+	// catch. Only an actual snooze (metadata) excludes.
+	id, sub, _, wh := seedEventLinked(t, "lat-backoff", 90*time.Minute, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	lateJob := job(id, 4)
+	lateJob.CreatedAt = time.Now().Add(-90 * time.Minute).UTC()
+	lateJob.ScheduledAt = time.Now().Add(-time.Minute).UTC() // deep in the backoff envelope, never snoozed
+	if err := w.Work(context.Background(), lateJob); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST after chained pre-POST failures", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 89*time.Minute.Seconds() || got > 91*time.Minute.Seconds() {
+		t.Errorf("first-attempt latency = %.0fs, want ~90min (the honest outage signal)", got)
+	}
+}

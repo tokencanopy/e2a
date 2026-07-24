@@ -88,7 +88,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received (connect/DNS/SSRF-blocked). |
 | `e2a_webhook_attempt_duration_seconds` | histogram | — | HTTP POST duration per attempt. |
-| `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (River attempt 1 with no recorded prior attempt). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), and eventless `/test` deliveries never observe. |
+| `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (no recorded prior attempt — regardless of River attempt number, so a first POST delayed by pre-POST failures still observes). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), eventless `/test` deliveries, and jobs that sat through a customer-disabled window (River snooze) never observe. |
 | `e2a_outbox_events_published_total` | counter | `type` | Events written to the outbox (fan-out input). |
 | `e2a_outbox_events_fanout_total` / `e2a_outbox_fanout_matched_total` | counter | `type` | Fan-out completions / subscriber delivery rows written. |
 | `e2a_outbox_events_nomatch_total` | counter | `type` | Events with zero matching subscribers. |
@@ -101,7 +101,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_ws_connections_active` | gauge | — | Currently registered connections. |
 | `e2a_ws_connects_total` | counter | — | Accepted + registered connections. |
-| `e2a_ws_handshake_rejected_total` | counter | `reason` | Pre-upgrade handshake rejections: `unauthorized` (missing/invalid credential), `not_found` (unknown agent — including the deliberate cross-tenant 404 collapse), `forbidden` (agent-scoped credential pinned to a different agent), `upgrade_failed` (authenticated, but the WebSocket upgrade itself failed). Never labeled with emails or tokens. |
+| `e2a_ws_handshake_rejected_total` | counter | `reason` | Pre-upgrade handshake rejections: `unauthorized` (missing/invalid credential), `not_found` (unknown agent — including the deliberate cross-tenant 404 collapse), `forbidden` (agent-scoped credential pinned to a different agent), `upgrade_failed` (authenticated, but the WebSocket upgrade itself failed), `internal_error` (a store/infra error while authenticating or resolving the agent — the only e2a-attributable reason). Never labeled with emails or tokens. |
 | `e2a_ws_disconnects_total` | counter | `reason` | `replaced` (one-conn-per-agent takeover), `ping_timeout`, `client_close`, `error`, `shutdown`. |
 | `e2a_ws_drained_messages_total` | counter | — | Unread messages pushed during connect-drain. The prober's WS scenario trashes its own probe messages after each run so this stays customer signal, not prober noise. |
 | `e2a_ws_send_failures_total` | counter | — | Failed pushes to a registered connection. |
@@ -252,15 +252,23 @@ over accepted plus e2a-attributable rejections:
 ```promql
 sum(rate(e2a_ws_connects_total[5m]))
 / (sum(rate(e2a_ws_connects_total[5m]))
-   + sum(rate(e2a_ws_handshake_rejected_total{reason=~"forbidden|upgrade_failed"}[5m])))
+   + sum(rate(e2a_ws_handshake_rejected_total{reason="internal_error"}[5m])))
 ```
 
-The split is deliberate: `unauthorized` (missing/invalid credential) and
-`not_found` (unknown agent — including the cross-tenant 404 collapse) are
-*client* faults and are excluded from the denominator, or scanner noise
-would burn the SLO. `forbidden` (a valid, authenticated credential pinned
-to a different agent) and `upgrade_failed` count against e2a — the
-credential was valid, so the rejection is ours to explain.
+The split is deliberate, by who can act on the rejection. Client faults are
+excluded from the denominator, or scanner noise and customer
+misconfiguration would burn the SLO: `unauthorized` (missing/invalid
+credential), `not_found` (unknown agent — including the cross-tenant 404
+collapse), `forbidden` (an agent-scoped credential pinned to a different
+agent — deterministic scope enforcement, not e2a-actionable), and
+`upgrade_failed` (predominantly client protocol defects, e.g. a plain GET
+with a valid key; genuine server-side upgrade breakage — a proxy stripping
+Upgrade headers fleet-wide — is covered by the prober's
+`websocket_round_trip` SLI below). `internal_error` (a store/infra error
+while authenticating or resolving the agent, distinguished from a genuine
+miss by `pgx.ErrNoRows`) is the only e2a-attributable reason and the only
+one in the denominator — a Postgres outage burns this SLI rather than
+reading 0/0 behind the client-fault labels.
 
 **WebSocket health** — active connections, abnormal disconnect rate, and the
 black-box push path:

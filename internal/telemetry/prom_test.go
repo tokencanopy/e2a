@@ -60,6 +60,7 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.WSConnected()
 	p.WSHandshakeRejected("unauthorized")
 	p.WSHandshakeRejected("forbidden")
+	p.WSHandshakeRejected("internal_error")
 	p.WSDisconnected("ping_timeout")
 	p.WSDrained(7)
 	p.WSSendFailure()
@@ -84,6 +85,7 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_ws_connects_total 1`,
 		`e2a_ws_handshake_rejected_total{reason="unauthorized"} 1`,
 		`e2a_ws_handshake_rejected_total{reason="forbidden"} 1`,
+		`e2a_ws_handshake_rejected_total{reason="internal_error"} 1`,
 		`e2a_ws_disconnects_total{reason="ping_timeout"} 1`,
 		`e2a_ws_drained_messages_total 7`,
 		`e2a_ws_send_failures_total 1`,

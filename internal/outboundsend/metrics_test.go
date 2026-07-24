@@ -8,6 +8,7 @@ import (
 
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 )
 
@@ -362,5 +363,32 @@ func TestSendWorker_TerminalLatencyGuardsZeroAcceptedAt(t *testing.T) {
 	}
 	if len(rec.latencies) != 0 {
 		t.Errorf("latencies = %v, want none with a zero accepted_at", rec.latencies)
+	}
+}
+
+func TestSendWorker_TerminalLatencyMarkFailedSettlesSentUsesWriteTime(t *testing.T) {
+	// When the guarded MarkFailed settles the row as SENT on raced-in
+	// provider evidence, the store rewrites occurred_at to the provider-accept
+	// time for the durable write. The latency SLI must use the write's
+	// EFFECTIVE occurred_at (returned by MarkFailed), not the caller's
+	// observation time — that is what the write actually did.
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-90 * time.Second)
+	providerAcceptedAt := time.Now().Add(-30 * time.Second).UTC()
+	st := &fakeStore{job: j, settleStatus: delivery.StatusSent, settleAt: providerAcceptedAt}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("rejected 550"), Permanent: true}}
+	rec := &recordingMetrics{}
+	if err := outboundsend.NewSendWorker(st, dl).WithMetrics(rec).Work(context.Background(), job("msg_1", 1)); err == nil {
+		t.Fatal("permanent failure should cancel")
+	}
+	if !stringsEqual(rec.terminals, []string{"sent"}) {
+		t.Fatalf("terminals = %v, want [sent] (evidence settle via the guarded write)", rec.terminals)
+	}
+	if len(rec.latencies) != 1 {
+		t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+	}
+	// provider-accept time − accepted_at ≈ 60s, NOT now − accepted_at ≈ 90s.
+	if got := rec.latencies[0]; got < 55 || got > 65 {
+		t.Errorf("latency = %.1fs, want ~60s (the write's effective occurred_at − accepted_at)", got)
 	}
 }

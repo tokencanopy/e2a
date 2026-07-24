@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/tokencanopy/e2a/internal/identity"
 	"nhooyr.io/websocket"
 )
@@ -330,7 +332,10 @@ func TestHandlerMetrics_HandshakeRejections(t *testing.T) {
 	}{
 		{"missing credential", &mockStore{}, "", true, "unauthorized"},
 		{"invalid token", &mockStore{user: nil}, "bad_key", false, "unauthorized"},
-		{"agent not found", &mockStore{user: newTestUser(), agentErr: errors.New("no rows")}, "valid_key", false, "not_found"},
+		{"unknown key from store", &mockStore{userErr: pgx.ErrNoRows}, "bad_key", false, "unauthorized"},
+		{"auth store outage", &mockStore{userErr: errors.New("connection reset")}, "valid_key", false, "internal_error"},
+		{"agent not found", &mockStore{user: newTestUser(), agentErr: pgx.ErrNoRows}, "valid_key", false, "not_found"},
+		{"agent store outage", &mockStore{user: newTestUser(), agentErr: errors.New("connection reset")}, "valid_key", false, "internal_error"},
 		{"cross-tenant agent", &mockStore{user: newTestUser(), agent: newTestAgent("user_other")}, "valid_key", false, "not_found"},
 		{"agent-scope pin", &mockStore{user: newTestUser(), scope: identity.ScopeAgent, agentID: "agent_other", agent: newTestAgent("user_1")}, "valid_key", false, "forbidden"},
 		{"upgrade failure", &mockStore{user: newTestUser(), agent: newTestAgent("user_1")}, "valid_key", true, "upgrade_failed"},
