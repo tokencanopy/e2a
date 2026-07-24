@@ -185,12 +185,12 @@ func TestReconcilePending(t *testing.T) {
 	}
 	j.SetEnqueuer(client)
 
-	n, err := j.ReconcilePending(ctx, pool)
+	res, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("cutover enqueued %d, want 3", n)
+	if res.Total() != 3 || res.Enqueued != 3 {
+		t.Errorf("cutover result = %+v, want 3 on the IS-NULL arm", res)
 	}
 	// Every row got a job_id.
 	for _, id := range ids {
@@ -203,12 +203,12 @@ func TestReconcilePending(t *testing.T) {
 		}
 	}
 	// Idempotent: a re-run enqueues nothing.
-	n2, err := j.ReconcilePending(ctx, pool)
+	res2, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending re-run: %v", err)
 	}
-	if n2 != 0 {
-		t.Errorf("cutover re-run enqueued %d, want 0 (idempotent)", n2)
+	if res2.Total() != 0 {
+		t.Errorf("cutover re-run enqueued %d, want 0 (idempotent)", res2.Total())
 	}
 }
 
@@ -227,6 +227,8 @@ type fakeMetrics struct{ attempts []attemptRec }
 func (f *fakeMetrics) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	f.attempts = append(f.attempts, attemptRec{outcome, statusClass, seconds})
 }
+
+func (f *fakeMetrics) WebhookDeliveryRescued(int) {} // not under test here
 
 // one asserts exactly one attempt was recorded and returns it.
 func (f *fakeMetrics) one(t *testing.T) attemptRec {

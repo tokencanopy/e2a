@@ -1,5 +1,8 @@
--- 079_wsd_pending_with_job_idx.sql
+-- 080_wsd_pending_with_job_idx.sql
 -- e2a:no-transaction
+-- (Numbered 080: PR #665, open concurrently, claims 079. The runner tracks
+-- applied migrations by filename and applies any unapplied file in sorted
+-- order — no high-water mark — so this is safe under either merge order.)
 --
 -- Partial index backing the webhook delivery reconciler's DEAD-JOB rescue scan
 -- (jobs.ReconcilePending with RescueDeadJobs, via webhookdelivery.ReconcilePending),
@@ -13,9 +16,10 @@
 --
 -- The indexed set is the in-flight population (pending rows with a job:
 -- currently-retrying plus disabled-webhook snoozes), bounded by the retry
--- envelope and the row TTL — small, so the index is cheap to maintain. Both
--- columns the scan touches are in the key (job_id to probe river_job, id to
--- return), allowing an index-only scan of the set.
+-- envelope and the row TTL — small, so the index is cheap to maintain. The key
+-- carries job_id (to probe river_job) and id (to return); the rescue's
+-- quiet-age gate (COALESCE(last_attempt_at, created_at), see
+-- webhookdelivery.ReconcilePending) is a heap filter over this enumerated set.
 --
 -- CREATE INDEX CONCURRENTLY so the build does not take a write lock on the
 -- prod-sized table (a plain CREATE INDEX would block webhook fan-out inserts for

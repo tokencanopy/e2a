@@ -74,12 +74,13 @@ func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 // double-enqueues. Mirrors webhookdelivery.ReconcilePending. Returns the count
 // enqueued.
 func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
+	res, err := jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
 		Table:     "messages",
 		JobColumn: "send_job_id",
 		Where:     "direction='outbound' AND delivery_status='accepted'",
 		LogPrefix: "[outbound-reconcile]",
 	}, j.EnqueueSendTx)
+	return res.Total(), err
 }
 
 // EnqueueSendTx enqueues a send job WITHIN the caller's transaction — the outbox

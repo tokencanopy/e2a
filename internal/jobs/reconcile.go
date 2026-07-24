@@ -25,10 +25,11 @@ const deadJobStates = `('cancelled','discarded','completed')`
 
 // ReconcileSpec describes one table's stranded-row reconcile.
 //
-// SECURITY: Table, JobColumn, and Where are COMPILE-TIME CONSTANTS supplied by the
-// calling package — never runtime or user input. They are interpolated directly into
-// SQL (there is no parameter form for identifiers), so callers must pass only literal
-// strings. The only runtime value (the row id) is always a bound parameter.
+// SECURITY: Table, JobColumn, Where, and RescueWhere are COMPILE-TIME CONSTANTS
+// supplied by the calling package — never runtime or user input. They are
+// interpolated directly into SQL (there is no parameter form for identifiers), so
+// callers must pass only literal strings. The only runtime value (the row id) is
+// always a bound parameter.
 type ReconcileSpec struct {
 	// Table is the row table (e.g. "messages", "webhook_events").
 	Table string
@@ -70,24 +71,58 @@ type ReconcileSpec struct {
 	// strands are even scanned, so under an IS-NULL backlog that saturates every
 	// tick's batch, dead-job rescues wait until that backlog drains.
 	RescueDeadJobs bool
+	// RescueWhere optionally narrows the dead-job arm ONLY (scan + per-row
+	// re-check); the IS NULL arm is unaffected. ANDed with the dead-job
+	// condition; empty = no extra gate. Use it to age-gate the rescue so the
+	// per-tick scan doesn't churn on rows whose jobs are plausibly still live —
+	// e.g. webhookdelivery gates on quiet-for-longer-than-the-retry-envelope.
+	// Same alias rules and SECURITY contract as Where.
+	RescueWhere string
 }
+
+// ReconcileResult reports one ReconcilePending pass, split by arm so callers can
+// observe them separately: Enqueued counts rows re-driven from the JobColumn IS
+// NULL arm (work that never got a job); Rescued counts rows re-driven from the
+// dead-job arm (RescueDeadJobs — a fresh job replacing a terminal/pruned one). A
+// monotonically climbing Rescued rate is the poison-row signal: a
+// deterministically failing row burns a full job envelope per rescue, forever,
+// and only this count makes that loop visible.
+type ReconcileResult struct {
+	Enqueued int
+	Rescued  int
+}
+
+// Total is the number of rows this pass re-drove across both arms.
+func (r ReconcileResult) Total() int { return r.Enqueued + r.Rescued }
 
 // ReconcilePending re-drives every stranded row matching spec.Where: rows whose
 // spec.JobColumn IS NULL and — when spec.RescueDeadJobs is set — rows whose stamped
-// river_job is missing or terminal. It scans up to spec.Batch ids, then per id opens a
-// tx, re-checks strandedness under FOR UPDATE (skipping rows another process or a
-// prior pass already gave a live job), calls enqueueTx to insert the River job in that
-// tx, and stamps the returned job id back onto the row — all atomically. Idempotent:
-// the FOR UPDATE re-check means a re-run (or a concurrent replica) never
-// double-enqueues. A per-row failure is logged and skipped (the next pass retries it);
-// the returned count is the rows enqueued.
+// river_job is missing or terminal (narrowed by spec.RescueWhere when given). It
+// scans up to spec.Batch ids, then per id opens a tx, re-checks strandedness under
+// FOR UPDATE (skipping rows another process or a prior pass already gave a live
+// job), calls enqueueTx to insert the River job in that tx, and stamps the returned
+// job id back onto the row — all atomically. A per-row failure is logged and skipped
+// (the next pass retries it); the returned result counts the rows re-driven, split
+// by arm.
+//
+// Idempotency, per arm: the IS NULL arm never double-enqueues — the FOR UPDATE
+// re-check reads the committed job column under the row lock, so a concurrent
+// enqueuer's stamp is always seen. The dead-job arm is AT-LEAST-ONCE by design
+// under concurrent reconcilers: when the loser of the row-lock race resumes,
+// READ COMMITTED's EvalPlanQual re-evaluates the quals against the updated row
+// version but keeps the outer-joined river_job tuple from its original snapshot,
+// so the winner's freshly stamped (live) job can still read as dead to the loser
+// and a duplicate job is enqueued. That duplicate is within the webhook
+// pipeline's at-least-once contract (worker-side status guards make it a no-op
+// or a tolerated duplicate delivery).
 //
 // This is the shared body behind every domain's startup cutover + live reconcile
 // worker (outboundsend, inboundprocess, hitlnotify, webhookdelivery, webhookpub
 // fan-out). Each domain supplies a ReconcileSpec + its own EnqueueXTx.
 func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpec,
-	enqueueTx func(ctx context.Context, tx pgx.Tx, id string) (int64, error)) (int, error) {
+	enqueueTx func(ctx context.Context, tx pgx.Tx, id string) (int64, error)) (ReconcileResult, error) {
 
+	var res ReconcileResult
 	batch := spec.Batch
 	if batch <= 0 {
 		batch = DefaultReconcileBatch
@@ -98,7 +133,11 @@ func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpe
 		spec.Table, spec.Where, spec.JobColumn),
 		batch)
 	if err != nil {
-		return 0, err
+		return res, err
+	}
+	rescueGate := spec.RescueWhere
+	if rescueGate == "" {
+		rescueGate = "true"
 	}
 	if spec.RescueDeadJobs && len(ids) < batch {
 		deadIDs, err := scanIDs(ctx, pool, fmt.Sprintf(
@@ -106,51 +145,55 @@ func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpe
 			   LEFT JOIN river_job r ON r.id = t.%s
 			  WHERE %s AND t.%s IS NOT NULL
 			    AND (r.id IS NULL OR r.state IN %s)
+			    AND (%s)
 			  LIMIT $1`,
-			spec.Table, spec.JobColumn, spec.Where, spec.JobColumn, deadJobStates),
+			spec.Table, spec.JobColumn, spec.Where, spec.JobColumn, deadJobStates, rescueGate),
 			batch-len(ids))
 		if err != nil {
-			return 0, err
+			return res, err
 		}
 		ids = append(ids, deadIDs...)
 	}
 
-	// The per-row re-check must apply the SAME strandedness test under the row
-	// lock: without RescueDeadJobs any stamped id means "already enqueued"; with
-	// it, a stamped id only counts when its job is still alive. The rescue
-	// variant also re-verifies Where (scanning no row = the row terminalized or
-	// vanished since the scan — skip), so a row that went terminal between scan
-	// and lock is never given a fresh job.
+	// The per-row re-check applies the SAME strandedness test under the row lock:
+	// without RescueDeadJobs any stamped id means "already enqueued"; with it, a
+	// stamped id only counts when its job is still alive (dead + rescue gate ⇒
+	// re-drive). The rescue variant also re-verifies Where (scanning no row = the
+	// row terminalized or vanished since the scan — skip), so a row that went
+	// terminal between scan and lock is never given a fresh job. See the function
+	// doc for the arms' differing idempotency guarantees under concurrency.
 	var recheckSQL string
 	if spec.RescueDeadJobs {
 		recheckSQL = fmt.Sprintf(
-			`SELECT t.%s, (t.%s IS NOT NULL AND (r.id IS NULL OR r.state IN %s))
+			`SELECT t.%s,
+			        (t.%s IS NOT NULL AND (r.id IS NULL OR r.state IN %s)),
+			        (%s)
 			   FROM %s t
 			   LEFT JOIN river_job r ON r.id = t.%s
 			  WHERE t.id = $1 AND (%s)
 			  FOR UPDATE OF t`,
-			spec.JobColumn, spec.JobColumn, deadJobStates, spec.Table, spec.JobColumn, spec.Where)
+			spec.JobColumn, spec.JobColumn, deadJobStates, rescueGate, spec.Table, spec.JobColumn, spec.Where)
 	} else {
-		recheckSQL = fmt.Sprintf(`SELECT %s, false FROM %s WHERE id=$1 FOR UPDATE`, spec.JobColumn, spec.Table)
+		recheckSQL = fmt.Sprintf(`SELECT %s, false, true FROM %s WHERE id=$1 FOR UPDATE`, spec.JobColumn, spec.Table)
 	}
 	stampSQL := fmt.Sprintf(`UPDATE %s SET %s=$2 WHERE id=$1`, spec.Table, spec.JobColumn)
 
-	n := 0
 	for _, id := range ids {
 		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			// Re-check under a row lock: another process (or a prior run) may have
-			// enqueued it already. Skip if the row now carries a live job — or, in
-			// rescue mode, no longer matches Where at all.
+			// enqueued it already. Skip if the row now carries a live job, is dead
+			// but outside the rescue gate, or — in rescue mode — no longer matches
+			// Where.
 			var jobID *int64
-			var jobDead bool
-			if err := tx.QueryRow(ctx, recheckSQL, id).Scan(&jobID, &jobDead); err != nil {
+			var jobDead, rescueOK bool
+			if err := tx.QueryRow(ctx, recheckSQL, id).Scan(&jobID, &jobDead, &rescueOK); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil // row gone or no longer stranded-eligible — nothing to do
 				}
 				return err
 			}
-			if jobID != nil && !jobDead {
-				return nil // already enqueued (live job)
+			if jobID != nil && !(jobDead && rescueOK) {
+				return nil // live job already stamped (or dead but gated) — skip
 			}
 			newJobID, err := enqueueTx(ctx, tx, id)
 			if err != nil {
@@ -159,13 +202,19 @@ func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpe
 			if _, err := tx.Exec(ctx, stampSQL, id, newJobID); err != nil {
 				return err
 			}
-			n++
+			// Attribute the arm by what the locked re-check saw, not by which scan
+			// found the id — the row may have changed in between.
+			if jobID == nil {
+				res.Enqueued++
+			} else {
+				res.Rescued++
+			}
 			return nil
 		}); err != nil {
 			log.Printf("%s enqueue %s: %v", spec.LogPrefix, id, err)
 		}
 	}
-	return n, nil
+	return res, nil
 }
 
 // scanIDs runs one bounded stranded-row scan and returns the matched ids.

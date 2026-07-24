@@ -62,6 +62,11 @@ type Metrics interface {
 	// skipped_disabled), which would otherwise drag the duration
 	// quantiles toward zero.
 	WebhookAttempt(outcome, statusClass string, seconds float64)
+
+	// WebhookDeliveryRescued counts delivery rows the reconciler's dead-job
+	// arm re-drove (fresh job replacing a terminal/pruned one). A climbing
+	// rate is the poison-row signal.
+	WebhookDeliveryRescued(count int)
 }
 
 // statusClassOf maps an HTTP status code to its metrics label ("1xx".."5xx"),

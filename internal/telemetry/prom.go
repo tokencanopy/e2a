@@ -27,9 +27,11 @@ type Prom struct {
 	outTerminal     *prometheus.CounterVec
 	outAttempts     *prometheus.CounterVec
 	outAttemptDur   prometheus.Histogram
-	whAttempts       *prometheus.CounterVec
-	whAttemptDur     prometheus.Histogram
-	whExpiredPending prometheus.Counter
+	whAttempts        *prometheus.CounterVec
+	whAttemptDur      prometheus.Histogram
+	whExpiredPending  prometheus.Counter
+	whFanOutRescued   prometheus.Counter
+	whDeliveryRescued prometheus.Counter
 	wsConnects      prometheus.Counter
 	wsDisconnects   *prometheus.CounterVec
 	wsDrained       prometheus.Counter
@@ -169,6 +171,14 @@ func NewProm() *Prom {
 			Name: "e2a_webhook_deliveries_expired_pending_total",
 			Help: "Delivery rows that hit their retention TTL still pending and were marked failed by the janitor.",
 		}),
+		whFanOutRescued: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "e2a_webhook_fanout_rescued_total",
+			Help: "Pending webhook events re-driven after their fan-out job died (discarded/pruned); a climbing rate = poison event.",
+		}),
+		whDeliveryRescued: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "e2a_webhook_deliveries_rescued_total",
+			Help: "Pending delivery rows re-driven after their delivery job died (discarded/pruned); a climbing rate = poison row.",
+		}),
 		wsConnects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_ws_connects_total",
 			Help: "WebSocket connections accepted and registered.",
@@ -249,7 +259,7 @@ func NewProm() *Prom {
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
 		p.outQueueWait, p.outTerminal, p.outAttempts, p.outAttemptDur,
-		p.whAttempts, p.whAttemptDur, p.whExpiredPending,
+		p.whAttempts, p.whAttemptDur, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued,
 		p.wsConnects, p.wsDisconnects, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
@@ -324,6 +334,18 @@ func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 func (p *Prom) WebhookExpiredPending(count int) {
 	if count > 0 {
 		p.whExpiredPending.Add(float64(count))
+	}
+}
+
+func (p *Prom) WebhookFanOutRescued(count int) {
+	if count > 0 {
+		p.whFanOutRescued.Add(float64(count))
+	}
+}
+
+func (p *Prom) WebhookDeliveryRescued(count int) {
+	if count > 0 {
+		p.whDeliveryRescued.Add(float64(count))
 	}
 }
 

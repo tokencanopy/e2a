@@ -123,6 +123,18 @@ type Metrics interface {
 	// for longer than the TTL.
 	WebhookExpiredPending(count int)
 
+	// WebhookFanOutRescued / WebhookDeliveryRescued count rows the
+	// reconcilers' dead-job arm re-drove: a pending webhook_events /
+	// webhook_subscriber_deliveries row whose stamped River job was
+	// terminal or pruned, given a fresh job. Occasional blips are normal
+	// (crash windows, lost terminal writes); a monotonically climbing
+	// rate is the poison-row signal — a deterministically failing row
+	// burning a fresh job envelope per rescue, forever. These counters
+	// are the observability half of the deliberate
+	// retry-forever-with-observability design.
+	WebhookFanOutRescued(count int)
+	WebhookDeliveryRescued(count int)
+
 	// WSConnected / WSDisconnected count WebSocket connection
 	// lifecycle events. reason ∈ {replaced, ping_timeout,
 	// client_close, error, shutdown}.
@@ -171,6 +183,8 @@ func (NoOp) OutboundTerminal(string)                     {}
 func (NoOp) OutboundAttempt(string, float64)             {}
 func (NoOp) WebhookAttempt(string, string, float64)      {}
 func (NoOp) WebhookExpiredPending(int)                   {}
+func (NoOp) WebhookFanOutRescued(int)                    {}
+func (NoOp) WebhookDeliveryRescued(int)                  {}
 func (NoOp) WSConnected()                                {}
 func (NoOp) WSDisconnected(string)                       {}
 func (NoOp) WSDrained(int)                               {}
@@ -269,6 +283,20 @@ func (l *Log) WebhookExpiredPending(count int) {
 		return // skip noise: the healthy steady state marks nothing
 	}
 	log.Printf("[metrics] event=webhook.expired_pending count=%d", count)
+}
+
+func (l *Log) WebhookFanOutRescued(count int) {
+	if count == 0 {
+		return // skip noise: the healthy steady state rescues nothing
+	}
+	log.Printf("[metrics] event=webhook.fanout_rescued count=%d", count)
+}
+
+func (l *Log) WebhookDeliveryRescued(count int) {
+	if count == 0 {
+		return // skip noise: the healthy steady state rescues nothing
+	}
+	log.Printf("[metrics] event=webhook.delivery_rescued count=%d", count)
 }
 
 func (l *Log) WSConnected() {

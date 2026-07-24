@@ -20,6 +20,21 @@ import (
 // re-driven within this bound rather than waiting for a process restart.
 const reconcileInterval = 1 * time.Minute
 
+// rescueQuietFor age-gates the dead-job rescue arm: only pending rows quiet
+// (COALESCE(last_attempt_at, created_at)) for longer than this are considered.
+// It must exceed the full retry envelope — sum(retryBackoffs) = 29h21m from the
+// initial to the final attempt — so a row still being legitimately retried by a
+// live job is never even scanned; 30h adds a ~39m margin
+// (TestRescueQuietForCoversRetryEnvelope pins the relationship). This keeps the
+// per-tick rescue scan from churning through the whole in-flight population,
+// which is largest exactly during an endpoint incident, when the table is
+// already under stress. Semantics: a row whose job dies EARLY (e.g. the
+// webhook-deleted cancel path racing a failed terminal write) is rescued ~30h
+// late instead of next tick — acceptable for a backstop, and never lost. The
+// COALESCE matters: a never-attempted row (last_attempt_at NULL) ages on
+// created_at, so it cannot be excluded forever.
+const rescueQuietFor = "30 hours"
+
 // Jobs is the webhook-delivery integration on the shared River client: a
 // jobs.Registrar (contributes DeliverWorker + the reconcile periodic) plus the
 // transactional enqueue entry point the outbox drain + redelivery API call. The
@@ -75,20 +90,30 @@ func (WebhookReconcileArgs) Kind() string { return "webhook_reconcile" }
 // (never enqueued, or its job is terminal/pruned). It is the LIVE backstop for
 // the separate-tx enqueue paths (/test, redelivery), any outbox-drain crash
 // window, and a lost final-attempt terminal write — turning "recovered only on
-// restart" (or never) into "recovered within reconcileInterval". Idempotent
-// (ReconcilePending's FOR UPDATE strandedness re-check).
+// restart" (or never) into "recovered within reconcileInterval" (dead-job
+// rescues: within rescueQuietFor + reconcileInterval). Never double-enqueues on
+// the IS-NULL arm; the dead-job rescue arm is at-least-once under concurrent
+// reconcilers (see jobs.ReconcilePending's EvalPlanQual note) — a duplicate POST
+// is within the delivery contract.
 type ReconcileWorker struct {
 	river.WorkerDefaults[WebhookReconcileArgs]
 	jobs *Jobs
 }
 
 func (w *ReconcileWorker) Work(ctx context.Context, _ *river.Job[WebhookReconcileArgs]) error {
-	n, err := w.jobs.ReconcilePending(ctx, w.jobs.pool)
+	res, err := w.jobs.ReconcilePending(ctx, w.jobs.pool)
 	if err != nil {
 		return err // River retries the reconcile job — transient DB blip is fine
 	}
-	if n > 0 {
-		log.Printf("[webhook-reconcile] re-enqueued %d stranded deliveries", n)
+	if res.Total() > 0 {
+		log.Printf("[webhook-reconcile] re-enqueued %d stranded deliveries (%d never-enqueued, %d dead-job rescues)",
+			res.Total(), res.Enqueued, res.Rescued)
+	}
+	// Rescues get their own counter: a climbing rate is the poison-row signal (a
+	// row burning a fresh delivery envelope per rescue). Nil-safe: metrics is
+	// optional wiring on Jobs.
+	if w.jobs.metrics != nil {
+		w.jobs.metrics.WebhookDeliveryRescued(res.Rescued)
 	}
 	return nil
 }
@@ -101,20 +126,25 @@ func (w *ReconcileWorker) Work(ctx context.Context, _ *river.Job[WebhookReconcil
 // DeliverWorker.Work), River discards the job and the row sat 'pending' with a
 // dead job_id, invisible to an IS-NULL-only reconciler, until its TTL. Re-driving
 // is safe: delivery is at-least-once and the DeliverWorker no-ops on rows that
-// already terminalized. It runs BOTH at startup (the one-shot cutover from the
-// legacy queue) AND on a live schedule (ReconcileWorker) so a stranded row —
-// from the separate-tx /test/redelivery enqueue paths, an outbox-drain crash
-// window, or a lost terminal write — is re-driven within reconcileInterval
-// rather than only on the next restart. Idempotent: the per-row FOR UPDATE
-// re-check means a re-run (or a concurrent replica) never double-enqueues.
-// Returns the number of rows enqueued.
-func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+// already terminalized. The rescue arm is age-gated (RescueWhere, rescueQuietFor)
+// to rows quiet for longer than the full retry envelope, so the per-tick scan
+// never churns the live in-flight set. It runs BOTH at startup (the one-shot
+// cutover from the legacy queue) AND on a live schedule (ReconcileWorker) so a
+// stranded row — from the separate-tx /test/redelivery enqueue paths, an
+// outbox-drain crash window, or a lost terminal write — is re-driven within
+// reconcileInterval (IS-NULL arm) or rescueQuietFor + reconcileInterval
+// (dead-job arm) rather than only on the next restart. A re-run never
+// double-enqueues on the IS-NULL arm; the dead-job arm is at-least-once under
+// concurrent reconcilers (see jobs.ReconcilePending's EvalPlanQual note).
+// Returns the per-arm counts.
+func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (jobs.ReconcileResult, error) {
 	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
 		Table:          "webhook_subscriber_deliveries",
 		JobColumn:      "job_id",
 		Where:          "status='pending'",
 		LogPrefix:      "[webhook-reconcile]",
 		RescueDeadJobs: true,
+		RescueWhere:    "COALESCE(t.last_attempt_at, t.created_at) < now() - interval '" + rescueQuietFor + "'",
 	}, j.EnqueueDeliveryTx)
 }
 

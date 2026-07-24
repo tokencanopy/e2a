@@ -310,12 +310,12 @@ func TestFanOutJobs_Integration_RescuesDeadFanOutJob(t *testing.T) {
 	}
 	j.SetEnqueuer(client)
 
-	n, err := j.ReconcilePending(ctx, pool)
+	res, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("reconcile enqueued %d events, want 2 (discarded-job + missing-job strands)", n)
+	if res.Rescued != 2 || res.Enqueued != 0 {
+		t.Errorf("reconcile result = %+v, want exactly 2 rescues (discarded-job + missing-job strands)", res)
 	}
 
 	fanoutJobIDOf := func(eventID string) int64 {
@@ -338,13 +338,15 @@ func TestFanOutJobs_Integration_RescuesDeadFanOutJob(t *testing.T) {
 		t.Errorf("live-job event fanout_job_id = %d, want untouched %d", got, aliveJob)
 	}
 
-	// Idempotent: rescued events now carry live jobs — a re-run enqueues nothing.
-	n2, err := j.ReconcilePending(ctx, pool)
+	// Idempotent re-run (single reconciler): rescued events now carry live jobs —
+	// a re-run enqueues nothing. (Concurrent reconcilers are at-least-once on
+	// this arm; see jobs.ReconcilePending.)
+	res2, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending re-run: %v", err)
 	}
-	if n2 != 0 {
-		t.Errorf("re-run enqueued %d events, want 0 (rescued events carry live jobs)", n2)
+	if res2.Total() != 0 {
+		t.Errorf("re-run enqueued %d events, want 0 (rescued events carry live jobs)", res2.Total())
 	}
 
 	// And a rescued event actually fans out to completion.

@@ -18,6 +18,8 @@ func TestNoOpSatisfiesInterface(t *testing.T) {
 	m.RedeliverRequests("")
 	m.JanitorRowsDeleted("", 0)
 	m.WebhookExpiredPending(0)
+	m.WebhookFanOutRescued(0)
+	m.WebhookDeliveryRescued(0)
 	m.NotifyMissed()
 	m.SetPublisherLag(0)
 }
@@ -34,6 +36,8 @@ func TestLogSatisfiesInterface(t *testing.T) {
 	m.RedeliverRequests("single")
 	m.JanitorRowsDeleted("webhook_events", 5)
 	m.WebhookExpiredPending(2)
+	m.WebhookFanOutRescued(1)
+	m.WebhookDeliveryRescued(1)
 	m.NotifyMissed()
 	m.SetPublisherLag(2.5)
 }

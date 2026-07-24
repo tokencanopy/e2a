@@ -53,8 +53,15 @@ func TestReconcilePending_RescuesDeadJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertPendingForTest: %v", err)
 	}
+	// A dead-job row still INSIDE the quiet-age envelope: must not be rescued
+	// this pass (its job could plausibly still have been retrying).
+	idFreshDead, err := sub.InsertPendingForTest(ctx, wh.ID, "email.received", []byte(`{"type":"email.received"}`))
+	if err != nil {
+		t.Fatalf("InsertPendingForTest: %v", err)
+	}
 
 	discardedJob := seedRiverJob(t, pool, "webhook_deliver", "discarded")
+	freshDeadJob := seedRiverJob(t, pool, "webhook_deliver", "discarded")
 	liveJob := seedRiverJob(t, pool, "webhook_deliver", "available")
 	missingJob := int64(1) << 60 // never a real river_job id (pruned strand)
 	stamp := func(deliveryID string, jobID int64) {
@@ -66,6 +73,22 @@ func TestReconcilePending_RescuesDeadJob(t *testing.T) {
 	stamp(idDiscarded, discardedJob)
 	stamp(idMissing, missingJob)
 	stamp(idLive, liveJob)
+	stamp(idFreshDead, freshDeadJob)
+
+	// The rescue arm is age-gated to rows quiet longer than the retry envelope
+	// (rescueQuietFor = 30h): backdate the two real strands past it — one via
+	// last_attempt_at, one via created_at only (the COALESCE arm for a
+	// never-attempted row). idFreshDead stays at now() (in-envelope).
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhook_subscriber_deliveries SET last_attempt_at = now() - interval '31 hours' WHERE id = $1`,
+		idDiscarded); err != nil {
+		t.Fatalf("backdate %s: %v", idDiscarded, err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhook_subscriber_deliveries SET created_at = now() - interval '31 hours' WHERE id = $1`,
+		idMissing); err != nil {
+		t.Fatalf("backdate %s: %v", idMissing, err)
+	}
 
 	// Real River client so rescued rows get real (alive) jobs — that is what
 	// makes the re-run idempotency assertion meaningful.
@@ -76,12 +99,12 @@ func TestReconcilePending_RescuesDeadJob(t *testing.T) {
 	}
 	j.SetEnqueuer(client)
 
-	n, err := j.ReconcilePending(ctx, pool)
+	res, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("reconcile enqueued %d rows, want 2 (discarded-job + missing-job strands)", n)
+	if res.Rescued != 2 || res.Enqueued != 0 {
+		t.Errorf("reconcile result = %+v, want exactly 2 rescues (discarded-job + missing-job strands)", res)
 	}
 
 	jobIDOf := func(id string) int64 {
@@ -104,6 +127,9 @@ func TestReconcilePending_RescuesDeadJob(t *testing.T) {
 	if got := jobIDOf(idLive); got != liveJob {
 		t.Errorf("live-job row job id = %d, want untouched %d", got, liveJob)
 	}
+	if got := jobIDOf(idFreshDead); got != freshDeadJob {
+		t.Errorf("in-envelope dead-job row job id = %d, want untouched %d (quiet-age gate)", got, freshDeadJob)
+	}
 	// The fresh jobs are real webhook_deliver river_jobs carrying the row ids.
 	for _, id := range []string{idDiscarded, idMissing} {
 		var count int
@@ -117,13 +143,15 @@ func TestReconcilePending_RescuesDeadJob(t *testing.T) {
 		}
 	}
 
-	// Idempotent: the rescued rows now carry live jobs — a re-run enqueues nothing.
-	n2, err := j.ReconcilePending(ctx, pool)
+	// Idempotent re-run (single reconciler): the rescued rows now carry live
+	// jobs — a re-run enqueues nothing. (Concurrent reconcilers are
+	// at-least-once on this arm; see jobs.ReconcilePending.)
+	res2, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending re-run: %v", err)
 	}
-	if n2 != 0 {
-		t.Errorf("re-run enqueued %d rows, want 0 (rescued rows carry live jobs)", n2)
+	if res2.Total() != 0 {
+		t.Errorf("re-run enqueued %d rows, want 0 (rescued rows carry live jobs)", res2.Total())
 	}
 
 	// And the rescued row actually terminalizes: drive the worker for it.
