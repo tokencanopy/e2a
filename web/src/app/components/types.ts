@@ -175,6 +175,10 @@ export type MessageSummary = {
   // Review lifecycle (from v1 review_status): pending_review | sent |
   // review_rejected | review_expired_approved | review_expired_rejected.
   review_status?: string;
+  // Future instant a scheduled outbound send will be submitted (from v1
+  // scheduled_at). Present only while a future send_at is set; absent on
+  // immediate sends and inbound rows. Drives the "Scheduled" chip + send time.
+  scheduled_at?: string;
   // Inbound read state (from v1 read_status): "unread" | "read". Empty on
   // outbound rows. Drives the inbox's unread/bold affordance.
   read_status?: string;
