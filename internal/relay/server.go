@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/mail"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/inboundpolicy"
+	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/piguard"
@@ -176,43 +176,14 @@ func NewServer(cfg *config.Config, store *identity.Store, usage usage.UsageTrack
 	return s
 }
 
-// geminiDetectorTimeout is the per-detector timeout used when the Gemini detector
-// is wired in, wider than the Engine's default (5s) so the retry/backoff schedule
-// in piguard/gemini.go (up to geminiDefaultMaxRetries retries) has room to run
-// instead of being cut off by the engine before it can fire.
-const geminiDetectorTimeout = 10 * time.Second
+// geminiDetectorTimeout / geminiDetectorEnabled / buildScreenEngine moved to
+// internal/inboundscreen (shared with the loopback inbound-leg screeners);
+// these thin aliases keep this package's call sites and internal tests stable.
+const geminiDetectorTimeout = inboundscreen.GeminiDetectorTimeout
 
-// geminiDetectorEnabled reports whether buildScreenEngine should even attempt to
-// construct the Gemini detector. Defaults to true — the existing behavior, where
-// Gemini is enabled purely by GEMINI_API_KEY/GOOGLE_API_KEY being present — unless
-// E2A_GEMINI_DETECTOR_ENABLED is explicitly set to "false". This is an operator
-// kill-switch/A-B toggle independent of the credential: it lets you disable Gemini
-// (isolating whether it or heuristics is driving a given block/review outcome, or
-// rolling back without touching secrets) without having to remove the API key.
-func geminiDetectorEnabled() bool {
-	return os.Getenv("E2A_GEMINI_DETECTOR_ENABLED") != "false"
-}
+func geminiDetectorEnabled() bool { return inboundscreen.GeminiDetectorEnabled() }
 
-// buildScreenEngine constructs the piguard screening engine for inbound mail. The
-// heuristics detector is always included. The Gemini detector is added when
-// geminiDetectorEnabled() and GEMINI_API_KEY or GOOGLE_API_KEY is set in the
-// environment; its prompt only classifies inbound content, so this engine
-// (inbound-only, unlike buildAgentScreenEngine in internal/agent/api.go) is where
-// it belongs.
-func buildScreenEngine() *piguard.Engine {
-	detectors := []piguard.Detector{piguard.NewHeuristicsDetector()}
-	cfg := piguard.EngineConfig{}
-	if geminiDetectorEnabled() {
-		if d, err := piguard.NewGeminiDetector(piguard.GeminiConfig{}); err == nil {
-			detectors = append(detectors, d)
-			cfg.Timeout = geminiDetectorTimeout
-			log.Printf("[piguard] Gemini detector enabled (model: %s)", d.Model())
-		}
-	} else {
-		log.Printf("[piguard] Gemini detector disabled via E2A_GEMINI_DETECTOR_ENABLED=false")
-	}
-	return piguard.NewEngine(cfg, detectors...)
-}
+func buildScreenEngine() *piguard.Engine { return inboundscreen.BuildEngine() }
 
 func (s *Server) ListenAndServe() error {
 	l, err := net.Listen("tcp", s.smtpServer.Addr)

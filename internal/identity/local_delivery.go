@@ -17,6 +17,24 @@ import (
 // pair.
 type LocalDeliveryTxHook func(ctx context.Context, tx pgx.Tx, outbound, inbound *Message, result SendResult, outboundTransitions, inboundTransitions []messagelifecycle.MessageLifecycleTransition) error
 
+// LocalInboundScreen carries the caller-evaluated inbound-protection verdict
+// for the recipient-side row of a providerless local delivery. The evaluation
+// itself lives in internal/inboundscreen (which this package cannot import —
+// it imports identity), so the compose callback returns the verdict alongside
+// the composed message and finalizeLocalDeliveryTx persists it: the inbound
+// row is created with the screening denorm (a review/block status hides it
+// from the inbox exactly like a relay-held message) and the gate flag
+// annotation. The zero value means "screened clean" — delivered normally.
+type LocalInboundScreen struct {
+	// MessageID pre-allocates the inbound row id so the caller's audit rows
+	// (protection_events) and deterministic event ids anchor to the row that is
+	// actually created. Empty → the store allocates one.
+	MessageID  string
+	Flagged    bool
+	FlagReason string
+	Screening  InboundScreening
+}
+
 // GetEventEnvelope returns the exact durable event envelope for a message.
 // WebSocket reconnect drain uses this instead of rebuilding an event whose
 // timestamp or attachment metadata could differ under the same event id.
@@ -34,12 +52,15 @@ func (s *Store) GetEventEnvelope(ctx context.Context, messageID, eventType strin
 // ApproveAndSend, compose must be a local, side-effect-free operation: the
 // outbound update, recipient-side insert, events, and idempotency completion
 // all commit or roll back together, so the SES-oriented send_attempts journal
-// is neither needed nor appropriate.
+// is neither needed nor appropriate. compose also returns the inbound-leg
+// screening verdict (evaluated over the composed MIME) so the recipient-side
+// row carries the agent's inbound protection outcome instead of a zero-value
+// screening.
 func (s *Store) ApproveAndDeliverLocal(
 	ctx context.Context,
 	messageID, userID string,
 	edits PendingApprovalEdit,
-	compose func(msg *Message) (SendResult, error),
+	compose func(msg *Message) (SendResult, LocalInboundScreen, error),
 	beforeCommit LocalDeliveryTxHook,
 ) (*Message, error) {
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
@@ -65,7 +86,7 @@ func (s *Store) ApproveAndDeliverLocal(
 	}
 
 	editedByReviewer := edits.Apply(m)
-	result, err := compose(m)
+	result, screen, err := compose(m)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +95,7 @@ func (s *Store) ApproveAndDeliverLocal(
 	}
 
 	reviewerID := userID
-	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusSent, editedByReviewer, &reviewerID)
+	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusSent, editedByReviewer, &reviewerID, screen)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +123,7 @@ func (s *Store) ApproveAndDeliverLocal(
 func (s *Store) ExpireAndDeliverLocal(
 	ctx context.Context,
 	messageID string,
-	compose func(msg *Message) (SendResult, error),
+	compose func(msg *Message) (SendResult, LocalInboundScreen, error),
 	beforeCommit LocalDeliveryTxHook,
 ) (*Message, error) {
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
@@ -124,7 +145,7 @@ func (s *Store) ExpireAndDeliverLocal(
 		return nil, err
 	}
 
-	result, err := compose(m)
+	result, screen, err := compose(m)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +153,7 @@ func (s *Store) ExpireAndDeliverLocal(
 		return nil, errors.New("identity: invalid local delivery result")
 	}
 
-	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusReviewExpiredApproved, false, nil)
+	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusReviewExpiredApproved, false, nil, screen)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +209,7 @@ func finalizeLocalDeliveryTx(
 	targetStatus string,
 	editedByReviewer bool,
 	reviewedByUserID *string,
+	screen LocalInboundScreen,
 ) (*Message, error) {
 	_, err := tx.Exec(ctx,
 		`UPDATE messages
@@ -223,11 +245,14 @@ func finalizeLocalDeliveryTx(
 		return nil, err
 	}
 
+	// The inbound row carries the caller-evaluated screening verdict: a
+	// review/block status makes it a hidden hold (pending_review /
+	// review_rejected) exactly like a relay-held inbound message.
 	inbound, err := createInboundMessage(
-		ctx, tx, "", m.AgentID, result.Sender, m.AgentID,
+		ctx, tx, screen.MessageID, m.AgentID, result.Sender, m.AgentID,
 		result.ProviderMessageID, m.Subject, m.ConversationID, "unread",
-		result.Raw, nil, nil, false, "", result.To, result.CC, m.ReplyTo,
-		InboundScreening{}, &InboundAuth{HeaderFrom: m.AgentID},
+		result.Raw, nil, nil, screen.Flagged, screen.FlagReason, result.To, result.CC, m.ReplyTo,
+		screen.Screening, &InboundAuth{HeaderFrom: m.AgentID},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("local delivery inbound row: %w", err)
