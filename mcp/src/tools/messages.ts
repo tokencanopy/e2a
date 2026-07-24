@@ -52,6 +52,7 @@ export function messageViewForTool(email: MessageView) {
     delivery_detail: email.deliveryDetail,
     review_status: email.reviewStatus,
     sent_as: email.sentAs,
+    scheduled_at: email.scheduledAt,
     size_bytes: email.sizeBytes,
     deleted_at: email.deletedAt,
     received_at: email.createdAt,

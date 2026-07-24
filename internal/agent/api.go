@@ -1327,6 +1327,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// §7.2 / async-send-contract.md): billing must not run ahead of a durable
 	// message row, or a crash between meter and persist bills an invisible send.
 	if isSelfSend(req, agent.EmailAddress()) {
+		// Self-send is an immediate in-process loopback; the scheduling path
+		// (River ScheduledAt) never runs for it, so a future send_at would be
+		// silently dropped. Reject it rather than deliver early against intent.
+		if req.ScheduledAt != nil {
+			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
+		}
 		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, idemCompleteTx)
 		if err != nil {
 			log.Printf("[api] self-send failed: agent=%s error=%v", agent.EmailAddress(), err)

@@ -4416,7 +4416,7 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 		        m.labels,
 		        COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict,
 		        COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''),
-		        COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
+		        COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), m.scheduled_at
 		 FROM messages m
 		 LEFT JOIN webhook_deliveries wd ON wd.message_id = m.id
 		 WHERE m.agent_id = $1
@@ -4450,7 +4450,7 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 			&m.Labels,
 			&outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &authVerdict,
 			&m.Flagged, &m.FlagReason,
-			&m.WebhookStatus, &m.WebhookError,
+			&m.WebhookStatus, &m.WebhookError, &m.ScheduledAt,
 		); err != nil {
 			return nil, err
 		}

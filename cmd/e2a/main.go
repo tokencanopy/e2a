@@ -622,6 +622,20 @@ func main() {
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
 	api.SetEnforcer(enforcer)
+	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
+	// month a scheduled send actually fires (accept-time enforcement can't know a
+	// future fire month). Over-cap → refuse terminally; a transient lookup error
+	// fails open so a glitch never drops a legitimate send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
+		err := enforcer.CheckMessageSend(ctx, userID)
+		if err == nil {
+			return false, nil
+		}
+		if _, ok := err.(*limits.LimitExceededError); ok {
+			return true, nil
+		}
+		return false, err
+	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)

@@ -61,6 +61,22 @@ type outboundSendStore struct {
 	store  *identity.Store
 	outbox webhookpub.Outbox
 	usage  usage.UsageTracker
+	// overQuota, when set, is consulted at FIRE time for SCHEDULED sends only:
+	// it reports whether the owning account is over its monthly message cap in
+	// the fire month. A send scheduled into a later month was never counted
+	// against that month's cap (accept-time enforcement can't know the fire
+	// month), so this closes the "schedule into a future month to bypass quota"
+	// gap. nil disables the gate (tests / plans without limits). The wrapper
+	// returns (false, err) on a transient lookup failure so a quota-check glitch
+	// never drops a legitimate send (fail open).
+	overQuota func(ctx context.Context, userID string) (bool, error)
+}
+
+// SetScheduledSendQuota installs the fire-time monthly-cap gate for scheduled
+// sends (see outboundSendStore.overQuota). Wired in main from the limits
+// enforcer; left nil in tests and plan-agnostic setups.
+func (a *outboundSendStore) SetScheduledSendQuota(f func(ctx context.Context, userID string) (bool, error)) {
+	a.overQuota = f
 }
 
 // NewOutboundSendStore builds the outboundsend.Store adapter for main.go.
@@ -127,7 +143,24 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 	if err != nil || p == nil {
 		return nil, err
 	}
-	return &outboundsend.SendJob{
+	// Fire-time monthly-cap gate for scheduled sends: a send scheduled into a
+	// future month was never counted against that month's cap, so enforce it now
+	// and refuse terminally (email.failed via MarkFailed) rather than deliver an
+	// uncapped send. Immediate sends are already gated at accept and skip this.
+	if p.ScheduledAt != nil && a.overQuota != nil {
+		over, qerr := a.overQuota(ctx, p.UserID)
+		if qerr != nil {
+			log.Printf("[outbound-send:%s] scheduled-send quota check failed, proceeding (fail open): %v", p.ID, qerr)
+		} else if over {
+			if failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+				"scheduled send canceled: monthly message limit exceeded at send time",
+				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
+				return nil, failErr
+			}
+			return nil, nil // refused at fire — the worker delivers nothing
+		}
+	}
+	sj := &outboundsend.SendJob{
 		MessageID:          p.ID,
 		UserID:             p.UserID,
 		AgentID:            p.AgentID,
@@ -142,7 +175,11 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 		ProviderAccepted:   p.ProviderAccepted,
 		ProviderAcceptedAt: p.ProviderAcceptedAt,
 		ProviderMessageID:  p.ProviderMessageID,
-	}, nil
+	}
+	if p.ScheduledAt != nil {
+		sj.ScheduledAt = *p.ScheduledAt
+	}
+	return sj, nil
 }
 
 // SuppressedRecipients backs the SendWorker's pre-provider suppression guard:
