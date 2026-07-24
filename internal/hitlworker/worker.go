@@ -423,8 +423,12 @@ func (w *Worker) autoApproveLoopback(ctx context.Context, agent *identity.AgentI
 		w.autoReject(ctx, c.MessageID, fmt.Sprintf("auto-approve send failed: %v", err))
 		return
 	}
-	// Screening audit rows are appended best-effort after the commit —
-	// deterministic ids keep a retried sweep idempotent (mirrors the relay).
+	// Screening audit rows are appended best-effort ONCE after the commit: a
+	// crash between the commit and this loop loses the audit rows for good —
+	// unlike the relay, nothing re-drives an already-delivered local sweep
+	// (the deterministic ids only dedupe the rare case where the same hold is
+	// re-processed end-to-end). Accepted: the verdict itself is durable on the
+	// message row; only the drill-down audit is best-effort.
 	for _, ev := range screenRes.Events {
 		if perr := w.store.CreateProtectionEvent(ctx, ev); perr != nil {
 			log.Printf("[mail:%s] screening_event write failed (%s/%s): %v", inboundID, ev.Source, ev.Reason, perr)

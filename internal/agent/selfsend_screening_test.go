@@ -340,6 +340,15 @@ func TestApprovePendingCore_SelfSendApprovalScreensInbound(t *testing.T) {
 	if status != identity.MessageStatusPendingReview {
 		t.Errorf("inbound status = %q, want pending_review (approve path must screen the inbound leg)", status)
 	}
+	// Held rows surface header_from in the review queue — it must be the
+	// agent's actual email address (matching performSelfSend), not an agent id.
+	var headerFrom string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(header_from,'') FROM messages WHERE id=$1`, inID).Scan(&headerFrom); err != nil {
+		t.Fatal(err)
+	}
+	if headerFrom != ag.EmailAddress() {
+		t.Errorf("held row header_from = %q, want the agent address %q", headerFrom, ag.EmailAddress())
+	}
 	if reviewReason != identity.ReviewReasonSenderGate {
 		t.Errorf("review_reason = %q, want %q", reviewReason, identity.ReviewReasonSenderGate)
 	}

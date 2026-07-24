@@ -149,9 +149,14 @@ func (a *API) performSelfSend(
 		if !screenRes.Hold {
 			a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
 		}
+		a.emitLoopbackScreeningMetrics(gate, screenRes)
 	}
-	// Screening audit rows are appended best-effort after the commit —
-	// deterministic ids keep a retried delivery idempotent (mirrors the relay).
+	// Screening audit rows are appended best-effort ONCE after the commit: a
+	// crash between commit and this write loses the audit rows (nothing
+	// re-drives a committed local delivery; an idempotent client retry replays
+	// the cached response without re-screening). Accepted: the verdict itself
+	// is durable on the message row; only the drill-down audit is best-effort.
+	// The deterministic ids dedupe the rare full re-execution.
 	a.writeProtectionEvents(ctx, inboundID, screenRes.Events)
 	// receivedEvent.MessageID is empty when delivery was suppressed (held), so
 	// the WebSocket push no-ops for holds.
@@ -277,10 +282,27 @@ func (a *API) approveSelfSend(
 		if !screenRes.Hold {
 			a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
 		}
+		a.emitLoopbackScreeningMetrics(gate, screenRes)
 	}
 	a.writeProtectionEvents(ctx, inboundID, screenRes.Events)
 	a.pushLoopbackReceived(ctx, agent.ID, receivedEvent.MessageID)
 	return sent, nil
+}
+
+// emitLoopbackScreeningMetrics counts the screening-outcome events published
+// for a loopback inbound leg (mirrors loopback.ScreeningEvents' conditions),
+// so email.flagged/email.blocked/email.review_requested are counted the same
+// way as the sent/received pair.
+func (a *API) emitLoopbackScreeningMetrics(gate inboundpolicy.Decision, res inboundscreen.Result) {
+	if gate.Flagged && !res.Hold {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailFlagged)
+	}
+	if res.Blocked() {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailBlocked)
+	}
+	if res.Review() {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailReviewRequested)
+	}
 }
 
 func (a *API) recordLoopbackUsage(ctx context.Context, userID string, agent *identity.AgentIdentity) {

@@ -59,16 +59,21 @@ func TestWorkerAutoApproveSelfSendScreensInboundLeg(t *testing.T) {
 	}
 
 	// Inbound leg screened → held.
-	var inID, inStatus, reviewReason string
+	var inID, inStatus, reviewReason, headerFrom string
 	var hasExpiry bool
 	if err := pool.QueryRow(ctx,
-		`SELECT id, status, COALESCE(review_reason,''), approval_expires_at IS NOT NULL
+		`SELECT id, status, COALESCE(review_reason,''), COALESCE(header_from,''), approval_expires_at IS NOT NULL
 		   FROM messages WHERE agent_id=$1 AND direction='inbound' AND subject='ttl screened self'`,
-		ag.ID).Scan(&inID, &inStatus, &reviewReason, &hasExpiry); err != nil {
+		ag.ID).Scan(&inID, &inStatus, &reviewReason, &headerFrom, &hasExpiry); err != nil {
 		t.Fatalf("read inbound row: %v", err)
 	}
 	if inStatus != identity.MessageStatusPendingReview {
 		t.Errorf("inbound status = %q, want pending_review (TTL-approve path must screen the loopback leg)", inStatus)
+	}
+	// Held rows surface header_from in the review queue — it must be the
+	// agent's actual email address, not an agent id.
+	if headerFrom != ag.EmailAddress() {
+		t.Errorf("held row header_from = %q, want the agent address %q", headerFrom, ag.EmailAddress())
 	}
 	if reviewReason != identity.ReviewReasonSenderGate {
 		t.Errorf("review_reason = %q, want %q", reviewReason, identity.ReviewReasonSenderGate)

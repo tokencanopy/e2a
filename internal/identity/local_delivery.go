@@ -56,6 +56,16 @@ func (s *Store) GetEventEnvelope(ctx context.Context, messageID, eventType strin
 // screening verdict (evaluated over the composed MIME) so the recipient-side
 // row carries the agent's inbound protection outcome instead of a zero-value
 // screening.
+//
+// compose runs BEFORE the transaction, on a lock-free snapshot of the pending
+// row: the inbound screening it performs may include a piguard detector with a
+// network call (Gemini, 10s detector timeout), which must not sit inside an
+// open transaction holding the row lock. The FOR-UPDATE reload + pending_review
+// CAS inside the transaction still protects against the row being resolved
+// between screen and commit, and held rows are mutation-guarded (content
+// cannot drift while pending_review), so screening the snapshot is sound —
+// the same TOCTOU stance as performSelfSend and the relay, which both screen
+// before their persist transactions.
 func (s *Store) ApproveAndDeliverLocal(
 	ctx context.Context,
 	messageID, userID string,
@@ -63,6 +73,25 @@ func (s *Store) ApproveAndDeliverLocal(
 	compose func(msg *Message) (SendResult, LocalInboundScreen, error),
 	beforeCommit LocalDeliveryTxHook,
 ) (*Message, error) {
+	// Phase 1 (no tx, no lock): snapshot the pending row, apply the reviewer's
+	// edits, compose + screen.
+	snapshot, ownerUserID, err := loadPendingOutboundForLocalDeliverySnapshot(ctx, s.pool, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if ownerUserID != userID {
+		return nil, ErrMessageNotFound
+	}
+	edits.Apply(snapshot)
+	result, screen, err := compose(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if result.Method != "loopback" || len(result.To) != 1 || len(result.Raw) == 0 || result.ProviderMessageID == "" || result.Sender == "" {
+		return nil, errors.New("identity: invalid local delivery result")
+	}
+
+	// Phase 2: lock + CAS (still pending_review, still owned) and finalize.
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
 	defer cancel()
 
@@ -84,15 +113,7 @@ func (s *Store) ApproveAndDeliverLocal(
 	if ownerUserID != userID {
 		return nil, ErrMessageNotFound
 	}
-
 	editedByReviewer := edits.Apply(m)
-	result, screen, err := compose(m)
-	if err != nil {
-		return nil, err
-	}
-	if result.Method != "loopback" || len(result.To) != 1 || len(result.Raw) == 0 || result.ProviderMessageID == "" || result.Sender == "" {
-		return nil, errors.New("identity: invalid local delivery result")
-	}
 
 	reviewerID := userID
 	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusSent, editedByReviewer, &reviewerID, screen)
@@ -120,12 +141,33 @@ func (s *Store) ApproveAndDeliverLocal(
 // ApproveAndDeliverLocal. It requires an expired pending row, records the
 // review_expired_approved lifecycle, and atomically creates the Inbox copy and
 // outcome events without using the external-provider send journal.
+//
+// Like ApproveAndDeliverLocal, compose (incl. the possibly-networked inbound
+// screening) runs BEFORE the transaction on a lock-free snapshot; the locked
+// reload's pending_review + expiry CAS inside the transaction protects
+// against the row being resolved in between, and held-row content is
+// mutation-guarded — so a single-threaded TTL sweep never holds the row lock
+// through a detector's network timeout.
 func (s *Store) ExpireAndDeliverLocal(
 	ctx context.Context,
 	messageID string,
 	compose func(msg *Message) (SendResult, LocalInboundScreen, error),
 	beforeCommit LocalDeliveryTxHook,
 ) (*Message, error) {
+	// Phase 1 (no tx, no lock): snapshot + compose + screen.
+	snapshot, _, err := loadExpiredPendingOutboundForLocalDeliverySnapshot(ctx, s.pool, messageID)
+	if err != nil {
+		return nil, err
+	}
+	result, screen, err := compose(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if result.Method != "loopback" || len(result.To) != 1 || len(result.Raw) == 0 || result.ProviderMessageID == "" || result.Sender == "" {
+		return nil, errors.New("identity: invalid local delivery result")
+	}
+
+	// Phase 2: lock (SKIP LOCKED) + CAS and finalize.
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
 	defer cancel()
 
@@ -143,14 +185,6 @@ func (s *Store) ExpireAndDeliverLocal(
 	m, _, err := loadExpiredPendingOutboundForLocalDelivery(txCtx, tx, messageID)
 	if err != nil {
 		return nil, err
-	}
-
-	result, screen, err := compose(m)
-	if err != nil {
-		return nil, err
-	}
-	if result.Method != "loopback" || len(result.To) != 1 || len(result.Raw) == 0 || result.ProviderMessageID == "" || result.Sender == "" {
-		return nil, errors.New("identity: invalid local delivery result")
 	}
 
 	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusReviewExpiredApproved, false, nil, screen)
@@ -248,11 +282,15 @@ func finalizeLocalDeliveryTx(
 	// The inbound row carries the caller-evaluated screening verdict: a
 	// review/block status makes it a hidden hold (pending_review /
 	// review_rejected) exactly like a relay-held inbound message.
+	// header_from is the agent's actual EMAIL ADDRESS (the validated single
+	// loopback recipient), matching performSelfSend — held rows surface
+	// header_from to reviewers via the review queue, which expects an address,
+	// not an agent id.
 	inbound, err := createInboundMessage(
 		ctx, tx, screen.MessageID, m.AgentID, result.Sender, m.AgentID,
 		result.ProviderMessageID, m.Subject, m.ConversationID, "unread",
 		result.Raw, nil, nil, screen.Flagged, screen.FlagReason, result.To, result.CC, m.ReplyTo,
-		screen.Screening, &InboundAuth{HeaderFrom: m.AgentID},
+		screen.Screening, &InboundAuth{HeaderFrom: firstOr(result.To, m.AgentID)},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("local delivery inbound row: %w", err)
@@ -291,6 +329,27 @@ func loadExpiredPendingOutboundForLocalDelivery(ctx context.Context, tx pgx.Tx, 
 func loadPendingOutboundForLocalDelivery(ctx context.Context, tx pgx.Tx, messageID string) (*Message, string, error) {
 	return scanPendingOutboundForLocalDelivery(tx.QueryRow(ctx, localDeliverySelect+
 		` FOR NO KEY UPDATE OF m`, messageID), ErrMessageNotFound)
+}
+
+// localDeliveryQuerier is the QueryRow slice of *pgxpool.Pool / pgx.Tx the
+// lock-free snapshot loaders need.
+type localDeliveryQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// loadPendingOutboundForLocalDeliverySnapshot is the lock-free (pre-transaction)
+// twin of loadPendingOutboundForLocalDelivery: same select and pending_review
+// check, no row lock — used to compose + screen before the delivery
+// transaction opens.
+func loadPendingOutboundForLocalDeliverySnapshot(ctx context.Context, q localDeliveryQuerier, messageID string) (*Message, string, error) {
+	return scanPendingOutboundForLocalDelivery(q.QueryRow(ctx, localDeliverySelect, messageID), ErrMessageNotFound)
+}
+
+// loadExpiredPendingOutboundForLocalDeliverySnapshot is the lock-free twin of
+// loadExpiredPendingOutboundForLocalDelivery (no FOR UPDATE / SKIP LOCKED).
+func loadExpiredPendingOutboundForLocalDeliverySnapshot(ctx context.Context, q localDeliveryQuerier, messageID string) (*Message, string, error) {
+	return scanPendingOutboundForLocalDelivery(q.QueryRow(ctx, localDeliverySelect+
+		` AND m.approval_expires_at < now()`, messageID), ErrNotPendingApproval)
 }
 
 const localDeliverySelect = `SELECT m.id, m.agent_id, m.direction, m.sender, m.recipient, m.subject,
