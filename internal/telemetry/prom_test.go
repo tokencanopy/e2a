@@ -52,10 +52,15 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.OutboundTerminal("sent")
 	p.OutboundTerminal("failed_provider")
 	p.OutboundTerminal("failed_cancelled")
+	p.OutboundTerminalLatency(240)
 	p.OutboundAttempt("success", 0.8)
 	p.WebhookAttempt("delivered", "2xx", 0.3)
 	p.WebhookAttempt("retryable_failure", "5xx", 0.2)
+	p.WebhookFirstAttemptLatency(12.5)
 	p.WSConnected()
+	p.WSHandshakeRejected("unauthorized")
+	p.WSHandshakeRejected("forbidden")
+	p.WSHandshakeRejected("internal_error")
 	p.WSDisconnected("ping_timeout")
 	p.WSDrained(7)
 	p.WSSendFailure()
@@ -72,10 +77,15 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="sent"} 1`,
 		`e2a_outbound_terminal_total{outcome="failed_provider"} 1`,
 		`e2a_outbound_terminal_total{outcome="failed_cancelled"} 1`,
+		`e2a_outbound_terminal_latency_seconds_count 1`,
 		`e2a_outbound_attempts_total{outcome="success"} 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
+		`e2a_webhook_first_attempt_latency_seconds_count 1`,
 		`e2a_ws_connects_total 1`,
+		`e2a_ws_handshake_rejected_total{reason="unauthorized"} 1`,
+		`e2a_ws_handshake_rejected_total{reason="forbidden"} 1`,
+		`e2a_ws_handshake_rejected_total{reason="internal_error"} 1`,
 		`e2a_ws_disconnects_total{reason="ping_timeout"} 1`,
 		`e2a_ws_drained_messages_total 7`,
 		`e2a_ws_send_failures_total 1`,
@@ -137,6 +147,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.OutboundTerminal("weird_new_outcome") // unknown enum
 	p.WebhookAttempt(secret, "banana", 0.1) // junk outcome + junk status class
 	p.WSDisconnected("some very long free text reason with details")
+	p.WSHandshakeRejected(addr) // raw address must not become a rejection-reason label
 	p.InboundProcess(secret, 0)
 	p.SetQueueDepth("attacker_queue", "exploded", 1)
 	p.HTTPRequest("PROPFIND", "/v1/agents/{email}", "7xx", 0.1) // unknown method + class
@@ -150,6 +161,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="other",status_class="other"} 1`,
 		`e2a_ws_disconnects_total{reason="other"} 1`,
+		`e2a_ws_handshake_rejected_total{reason="other"} 1`,
 		`e2a_inbound_process_total{outcome="other"} 1`,
 		`e2a_queue_depth{queue="other",state="other"} 1`,
 		`e2a_http_requests_total{method="other",route="/v1/agents/{email}",status_class="other"} 1`,

@@ -1,6 +1,8 @@
 package outboundsend
 
 import (
+	"time"
+
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 )
@@ -18,6 +20,11 @@ type Metrics interface {
 	// outcome ∈ {sent, failed_suppressed, failed_provider,
 	// failed_local_retries, failed_cancelled}.
 	OutboundTerminal(outcome string)
+	// OutboundTerminalLatency records acceptance→terminal latency for one
+	// outbound message (the terminal write's occurred_at −
+	// messages.created_at). Observed exactly once per message, co-located
+	// with OutboundTerminal so the two share their exactly-once contract.
+	OutboundTerminalLatency(seconds float64)
 	// OutboundAttempt records one submission attempt to the upstream relay.
 	// outcome ∈ {success, temporary_failure, permanent_failure}.
 	OutboundAttempt(outcome string, seconds float64)
@@ -43,7 +50,26 @@ type noopMetrics struct{}
 
 func (noopMetrics) OutboundQueueWait(float64)       {}
 func (noopMetrics) OutboundTerminal(string)         {}
+func (noopMetrics) OutboundTerminalLatency(float64) {}
 func (noopMetrics) OutboundAttempt(string, float64) {}
+
+// emitTerminal records one terminal outcome count AND its co-located
+// acceptance→terminal latency — the two instruments' exactly-once contract
+// lives in this single helper so no call site can emit one without the
+// other. occurredAt is the terminal write's EFFECTIVE occurred_at (what the
+// write actually did: the provider-accept evidence time on an evidence
+// settle, the caller's observation time otherwise); acceptedAt is
+// messages.created_at. A zero timestamp or non-positive delta records the
+// count but no latency sample (same discipline as the queue-wait guard).
+func emitTerminal(m Metrics, outcome string, acceptedAt, occurredAt time.Time) {
+	m.OutboundTerminal(outcome)
+	if acceptedAt.IsZero() || occurredAt.IsZero() {
+		return
+	}
+	if d := occurredAt.Sub(acceptedAt); d > 0 {
+		m.OutboundTerminalLatency(d.Seconds())
+	}
+}
 
 // terminalOutcome maps a MarkFailed call's provenance to the OutboundTerminal
 // label: suppression holds blocked recipients; a policy cancel without them

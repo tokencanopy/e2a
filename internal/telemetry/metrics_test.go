@@ -19,6 +19,9 @@ func TestNoOpSatisfiesInterface(t *testing.T) {
 	m.JanitorRowsDeleted("", 0)
 	m.NotifyMissed()
 	m.SetPublisherLag(0)
+	m.OutboundTerminalLatency(0)
+	m.WebhookFirstAttemptLatency(0)
+	m.WSHandshakeRejected("")
 }
 
 func TestLogSatisfiesInterface(t *testing.T) {
@@ -34,6 +37,9 @@ func TestLogSatisfiesInterface(t *testing.T) {
 	m.JanitorRowsDeleted("webhook_events", 5)
 	m.NotifyMissed()
 	m.SetPublisherLag(2.5)
+	m.OutboundTerminalLatency(240)
+	m.WebhookFirstAttemptLatency(12.5)
+	m.WSHandshakeRejected("unauthorized")
 }
 
 func TestLogJanitorSkipsZeroCount(t *testing.T) {

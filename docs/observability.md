@@ -80,6 +80,7 @@ acceptance SLI below deliberately excludes them.
 | `e2a_outbound_attempts_total` | counter | `outcome` | Upstream submission attempts: `success`, `temporary_failure`, `permanent_failure`. |
 | `e2a_outbound_attempt_duration_seconds` | histogram | — | Upstream (SES/SMTP relay) submission duration. |
 | `e2a_outbound_terminal_total` | counter | `outcome` | Messages reaching a terminal submission outcome, **exactly once per message**: `sent`, `failed_suppressed`, `failed_provider`, `failed_local_retries`, `failed_cancelled` (policy cancel settled by the reconciler — kept out of `failed_local_retries` so cancellations can't mask a retries-exhausted regression). A deferred final attempt is counted when the terminal reconciler settles it — as `sent` when provider-accept evidence arrived (never a false failure), else as a failure. |
+| `e2a_outbound_terminal_latency_seconds` | histogram | — | Acceptance→terminal latency per message (the terminal write's occurred_at − `messages.created_at`), observed **exactly once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both). Provider-evidence settles use the evidence's accept time as occurred_at, so they measure acceptance→provider-accept, not acceptance→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
 
 ### Webhook delivery
 
@@ -87,6 +88,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received (connect/DNS/SSRF-blocked). |
 | `e2a_webhook_attempt_duration_seconds` | histogram | — | HTTP POST duration per attempt. |
+| `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (no recorded prior attempt — regardless of River attempt number, so a first POST delayed by pre-POST failures still observes). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), eventless `/test` deliveries, and jobs that sat through a customer-disabled window (River snooze) never observe. |
 | `e2a_outbox_events_published_total` | counter | `type` | Events written to the outbox (fan-out input). |
 | `e2a_outbox_events_fanout_total` / `e2a_outbox_fanout_matched_total` | counter | `type` | Fan-out completions / subscriber delivery rows written. |
 | `e2a_outbox_events_nomatch_total` | counter | `type` | Events with zero matching subscribers. |
@@ -99,6 +101,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_ws_connections_active` | gauge | — | Currently registered connections. |
 | `e2a_ws_connects_total` | counter | — | Accepted + registered connections. |
+| `e2a_ws_handshake_rejected_total` | counter | `reason` | Pre-upgrade handshake rejections: `unauthorized` (missing/invalid credential), `not_found` (unknown agent — including the deliberate cross-tenant 404 collapse), `forbidden` (agent-scoped credential pinned to a different agent), `upgrade_failed` (authenticated, but the WebSocket upgrade itself failed), `internal_error` (a store/infra error while authenticating or resolving the agent — the only e2a-attributable reason). Never labeled with emails or tokens. |
 | `e2a_ws_disconnects_total` | counter | `reason` | `replaced` (one-conn-per-agent takeover), `ping_timeout`, `client_close`, `error`, `shutdown`. |
 | `e2a_ws_drained_messages_total` | counter | — | Unread messages pushed during connect-drain. The prober's WS scenario trashes its own probe messages after each run so this stays customer signal, not prober noise. |
 | `e2a_ws_send_failures_total` | counter | — | Failed pushes to a registered connection. |
@@ -210,6 +213,20 @@ histogram_quantile(0.95, sum by (le) (rate(e2a_outbound_queue_wait_seconds_bucke
 max(e2a_queue_oldest_age_seconds{queue="outbound"})
 ```
 
+**Outbound acceptance→terminal** — fraction of messages reaching a terminal
+outcome within 5 minutes of acceptance (the `le="300"` bucket edge is the
+SLO threshold):
+
+```promql
+sum(rate(e2a_outbound_terminal_latency_seconds_bucket{le="300"}[1h]))
+/ sum(rate(e2a_outbound_terminal_latency_seconds_count[1h]))
+```
+
+The histogram's exactly-once contract (one sample per message, co-located
+with `e2a_outbound_terminal_total`) is what makes this ratio a per-message
+fraction; an outage-tail message can legitimately land in the day-scale
+buckets, so alert on the ratio, not the tail.
+
 **Webhook attempt health** — per-attempt success to responsive endpoints,
 across all attempt indexes (there is no attempt-number label; an unhealthy
 customer endpoint is not an e2a failure, but a rising `none` / `5xx` share
@@ -221,6 +238,37 @@ snooze, and no POST happens:
 sum(rate(e2a_webhook_attempts_total{outcome="delivered"}[5m]))
 / sum(rate(e2a_webhook_attempts_total{outcome=~"delivered|retryable_failure|exhausted"}[5m]))
 ```
+
+**Webhook event→first attempt** — p95 latency from event creation to the
+first HTTP attempt (covers fan-out, queue wait, and worker pickup):
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(e2a_webhook_first_attempt_latency_seconds_bucket[5m])))
+```
+
+**WebSocket handshake success (valid credentials)** — accepted handshakes
+over accepted plus e2a-attributable rejections:
+
+```promql
+sum(rate(e2a_ws_connects_total[5m]))
+/ (sum(rate(e2a_ws_connects_total[5m]))
+   + sum(rate(e2a_ws_handshake_rejected_total{reason="internal_error"}[5m])))
+```
+
+The split is deliberate, by who can act on the rejection. Client faults are
+excluded from the denominator, or scanner noise and customer
+misconfiguration would burn the SLO: `unauthorized` (missing/invalid
+credential), `not_found` (unknown agent — including the cross-tenant 404
+collapse), `forbidden` (an agent-scoped credential pinned to a different
+agent — deterministic scope enforcement, not e2a-actionable), and
+`upgrade_failed` (predominantly client protocol defects, e.g. a plain GET
+with a valid key; genuine server-side upgrade breakage — a proxy stripping
+Upgrade headers fleet-wide — is covered by the prober's
+`websocket_round_trip` SLI below). `internal_error` (a store/infra error
+while authenticating or resolving the agent, distinguished from a genuine
+miss by `pgx.ErrNoRows`) is the only e2a-attributable reason and the only
+one in the denominator — a Postgres outage burns this SLI rather than
+reading 0/0 behind the client-fault labels.
 
 **WebSocket health** — active connections, abnormal disconnect rate, and the
 black-box push path:
@@ -250,23 +298,13 @@ after M ≥ 2 consecutive failed probes).
 | HTTP API | p99 latency (`/v1`, excluding WS upgrades) | < 750 ms |
 | SMTP intake | acceptance (non-policy) | ≥ 99.9% |
 | SMTP intake | DATA processing p95 | < 2 s |
-| Outbound | terminal outcome within 5 min of acceptance ¹ | ≥ 99% |
+| Outbound | terminal outcome within 5 min of acceptance | ≥ 99% |
 | Outbound | queue wait p95 | < 30 s |
-| Webhooks | event → first delivery attempt ¹ | < 60 s (p95) |
+| Webhooks | event → first delivery attempt | < 60 s (p95) |
 | Webhooks | eventual delivery to responsive endpoints (≤ 8 attempts) | ≥ 99% |
-| WebSocket | handshake success (valid credentials) ¹ | ≥ 99.9% |
+| WebSocket | handshake success (valid credentials) | ≥ 99.9% |
 | WebSocket | prober round-trip (connect → live push) | ≥ 99.9% of probes |
 | MCP | prober connection + tool-call success | ≥ 99.9% of probes |
-
-¹ **Target adopted; instrument pending.** These three rows cannot yet be
-computed from shipped metrics: acceptance→terminal latency needs a per-
-message duration histogram (terminal counters and the queue-wait histogram
-don't compose into one), event→first-attempt needs the delivery row's age
-observed at attempt time, and handshake success needs a rejected-handshake
-counter (today only successful registrations increment `e2a_ws_connects_total`;
-rejections appear in the HTTP metrics as 4xx on the WS route). They are
-listed so the targets are on record; the instruments land in a follow-up,
-and until then these rows must not be reported as measured.
 
 ## Product SLOs vs. inbox placement
 

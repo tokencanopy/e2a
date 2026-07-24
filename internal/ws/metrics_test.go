@@ -7,9 +7,12 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"nhooyr.io/websocket"
@@ -21,6 +24,7 @@ type fakeWSMetrics struct {
 	mu          sync.Mutex
 	connected   int
 	disconnects []string
+	rejections  []string
 	drained     []int
 	sendFails   int
 	active      []int // every SetWSActive value, in order
@@ -36,6 +40,12 @@ func (f *fakeWSMetrics) WSDisconnected(reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.disconnects = append(f.disconnects, reason)
+}
+
+func (f *fakeWSMetrics) WSHandshakeRejected(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejections = append(f.rejections, reason)
 }
 
 func (f *fakeWSMetrics) WSDrained(count int) {
@@ -71,6 +81,13 @@ func (f *fakeWSMetrics) snapshotDisconnects() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.disconnects...)
+}
+
+// snapshotRejections copies the recorded handshake-rejection reasons.
+func (f *fakeWSMetrics) snapshotRejections() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rejections...)
 }
 
 // waitDisconnect polls until a disconnect with the given reason is recorded.
@@ -296,5 +313,81 @@ func TestHandlerMetrics_Replaced(t *testing.T) {
 	}
 	if fm.connected != 2 {
 		t.Fatalf("connected = %d, want 2", fm.connected)
+	}
+}
+
+// ── Handshake-rejection SLI (docs/observability.md) ─────────────
+//
+// Every pre-upgrade rejection branch in serve() records exactly one
+// e2a_ws_handshake_rejected_total with an enum reason; a successful
+// handshake records none (the success side is e2a_ws_connects_total).
+
+func TestHandlerMetrics_HandshakeRejections(t *testing.T) {
+	cases := []struct {
+		name       string
+		store      *mockStore
+		token      string
+		plainHTTP  bool // plain GET (no upgrade) instead of a WS dial
+		wantReason string
+	}{
+		{"missing credential", &mockStore{}, "", true, "unauthorized"},
+		{"invalid token", &mockStore{user: nil}, "bad_key", false, "unauthorized"},
+		{"unknown key from store", &mockStore{userErr: pgx.ErrNoRows}, "bad_key", false, "unauthorized"},
+		{"auth store outage", &mockStore{userErr: errors.New("connection reset")}, "valid_key", false, "internal_error"},
+		{"agent not found", &mockStore{user: newTestUser(), agentErr: pgx.ErrNoRows}, "valid_key", false, "not_found"},
+		{"agent store outage", &mockStore{user: newTestUser(), agentErr: errors.New("connection reset")}, "valid_key", false, "internal_error"},
+		{"cross-tenant agent", &mockStore{user: newTestUser(), agent: newTestAgent("user_other")}, "valid_key", false, "not_found"},
+		{"agent-scope pin", &mockStore{user: newTestUser(), scope: identity.ScopeAgent, agentID: "agent_other", agent: newTestAgent("user_1")}, "valid_key", false, "forbidden"},
+		{"upgrade failure", &mockStore{user: newTestUser(), agent: newTestAgent("user_1")}, "valid_key", true, "upgrade_failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := NewHub()
+			defer hub.Close()
+			fm := &fakeWSMetrics{}
+			handler := NewHandler(hub, tc.store)
+			handler.SetMetrics(fm)
+			srv := startServer(t, handler)
+
+			if tc.plainHTTP {
+				resp := doHTTP(t, srv, "bot@agents.e2a.dev", tc.token)
+				resp.Body.Close()
+			} else {
+				conn, _ := dialWS(t, srv, "bot@agents.e2a.dev", tc.token)
+				if conn != nil {
+					t.Fatal("expected the handshake to be rejected")
+				}
+			}
+			got := fm.snapshotRejections()
+			if len(got) != 1 || got[0] != tc.wantReason {
+				t.Fatalf("rejections = %v, want exactly [%s]", got, tc.wantReason)
+			}
+			fm.mu.Lock()
+			connected := fm.connected
+			fm.mu.Unlock()
+			if connected != 0 {
+				t.Errorf("connected = %d, want 0 — a rejected handshake never registers", connected)
+			}
+		})
+	}
+}
+
+func TestHandlerMetrics_SuccessfulHandshakeRecordsNoRejection(t *testing.T) {
+	hub := NewHub()
+	defer hub.Close()
+	fm := &fakeWSMetrics{}
+	handler := NewHandler(hub, &mockStore{user: newTestUser(), agent: newTestAgent("user_1")})
+	handler.SetMetrics(fm)
+	srv := startServer(t, handler)
+
+	conn, _ := dialWS(t, srv, "bot@agents.e2a.dev", "valid_key")
+	if conn == nil {
+		t.Fatal("expected successful WS connection")
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	waitConnected(t, hub, "agent_test")
+
+	if got := fm.snapshotRejections(); len(got) != 0 {
+		t.Errorf("rejections = %v, want none for a successful handshake", got)
 	}
 }

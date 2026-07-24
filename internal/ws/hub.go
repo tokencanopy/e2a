@@ -12,11 +12,15 @@ import (
 // (same pattern as internal/janitor.Metrics). Each event has exactly ONE
 // owner so nothing double-counts: the Hub owns connects, the active gauge,
 // send failures, and shutdown disconnects (it drops every conn at Close);
-// the Handler owns per-connection disconnect reasons and drain counts (it
-// is the only place the reason is known).
+// the Handler owns handshake rejections, per-connection disconnect reasons,
+// and drain counts (it is the only place the reason is known).
 type Metrics interface {
 	WSConnected()
 	WSDisconnected(reason string) // reason ∈ {replaced, ping_timeout, client_close, error, shutdown}
+	// WSHandshakeRejected counts pre-upgrade handshake rejections.
+	// reason ∈ {unauthorized, not_found, forbidden, upgrade_failed,
+	// internal_error}. Never pass emails or tokens.
+	WSHandshakeRejected(reason string)
 	WSDrained(count int)
 	WSSendFailure()
 	SetWSActive(n int)
@@ -26,11 +30,12 @@ type Metrics interface {
 // never guard and tests don't have to wire anything.
 type noopMetrics struct{}
 
-func (noopMetrics) WSConnected()          {}
-func (noopMetrics) WSDisconnected(string) {}
-func (noopMetrics) WSDrained(int)         {}
-func (noopMetrics) WSSendFailure()        {}
-func (noopMetrics) SetWSActive(int)       {}
+func (noopMetrics) WSConnected()               {}
+func (noopMetrics) WSDisconnected(string)      {}
+func (noopMetrics) WSHandshakeRejected(string) {}
+func (noopMetrics) WSDrained(int)              {}
+func (noopMetrics) WSSendFailure()             {}
+func (noopMetrics) SetWSActive(int)            {}
 
 // Hub manages WebSocket connections for agents that live-tail inbound
 // mail. Any agent may connect — WS is an opportunistic push on top of

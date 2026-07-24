@@ -25,12 +25,15 @@ type Prom struct {
 	smtpDuration    prometheus.Histogram
 	outQueueWait    prometheus.Histogram
 	outTerminal     *prometheus.CounterVec
+	outTerminalLat  prometheus.Histogram
 	outAttempts     *prometheus.CounterVec
 	outAttemptDur   prometheus.Histogram
 	whAttempts      *prometheus.CounterVec
 	whAttemptDur    prometheus.Histogram
+	whFirstTryLat   prometheus.Histogram
 	wsConnects      prometheus.Counter
 	wsDisconnects   *prometheus.CounterVec
+	wsRejected      *prometheus.CounterVec
 	wsDrained       prometheus.Counter
 	wsSendFailures  prometheus.Counter
 	wsActive        prometheus.Gauge
@@ -78,6 +81,7 @@ var (
 	whSet         = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	wsReasonSet = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
+	wsRejectSet = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
 	inboundSet  = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
@@ -110,6 +114,11 @@ func enum(allowed map[string]struct{}, v string) string {
 var (
 	fastBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30}
 	waitBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 15, 30, 60, 120, 300, 900, 3600}
+	// longBuckets spans seconds-to-days: outbound acceptance→terminal can
+	// legitimately reach the 72h retry horizon under a provider outage,
+	// and webhook event→first-attempt includes fan-out + queue wait. The
+	// 60s and 300s edges are the SLO thresholds (docs/observability.md).
+	longBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400, 259200}
 )
 
 func NewProm() *Prom {
@@ -146,6 +155,11 @@ func NewProm() *Prom {
 			Name: "e2a_outbound_terminal_total",
 			Help: "Outbound messages reaching a terminal submission outcome.",
 		}, []string{"outcome"}),
+		outTerminalLat: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "e2a_outbound_terminal_latency_seconds",
+			Help:    "Outbound acceptance→terminal latency per message (terminal occurred_at - messages.created_at), observed exactly once per message.",
+			Buckets: longBuckets,
+		}),
 		outAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_outbound_attempts_total",
 			Help: "Outbound submission attempts to the upstream relay, by outcome.",
@@ -164,10 +178,19 @@ func NewProm() *Prom {
 			Help:    "Webhook delivery attempt duration (HTTP POST to subscriber).",
 			Buckets: fastBuckets,
 		}),
+		whFirstTryLat: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "e2a_webhook_first_attempt_latency_seconds",
+			Help:    "Webhook event→first-attempt latency per subscriber delivery (attempt start - webhook_events.created_at); first HTTP attempt only.",
+			Buckets: longBuckets,
+		}),
 		wsConnects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_ws_connects_total",
 			Help: "WebSocket connections accepted and registered.",
 		}),
+		wsRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_ws_handshake_rejected_total",
+			Help: "WebSocket handshakes rejected before upgrade, by reason.",
+		}, []string{"reason"}),
 		wsDisconnects: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_ws_disconnects_total",
 			Help: "WebSocket disconnects, by reason.",
@@ -243,9 +266,9 @@ func NewProm() *Prom {
 	reg.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outAttempts, p.outAttemptDur,
-		p.whAttempts, p.whAttemptDur,
-		p.wsConnects, p.wsDisconnects, p.wsDrained, p.wsSendFailures, p.wsActive,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur,
+		p.whAttempts, p.whAttemptDur, p.whFirstTryLat,
+		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
@@ -302,6 +325,8 @@ func (p *Prom) OutboundTerminal(outcome string) {
 	p.outTerminal.WithLabelValues(enum(outTermSet, outcome)).Inc()
 }
 
+func (p *Prom) OutboundTerminalLatency(seconds float64) { p.outTerminalLat.Observe(seconds) }
+
 func (p *Prom) OutboundAttempt(outcome string, seconds float64) {
 	p.outAttempts.WithLabelValues(enum(outAttemptSet, outcome)).Inc()
 	p.outAttemptDur.Observe(seconds)
@@ -319,6 +344,12 @@ func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 func (p *Prom) WSConnected()      { p.wsConnects.Inc() }
 func (p *Prom) WSSendFailure()    { p.wsSendFailures.Inc() }
 func (p *Prom) SetWSActive(n int) { p.wsActive.Set(float64(n)) }
+
+func (p *Prom) WSHandshakeRejected(reason string) {
+	p.wsRejected.WithLabelValues(enum(wsRejectSet, reason)).Inc()
+}
+
+func (p *Prom) WebhookFirstAttemptLatency(seconds float64) { p.whFirstTryLat.Observe(seconds) }
 
 func (p *Prom) WSDisconnected(reason string) {
 	p.wsDisconnects.WithLabelValues(enum(wsReasonSet, reason)).Inc()

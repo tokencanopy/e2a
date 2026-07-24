@@ -102,6 +102,15 @@ type Metrics interface {
 	// when it settles.
 	OutboundTerminal(outcome string)
 
+	// OutboundTerminalLatency records acceptance→terminal latency for
+	// one outbound message (the terminal write's occurred_at −
+	// messages.created_at). Observed exactly once per message,
+	// co-located with the OutboundTerminal emission so the two share
+	// their exactly-once contract (the SNS-feedback settle path stays
+	// uninstrumented for both — see the guard comment at the worker's
+	// MarkSent emit in internal/outboundsend).
+	OutboundTerminalLatency(seconds float64)
+
 	// OutboundAttempt records one submission attempt to the upstream
 	// relay. outcome ∈ {success, temporary_failure, permanent_failure}.
 	// seconds is the submission duration.
@@ -114,11 +123,23 @@ type Metrics interface {
 	// (connect/DNS/SSRF-blocked).
 	WebhookAttempt(outcome, statusClass string, seconds float64)
 
+	// WebhookFirstAttemptLatency records event→first-attempt latency
+	// for one subscriber delivery (attempt start − the webhook_events
+	// row's created_at). Observed only on a delivery's FIRST HTTP
+	// attempt — retries and the no-POST outcomes (webhook_deleted,
+	// skipped_disabled) never observe.
+	WebhookFirstAttemptLatency(seconds float64)
+
 	// WSConnected / WSDisconnected count WebSocket connection
 	// lifecycle events. reason ∈ {replaced, ping_timeout,
 	// client_close, error, shutdown}.
 	WSConnected()
 	WSDisconnected(reason string)
+
+	// WSHandshakeRejected counts pre-upgrade WebSocket handshake
+	// rejections. reason ∈ {unauthorized, not_found, forbidden,
+	// upgrade_failed, internal_error}. Never label with emails or tokens.
+	WSHandshakeRejected(reason string)
 
 	// WSDrained counts unread messages pushed during connect-drain.
 	WSDrained(count int)
@@ -159,10 +180,13 @@ func (NoOp) HTTPRequest(string, string, string, float64) {}
 func (NoOp) SMTPInbound(string, float64)                 {}
 func (NoOp) OutboundQueueWait(float64)                   {}
 func (NoOp) OutboundTerminal(string)                     {}
+func (NoOp) OutboundTerminalLatency(float64)             {}
 func (NoOp) OutboundAttempt(string, float64)             {}
 func (NoOp) WebhookAttempt(string, string, float64)      {}
+func (NoOp) WebhookFirstAttemptLatency(float64)          {}
 func (NoOp) WSConnected()                                {}
 func (NoOp) WSDisconnected(string)                       {}
+func (NoOp) WSHandshakeRejected(string)                  {}
 func (NoOp) WSDrained(int)                               {}
 func (NoOp) WSSendFailure()                              {}
 func (NoOp) SetWSActive(int)                             {}
@@ -246,6 +270,10 @@ func (l *Log) OutboundTerminal(outcome string) {
 	log.Printf("[metrics] event=outbound.terminal outcome=%s", outcome)
 }
 
+func (l *Log) OutboundTerminalLatency(seconds float64) {
+	log.Printf("[metrics] event=outbound.terminal_latency duration=%.3f", seconds)
+}
+
 func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 	log.Printf("[metrics] event=outbound.attempt outcome=%s duration=%.3f", outcome, seconds)
 }
@@ -254,8 +282,16 @@ func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	log.Printf("[metrics] event=webhook.attempt outcome=%s status_class=%s duration=%.3f", outcome, statusClass, seconds)
 }
 
+func (l *Log) WebhookFirstAttemptLatency(seconds float64) {
+	log.Printf("[metrics] event=webhook.first_attempt_latency duration=%.3f", seconds)
+}
+
 func (l *Log) WSConnected() {
 	log.Printf("[metrics] event=ws.connected")
+}
+
+func (l *Log) WSHandshakeRejected(reason string) {
+	log.Printf("[metrics] event=ws.handshake_rejected reason=%s", reason)
 }
 
 func (l *Log) WSDisconnected(reason string) {
