@@ -12,6 +12,7 @@ import (
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/webhook"
 	"github.com/tokencanopy/e2a/internal/webhookdelivery"
@@ -149,9 +150,15 @@ func (f *fakeEnq) InsertTx(_ context.Context, _ pgx.Tx, _ river.JobArgs, _ *rive
 
 // TestReconcilePending: the one-shot migration enqueues a job + stamps job_id for
 // every pending row with no job, and a re-run is idempotent (no double-enqueue).
+// Uses a REAL River client: the reconciler also rescues rows whose stamped job is
+// dead (missing/terminal), so idempotency requires the stamped ids to reference
+// live river_job rows — a fake enqueuer's synthetic ids would read as pruned jobs.
 func TestReconcilePending(t *testing.T) {
 	pool := testutil.TestDB(t)
 	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
 	store := identity.NewStore(pool)
 	user, err := store.CreateOrGetUser(ctx, "owner-cutover@example.com", "Owner", "google-cutover")
 	if err != nil {
@@ -172,7 +179,11 @@ func TestReconcilePending(t *testing.T) {
 	}
 
 	j := webhookdelivery.NewJobs(sub, fakeDeliverer{}, fakeWebhooks{wh: wh}, pool)
-	j.SetEnqueuer(&fakeEnq{})
+	client, err := jobs.New(pool, jobs.Config{}, j)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	j.SetEnqueuer(client)
 
 	n, err := j.ReconcilePending(ctx, pool)
 	if err != nil {

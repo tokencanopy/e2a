@@ -282,6 +282,130 @@ func TestReconcilePending_SkipsRowStampedConcurrently(t *testing.T) {
 	}
 }
 
+// insertRiverJob inserts a bare river_job row in the given state and returns
+// its id, so dead-job-rescue tests can stamp rows with jobs in every state.
+// Terminal states get the finalized_at that river_job's CHECK constraint
+// requires. The caller must have applied River's schema (jobs.Migrate).
+func insertRiverJob(t *testing.T, pool *pgxpool.Pool, state string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO river_job (state, kind, args, max_attempts, finalized_at)
+		 VALUES ($1::river_job_state, 'jobs_reconcile_test', '{}'::jsonb, 4,
+		         CASE WHEN $1 IN ('cancelled','completed','discarded') THEN now() END)
+		 RETURNING id`, state).Scan(&id); err != nil {
+		t.Fatalf("insert river_job(%s): %v", state, err)
+	}
+	return id
+}
+
+// TestReconcilePending_RescueDeadJobs covers the opt-in dead-job rescue
+// (spec.RescueDeadJobs): a row whose stamped job id refers to a river_job that
+// no longer exists (pruned) or is in a terminal state (cancelled / discarded /
+// completed) can never be worked again — it must be rescued (fresh job
+// enqueued, id re-stamped) exactly like the JobColumn IS NULL strand. Rows
+// whose stamped job is still live (available/running/scheduled/retryable) and
+// rows not matching Where stay untouched, and the plain IS NULL strand keeps
+// working alongside.
+func TestReconcilePending_RescueDeadJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+	spec := reconcileScratch(t, pool, "jobs_reconcile_dead")
+	// The rescue queries join river_job r, whose own `state` column would make
+	// the scratch table's unqualified `state` ambiguous — qualify with the `t`
+	// alias every ReconcilePending query binds to the row table.
+	spec.Where = "t.state = 'pending'"
+	spec.RescueDeadJobs = true
+
+	missing := int64(1) << 60 // never a real river_job id
+	dead := map[string]int64{
+		"dead-missing":   missing,
+		"dead-cancelled": insertRiverJob(t, pool, "cancelled"),
+		"dead-discarded": insertRiverJob(t, pool, "discarded"),
+		"dead-completed": insertRiverJob(t, pool, "completed"),
+	}
+	live := map[string]int64{
+		"live-available": insertRiverJob(t, pool, "available"),
+		"live-running":   insertRiverJob(t, pool, "running"),
+		"live-scheduled": insertRiverJob(t, pool, "scheduled"),
+		"live-retryable": insertRiverJob(t, pool, "retryable"),
+	}
+	for id, jobID := range dead {
+		jid := jobID
+		insertReconcileRow(t, pool, spec.Table, id, "pending", &jid)
+	}
+	for id, jobID := range live {
+		jid := jobID
+		insertReconcileRow(t, pool, spec.Table, id, "pending", &jid)
+	}
+	insertReconcileRow(t, pool, spec.Table, "stranded-null", "pending", nil)
+	doneDead := dead["dead-discarded"]
+	insertReconcileRow(t, pool, spec.Table, "done-dead-job", "done", &doneDead)
+
+	enq := &stampEnqueue{}
+	n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("enqueued count = %d, want 5 (4 dead-job rows + 1 NULL row)", n)
+	}
+	for id, oldJobID := range dead {
+		got := rowJobID(t, pool, spec.Table, id)
+		if got == nil || *got == oldJobID {
+			t.Errorf("%s job id = %v, want re-stamped fresh id (old %d)", id, got, oldJobID)
+		}
+	}
+	for id, jobID := range live {
+		if got := rowJobID(t, pool, spec.Table, id); got == nil || *got != jobID {
+			t.Errorf("%s job id = %v, want untouched live job %d", id, got, jobID)
+		}
+	}
+	if got := rowJobID(t, pool, spec.Table, "stranded-null"); got == nil {
+		t.Error("stranded-null row was not enqueued alongside the dead-job rescues")
+	}
+	if got := rowJobID(t, pool, spec.Table, "done-dead-job"); got == nil || *got != doneDead {
+		t.Errorf("non-matching row job id = %v, want untouched %d (Where must still gate rescue)", got, doneDead)
+	}
+}
+
+// TestReconcilePending_DefaultSpecIgnoresDeadJobs pins the default (opt-out)
+// behavior: without RescueDeadJobs a stamped row is NEVER re-driven, even when
+// its job is gone. Load-bearing for outboundsend, which shares this machinery
+// but must not re-enqueue a discarded send job (its TerminalReconcileWorker
+// settles those rows terminally instead — re-driving would resend email).
+func TestReconcilePending_DefaultSpecIgnoresDeadJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+	spec := reconcileScratch(t, pool, "jobs_reconcile_nodead")
+
+	missing := int64(1) << 60
+	discarded := insertRiverJob(t, pool, "discarded")
+	insertReconcileRow(t, pool, spec.Table, "dead-missing", "pending", &missing)
+	insertReconcileRow(t, pool, spec.Table, "dead-discarded", "pending", &discarded)
+
+	enq := &stampEnqueue{}
+	n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if n != 0 || len(enq.ids) != 0 {
+		t.Errorf("default spec enqueued n=%d ids=%v, want 0 (dead-job rescue must be opt-in)", n, enq.ids)
+	}
+	if got := rowJobID(t, pool, spec.Table, "dead-missing"); got == nil || *got != missing {
+		t.Errorf("dead-missing job id = %v, want untouched %d", got, missing)
+	}
+	if got := rowJobID(t, pool, spec.Table, "dead-discarded"); got == nil || *got != discarded {
+		t.Errorf("dead-discarded job id = %v, want untouched %d", got, discarded)
+	}
+}
+
 // TestReconcilePending_BadSpecReturnsError covers the scan-query error return:
 // a spec pointing at a nonexistent table surfaces the error instead of
 // swallowing it.

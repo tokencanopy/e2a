@@ -71,10 +71,12 @@ type WebhookReconcileArgs struct{}
 
 func (WebhookReconcileArgs) Kind() string { return "webhook_reconcile" }
 
-// ReconcileWorker re-enqueues any pending delivery row with no River job. It is
-// the LIVE backstop for the separate-tx enqueue paths (/test, redelivery) and any
-// outbox-drain crash window — turning "recovered only on restart" into "recovered
-// within reconcileInterval". Idempotent (ReconcilePending's job_id IS NULL guard).
+// ReconcileWorker re-enqueues any pending delivery row with no live River job
+// (never enqueued, or its job is terminal/pruned). It is the LIVE backstop for
+// the separate-tx enqueue paths (/test, redelivery), any outbox-drain crash
+// window, and a lost final-attempt terminal write — turning "recovered only on
+// restart" (or never) into "recovered within reconcileInterval". Idempotent
+// (ReconcilePending's FOR UPDATE strandedness re-check).
 type ReconcileWorker struct {
 	river.WorkerDefaults[WebhookReconcileArgs]
 	jobs *Jobs
@@ -92,19 +94,27 @@ func (w *ReconcileWorker) Work(ctx context.Context, _ *river.Job[WebhookReconcil
 }
 
 // ReconcilePending enqueues a River delivery job for every pending Layer 2 row
-// that has no job yet (job_id IS NULL). It runs BOTH at startup (the one-shot
-// cutover from the legacy queue) AND on a live schedule (ReconcileWorker) so a
-// stranded row — from the separate-tx /test/redelivery enqueue paths or an
-// outbox-drain crash window — is re-driven within reconcileInterval rather than
-// only on the next restart. Idempotent: the per-row FOR UPDATE + job_id IS NULL
-// guard means a re-run (or a concurrent replica) never double-enqueues. Returns
-// the number of rows enqueued.
+// that has no live job: job_id IS NULL, or (RescueDeadJobs) stamped with a
+// river_job that is terminal or already pruned. The dead-job arm closes the CW-2
+// strand: when the final delivery attempt's terminal 'failed' write is lost (a
+// sustained DB outage in exactly that window — the CRITICAL log in
+// DeliverWorker.Work), River discards the job and the row sat 'pending' with a
+// dead job_id, invisible to an IS-NULL-only reconciler, until its TTL. Re-driving
+// is safe: delivery is at-least-once and the DeliverWorker no-ops on rows that
+// already terminalized. It runs BOTH at startup (the one-shot cutover from the
+// legacy queue) AND on a live schedule (ReconcileWorker) so a stranded row —
+// from the separate-tx /test/redelivery enqueue paths, an outbox-drain crash
+// window, or a lost terminal write — is re-driven within reconcileInterval
+// rather than only on the next restart. Idempotent: the per-row FOR UPDATE
+// re-check means a re-run (or a concurrent replica) never double-enqueues.
+// Returns the number of rows enqueued.
 func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
-		Table:     "webhook_subscriber_deliveries",
-		JobColumn: "job_id",
-		Where:     "status='pending'",
-		LogPrefix: "[webhook-reconcile]",
+		Table:          "webhook_subscriber_deliveries",
+		JobColumn:      "job_id",
+		Where:          "status='pending'",
+		LogPrefix:      "[webhook-reconcile]",
+		RescueDeadJobs: true,
 	}, j.EnqueueDeliveryTx)
 }
 

@@ -31,8 +31,10 @@ func (FanOutArgs) Kind() string { return "webhook_fanout" }
 const (
 	// maxFanOutAttempts bounds River's retries of a fan-out job. Fan-out failures are
 	// transient (DB blip, identity read) — a handful of retries rides them out. A
-	// persistent failure (e.g. a matching bug) should surface as a discarded job, not
-	// retry forever the way the legacy pending-row poll did.
+	// persistent failure (e.g. a matching bug) surfaces as a discarded job; the
+	// reconciler's dead-job rescue then re-drives the still-pending event with a
+	// fresh job on the reconcile cadence (the outbox's at-least-once retry-forever
+	// contract), so a discarded job is a loud signal, never a permanent strand.
 	maxFanOutAttempts = 10
 
 	// fanOutReconcileInterval is how often the reconciler re-drives pending events with
@@ -190,16 +192,24 @@ func (w *FanOutReconcileWorker) Work(ctx context.Context, _ *river.Job[FanOutRec
 	return nil
 }
 
-// ReconcilePending enqueues a fan-out job for every pending webhook_events row with no
-// job yet (fanout_job_id IS NULL). Runs at startup (cutover) AND on the live schedule
-// (FanOutReconcileWorker). Idempotent: the per-row FOR UPDATE + fanout_job_id IS NULL
-// guard means a re-run (or a concurrent replica) never double-enqueues. Returns the
-// number of events enqueued.
+// ReconcilePending enqueues a fan-out job for every pending webhook_events row that
+// has no live job: fanout_job_id IS NULL, or (RescueDeadJobs) stamped with a job
+// River has discarded (maxFanOutAttempts exhausted), cancelled, completed without
+// the event terminalizing, or already pruned. Without the dead-job arm, an event
+// whose fan-out job burned all its attempts was stranded forever: still 'pending'
+// (so never swept by the janitor, by design — the outbox is at-least-once), stamped
+// (so invisible to an IS-NULL-only reconciler). Re-driving is safe: the FanOutWorker
+// re-reads status under a pending guard and the (event_id, webhook_id) unique index
+// dedups delivery inserts. Runs at startup (cutover) AND on the live schedule
+// (FanOutReconcileWorker). Idempotent: the per-row FOR UPDATE re-check means a re-run
+// (or a concurrent replica) never double-enqueues. Returns the number of events
+// enqueued.
 func (j *FanOutJobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
-		Table:     "webhook_events",
-		JobColumn: "fanout_job_id",
-		Where:     "status='pending'",
-		LogPrefix: "[webhook-fanout-reconcile]",
+		Table:          "webhook_events",
+		JobColumn:      "fanout_job_id",
+		Where:          "status='pending'",
+		LogPrefix:      "[webhook-fanout-reconcile]",
+		RescueDeadJobs: true,
 	}, j.EnqueueFanOutTx)
 }
