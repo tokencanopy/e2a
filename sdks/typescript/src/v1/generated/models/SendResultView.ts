@@ -25,7 +25,7 @@ export class SendResultView {
     */
     'providerMessageId'?: string;
     /**
-    * Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash.
+    * Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it.
     */
     'scheduledAt'?: Date;
     /**

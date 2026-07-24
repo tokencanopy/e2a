@@ -128,7 +128,7 @@ type SendResultView struct {
 	ProviderMessageID string     `json:"provider_message_id,omitempty" doc:"Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id."`
 	SentAs            string     `json:"sent_as,omitempty" doc:"From identity used. Open set; tolerate unknown values. Known values: own_address, relay."`
 	Method            string     `json:"method,omitempty" doc:"Send transport. Open set; tolerate unknown values. Known values: smtp, loopback."`
-	ScheduledAt       *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash."`
+	ScheduledAt       *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."`
 	ApprovalExpiresAt *time.Time `json:"approval_expires_at,omitempty"`
 	// Edited is set only by approve (true/false = did the reviewer edit the
 	// draft before sending); omitted on the plain send path.
@@ -501,6 +501,14 @@ func parentNotYetSubmitted(msg *identity.Message) *ErrorEnvelope {
 	}
 	if msg.DeliveryStatus != "accepted" && msg.DeliveryStatus != "sending" {
 		return nil
+	}
+	// A scheduled parent won't gain its provider Message-ID until it fires, which
+	// may be far off — say so (and when) instead of the bare "retry after it is
+	// sent", which reads as imminent.
+	if msg.ScheduledAt != nil && msg.ScheduledAt.After(time.Now()) {
+		return NewError(http.StatusConflict, "message_not_yet_delivered",
+			fmt.Sprintf("referenced message is scheduled to send at %s and has not been submitted yet — reply or forward once it sends (threading anchors on the parent's provider Message-ID, assigned only at submission)",
+				msg.ScheduledAt.UTC().Format(time.RFC3339)))
 	}
 	return NewError(http.StatusConflict, "message_not_yet_delivered",
 		"referenced message not yet delivered — retry after it is sent, or use wait=sent on the original send")

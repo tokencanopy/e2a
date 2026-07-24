@@ -74,7 +74,7 @@ export class MessageView {
     */
     'reviewStatus'?: string;
     /**
-    * Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash.
+    * Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it.
     */
     'scheduledAt'?: Date;
     /**

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 import pprint
+import re  # noqa: F401
 import json
 
 from datetime import datetime
@@ -56,7 +57,7 @@ class MessageView(BaseModel):
     read_status: StrictStr
     reply_to: List[StrictStr] = Field(description="The parsed Reply-To header of an inbound message. Populated for inbound only; always empty for outbound (a Reply-To you SET on a send is a request-side field on the send/reply/forward body and is not echoed back here).")
     review_status: Optional[StrictStr] = Field(default=None, description="Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field.")
-    scheduled_at: Optional[datetime] = Field(default=None, description="Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash.")
+    scheduled_at: Optional[datetime] = Field(default=None, description="Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it.")
     sent_as: Optional[StrictStr] = Field(default=None, description="From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.")
     size_bytes: Optional[StrictInt] = Field(default=None, description="RAW MIME byte length of the whole stored message (headers + bodies + encoded attachments as transported). Distinct from attachments[].size_bytes, which is one attachment's DECODED payload size. This value is the dominant term of the account's storage-quota accounting (usage.storage_bytes).")
     subject: StrictStr

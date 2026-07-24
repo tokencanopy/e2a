@@ -643,6 +643,19 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		// Provenance 'local' (a deliberate local cancel): if provider evidence
 		// later proves an earlier crashed attempt DID reach SES, the §3.1
 		// correction may still record the truthful outcome on the hidden row.
+		//
+		// Scheduled-send note: this is the ONLY thing that "cancels" a scheduled
+		// send — the River job itself is never cancelled, only claim-gated here.
+		// So trash-cancel is REVERSIBLE: restoring a trashed scheduled message
+		// before its scheduled_at re-arms it (the job still fires and, finding the
+		// row un-trashed, submits). "Cancel by trashing" is final only if the row
+		// stays trashed past send time.
+		//
+		// Domain-verification note: verification is checked at accept, not
+		// re-checked here at fire (up to 90 days later). That's safe because a
+		// verified domain cannot lapse independently of its agents — DeleteDomain
+		// is blocked while any agent exists (ErrDomainHasAgents), and deleting the
+		// agent trips the agentDeletedAt cancel in this very branch.
 		if _, err := tx.Exec(ctx,
 			`UPDATE messages
 			    SET delivery_status = 'failed',

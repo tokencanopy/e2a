@@ -73,7 +73,7 @@ const sendAtField = z
   .datetime({ offset: true })
   .optional()
   .describe(
-    'Optional scheduled-send time (RFC 3339 with a UTC offset, e.g. "2026-08-01T09:00:00Z"). When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Cancel a scheduled send with delete_message (move to trash).',
+    'Optional scheduled-send time (RFC 3339 with a UTC offset, e.g. "2026-08-01T09:00:00Z"). When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Cancel a scheduled send with delete_message (move to trash) — reversible: restoring it before the send time re-arms it.',
   );
 
 export function registerMessageTools(server: McpServer, client: McpClient): void {

@@ -77,7 +77,7 @@ type MessageView struct {
 	// send_at and retained afterwards (it records the scheduled instant and is not
 	// cleared once the send fires); omitted for immediate sends and all inbound
 	// rows. delivery_status stays 'accepted' while scheduled.
-	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash."`
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."`
 	// Flagged + FlagReason carry the beta inbound ingestion verdict: true when
 	// the agent's inbound-policy gate flagged this message on arrival while still
 	// delivering it. Polling agents need this signal because no review item is

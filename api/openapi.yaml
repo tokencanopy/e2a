@@ -2885,7 +2885,7 @@ components:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
         scheduled_at:
-          description: Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as "not before"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash.
+          description: "Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
           format: date-time
           type: string
         sent_as:
@@ -3840,7 +3840,7 @@ components:
           description: Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id.
           type: string
         scheduled_at:
-          description: "Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash."
+          description: "Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
           format: date-time
           type: string
         sent_as:
