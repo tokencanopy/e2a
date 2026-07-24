@@ -1,0 +1,38 @@
+-- 079_wsd_pending_with_job_idx.sql
+-- e2a:no-transaction
+--
+-- Partial index backing the webhook delivery reconciler's DEAD-JOB rescue scan
+-- (jobs.ReconcilePending with RescueDeadJobs, via webhookdelivery.ReconcilePending),
+-- which runs every minute and looks for pending rows whose stamped River job is
+-- terminal or pruned: `status = 'pending' AND job_id IS NOT NULL` joined to
+-- river_job by primary key. Neither existing index covers that predicate —
+-- idx_wsd_pending_no_job (052) has the OPPOSITE job_id condition, and the
+-- next_retry_at index it replaced was dropped in 053 — so without this the scan
+-- seq-scans the whole 30-day, delivery-volume-scaled table once per tick: the
+-- exact regression 052/059 were written to prevent.
+--
+-- The indexed set is the in-flight population (pending rows with a job:
+-- currently-retrying plus disabled-webhook snoozes), bounded by the retry
+-- envelope and the row TTL — small, so the index is cheap to maintain. Both
+-- columns the scan touches are in the key (job_id to probe river_job, id to
+-- return), allowing an index-only scan of the set.
+--
+-- CREATE INDEX CONCURRENTLY so the build does not take a write lock on the
+-- prod-sized table (a plain CREATE INDEX would block webhook fan-out inserts for
+-- the full build). The runner's e2a:no-transaction directive (see
+-- internal/identity/migrate.go) skips the BeginTx wrapper — required because
+-- Postgres rejects CONCURRENTLY inside a transaction block; the no-transaction
+-- runner requires a single statement.
+--
+-- OPS NOTE — invalid-index recovery: if the CONCURRENTLY build is interrupted,
+-- Postgres leaves an INVALID index of this name. On the next startup this
+-- migration re-runs, but CREATE ... IF NOT EXISTS sees the name and SKIPS the
+-- rebuild, marking the migration applied over a broken index — the rescue scan
+-- then falls back to a seq scan every minute (a performance, not correctness,
+-- regression: stranded rows are still rescued). To recover, manually:
+--     DROP INDEX CONCURRENTLY IF EXISTS idx_wsd_pending_with_job;
+-- then re-run this statement. Check validity with:
+--     SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_wsd_pending_with_job'::regclass;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wsd_pending_with_job
+    ON webhook_subscriber_deliveries (job_id, id)
+    WHERE status = 'pending' AND job_id IS NOT NULL;

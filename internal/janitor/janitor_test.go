@@ -57,9 +57,9 @@ func (f *fakePruner) DeleteExpiredDeliveries(context.Context) (int64, error) {
 	return 1, f.deliveriesErr
 }
 
-func (f *fakePruner) DeleteExpiredSubscriberDeliveries(context.Context) (int, error) {
+func (f *fakePruner) DeleteExpiredSubscriberDeliveries(context.Context) (int, int, error) {
 	f.subscribersCalled++
-	return 5, f.subscribersErr // distinct count for the metric test
+	return 5, 4, f.subscribersErr // distinct deleted + marked counts for the metric test
 }
 
 func (f *fakePruner) DeleteExpiredWebhookEvents(context.Context) (int, error) {
@@ -84,11 +84,19 @@ type metricCall struct {
 }
 
 // fakeMetrics records every JanitorRowsDeleted call so a test can assert exactly
-// which prunes emit a metric and with what count.
-type fakeMetrics struct{ calls []metricCall }
+// which prunes emit a metric and with what count, plus WebhookExpiredPending
+// emissions from the subscriber prune's mark-failed phase.
+type fakeMetrics struct {
+	calls          []metricCall
+	expiredPending []int
+}
 
 func (m *fakeMetrics) JanitorRowsDeleted(table string, count int) {
 	m.calls = append(m.calls, metricCall{table, count})
+}
+
+func (m *fakeMetrics) WebhookExpiredPending(count int) {
+	m.expiredPending = append(m.expiredPending, count)
 }
 
 func newJanitor(f *fakePruner, oauth janitor.OAuthPruner) *janitor.Janitor {
@@ -156,6 +164,11 @@ func TestSweep_EmitsMetricsForCorrectTables(t *testing.T) {
 		if m.calls[i] != w {
 			t.Errorf("metric[%d] = %+v, want %+v", i, m.calls[i], w)
 		}
+	}
+	// The subscriber prune's mark-failed phase emits WebhookExpiredPending with
+	// the marked count it returned.
+	if len(m.expiredPending) != 1 || m.expiredPending[0] != 4 {
+		t.Errorf("WebhookExpiredPending emissions = %v, want [4]", m.expiredPending)
 	}
 }
 

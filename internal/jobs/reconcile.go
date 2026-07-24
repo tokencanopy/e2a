@@ -65,7 +65,10 @@ type ReconcileSpec struct {
 	// indexes; it walks the rows matching Where with a stamped job (the in-flight
 	// set) and probes river_job by primary key per row. Callers' Where predicates
 	// keep that set small and TTL-bounded; the plain IS NULL scan still runs
-	// first and stays index-backed.
+	// first and stays index-backed. That ordering is also a prioritization: the
+	// IS NULL strand (work that never got a job) fills the batch before dead-job
+	// strands are even scanned, so under an IS-NULL backlog that saturates every
+	// tick's batch, dead-job rescues wait until that backlog drains.
 	RescueDeadJobs bool
 }
 

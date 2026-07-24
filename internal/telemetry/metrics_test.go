@@ -17,6 +17,7 @@ func TestNoOpSatisfiesInterface(t *testing.T) {
 	m.OutboxFailures("")
 	m.RedeliverRequests("")
 	m.JanitorRowsDeleted("", 0)
+	m.WebhookExpiredPending(0)
 	m.NotifyMissed()
 	m.SetPublisherLag(0)
 }
@@ -32,6 +33,7 @@ func TestLogSatisfiesInterface(t *testing.T) {
 	m.OutboxFailures("lease")
 	m.RedeliverRequests("single")
 	m.JanitorRowsDeleted("webhook_events", 5)
+	m.WebhookExpiredPending(2)
 	m.NotifyMissed()
 	m.SetPublisherLag(2.5)
 }

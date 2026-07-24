@@ -170,12 +170,14 @@ type FanOutReconcileArgs struct{}
 
 func (FanOutReconcileArgs) Kind() string { return "webhook_fanout_reconcile" }
 
-// FanOutReconcileWorker re-enqueues any pending event with no fan-out job. It is the
-// LIVE backstop for the best-effort publish path (PublishBestEffortTx must not fail the
-// caller's tx, so an event can commit with its enqueue lost) and any crash window
-// between the event commit and the job insert — turning "recovered only on restart"
-// into "recovered within fanOutReconcileInterval". Idempotent (fanout_job_id IS NULL
-// guard). Mirrors webhookdelivery.ReconcileWorker.
+// FanOutReconcileWorker re-enqueues any pending event with no live fan-out job
+// (never enqueued, or its job is terminal/pruned). It is the LIVE backstop for the
+// best-effort publish path (PublishBestEffortTx must not fail the caller's tx, so an
+// event can commit with its enqueue lost), any crash window between the event commit
+// and the job insert, and a fan-out job discarded after exhausting its attempts —
+// turning "recovered only on restart" (or never) into "recovered within
+// fanOutReconcileInterval". Idempotent (ReconcilePending's FOR UPDATE strandedness
+// re-check). Mirrors webhookdelivery.ReconcileWorker.
 type FanOutReconcileWorker struct {
 	river.WorkerDefaults[FanOutReconcileArgs]
 	jobs *FanOutJobs

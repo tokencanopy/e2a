@@ -114,6 +114,15 @@ type Metrics interface {
 	// (connect/DNS/SSRF-blocked).
 	WebhookAttempt(outcome, statusClass string, seconds float64)
 
+	// WebhookExpiredPending counts delivery rows that reached their
+	// retention TTL while still 'pending' and were marked terminally
+	// failed ("expired before delivery") by the janitor instead of being
+	// silently deleted. With the dead-job reconciler rescuing strands,
+	// a sustained non-zero rate means deliveries are aging out
+	// un-attempted — in practice rows snoozing behind a webhook disabled
+	// for longer than the TTL.
+	WebhookExpiredPending(count int)
+
 	// WSConnected / WSDisconnected count WebSocket connection
 	// lifecycle events. reason ∈ {replaced, ping_timeout,
 	// client_close, error, shutdown}.
@@ -161,6 +170,7 @@ func (NoOp) OutboundQueueWait(float64)                   {}
 func (NoOp) OutboundTerminal(string)                     {}
 func (NoOp) OutboundAttempt(string, float64)             {}
 func (NoOp) WebhookAttempt(string, string, float64)      {}
+func (NoOp) WebhookExpiredPending(int)                   {}
 func (NoOp) WSConnected()                                {}
 func (NoOp) WSDisconnected(string)                       {}
 func (NoOp) WSDrained(int)                               {}
@@ -252,6 +262,13 @@ func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	log.Printf("[metrics] event=webhook.attempt outcome=%s status_class=%s duration=%.3f", outcome, statusClass, seconds)
+}
+
+func (l *Log) WebhookExpiredPending(count int) {
+	if count == 0 {
+		return // skip noise: the healthy steady state marks nothing
+	}
+	log.Printf("[metrics] event=webhook.expired_pending count=%d", count)
 }
 
 func (l *Log) WSConnected() {

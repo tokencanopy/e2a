@@ -27,8 +27,9 @@ type Prom struct {
 	outTerminal     *prometheus.CounterVec
 	outAttempts     *prometheus.CounterVec
 	outAttemptDur   prometheus.Histogram
-	whAttempts      *prometheus.CounterVec
-	whAttemptDur    prometheus.Histogram
+	whAttempts       *prometheus.CounterVec
+	whAttemptDur     prometheus.Histogram
+	whExpiredPending prometheus.Counter
 	wsConnects      prometheus.Counter
 	wsDisconnects   *prometheus.CounterVec
 	wsDrained       prometheus.Counter
@@ -164,6 +165,10 @@ func NewProm() *Prom {
 			Help:    "Webhook delivery attempt duration (HTTP POST to subscriber).",
 			Buckets: fastBuckets,
 		}),
+		whExpiredPending: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "e2a_webhook_deliveries_expired_pending_total",
+			Help: "Delivery rows that hit their retention TTL still pending and were marked failed by the janitor.",
+		}),
 		wsConnects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_ws_connects_total",
 			Help: "WebSocket connections accepted and registered.",
@@ -244,7 +249,7 @@ func NewProm() *Prom {
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
 		p.outQueueWait, p.outTerminal, p.outAttempts, p.outAttemptDur,
-		p.whAttempts, p.whAttemptDur,
+		p.whAttempts, p.whAttemptDur, p.whExpiredPending,
 		p.wsConnects, p.wsDisconnects, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
@@ -313,6 +318,12 @@ func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	// webhook_deleted / skipped_disabled — must not drag quantiles to 0).
 	if seconds >= 0 {
 		p.whAttemptDur.Observe(seconds)
+	}
+}
+
+func (p *Prom) WebhookExpiredPending(count int) {
+	if count > 0 {
+		p.whExpiredPending.Add(float64(count))
 	}
 }
 
