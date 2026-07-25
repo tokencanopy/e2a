@@ -25,9 +25,20 @@ import (
 // and DELETE …/messages/{id} (recorded into deleted, so tests can pin the
 // scenario's residue cleanup against the actual response shape).
 type wsStubState struct {
-	mu      sync.Mutex
-	conn    *websocket.Conn
-	deleted []string
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	deleted  []string
+	sawClose bool
+}
+
+// sawCloseFrame reports whether the stub read a normal-closure frame from the
+// client. This is the DETERMINISTIC signal that the close handshake completed:
+// conn.Close blocks until the peer answers (or its 5s timeout expires), so if
+// this is false by the time the scenario returns, the handshake did not happen.
+func (st *wsStubState) sawCloseFrame() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.sawClose
 }
 
 func (st *wsStubState) deletedIDs() []string {
@@ -55,6 +66,32 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 			st.mu.Lock()
 			st.conn = c
 			st.mu.Unlock()
+			// Read loop mirroring the real handler (internal/ws/handler.go:377).
+			// Control frames are only processed while something reads, so a stub
+			// that never reads never answers the client's close frame — and the
+			// scenario's deferred conn.Close then blocks for the library's full
+			// 5s close-handshake timeout, making every WS scenario invocation
+			// cost 5s of pure waiting.
+			//
+			// An explicit loop rather than CloseRead so the close frame is both
+			// ANSWERED and OBSERVABLE — sawCloseFrame is what pins this fix.
+			//
+			// NOT r.Context(): Accept hijacks the connection so it outlives this
+			// handler, and the request context is cancelled the moment the
+			// handler returns, which tore the socket down before the push could
+			// be written ("failed to read frame header: EOF").
+			go func() {
+				for {
+					if _, _, err := c.Read(context.Background()); err != nil {
+						if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+							st.mu.Lock()
+							st.sawClose = true
+							st.mu.Unlock()
+						}
+						return
+					}
+				}
+			}()
 		case r.Method == http.MethodDelete:
 			parts := strings.Split(r.URL.Path, "/")
 			st.mu.Lock()
@@ -110,6 +147,15 @@ func TestScenarioWebSocketRoundTrip(t *testing.T) {
 			t.Errorf("message %q was not trashed (deleted: %v)", id, deleted)
 		}
 	}
+	// Close-handshake contract. conn.Close waits for the peer's close frame and
+	// gives up after 5s, so a stub that does not read makes EVERY invocation of
+	// this scenario cost 5s of pure waiting. Asserting the stub observed the
+	// frame pins that deterministically — without a wall-clock budget, which is
+	// the flake pattern this suite already got bitten by.
+	if !st.sawCloseFrame() {
+		t.Error("stub never observed the client's close frame: the close handshake " +
+			"did not complete, so conn.Close burned the library's full 5s timeout")
+	}
 }
 
 func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
@@ -127,7 +173,11 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
 			c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err == nil {
-				_ = c // hold open, push nothing
+				// Hold open and push nothing — but still read, so the deferred
+				// conn.Close is answered instead of burning the library's 5s
+				// close-handshake timeout. The scenario must fail on its own
+				// round-trip timeout, which is what this case asserts.
+				c.CloseRead(context.Background())
 			}
 			return
 		}
@@ -146,7 +196,9 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
-			_, _ = websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true}); err == nil {
+				c.CloseRead(context.Background())
+			}
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)
