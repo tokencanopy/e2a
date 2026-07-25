@@ -20,7 +20,7 @@ export class UpsertEngagementRequest {
     /**
     * Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.
     */
-    'nextActionAt'?: Date;
+    'nextActionAt'?: Date | null;
     /**
     * Set the outreach stage. Omit to leave unchanged.
     */
