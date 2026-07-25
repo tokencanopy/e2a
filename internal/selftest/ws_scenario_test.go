@@ -55,6 +55,20 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 			st.mu.Lock()
 			st.conn = c
 			st.mu.Unlock()
+			// Consume incoming frames, mirroring the real handler's read loop
+			// (internal/ws/handler.go). Control frames are only processed while
+			// something reads, so a stub that never reads never answers the
+			// client's close frame — and the scenario's deferred conn.Close then
+			// blocks for the library's full 5s close-handshake timeout, making
+			// every WS scenario invocation cost 5s of pure waiting. CloseRead is
+			// the push-only equivalent: it answers close, keeps writes working,
+			// and expects no client messages (this transport is server-push).
+			//
+			// NOT r.Context(): Accept hijacks the connection so it outlives this
+			// handler, and the request context is cancelled the moment the
+			// handler returns — which tore the socket down before the push could
+			// be written ("failed to read frame header: EOF").
+			c.CloseRead(context.Background())
 		case r.Method == http.MethodDelete:
 			parts := strings.Split(r.URL.Path, "/")
 			st.mu.Lock()
@@ -127,7 +141,11 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
 			c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err == nil {
-				_ = c // hold open, push nothing
+				// Hold open and push nothing — but still read, so the deferred
+				// conn.Close is answered instead of burning the library's 5s
+				// close-handshake timeout. The scenario must fail on its own
+				// round-trip timeout, which is what this case asserts.
+				c.CloseRead(context.Background())
 			}
 			return
 		}
@@ -146,7 +164,9 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
-			_, _ = websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true}); err == nil {
+				c.CloseRead(context.Background())
+			}
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)
