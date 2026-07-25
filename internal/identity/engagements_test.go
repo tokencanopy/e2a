@@ -569,3 +569,66 @@ func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
 		t.Errorf("suppression lookup = %v — consent must survive agent deletion", blocked)
 	}
 }
+
+// TestReconcileEngagementCountsWithMultiRecipientMessages exercises the
+// reconcile SQL against REAL message rows, which the older drift test does not:
+// that one runs with an empty messages table, so its join logic is never
+// executed and it would pass even if the counting query were nonsense.
+//
+// The case that matters is a single outbound message addressed to TWO enrolled
+// contacts. messages.recipient stores only the first recipient, while the
+// activity hook increments every To recipient — so a sweep that counts by the
+// scalar computes the right number for the first contact and zero for the
+// second, then "corrects" a correct counter down to zero and reports drift on
+// every run forever. Scheduling that sweep hourly would destroy real data.
+func TestReconcileEngagementCountsWithMultiRecipientMessages(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "multirecip")
+	if _, err := store.ClaimOrCreateDomain(ctx, "multirecip.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@multirecip.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "multirecip.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	const first = "first@multirecip.vc"
+	const second = "second@multirecip.vc"
+	enroll(t, store, user.ID, agent, first, "touch1")
+	enroll(t, store, user.ID, agent, second, "touch1")
+
+	// One message, both recipients — the shape that breaks a scalar-keyed sweep.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first, second}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-multi", []byte("raw")); err != nil {
+		t.Fatalf("create outbound: %v", err)
+	}
+	// Record activity exactly as the hook does: once per To recipient.
+	sentAt := time.Now().UTC()
+	for _, addr := range []string{first, second} {
+		if _, err := store.RecordOutboundActivity(ctx, user.ID, agent, addr, "conv-multi", sentAt); err != nil {
+			t.Fatalf("record %s: %v", addr, err)
+		}
+	}
+
+	drift, err := store.ReconcileEngagementCounts(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(drift) != 0 {
+		t.Errorf("reconcile reported drift %+v on correct counters — "+
+			"the sweep is miscounting multi-recipient sends and would zero them out", drift)
+	}
+
+	for _, addr := range []string{first, second} {
+		e, err := store.GetEngagement(ctx, user.ID, agent, addr)
+		if err != nil {
+			t.Fatalf("get %s: %v", addr, err)
+		}
+		if e.OutboundCount != 1 {
+			t.Errorf("%s outbound_count = %d after reconcile, want 1", addr, e.OutboundCount)
+		}
+	}
+}
