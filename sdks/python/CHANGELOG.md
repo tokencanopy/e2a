@@ -1,5 +1,40 @@
 # Changelog
 
+## 5.4.0
+
+Additive only. Every 5.3.0 call site keeps working identically; the new
+parameters are keyword-only with defaults that preserve 5.3.0 behavior.
+
+### Added
+- **``unsubscribe=`` on ``messages.send`` / ``.reply`` / ``.forward``** — opt a
+  single message into e2a-managed unsubscribe handling by passing
+  ``unsubscribe={"mode": "managed"}`` (or an ``UnsubscribeOptions``), instead of
+  having to set the field inside the request body. When both are given the
+  kwarg wins. Beta, together with the raw ``GET|POST /u/{token}`` confirmation
+  flow it enables. Mirrors the TypeScript SDK's ``ManagedUnsubscribeOptions``.
+- **``wait="sent"`` on ``messages.send`` / ``.reply`` / ``.forward``** — an
+  optional bounded wait. The request is held server-side until the
+  asynchronously delivered message reaches a terminal-or-held state, or at most
+  20 seconds elapse (the frozen contract ceiling; the server currently returns
+  in ~15s), and then returns the observed state. On timeout the result stays
+  ``status="accepted"``, so always branch on the result's ``status``, never on
+  the HTTP code. Default is unchanged: no wait. Available on both
+  ``AsyncE2AClient`` and the synchronous ``E2AClient``.
+- **``DomainCapabilities`` on ``DomainView.capabilities``** — per-axis domain
+  readiness, splitting the two independent axes that the legacy ``verified``
+  boolean and ``sending_status`` rollup expressed separately. ``inbound``
+  restates whether the domain can receive mail (``verified`` | ``pending`` —
+  there is deliberately no inbound failure state; a missing or wrong MX stays
+  ``pending``). ``outbound`` restates whether agents can send as their own
+  address (``none`` | ``pending`` | ``verified`` | ``failed``, with detail in
+  ``sending_error``). Both are open string sets — tolerate unknown values.
+
+### Fixed
+- **``unsubscribe=`` no longer mutates the caller's request model.** When the
+  body was already a ``SendEmailRequest`` / ``ReplyRequest`` / ``ForwardRequest``
+  instance, the kwarg was assigned onto that object, leaking into the caller's
+  model and into any later reuse of it. The SDK now copies before assigning.
+
 ## 5.3.0
 
 ### Added
