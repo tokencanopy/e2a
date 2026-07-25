@@ -4,16 +4,25 @@
 // and broad queryability, so log lines are NOT a private scratchpad: an email
 // subject, an external human's address, or a free-text rejection reason in a
 // log line is personal data replicated outside the database's access controls.
-// The policy (enforced by logguard_test.go):
+// The policy:
 //
 //   - Never log message subject lines — log subject_len instead.
 //   - Never log an EXTERNAL human's full email address — log only its domain
 //     (AddressDomain) or, for recipient lists, the count plus the distinct
 //     domain set (AddressDomains). e2a AGENT addresses are our own namespace
-//     and the primary tracing key, so they stay in full.
+//     and the primary tracing key, so they stay in full — but only once the
+//     address has RESOLVED to an agent row. An unresolved recipient is just an
+//     attacker-supplied string (SMTP RCPT runs before any authentication) and
+//     is redacted like any external address.
 //   - Truncate connecting IPs to a network prefix (IPNetwork): /24 for IPv4,
 //     /48 for IPv6 — enough for abuse/rate-limit debugging, less identifying.
 //   - Cap free-text human input and third-party error bodies (Truncate).
+//   - Redact at the LOG SINK, not at the source. A value that is also stored,
+//     served by the API, or emitted in a webhook (e.g. a HITL rejection
+//     reason) must stay precise there; only its log copy is reduced.
+//
+// Only the subject rule is machine-checked, by the tripwire scan in
+// logguard_test.go; the rest is a code-review responsibility.
 //
 // Every helper here runs on hostile external input on the SMTP hot path and
 // must never panic; malformed input degrades to a safe placeholder.
@@ -24,6 +33,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // invalidPlaceholder is returned when the input cannot be interpreted at all.
@@ -41,9 +51,10 @@ const (
 
 // AddressDomain reduces an email address to only its domain, e.g.
 // "alice@example.com" -> "example.com". It tolerates display-name forms
-// ("Alice <alice@example.com>") and angle brackets, lowercases the result,
-// and returns "invalid" for anything without a parsable domain. It never
-// returns the local part.
+// ("Alice <alice@example.com>"), angle brackets, and the RFC 5322 comment
+// form ("alice@example.com (Alice Smith)"), lowercases the result, and
+// returns "invalid" for anything whose domain part is not hostname-shaped.
+// It never returns the local part, a display name, or a comment.
 func AddressDomain(addr string) string {
 	addr = strings.TrimSpace(addr)
 	// Tolerate "Display Name <local@domain>" and bare "<local@domain>".
@@ -56,10 +67,44 @@ func AddressDomain(addr string) string {
 		return invalidPlaceholder
 	}
 	domain := strings.ToLower(strings.TrimSpace(addr[at+1:]))
-	if domain == "" {
+	// Cut at the first character that cannot occur inside a hostname. Without
+	// this, the RFC 5322 comment form leaks a PERSON'S NAME as the "domain"
+	// ("alice@example.com (Alice Smith)" -> "example.com (alice smith)"), and
+	// a stray unmatched bracket rides along ("example.com>").
+	if i := strings.IndexFunc(domain, notHostnameRune); i >= 0 {
+		domain = domain[:i]
+	}
+	if !hostnameShaped(domain) {
 		return invalidPlaceholder
 	}
 	return Truncate(domain, maxDomainRunes)
+}
+
+// notHostnameRune reports whether r cannot appear inside a hostname, and so
+// terminates the domain. Kept as a denylist of the structural/quoting runes
+// RFC 5322 puts around an address, plus all whitespace.
+func notHostnameRune(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune("()<>[]{},;:\"'\\@", r)
+}
+
+// hostnameShaped reports whether s looks like a domain name: non-empty, no
+// leading or trailing dot, and built only from letters, digits, dots, hyphens
+// and underscores. Unicode letters count, so IDN labels ("bücher.example")
+// pass through unchanged; anything else degrades to the invalid placeholder
+// rather than being logged.
+func hostnameShaped(s string) bool {
+	if s == "" || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // AddressDomains reduces a recipient list to its distinct, sorted domain set,

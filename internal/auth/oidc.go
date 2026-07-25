@@ -306,14 +306,16 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		// A *oauth2.RetrieveError formats the provider's FULL raw HTTP response
 		// body into its Error() string — third-party text of unbounded size that
 		// must not land in logs verbatim. Log the status + RFC 6749 error code
-		// only; anything else is hard-truncated.
+		// only, and truncate that too: ErrorCode is parsed straight out of the
+		// provider's response body, so it is provider-controlled and unbounded
+		// just like the Error() string in the sibling branch.
 		var retrieveErr *oauth2.RetrieveError
 		if errors.As(err, &retrieveErr) {
 			status := 0
 			if retrieveErr.Response != nil {
 				status = retrieveErr.Response.StatusCode
 			}
-			log.Printf("[auth] OIDC code exchange failed: provider returned HTTP %d (oauth error=%q)", status, retrieveErr.ErrorCode)
+			log.Printf("[auth] OIDC code exchange failed: provider returned HTTP %d (oauth error=%q)", status, logredact.Truncate(retrieveErr.ErrorCode, 200))
 		} else {
 			log.Printf("[auth] OIDC code exchange failed: %s", logredact.Truncate(err.Error(), 200))
 		}

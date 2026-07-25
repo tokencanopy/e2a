@@ -26,6 +26,22 @@ func TestAddressDomain(t *testing.T) {
 		{"trailing at sign", "alice@", "invalid"},
 		{"whitespace only", "   ", "invalid"},
 		{"null bytes", "a\x00b", "invalid"},
+		// RFC 5322 comment form: the parenthesised display name is a PERSON'S
+		// NAME and must never come back as part of the "domain".
+		{"comment form", "alice@example.com (Alice Smith)", "example.com"},
+		{"comment form no space", "alice@example.com(Alice Smith)", "example.com"},
+		{"display name plus comment", "Alice Smith <alice@example.com> (work)", "example.com"},
+		{"stray closing bracket", "alice@example.com>", "example.com"},
+		{"stray opening bracket", "alice@<example.com", "invalid"},
+		{"trailing semicolon", "alice@example.com;", "example.com"},
+		{"trailing comma in a header list", "alice@example.com, bob@other.test", "other.test"},
+		{"address literal", "alice@[192.168.0.1]", "invalid"},
+		{"leading dot", "alice@.example.com", "invalid"},
+		{"trailing dot", "alice@example.com.", "invalid"},
+		{"domain is only punctuation", "alice@---", "---"},
+		{"control characters in domain", "alice@exa\x01mple.com", "invalid"},
+		{"quoted domain", `alice@"example.com"`, "invalid"},
+		{"tab separated comment", "alice@example.com\t(Alice)", "example.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -48,6 +64,25 @@ func TestAddressDomainNeverReturnsLocalPart(t *testing.T) {
 	} {
 		if got := AddressDomain(in); strings.Contains(got, "secret-local") {
 			t.Errorf("AddressDomain(%q) = %q leaks the local part", in, got)
+		}
+	}
+}
+
+// TestAddressDomainNeverReturnsDisplayName covers the other half of the
+// property: a human's NAME is personal data too, and RFC 5322 lets it sit on
+// either side of the address (angle-bracket form before it, comment form
+// after it). Neither may survive into a log line.
+func TestAddressDomainNeverReturnsDisplayName(t *testing.T) {
+	for _, in := range []string{
+		"alice@example.com (Secret Name)",
+		"alice@example.com(Secret Name)",
+		"Secret Name <alice@example.com>",
+		"Secret Name <alice@example.com> (Secret Name)",
+		"alice@example.com (Secret Name) <alice@example.com>",
+		"alice@example.com \"Secret Name\"",
+	} {
+		if got := AddressDomain(in); strings.Contains(strings.ToLower(got), "secret") {
+			t.Errorf("AddressDomain(%q) = %q leaks the display name", in, got)
 		}
 	}
 }
@@ -157,6 +192,7 @@ func TestHelpersNeverPanic(t *testing.T) {
 		"", " ", "@", "@@", "<", ">", "<>", "<@>", "a@", "@b",
 		"\x00", "\xff\xfe", strings.Repeat("@", 10_000),
 		strings.Repeat("<", 10_000), "a@b@c@d", "[::1]", "[",
+		"a@b (", "a@b )", "a@(((", strings.Repeat("a@b (c) ", 1_000),
 		"名前 <ユーザー@例え.テスト>", string(rune(0xD800)), // lone surrogate
 	}
 	for _, in := range inputs {

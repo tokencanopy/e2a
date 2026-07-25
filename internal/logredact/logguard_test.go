@@ -26,16 +26,36 @@ var subjectLogPatternAllowlist = map[string]string{
 }
 
 // subjectContentPattern matches format verbs that would render subject
-// CONTENT into a log or error string: subject=%q / subject=%s / subject=%v
-// and the quoted form subject="%s". subject_len=%d and other derived,
-// content-free fields do not match.
-var subjectContentPattern = regexp.MustCompile(`subject=(%[qsv]|\\?"%[qsv])`)
+// CONTENT: the `subject<sep><verb>` family in the shapes that actually occur —
+// either separator (`subject=%q`, `subject: %q`), any case (`Subject=%v`), and
+// the quoted / escaped-quoted forms (`"subject": %s`, `subject=\"%s\"`).
+// subject_len=%d and other derived, content-free fields do not match.
+var subjectContentPattern = regexp.MustCompile(`(?i)subject(\\?")?\s*[:=]\s*(\\?")?%[qsv]`)
 
-// TestNoSubjectContentInLogFormats is the stance gate for the log-redaction
-// rule on email subject lines. It scans every non-test Go source file in the
-// module and fails when a format string renders subject content — the exact
-// pattern this package's introduction removed (e.g. `subject=%q` in the
-// [mail:...] lines).
+// logSitePattern narrows subjectContentPattern to lines that actually emit a
+// log or error string. Without it the case-insensitive `[:=]` form above also
+// flags legitimate `"Subject: %s\n"` MIME-header composition (the HITL
+// notification email body) and prompt building (the piguard LLM prompt) —
+// sites that handle the subject on purpose and never reach stdout. Keeping the
+// two checks separate is what lets the content pattern stay broad without
+// generating false positives that would get the whole guard allowlisted away.
+var logSitePattern = regexp.MustCompile(`\b(log|logger|slog)\.|fmt\.Errorf|errors\.Errorf`)
+
+// TestNoSubjectContentInLogFormats is a TRIPWIRE for one rule only: email
+// subject CONTENT must not appear in a log or error format string. It scans
+// every non-test Go source file in the module and fails on the `subject=%q`
+// family — the exact pattern this package's introduction removed from the
+// [mail:...] lines.
+//
+// What it does NOT do, so nobody mistakes a green run for compliance:
+//   - It enforces the SUBJECT rule only. The rest of the logredact policy
+//     (external addresses, IPs, free text, third-party error bodies) is not
+//     machine-checked — that stays a code-review responsibility.
+//   - It is a textual, line-at-a-time scan, not analysis. A subject reached
+//     through a variable (`log.Printf("%s", subj)`), a differently named
+//     field, a positional form like `log.Println("subject", s)`, a format
+//     string built on a different line from its logging call, or a logger
+//     reached through some other name all pass right through it.
 //
 // If this test failed because you added a subject to a log line: log
 // `subject_len=%d` (utf8.RuneCountInString) instead — operators get a
@@ -77,8 +97,8 @@ func TestNoSubjectContentInLogFormats(t *testing.T) {
 			return nil
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
-			if subjectContentPattern.MatchString(line) {
-				t.Errorf("%s:%d formats subject CONTENT (%s).\n"+
+			if subjectLogViolation(line) {
+				t.Errorf("%s:%d logs subject CONTENT (%s).\n"+
 					"Email subjects are customer content and logs are shipped to long-retention,\n"+
 					"widely queryable storage: log subject_len=%%d instead (the full subject lives\n"+
 					"on the message row in Postgres), or allowlist the file in\n"+
@@ -99,8 +119,60 @@ func TestNoSubjectContentInLogFormats(t *testing.T) {
 	// the exact inventory of deliberate exceptions.
 	for rel := range subjectLogPatternAllowlist {
 		raw, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-		if readErr != nil || !subjectContentPattern.Match(raw) {
+		if readErr != nil || !anyLineViolates(string(raw)) {
 			t.Errorf("subjectLogPatternAllowlist entry %q matched no subject-content pattern — remove the stale entry", rel)
+		}
+	}
+}
+
+// subjectLogViolation reports whether one source line both formats subject
+// content AND is a log/error emission site.
+func subjectLogViolation(line string) bool {
+	return subjectContentPattern.MatchString(line) && logSitePattern.MatchString(line)
+}
+
+func anyLineViolates(src string) bool {
+	for _, line := range strings.Split(src, "\n") {
+		if subjectLogViolation(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSubjectLogViolationDiscrimination pins the guard's own behaviour: the
+// shapes it must catch (the reason it exists) and the shapes it must not flag
+// (the reason it stays useful rather than being allowlisted into silence).
+func TestSubjectLogViolationDiscrimination(t *testing.T) {
+	violations := []string{
+		`log.Printf("[mail:%s] subject=%q", id, subject)`,
+		`log.Printf("subject: %q", subject)`,
+		`log.Printf("Subject=%v", subject)`,
+		`log.Printf("SUBJECT = %s", subject)`,
+		`log.Printf("{\"subject\": %q}", subject)`,
+		`log.Printf("subject=\"%s\"", subject)`,
+		`return fmt.Errorf("bad subject: %q", subject)`,
+		`slog.Info(fmt.Sprintf("subject=%s", subject))`,
+	}
+	for _, line := range violations {
+		if !subjectLogViolation(line) {
+			t.Errorf("guard missed a subject-content log line: %s", line)
+		}
+	}
+
+	clean := []string{
+		`log.Printf("[mail:%s] subject_len=%d", id, utf8.RuneCountInString(subject))`,
+		`log.Printf("subject_len=%d", n)`,
+		// MIME header composition into an email body, not a log.
+		`fmt.Fprintf(&b, "Subject: %s\n", msg.Subject)`,
+		// LLM prompt construction, not a log.
+		`return fmt.Sprintf("Subject: %s\nFrom: %s\n\n%s", subject, req.Sender, body)`,
+		`h.Set("Subject", subject)`,
+		`var subject = "%s"`,
+	}
+	for _, line := range clean {
+		if subjectLogViolation(line) {
+			t.Errorf("guard false-positived on a non-log line: %s", line)
 		}
 	}
 }

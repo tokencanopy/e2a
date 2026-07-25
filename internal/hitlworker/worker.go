@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -277,12 +278,14 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 		return true
 	}
 	if len(suppressed) > 0 {
-		// Domains only: this reason string is logged verbatim by autoReject
-		// (reason=%q), so full external recipient addresses must not ride in it.
-		// The owner can identify the exact suppressed recipient from the
-		// message's stored recipient list.
-		w.autoReject(ctx, c.MessageID, fmt.Sprintf("auto-approve blocked: %d recipient(s) on the suppression list (domains: %s)",
-			len(suppressed), strings.Join(logredact.AddressDomains(suppressed), ", ")))
+		// Precise addresses on purpose: this reason string is CUSTOMER-FACING
+		// output, not a log line — it is persisted to messages.rejection_reason,
+		// returned by the HITL REST API, and carried in the
+		// email.review_rejected webhook payload. The owner is entitled to know
+		// exactly which of THEIR OWN recipients is suppressed (two suppressed
+		// recipients can share a domain). Log-side redaction happens in
+		// autoReject, which is where the log copy is produced.
+		w.autoReject(ctx, c.MessageID, "auto-approve blocked: recipient(s) on the suppression list: "+strings.Join(suppressed, ", "))
 		return true
 	}
 	w.attachReferencesChain(ctx, agent.ID, &req)
@@ -562,7 +565,17 @@ func (w *Worker) pushLoopbackReceived(ctx context.Context, agentID, messageID st
 	w.wsHub.Send(agentID, payload)
 }
 
+// autoReject resolves a stuck/blocked hold to rejected. `reason` is customer-
+// facing and must stay precise: it is written to messages.rejection_reason,
+// surfaced by the HITL REST API, and emitted in email.review_rejected. It is
+// therefore NOT log-safe — callers build it from suppressed recipient lists and
+// from %v of arbitrary compose/validation errors, which routinely embed a
+// recipient address (see internal/outbound.platform "invalid To address: %v").
+// The redaction belongs here, at the log sink, not at the source: the two
+// log.Printf calls below carry reason_len only. Operators recover the exact
+// reason from the message row keyed by the message id already on the line.
 func (w *Worker) autoReject(ctx context.Context, messageID, reason string) {
+	reasonLen := utf8.RuneCountInString(reason)
 	rejected, err := w.store.ExpireReject(ctx, messageID, reason)
 	if err != nil {
 		if err == identity.ErrNotPendingApproval {
@@ -574,12 +587,12 @@ func (w *Worker) autoReject(ctx context.Context, messageID, reason string) {
 		// intervenes. Tag the log line so monitors / alerting can match
 		// on it specifically — distinct from routine "[hitl-worker]"
 		// noise.
-		log.Printf("[hitl-stuck] message=%s reason=%q reject_error=%v ACTION=needs_manual_intervention",
-			messageID, reason, err)
+		log.Printf("[hitl-stuck] message=%s reason_len=%d reject_error=%v ACTION=needs_manual_intervention",
+			messageID, reasonLen, err)
 		return
 	}
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s reason=%q auto_rejected=true",
-		rejected.ID, rejected.Type, rejected.Status, rejected.AgentID, reason)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s reason_len=%d auto_rejected=true",
+		rejected.ID, rejected.Type, rejected.Status, rejected.AgentID, reasonLen)
 	w.emitOutboundRejected(ctx, rejected, reason)
 }
 

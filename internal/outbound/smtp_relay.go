@@ -72,8 +72,14 @@ func (r *SMTPRelay) SendWithEnvelopeContext(ctx context.Context, envelopeFrom st
 			return "", lastErr
 		}
 		if attempt < len(smtpRetryBackoffs) {
-			log.Printf("[smtp-relay] transient error sending to recipient_count=%d recipient_domains=%v (attempt %d/%d), retrying in %s: %v",
-				len(recipients), logredact.AddressDomains(recipients), attempt+1, len(smtpRetryBackoffs)+1, smtpRetryBackoffs[attempt], lastErr)
+			// lastErr is an upstream MTA response and cannot be perfectly
+			// sanitized: rejections routinely quote the recipient back at us
+			// ("550 5.1.1 <bob@example.com>: user unknown"), which would
+			// otherwise defeat the recipient redaction on this same line. Cap
+			// it so at most a bounded slice of provider text is retained; the
+			// full error still reaches the caller and the message row.
+			log.Printf("[smtp-relay] transient error sending to recipient_count=%d recipient_domains=%v (attempt %d/%d), retrying in %s: %s",
+				len(recipients), logredact.AddressDomains(recipients), attempt+1, len(smtpRetryBackoffs)+1, smtpRetryBackoffs[attempt], logredact.Truncate(lastErr.Error(), 200))
 			select {
 			case <-time.After(smtpRetryBackoffs[attempt]):
 			case <-ctx.Done():

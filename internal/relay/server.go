@@ -253,19 +253,27 @@ func (s *session) Mail(from string, opts *smtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	// `to` is an address in OUR agent namespace (the tracing key) — keep it in
-	// full; the external sender is reduced to its domain.
-	log.Printf("[%s] [%s] RCPT TO: %s", s.id, logredact.AddressDomain(s.from), to)
+	// INVARIANT: an UNRESOLVED `to` is never logged in full. This listener is
+	// open to the internet and RCPT runs before any authentication, so `to` is
+	// at this point an arbitrary attacker-chosen string — anyone can
+	// `RCPT TO:<victim@gmail.com>` and inject a third party's address into the
+	// shipped logs. Only after resolveAgent succeeds is `to` known to be an
+	// address in OUR agent namespace, and only then is it logged in full as the
+	// tracing key. Until then: domain only.
+	log.Printf("[%s] [%s] RCPT TO: %s", s.id, logredact.AddressDomain(s.from), logredact.AddressDomain(to))
 
 	// Reject unknown or unverified recipients at SMTP level.
 	// The sender's mail server will generate a bounce notification.
 	ctx := context.Background()
 	agent, err := s.relay.resolveAgent(ctx, to)
 	if err != nil {
-		log.Printf("[%s] [%s] rejecting %s: no agent found", s.id, logredact.AddressDomain(s.from), to)
+		// Still unresolved — an arbitrary probe address, so still domain only.
+		log.Printf("[%s] [%s] rejecting %s: no agent found", s.id, logredact.AddressDomain(s.from), logredact.AddressDomain(to))
 		s.relay.recordSMTPInbound("rejected_unknown_recipient", 0)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not found"}
 	}
+	// Past this point `to` resolved to a real agent row: it is ours, and the
+	// full address is the tracing key operators need.
 	if !agent.DomainVerified {
 		log.Printf("[%s] [%s] rejecting %s: domain not verified", s.id, logredact.AddressDomain(s.from), to)
 		s.relay.recordSMTPInbound("rejected_unverified_domain", 0)

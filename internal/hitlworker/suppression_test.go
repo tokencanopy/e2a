@@ -61,14 +61,12 @@ func TestWorkerAutoApproveAsync_SuppressedRecipientAutoRejected(t *testing.T) {
 		t.Errorf("status = %q, want %q (resolved via the existing rejected/expired lifecycle)",
 			status, identity.MessageStatusReviewExpiredRejected)
 	}
-	// Domains only: autoReject logs this string verbatim (reason=%q), so the
-	// reason must identify the suppressed recipient by domain, never by full
-	// external address (internal/logredact policy).
-	if !strings.Contains(reason, "suppression") || !strings.Contains(reason, "external.test") {
-		t.Errorf("rejection_reason = %q, want an explicit suppression reason naming the recipient domain", reason)
-	}
-	if strings.Contains(reason, "bob@") {
-		t.Errorf("rejection_reason = %q must not carry the full external address — it flows into shipped logs", reason)
+	// The reason is customer-facing (stored on the message row, returned by the
+	// HITL API, emitted in email.review_rejected), so it must name the exact
+	// suppressed recipient — the owner's own recipient, and ambiguous by domain
+	// alone. Log-side redaction lives in autoReject (reason_len only), not here.
+	if !strings.Contains(reason, "suppression") || !strings.Contains(reason, "bob@external.test") {
+		t.Errorf("rejection_reason = %q, want an explicit suppression reason naming the address", reason)
 	}
 }
 
