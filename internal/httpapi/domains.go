@@ -32,10 +32,31 @@ type DNSRecord struct {
 	Status   string `json:"status" doc:"Persisted verification state of this DNS record — the stored domain state, updated when verification checks and the SES reconciler run, NOT a live DNS probe result. Open set; tolerate unknown values. Known values: verified (record confirmed), pending (not yet confirmed — awaiting publish/propagation or an SES result), missing (documented for forward compatibility; not currently emitted), failed (verification failed, or pending exceeded its TTL). Inbound records (ownership, inbound_mx) become verified once inbound verification passes, which requires BOTH the ownership TXT and the inbound MX. Sending records reflect their own SES axis: the dkim record follows the DKIM axis, while mail_from_mx and mail_from_spf follow the custom MAIL FROM axis, so a domain with working DKIM but a broken MAIL FROM (or the reverse) shows exactly which record to fix rather than failing all three. Before SES has reported a per-axis result (pre-provision rows) the sending records fall back to the all-or-nothing sending_status rollup; consult sending_error for the failure reason. The domain-level sending_status field remains the all-or-nothing rollup summary. POST /v1/domains/{domain}/verify reports the LIVE probe outcome for the same records in probe vocabulary (found/missing/deferred/mismatch) — persisted state and live probe outcome are deliberately distinct axes; do not map one vocabulary onto the other."`
 }
 
+// DomainCapabilities is the per-axis rollup of what a domain can actually do:
+// receive mail (inbound) and send mail as its own address (outbound). The two
+// axes are already independent in the data model — inbound is proven by the
+// ownership TXT plus the inbound MX, while outbound is the async SES sending
+// identity (DKIM + custom MAIL FROM) that the reconciler drives on its own
+// schedule — and they are already reported separately per DNS record.
+//
+// Derived, never stored: `inbound` restates `verified` and `outbound` restates
+// the `sending_status` rollup, so this object cannot drift from them. It exists
+// so the two axes have one home whose name stays accurate as they diverge; the
+// legacy `verified` boolean names only the inbound axis while reading as though
+// it covered the domain as a whole.
+type DomainCapabilities struct {
+	Inbound  string `json:"inbound" doc:"Whether this domain can RECEIVE mail — the inbound axis. Restates the legacy verified boolean: verified once inbound verification has passed (which requires BOTH the ownership TXT and the inbound MX), pending otherwise. Open set; tolerate unknown values. Known values: verified, pending, none, failed — only verified and pending are currently emitted; the others are documented for forward compatibility."`
+	Outbound string `json:"outbound" doc:"Whether agents on this domain can SEND as their own address — the outbound axis. Restates the domain-level sending_status rollup over the async SES sending identity (DKIM + custom MAIL FROM). Open set; tolerate unknown values. Known values: none (not provisioned), pending (provisioning, or awaiting DNS publish/propagation), verified (agents send as their own address, DKIM-aligned), failed (consult sending_error). Independent of inbound: a domain can be outbound-pending while inbound is verified, and the per-record statuses in dns_records show which record to fix."`
+}
+
 type DomainView struct {
-	Domain            string `json:"domain"`
-	Verified          bool   `json:"verified"`
-	VerificationToken string `json:"verification_token"`
+	Domain   string `json:"domain"`
+	Verified bool   `json:"verified"`
+	// Capabilities restates `verified` (inbound) and `sending_status` (outbound)
+	// as one per-axis object. Prefer it over reading those two fields separately:
+	// it is the surface that stays accurate as the axes diverge.
+	Capabilities      DomainCapabilities `json:"capabilities"`
+	VerificationToken string             `json:"verification_token"`
 	// DNSRecords is the unified, purpose-tagged set of records the customer must
 	// publish. ALL applicable records are returned at register time (they are
 	// deterministic), so onboarding is a single paste — sending records do not
@@ -163,8 +184,14 @@ func (s *Server) domainView(d *identity.Domain) DomainView {
 	}
 
 	return DomainView{
-		Domain:               d.Domain,
-		Verified:             d.Verified,
+		Domain:   d.Domain,
+		Verified: d.Verified,
+		// Reuses the same two locals the DNS records are stamped from, so the
+		// object can never disagree with dns_records[].status or the rollup.
+		Capabilities: DomainCapabilities{
+			Inbound:  inboundStatus,
+			Outbound: sendingStatus,
+		},
 		VerificationToken:    d.VerificationToken,
 		DNSRecords:           records,
 		CreatedAt:            d.CreatedAt,

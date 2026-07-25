@@ -1062,6 +1062,19 @@ components:
         - sending_status
       type: object
       x-stability-level: beta
+    DomainCapabilities:
+      additionalProperties: true
+      properties:
+        inbound:
+          description: "Whether this domain can RECEIVE mail — the inbound axis. Restates the legacy verified boolean: verified once inbound verification has passed (which requires BOTH the ownership TXT and the inbound MX), pending otherwise. Open set; tolerate unknown values. Known values: verified, pending, none, failed — only verified and pending are currently emitted; the others are documented for forward compatibility."
+          type: string
+        outbound:
+          description: "Whether agents on this domain can SEND as their own address — the outbound axis. Restates the domain-level sending_status rollup over the async SES sending identity (DKIM + custom MAIL FROM). Open set; tolerate unknown values. Known values: none (not provisioned), pending (provisioning, or awaiting DNS publish/propagation), verified (agents send as their own address, DKIM-aligned), failed (consult sending_error). Independent of inbound: a domain can be outbound-pending while inbound is verified, and the per-record statuses in dns_records show which record to fix."
+          type: string
+      required:
+        - inbound
+        - outbound
+      type: object
     DomainSendingFailedData:
       additionalProperties: true
       properties:
@@ -1115,6 +1128,8 @@ components:
         agent_count:
           format: int64
           type: integer
+        capabilities:
+          $ref: "#/components/schemas/DomainCapabilities"
         created_at:
           format: date-time
           type: string
@@ -1147,6 +1162,7 @@ components:
       required:
         - domain
         - verified
+        - capabilities
         - verification_token
         - dns_records
         - created_at

@@ -9,12 +9,16 @@ import {
 } from "../../../components/onboarding/api";
 import type {
   DomainInfo,
-  DomainSendingStatus,
+  DomainCapabilityStatus,
   DNSRecord,
   DNSRecordPurpose,
   DNSRecordStatus,
   VerifyDomainResponse,
 } from "../../../components/onboarding/types";
+import {
+  canReceive,
+  outboundCapability,
+} from "../../../components/onboarding/state";
 import { track } from "../../../components/onboarding/analytics";
 
 // Per-purpose display metadata. `group` decides whether a record lands in the
@@ -132,7 +136,7 @@ function RecordStatusChip({ status }: { status: DNSRecordStatus }) {
 function SendingStatusChip({
   status,
 }: {
-  status: DomainSendingStatus | undefined;
+  status: DomainCapabilityStatus | undefined;
 }) {
   if (status === "verified")
     return (
@@ -149,6 +153,35 @@ function SendingStatusChip({
       </Chip>
     );
   return <Chip tone="info">Verifying…</Chip>;
+}
+
+// Header chip for the OUTBOUND axis, so a domain's send capability is legible
+// without expanding the DNS section — the two axes are independent, and a domain
+// can be inbound-verified while outbound is still pending or has failed.
+//
+// Deliberately worded differently from SendingStatusChip (the rollup chip inside
+// the DNS section): both can be on screen at once, and distinct copy keeps them
+// individually addressable rather than rendering the same string twice.
+function OutboundCapabilityChip({
+  status,
+}: {
+  status: DomainCapabilityStatus;
+}) {
+  if (status === "verified")
+    return (
+      <Chip tone="success">
+        <Dot tone="success" />
+        Outbound ready
+      </Chip>
+    );
+  if (status === "failed")
+    return (
+      <Chip tone="danger">
+        <Dot tone="danger" />
+        Outbound failed
+      </Chip>
+    );
+  return <Chip tone="info">Outbound pending</Chip>;
 }
 
 // One DNS record row: a type badge + purpose label + status chip, then the
@@ -248,6 +281,16 @@ export function DomainCard({
     (r) => purposeMeta(r.purpose).group === "sending",
   );
 
+  // Both capability axes, read through the helpers so they prefer the backend's
+  // `capabilities` object and fall back to the legacy verified/sending_status
+  // pair. The outbound chip appears only when the sending feature is live
+  // server-side — detected by the presence of the deterministic mail_from rows,
+  // the same gate the sending section below uses — so a deployment with sending
+  // off renders exactly as it did before.
+  const inboundReady = canReceive(domain);
+  const outbound = outboundCapability(domain);
+  const sendingFeatureLive = sendingRecords.length > 0;
+
   const handleVerify = async () => {
     setVerifyError("");
     setVerifying(true);
@@ -321,10 +364,11 @@ export function DomainCard({
             >
               {domain.domain}
             </code>
-            <Chip tone={domain.verified ? "success" : "warn"}>
-              <Dot tone={domain.verified ? "success" : "warn"} />
-              {domain.verified ? "Verified" : "Unverified"}
+            <Chip tone={inboundReady ? "success" : "warn"}>
+              <Dot tone={inboundReady ? "success" : "warn"} />
+              {inboundReady ? "Verified" : "Unverified"}
             </Chip>
+            {sendingFeatureLive && <OutboundCapabilityChip status={outbound} />}
           </div>
           <p
             className="text-[12px]"
@@ -359,7 +403,7 @@ export function DomainCard({
           </p>
         </div>
         <div className="flex gap-2 shrink-0 flex-wrap">
-          {domain.verified ? (
+          {inboundReady ? (
             <a
               href={`/get-started?domain=${encodeURIComponent(domain.domain)}`}
               className="text-[12px] px-3 py-1.5 font-medium transition"
@@ -520,7 +564,7 @@ export function DomainCard({
                 >
                   Outbound sending
                 </p>
-                <SendingStatusChip status={domain.sending_status} />
+                <SendingStatusChip status={outbound} />
               </div>
               <p className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
                 Publish these so mail sends as{" "}
@@ -528,7 +572,7 @@ export function DomainCard({
                 “via e2a”. The DKIM record above is also required.
               </p>
 
-              {domain.sending_status === "failed" && domain.sending_error && (
+              {outbound === "failed" && domain.sending_error && (
                 <div
                   className="p-3 text-[12px]"
                   style={{
@@ -552,7 +596,7 @@ export function DomainCard({
             </div>
           )}
 
-          {!domain.verified && (
+          {!inboundReady && (
             <div
               className="p-3 text-[12px]"
               style={{
