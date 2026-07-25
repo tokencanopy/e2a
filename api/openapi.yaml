@@ -4223,7 +4223,9 @@ components:
         next_action_at:
           description: Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.
           format: date-time
-          type: string
+          type:
+            - string
+            - "null"
         stage:
           description: Set the outreach stage. Omit to leave unchanged.
           maxLength: 128

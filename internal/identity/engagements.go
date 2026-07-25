@@ -22,6 +22,7 @@ var ErrEngagementNotFound = errors.New("engagement not found")
 // Everything else is derived by e2a from real message activity and is read-only
 // to clients; a caller cannot fake a reply.
 type ContactEngagement struct {
+	ID         string `json:"id"`
 	AgentEmail string `json:"agent_email"`
 	Address    string `json:"address"`
 	ContactID  string `json:"contact_id"`
@@ -82,7 +83,7 @@ func NewEngagementID() string { return "eng_" + generateID() }
 // an agent-scoped one both mean "cannot send", and the agent-scoped row wins
 // when reporting the reason because it is the more specific fact.
 const engagementColumns = `
-	ce.agent_id, ce.address, ce.contact_id,
+	ce.id, ce.agent_id, ce.address, ce.contact_id,
 	ce.stage, ce.next_action_at, ce.metadata,
 	ce.first_outbound_at, ce.last_outbound_at, ce.last_inbound_at,
 	ce.outbound_count, ce.inbound_count, ce.last_conversation_id,
@@ -104,7 +105,7 @@ func scanEngagement(row pgx.Row) (ContactEngagement, error) {
 	var e ContactEngagement
 	var meta, contactMeta []byte
 	if err := row.Scan(
-		&e.AgentEmail, &e.Address, &e.ContactID,
+		&e.ID, &e.AgentEmail, &e.Address, &e.ContactID,
 		&e.Stage, &e.NextActionAt, &meta,
 		&e.FirstOutboundAt, &e.LastOutboundAt, &e.LastInboundAt,
 		&e.OutboundCount, &e.InboundCount, &e.LastConversationID,
