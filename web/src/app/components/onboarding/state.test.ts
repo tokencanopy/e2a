@@ -6,6 +6,9 @@ import {
   isValidSlug,
   isValidDomain,
   isValidLocalPart,
+  inboundCapability,
+  outboundCapability,
+  canReceive,
 } from "./state";
 import type { DomainInfo } from "./types";
 import type { DashboardAgent } from "../types";
@@ -54,6 +57,73 @@ function makeAgent(overrides: Partial<DashboardAgent> = {}): DashboardAgent {
 }
 
 // ── deriveChecklistStep ──────────────────────────────────
+
+// The capability readers are the single seam between the UI and the two
+// independent axes. They must prefer the backend's `capabilities` object, fall
+// back to the legacy verified/sending_status pair when it is absent, and pass
+// unknown values through untouched (both axes are documented open sets).
+describe("capability readers", () => {
+  it("prefer capabilities over the legacy fields", () => {
+    const d = makeDomain({
+      verified: false,
+      sending_status: "none",
+      capabilities: { inbound: "verified", outbound: "failed" },
+    });
+    expect(inboundCapability(d)).toBe("verified");
+    expect(outboundCapability(d)).toBe("failed");
+    expect(canReceive(d)).toBe(true);
+  });
+
+  it("fall back to verified/sending_status when capabilities is absent", () => {
+    const unverified = makeDomain();
+    expect(inboundCapability(unverified)).toBe("pending");
+    expect(outboundCapability(unverified)).toBe("none");
+    expect(canReceive(unverified)).toBe(false);
+
+    const ready = makeDomain({ verified: true, sending_status: "verified" });
+    expect(inboundCapability(ready)).toBe("verified");
+    expect(outboundCapability(ready)).toBe("verified");
+    expect(canReceive(ready)).toBe(true);
+  });
+
+  it("pass unknown open-set values through unchanged", () => {
+    const d = makeDomain({
+      capabilities: {
+        inbound: "provisioning" as never,
+        outbound: "provisioning" as never,
+      },
+    });
+    expect(inboundCapability(d)).toBe("provisioning");
+    expect(outboundCapability(d)).toBe("provisioning");
+    // Anything that is not exactly "verified" cannot receive — fail closed.
+    expect(canReceive(d)).toBe(false);
+  });
+
+  it("treat the axes as independent in both directions", () => {
+    const sendOnly = makeDomain({
+      capabilities: { inbound: "pending", outbound: "verified" },
+    });
+    expect(canReceive(sendOnly)).toBe(false);
+    expect(outboundCapability(sendOnly)).toBe("verified");
+
+    const receiveOnly = makeDomain({
+      capabilities: { inbound: "verified", outbound: "none" },
+    });
+    expect(canReceive(receiveOnly)).toBe(true);
+    expect(outboundCapability(receiveOnly)).toBe("none");
+  });
+
+  // deriveChecklistStep reads the inbound axis through canReceive, so a domain
+  // whose capabilities say inbound-verified advances even if the legacy boolean
+  // has not caught up.
+  it("drive checklist derivation off the inbound axis", () => {
+    const d = makeDomain({
+      verified: false,
+      capabilities: { inbound: "verified", outbound: "none" },
+    });
+    expect(deriveChecklistStep(d, [])).toBe("domain_verified");
+  });
+});
 
 describe("deriveChecklistStep", () => {
   it("returns domain_added for unverified domain with no agents", () => {
