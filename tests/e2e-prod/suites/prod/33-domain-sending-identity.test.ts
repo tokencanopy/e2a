@@ -237,10 +237,15 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
       });
       const evt = events.body?.items?.find((e) => (e.data as { domain?: string }).domain === domain);
       if (evt) {
-        info(SUITE, "sending-verified-event-confirmed", `domain.sending_verified event observed for ${domain} — remove its event_coverage_gate.py ALLOWLIST entry`);
+        info(SUITE, "sending-verified-event-confirmed", `domain.sending_verified event observed for ${domain}`);
         verifiedEventTypes.add("domain.sending_verified");
       } else {
-        warn(SUITE, "sending-verified-event-not-observed", `sending_status reached verified but no matching domain.sending_verified event was found in listEvents for ${domain} — leaving the allowlist entry in place pending investigation`);
+        // domain.sending_verified is no longer allowlisted in
+        // event_coverage_gate.py — this suite is what verifies it. So not
+        // finding the event here is not merely informational: the gate will
+        // report it UNVERIFIED and fail the run. Said plainly so the gate
+        // failure that follows is not a surprise.
+        warn(SUITE, "sending-verified-event-not-observed", `sending_status reached verified but no domain.sending_verified event was found in listEvents for ${domain} — the event coverage gate will FAIL, since this suite is its only source`);
       }
     } else if (finalStatus === "failed") {
       const finalDomain = await client.get<DomainView>(`/v1/domains/${domain}`);
