@@ -142,8 +142,9 @@ Templates are beta: shapes may change before they're declared stable. Only `send
 1. `register_domain` with the FQDN — returns MX + TXT records and an unverified domain row.
 2. Hand the records to the user (or to a DNS-provider MCP — Cloudflare, Route 53, etc. — if one is loaded; call its `create_dns_record`-style tool with the returned values).
 3. Wait. DNS propagation is asynchronous — minutes typically, occasionally hours.
-4. `verify_domain` with the same FQDN. If it returns `verified: true`, the domain is live. If still false, the response shows what DNS state was resolved so the user can debug. Retry as needed.
+4. `verify_domain` with the same FQDN. If it returns `verified: true`, the domain can RECEIVE mail. If still false, the response shows what DNS state was resolved so the user can debug. Retry as needed.
 5. Once verified, agents can be created on (or moved to) that domain.
+6. Sending as your own address is a **separate axis** that verifies asynchronously afterwards. Poll `get_domain` until `capabilities.outbound` is `verified` before promising the user mail will send from `@their-domain` — until then outbound still goes out as "… via e2a". `capabilities.inbound` is the receive axis (it restates `verified`); the two are independent, so don't infer one from the other.
 
 ### Receive mail in your own backend (webhooks)
 

@@ -83,6 +83,7 @@ __all__ = [
     "DeliveryStatusJSON",
     "DeploymentInfoView",
     "Domain",
+    "DomainCapabilities",
     "DomainSendingFailedData",
     "DomainSendingVerifiedData",
     "DomainSuppressionAddedData",
@@ -264,6 +265,7 @@ from e2a.v1.generated.models.delete_webhook_result import DeleteWebhookResult as
 from e2a.v1.generated.models.delivery_status_json import DeliveryStatusJSON as DeliveryStatusJSON
 from e2a.v1.generated.models.deployment_info_view import DeploymentInfoView as DeploymentInfoView
 from e2a.v1.generated.models.domain import Domain as Domain
+from e2a.v1.generated.models.domain_capabilities import DomainCapabilities as DomainCapabilities
 from e2a.v1.generated.models.domain_sending_failed_data import DomainSendingFailedData as DomainSendingFailedData
 from e2a.v1.generated.models.domain_sending_verified_data import DomainSendingVerifiedData as DomainSendingVerifiedData
 from e2a.v1.generated.models.domain_suppression_added_data import DomainSuppressionAddedData as DomainSuppressionAddedData

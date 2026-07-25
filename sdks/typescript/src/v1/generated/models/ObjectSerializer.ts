@@ -43,6 +43,7 @@ export * from '../models/DeleteWebhookResult.js';
 export * from '../models/DeliveryStatusJSON.js';
 export * from '../models/DeploymentInfoView.js';
 export * from '../models/Domain.js';
+export * from '../models/DomainCapabilities.js';
 export * from '../models/DomainSendingFailedData.js';
 export * from '../models/DomainSendingVerifiedData.js';
 export * from '../models/DomainSuppressionAddedData.js';
@@ -198,6 +199,7 @@ import { DeleteWebhookResult } from '../models/DeleteWebhookResult.js';
 import { DeliveryStatusJSON } from '../models/DeliveryStatusJSON.js';
 import { DeploymentInfoView } from '../models/DeploymentInfoView.js';
 import { Domain } from '../models/Domain.js';
+import { DomainCapabilities } from '../models/DomainCapabilities.js';
 import { DomainSendingFailedData } from '../models/DomainSendingFailedData.js';
 import { DomainSendingVerifiedData } from '../models/DomainSendingVerifiedData.js';
 import { DomainSuppressionAddedData } from '../models/DomainSuppressionAddedData.js';
@@ -394,6 +396,7 @@ let typeMap: {[index: string]: any} = {
     "DeliveryStatusJSON": DeliveryStatusJSON,
     "DeploymentInfoView": DeploymentInfoView,
     "Domain": Domain,
+    "DomainCapabilities": DomainCapabilities,
     "DomainSendingFailedData": DomainSendingFailedData,
     "DomainSendingVerifiedData": DomainSendingVerifiedData,
     "DomainSuppressionAddedData": DomainSuppressionAddedData,

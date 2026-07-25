@@ -28,6 +28,26 @@ export type ChecklistStep =
  *  unknown values. */
 export type DomainSendingStatus = "none" | "pending" | "verified" | "failed";
 
+/** One axis of `DomainInfo.capabilities`. Documented OPEN set — tolerate
+ *  unknown values (render generically, never crash). Same vocabulary on both
+ *  axes; today `inbound` only ever emits verified/pending. */
+export type DomainCapabilityStatus = "none" | "pending" | "verified" | "failed";
+
+/** Per-axis rollup of what a domain can actually do, mirroring the backend
+ *  DomainCapabilities. `inbound` = can it RECEIVE mail (ownership TXT + inbound
+ *  MX); `outbound` = can agents on it SEND as their own address (the async SES
+ *  sending identity). The axes are provisioned on different schedules and are
+ *  independent in both directions — never treat one as implying the other.
+ *
+ *  Restates the legacy `verified` (inbound) and `sending_status` (outbound)
+ *  fields. Prefer this via inboundCapability()/outboundCapability() in
+ *  ./state, which fall back to the legacy fields when a server predating
+ *  `capabilities` omits it. */
+export type DomainCapabilities = {
+  inbound: DomainCapabilityStatus;
+  outbound: DomainCapabilityStatus;
+};
+
 /** What a DNS record is for. Documented OPEN set — tolerate unknown values
  *  (a future record kind should render generically, not crash the card).
  *  ownership/inbound_mx are inbound; dkim/mail_from_* are sending. */
@@ -59,6 +79,10 @@ export type DNSRecord = {
 export type DomainInfo = {
   domain: string;
   verified: boolean;
+  // Per-axis rollup of inbound (receive) vs outbound (send-as-own-address).
+  // Optional: a server predating the field omits it, so read it through
+  // inboundCapability()/outboundCapability() rather than directly.
+  capabilities?: DomainCapabilities;
   verification_token: string;
   // Unified, purpose-tagged record set. ALL applicable records (inbound +
   // sending) are returned at register time — they are deterministic — so the

@@ -1,5 +1,39 @@
 # Changelog
 
+## 5.4.0
+
+Additive only. Every 5.3.0 call site keeps compiling and behaving identically.
+
+### Added
+- **`wait: "sent"` on `messages.send` / `.reply` / `.forward`** via the new
+  exported `SendOptions` (a `RequestOptions` superset). The request is held
+  server-side until the asynchronously delivered message reaches a
+  terminal-or-held state, or at most 20 seconds elapse — the frozen contract
+  ceiling; the server currently returns in ~15s — and then returns the observed
+  state. On timeout the result stays `status: "accepted"`, so always branch on
+  the result's `status`, never on the HTTP code. Default is unchanged: no wait.
+- **`agents.delete(email, { permanent: true })`** — delete an agent
+  irreversibly instead of moving it to the 30-day trash. Accepts both live and
+  already-trashed agents. `agents.delete(email)` keeps its 5.3.0 meaning
+  (trash, restorable via `agents.restore(email)`).
+- **`apiKeys.create(body, { idempotencyKey })`** — the create call now accepts
+  a request-scoped idempotency key. The server replays the same credential for
+  a keyed retry, so an ambiguous transport failure can be retried without
+  minting a second key.
+- **`DomainCapabilities` on `DomainView.capabilities`** — per-axis domain
+  readiness, splitting the two independent axes that the legacy `verified`
+  boolean and `sendingStatus` rollup expressed separately. `inbound` restates
+  whether the domain can receive mail (`verified` | `pending` — there is
+  deliberately no inbound failure state; a missing or wrong MX stays `pending`).
+  `outbound` restates whether agents can send as their own address (`none` |
+  `pending` | `verified` | `failed`, with detail in `sendingError`). Both are
+  open string sets — tolerate unknown values.
+
+### Fixed
+- **HTTP 410 now maps to `E2ANotFoundError`** in the status fallback, matching
+  the family the `gone` error code already took in the code table. Previously a
+  410 carrying an unrecognized code degraded to the base `E2AError`.
+
 ## 5.3.0
 
 ### Added

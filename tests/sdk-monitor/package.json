@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "description": "Node-runtime dependencies for tests/sdk-monitor's ts_sdk and cli interfaces — pinned to the exact PUBLISHED npm packages so a broken publish surfaces here, never workspace source. Never add a path/workspace dependency on ../../sdks/typescript or ../../cli.",
   "dependencies": {
-    "@e2a/sdk": "5.3.0",
-    "@e2a/cli": "2.0.0"
+    "@e2a/sdk": "5.4.0",
+    "@e2a/cli": "2.1.0"
   }
 }
