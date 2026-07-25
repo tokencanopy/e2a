@@ -2,6 +2,7 @@ package logredact
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -66,35 +67,17 @@ func TestNoSubjectContentInLogFormats(t *testing.T) {
 	root := moduleRoot(t)
 
 	checked := 0
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// Only Go source can call log; skip trees that never hold it.
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "web", "sdks", "docs":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		raw, readErr := os.ReadFile(path)
+	for _, rel := range guardedGoFiles(t, root) {
+		raw, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if readErr != nil {
-			return readErr
+			t.Fatalf("read %s: %v", rel, readErr)
 		}
 		checked++
 		if !subjectContentPattern.Match(raw) {
-			return nil
+			continue
 		}
-		if _, ok := subjectLogPatternAllowlist[filepath.ToSlash(rel)]; ok {
-			return nil
+		if _, ok := subjectLogPatternAllowlist[rel]; ok {
+			continue
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
 			if subjectLogViolation(line) {
@@ -106,13 +89,9 @@ func TestNoSubjectContentInLogFormats(t *testing.T) {
 					rel, i+1, strings.TrimSpace(line))
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk module source: %v", err)
 	}
 	if checked == 0 {
-		t.Fatal("scanned no Go source files — the module-root discovery or the walk is wrong")
+		t.Fatal("scanned no Go source files — the module-root discovery or the file listing is wrong")
 	}
 
 	// Prune the allowlist when a file stops carrying the pattern, so it stays
@@ -175,6 +154,76 @@ func TestSubjectLogViolationDiscrimination(t *testing.T) {
 			t.Errorf("guard false-positived on a non-log line: %s", line)
 		}
 	}
+}
+
+// guardedGoFiles returns the module-relative, non-test Go sources this guard
+// must check: the ones git TRACKS.
+//
+// Walking the filesystem instead scans whatever happens to sit under the module
+// root. This repo's worktree workflow puts checked-out branches in
+// .claude/worktrees/ and .worktrees/ (both gitignored), which added 5,548 .go
+// files against 550 tracked — and the guard then reported OTHER branches' code
+// as violations of this working tree. CI never caught it because a fresh
+// checkout has no worktrees, so it only ever failed locally, for every agent
+// using a worktree.
+//
+// Tracked files are also the correct scope on the merits: the rule governs
+// COMMITTED source. Falls back to a filesystem walk where git is unavailable
+// (source tarball, no VCS), there skipping nested checkouts by their .git marker.
+func guardedGoFiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	// --cached --others --exclude-standard: tracked files PLUS untracked ones that
+	// are not gitignored. Tracked alone would miss a violation in a brand-new file
+	// the author has not committed yet; --exclude-standard is what drops the
+	// gitignored worktree trees.
+	if out, err := exec.Command("git", "-C", root, "ls-files", "-z",
+		"--cached", "--others", "--exclude-standard", "*.go").Output(); err == nil {
+		var files []string
+		seen := map[string]bool{}
+		for _, rel := range strings.Split(string(out), "\x00") {
+			if rel == "" || strings.HasSuffix(rel, "_test.go") || seen[rel] {
+				continue
+			}
+			seen[rel] = true
+			files = append(files, rel)
+		}
+		return files
+	}
+
+	var files []string
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Only Go source can call log; skip trees that never hold it.
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "web", "sdks", "docs":
+				return filepath.SkipDir
+			}
+			// A nested checkout or git worktree carries its own .git entry. Its
+			// contents belong to a different tree and must not be attributed here.
+			if path != root {
+				if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		t.Fatalf("walk module source: %v", err)
+	}
+	return files
 }
 
 // moduleRoot walks up from the test's working directory to the directory
