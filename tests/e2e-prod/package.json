@@ -10,6 +10,7 @@
     "coverage:gate": "python3 coverage_gate.py",
     "coverage:gate:mcp": "python3 mcp_coverage_gate.py",
     "coverage": "npm test; npm run coverage:gate",
+    "report:gate": "node consolidate.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

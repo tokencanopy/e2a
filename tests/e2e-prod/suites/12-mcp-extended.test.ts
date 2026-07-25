@@ -139,10 +139,8 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
   const s = await apiClient.post<{ message_id: string }>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
     body: { to: [SINK_EMAIL], subject: uniqueSubject("mcp pending"), text: "x" },
   });
-  if (s.status !== 202 || !s.body?.message_id) {
-    info(SUITE, "pending-setup-failed", `send returned ${s.status}, can't probe pending tools`);
-    return;
-  }
+  assert.equal(s.status, 202, `pending setup send expected 202: ${s.raw.slice(0, 200)}`);
+  assert.ok(s.body?.message_id, "pending setup send must return a message_id — a missing fixture is a broken test, not a skip");
   const id = s.body.message_id;
 
   // list_reviews — should include our queued msg. The MCP
@@ -154,9 +152,10 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
     fail(SUITE, "list-pending-error", `list_reviews isError: ${extractText(lp).slice(0, 200)}`);
   } else {
     const text = extractText(lp);
-    if (!text.includes(id)) {
-      info(SUITE, "list-pending-missing-msg", `queued ${id} not in list_reviews response (may be paginated or filtered)`);
-    }
+    assert.ok(
+      text.includes(id),
+      `queued ${id} must appear in list_reviews (the MCP tool exposes no pagination or filter that could hide it)`,
+    );
   }
 
   // get_review.
@@ -166,9 +165,7 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
   } else {
     const parsed = JSON.parse(extractText(gp)) as { id?: string; message_id?: string; status?: string };
     const returnedId = parsed.id ?? parsed.message_id;
-    if (returnedId !== id) {
-      info(SUITE, "get-pending-id-mismatch", `get_review returned id=${returnedId}, expected ${id}`);
-    }
+    assert.equal(returnedId, id, `get_review returned id=${returnedId}, expected ${id}`);
   }
 
   // Cleanup
@@ -246,9 +243,7 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
 
   // Bogus id — should isError.
   const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}`, email: apiClient.env.primaryAgentEmail });
-  if (!r2.isError) {
-    info(SUITE, "get-msg-bogus-not-error", "get_message with bogus id did not surface as error");
-  }
+  assert.equal(r2.isError, true, "get_message with a bogus id must surface as an error");
 });
 
 test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
@@ -298,15 +293,15 @@ test("mcp-ext: cross-tool consistency — list_agents matches API surface", asyn
   const r = await callTool(mcp, "list_agents");
   const text = extractText(r);
   const mcpAgents = (JSON.parse(text) as { agents: Array<{ email: string }> }).agents.map((a) => a.email).sort();
-  const apiResp = await apiClient.get<{ agents: Array<{ email: string }> }>("/v1/agents");
-  const apiAgents = (apiResp.body?.agents ?? []).map((a) => a.email).sort();
-  if (mcpAgents.length !== apiAgents.length || JSON.stringify(mcpAgents) !== JSON.stringify(apiAgents)) {
-    info(
-      SUITE,
-      "list-agents-divergence",
-      `MCP list_agents (${mcpAgents.length}) differs from API /agents (${apiAgents.length})`,
-    );
-  } else {
-    info(SUITE, "list-agents-aligned", `MCP and API agent lists match: ${apiAgents.length} agents`);
-  }
+  // REST list envelope is Page[T] = {items, next_cursor}; the MCP envelope is
+  // {agents, next_cursor?} — deliberately different shapes (frozen MCP
+  // contract, see paginationInput in mcp/src/tools/util.ts). Compare contents.
+  const apiResp = await apiClient.get<{ items: Array<{ email: string }> }>("/v1/agents");
+  const apiAgents = (apiResp.body?.items ?? []).map((a) => a.email).sort();
+  assert.deepEqual(
+    mcpAgents,
+    apiAgents,
+    `MCP list_agents (${mcpAgents.length}) must match API /agents (${apiAgents.length})`,
+  );
+  info(SUITE, "list-agents-aligned", `MCP and API agent lists match: ${apiAgents.length} agents`);
 });

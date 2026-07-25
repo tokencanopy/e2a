@@ -4,7 +4,7 @@ import { ApiClient } from "../harness/client.ts";
 import { cleanup, track, untrack } from "../harness/cleanup.ts";
 import { HttpMcpClient, callTool } from "../harness/mcp.ts";
 import { uniqueSlug, uniqueSubject, runId, SINK_EMAIL, holdAllOutbound } from "../harness/fixtures.ts";
-import { fail, info, warn, writeReport } from "../harness/report.ts";
+import { info, warn, writeReport } from "../harness/report.ts";
 
 // MCP coverage for the domains tool family (register_domain, get_domain,
 // list_domains, verify_domain, delete_domain) and the pending-review-queue
@@ -97,10 +97,7 @@ test("mcp-domains: register_domain / get_domain / list_domains / verify_domain (
   // the afterEach/after cleanup net catches it even if a later assertion in
   // this test throws (free-plan account: 1 domain total, must not leak it).
   const reg = await callTool(mcp, "register_domain", { domain });
-  if (reg.isError) {
-    fail(SUITE, "register-domain-error", `register_domain isError: ${extractText(reg).slice(0, 200)}`);
-    return;
-  }
+  assert.equal(reg.isError, undefined, `register_domain isError: ${extractText(reg).slice(0, 200)}`);
   track("domain", domain);
   const regParsed = JSON.parse(extractText(reg)) as {
     domain?: string;

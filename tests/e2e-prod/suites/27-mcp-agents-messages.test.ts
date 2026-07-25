@@ -361,10 +361,7 @@ function attachmentFixture(): Promise<AttachmentFixture | null> {
 test("mcp-agents-msgs: get_attachment returns metadata + a short-lived download_url", async () => {
   const email = await agent();
   const fixture = await attachmentFixture();
-  if (!fixture) {
-    info(SUITE, "get-attachment-skip", "no attachment fixture available; skipping get_attachment happy path");
-    return;
-  }
+  assert.ok(fixture, "no attachment fixture available — a missing fixture is a broken test, not a reason to pass");
   const r = await callTool(mcp, "get_attachment", { message_id: fixture.messageId, attachment_index: 0, email });
   assert.equal(r.isError, undefined, `get_attachment isError: ${extractText(r).slice(0, 200)}`);
   const parsed = parseJson<{
@@ -387,10 +384,7 @@ test("mcp-agents-msgs: get_attachment returns metadata + a short-lived download_
 test("mcp-agents-msgs: get_attachment_data (legacy alias) returns inline base64 that round-trips", async () => {
   const email = await agent();
   const fixture = await attachmentFixture();
-  if (!fixture) {
-    info(SUITE, "get-attachment-data-skip", "no attachment fixture available; skipping get_attachment_data happy path");
-    return;
-  }
+  assert.ok(fixture, "no attachment fixture available — a missing fixture is a broken test, not a reason to pass");
   const r = await callTool(mcp, "get_attachment_data", { message_id: fixture.messageId, attachment_index: 0, agent_email: email });
   assert.equal(r.isError, undefined, `get_attachment_data isError: ${extractText(r).slice(0, 200)}`);
   const parsed = parseJson<{ filename?: string; content_type?: string; size_bytes?: number; data?: string }>(r);
