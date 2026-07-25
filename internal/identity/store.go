@@ -1235,25 +1235,29 @@ func (s *Store) TouchDomainLastChecked(ctx context.Context, domain, userID strin
 	return nil
 }
 
-// HasAgentsOnDomain checks whether the owned domain still has LIVE agents.
+// CountAgentsOnDomain reports how many agents still sit on the owned domain,
+// split into LIVE and TRASHED. Both block the delete, and deliberately so: the
+// FK agent_identities.registered_domain -> domains.domain is ON DELETE NO ACTION
+// (migration 001), and a trashed agent is still a row. It also still owns its
+// address for the 30-day restore window, so dropping the domain under it would
+// break restore.
 //
-// Trashed agents do not block the delete. Counting them did, and it produced a
-// dead end: deleting an agent soft-deletes it (migration 063), so a caller who
-// deleted every agent on a domain and then deleted the domain got
-// 400 domain_has_agents while list_agents showed nothing on it. The only escape
-// was permanent deletion — irreversible — which is a bad thing to force on
-// someone whose only mistake was following the documented order.
-func (s *Store) HasAgentsOnDomain(ctx context.Context, domain, userID string) (bool, error) {
-	var count int
-	err := s.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM agent_identities
-		   WHERE registered_domain = $1 AND user_id = $2 AND deleted_at IS NULL`,
+// The split exists purely so the caller can say WHICH kind is blocking. A
+// trashed agent is invisible to list_agents, so "agents exist" alone sends
+// someone hunting for agents they cannot see; naming the trash and the remedy
+// turns a dead end into a signpost.
+func (s *Store) CountAgentsOnDomain(ctx context.Context, domain, userID string) (live, trashed int, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT
+		   COUNT(*) FILTER (WHERE deleted_at IS NULL),
+		   COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)
+		 FROM agent_identities WHERE registered_domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
-	).Scan(&count)
+	).Scan(&live, &trashed)
 	if err != nil {
-		return false, err
+		return 0, 0, err
 	}
-	return count > 0, nil
+	return live, trashed, nil
 }
 
 // ErrDomainHasAgents is returned when a domain delete is blocked by existing agents.

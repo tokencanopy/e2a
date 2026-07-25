@@ -9,15 +9,16 @@ import (
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
-// Deleting an agent SOFT-deletes it (migration 063: agent_identities.deleted_at).
-// HasAgentsOnDomain counted those trashed rows, which produced a dead end for
-// anyone tidying up: delete every agent on a domain, delete the domain, get
-// 400 domain_has_agents — while list_agents shows nothing on that domain. The
-// only way out was permanent deletion, which is irreversible.
+// Both live AND trashed agents block deleting their domain, and that is
+// deliberate: the FK agent_identities.registered_domain -> domains.domain is
+// ON DELETE NO ACTION (migration 001), so Postgres refuses regardless of what
+// the app layer thinks, and a trashed agent still owns its address for the
+// 30-day restore window — dropping the domain under it would break restore.
 //
-// This is the documented teardown order ("delete agents before domains"), so
-// the guidance itself did not work.
-func TestHasAgentsOnDomain_IgnoresTrashedAgents(t *testing.T) {
+// CountAgentsOnDomain exists so the API can say WHICH kind is blocking. A
+// trashed agent does not appear in list_agents, so a generic "agents exist"
+// sends the caller hunting for agents they cannot see.
+func TestCountAgentsOnDomain_SplitsLiveFromTrashed(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
@@ -36,13 +37,12 @@ func TestHasAgentsOnDomain_IgnoresTrashedAgents(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
-	// Live agent: the domain is genuinely in use, so the delete must stay blocked.
-	has, err := store.HasAgentsOnDomain(ctx, domain, user.ID)
+	live, trashed, err := store.CountAgentsOnDomain(ctx, domain, user.ID)
 	if err != nil {
-		t.Fatalf("HasAgentsOnDomain (live): %v", err)
+		t.Fatalf("CountAgentsOnDomain (live): %v", err)
 	}
-	if !has {
-		t.Fatal("a LIVE agent on the domain must block the domain delete")
+	if live != 1 || trashed != 0 {
+		t.Fatalf("with one live agent: live=%d trashed=%d, want 1/0", live, trashed)
 	}
 
 	// Trash it — the ordinary DELETE /v1/agents/{email} path, not a purge.
@@ -50,17 +50,26 @@ func TestHasAgentsOnDomain_IgnoresTrashedAgents(t *testing.T) {
 		t.Fatalf("SoftDeleteAgent: %v", err)
 	}
 
-	has, err = store.HasAgentsOnDomain(ctx, domain, user.ID)
+	live, trashed, err = store.CountAgentsOnDomain(ctx, domain, user.ID)
 	if err != nil {
-		t.Fatalf("HasAgentsOnDomain (trashed): %v", err)
+		t.Fatalf("CountAgentsOnDomain (trashed): %v", err)
 	}
-	if has {
-		t.Fatal("a TRASHED agent must not block the domain delete — the caller sees no agents on the domain, so blocking is an unescapable dead end short of permanent deletion")
+	if live != 0 || trashed != 1 {
+		t.Fatalf("after trashing the only agent: live=%d trashed=%d, want 0/1 — the split is what lets the API say WHICH kind blocks", live, trashed)
+	}
+
+	// The delete really is still blocked, by the FK, whatever the app layer
+	// believes. This assertion catches anyone "fixing" the block by filtering
+	// deleted_at out of the pre-check: doing that does not unblock anything, it
+	// just moves the rejection into an FK-violation string match one layer down.
+	if err := store.DeleteDomain(ctx, domain, user.ID); err == nil {
+		t.Fatal("deleting a domain whose only agent is TRASHED unexpectedly succeeded — the FK is ON DELETE NO ACTION, so if this ever passes the schema changed and the error message needs revisiting")
 	}
 }
 
-// The same soft-delete filter was missing from the agent_count reported on each
-// DomainView, so a listed domain over-reported how many agents were on it.
+// The agent_count reported on each DomainView counts only LIVE agents, so it
+// agrees with what list_agents returns. Blocking is a separate question (above);
+// a displayed count that disagrees with the list is simply wrong.
 func TestListDomains_AgentCountExcludesTrashedAgents(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
@@ -75,11 +84,9 @@ func TestListDomains_AgentCountExcludesTrashedAgents(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	keep, err := store.CreateAgent(ctx, "keep@"+domain, domain, "Keep", "", "", user.ID)
-	if err != nil {
+	if _, err := store.CreateAgent(ctx, "keep@"+domain, domain, "Keep", "", "", user.ID); err != nil {
 		t.Fatalf("CreateAgent keep: %v", err)
 	}
-	_ = keep
 	trash, err := store.CreateAgent(ctx, "trash@"+domain, domain, "Trash", "", "", user.ID)
 	if err != nil {
 		t.Fatalf("CreateAgent trash: %v", err)
@@ -88,22 +95,17 @@ func TestListDomains_AgentCountExcludesTrashedAgents(t *testing.T) {
 		t.Fatalf("SoftDeleteAgent: %v", err)
 	}
 
-	countFor := func(t *testing.T) int {
-		t.Helper()
-		domains, err := store.ListDomainsByUser(ctx, user.ID, 50, time.Time{}, "")
-		if err != nil {
-			t.Fatalf("ListDomainsByUser: %v", err)
-		}
-		for _, d := range domains {
-			if d.Domain == domain {
-				return d.AgentCount
+	domains, err := store.ListDomainsByUser(ctx, user.ID, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("ListDomainsByUser: %v", err)
+	}
+	for _, d := range domains {
+		if d.Domain == domain {
+			if d.AgentCount != 1 {
+				t.Fatalf("agent_count = %d, want 1 (one live agent; the trashed one must not be counted — list_agents does not show it either)", d.AgentCount)
 			}
+			return
 		}
-		t.Fatalf("domain %s not returned by ListDomainsByUser", domain)
-		return -1
 	}
-
-	if got := countFor(t); got != 1 {
-		t.Fatalf("agent_count = %d, want 1 (one live agent; the trashed one must not be counted)", got)
-	}
+	t.Fatalf("domain %s not returned by ListDomainsByUser", domain)
 }
