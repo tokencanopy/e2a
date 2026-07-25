@@ -119,7 +119,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | `recipient_suppressed` | 422 | A recipient is on the account-wide or exact sending-agent suppression list — un-suppress or drop it. |
 | **Not found / gone** | | |
 | `not_found` | 404 | No such resource (agents, messages, webhooks, …). |
-| `attachment_not_found`, `contact_not_found`, `import_batch_not_found`, `template_not_found`, `starter_template_not_found` | 404 | The `*_not_found` family — a specific sub-resource is missing. |
+| `attachment_not_found`, `contact_not_found`, `engagement_not_found`, `import_batch_not_found`, `template_not_found`, `starter_template_not_found` | 404 | The `*_not_found` family — a specific sub-resource is missing. |
 | `gone` | 410 | The event exists but is past the 30-day retention window. |
 | **Conflict / state** | | |
 | `conflict` | 409 | Generic state conflict (e.g. redelivery to a webhook that never matched the event). |
@@ -200,10 +200,12 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `createTemplate` | `POST /v1/templates` | Templates |
 | `deleteAgentSuppression` | `DELETE /v1/agents/{email}/suppressions/{address}` | Agent suppressions |
 | `deleteContact` | `DELETE /v1/contacts/{address}` | Contacts |
+| `deleteEngagement` | `DELETE /v1/agents/{email}/contacts/{address}` | Contacts |
 | `deleteImportBatch` | `DELETE /v1/contacts/imports/{batch_id}` | Contacts |
 | `deleteTemplate` | `DELETE /v1/templates/{id}` | Templates |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
 | `getContact` | `GET /v1/contacts/{address}` | Contacts |
+| `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
 | `getReview` | `GET /v1/reviews/{id}` | Reviews |
 | `getStarterTemplate` | `GET /v1/starter-templates/{alias}` | Starter templates |
@@ -211,6 +213,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `importContacts` | `POST /v1/contacts/import` | Contacts |
 | `listAgentSuppressions` | `GET /v1/agents/{email}/suppressions` | Agent suppressions |
 | `listContacts` | `GET /v1/contacts` | Contacts |
+| `listEngagements` | `GET /v1/agents/{email}/contacts` | Contacts |
 | `listReviews` | `GET /v1/reviews` | Reviews |
 | `listStarterTemplates` | `GET /v1/starter-templates` | Starter templates |
 | `listTemplates` | `GET /v1/templates` | Templates |
@@ -218,6 +221,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `rejectReview` | `POST /v1/reviews/{id}/reject` | Reviews |
 | `updateContact` | `PATCH /v1/contacts/{address}` | Contacts |
 | `updateTemplate` | `PATCH /v1/templates/{id}` | Templates |
+| `upsertEngagement` | `PUT /v1/agents/{email}/contacts/{address}` | Contacts |
 | `validateTemplate` | `POST /v1/templates/validate` | Templates |
 
 ### Compatibility rules

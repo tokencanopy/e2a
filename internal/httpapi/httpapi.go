@@ -301,6 +301,14 @@ type Deps struct {
 	ImportContacts      func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error)
 	DeleteImportBatch   func(ctx context.Context, userID, batchID string) (deleted int, retained int, err error)
 	SuppressedAddresses func(ctx context.Context, userID string, addresses []string) ([]string, error)
+	// Per-agent outreach state. Unlike the contact capabilities above, these are
+	// reachable by an AGENT-scoped credential acting as itself — the agent runs
+	// its own outreach loop. Consent stays out of reach: suppression is only
+	// ever read through a join here.
+	UpsertEngagement func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any) (identity.ContactEngagement, bool, error)
+	GetEngagement    func(ctx context.Context, userID, agentID, address string) (identity.ContactEngagement, error)
+	ListEngagements  func(ctx context.Context, userID, agentID string, f identity.EngagementFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ContactEngagement, error)
+	DeleteEngagement func(ctx context.Context, userID, agentID, address string) (bool, error)
 	// Public managed-unsubscribe capabilities. Resolve accepts only a token hash;
 	// the write capability accepts only the exact scope returned by that lookup,
 	// so the unauthenticated route cannot choose an account, agent, or recipient.
@@ -621,6 +629,7 @@ func (s *Server) registerOperations() {
 	s.registerAgentSuppressions()
 	s.registerContacts()
 	s.registerContactImport()
+	s.registerEngagements()
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()

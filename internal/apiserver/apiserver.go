@@ -214,6 +214,11 @@ func BuildDeps(p Params) httpapi.Deps {
 		DeleteContact: p.Store.DeleteContact,
 		CountContacts: p.Store.CountContacts,
 
+		UpsertEngagement: p.Store.UpsertEngagement,
+		GetEngagement:    p.Store.GetEngagement,
+		ListEngagements:  p.Store.ListEngagements,
+		DeleteEngagement: p.Store.DeleteEngagement,
+
 		ImportContacts:    p.Store.ImportContacts,
 		DeleteImportBatch: p.Store.DeleteImportBatch,
 		// Account-wide suppression view for import marking: agentID is empty so

@@ -30,6 +30,10 @@ func TestContactDepsAreWired(t *testing.T) {
 		"ImportContacts":      deps.ImportContacts != nil,
 		"DeleteImportBatch":   deps.DeleteImportBatch != nil,
 		"SuppressedAddresses": deps.SuppressedAddresses != nil,
+		"UpsertEngagement":    deps.UpsertEngagement != nil,
+		"GetEngagement":       deps.GetEngagement != nil,
+		"ListEngagements":     deps.ListEngagements != nil,
+		"DeleteEngagement":    deps.DeleteEngagement != nil,
 	} {
 		if !wired {
 			t.Errorf("Deps.%s is nil — the endpoint would return 501 not_implemented in the real binary", name)

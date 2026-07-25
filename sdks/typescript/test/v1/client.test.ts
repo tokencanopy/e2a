@@ -716,6 +716,53 @@ describe("E2AClient", () => {
     expect(res.contactsDeleted).toBe(2);
   });
 
+  it("contacts.outreach builds the follow-up sweep query", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    // AutoPager is an async iterable; draining it issues the request.
+    for await (const _ of client.contacts.outreach("raise@example.com", {
+      replied: false,
+      nextActionBefore: new Date("2026-07-29T09:00:00Z"),
+      lastOutboundBefore: new Date("2026-07-24T09:00:00Z"),
+    })) {
+      // no rows in this fixture
+    }
+    const { url } = lastCall();
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts");
+    expect(url).toContain("replied=false");
+    // last_outbound_before is what makes a lost state-write safe — without it a
+    // failed update can send the same person twice.
+    expect(url).toContain("last_outbound_before=");
+    expect(url).toContain("next_action_before=");
+  });
+
+  it("contacts.setOutreach PUTs only the fields given", async () => {
+    globalThis.fetch = mockFetch(200, {
+      agent_email: "raise@example.com", address: "partner@fund.vc",
+      stage: "touch2", next_action_at: null, metadata: {},
+      replied: false, suppressed: false,
+      first_outbound_at: null, last_outbound_at: null, last_inbound_at: null,
+      outbound_count: 0, inbound_count: 0,
+      contact: { address: "partner@fund.vc", display_name: "", metadata: {} },
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    await client.contacts.setOutreach("raise@example.com", "partner@fund.vc", { stage: "touch2" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("PUT");
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts/partner%40fund.vc");
+    // Only the caller's field reaches the wire — omitting next_action_at is
+    // what tells the server to leave the schedule alone.
+    expect(JSON.parse(init.body as string)).toEqual({ stage: "touch2" });
+  });
+
+  it("contacts.deleteOutreach un-enrols with the confirm guard", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true, address: "partner@fund.vc" });
+    const res = await client.contacts.deleteOutreach("raise@example.com", "partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.deleted).toBe(true);
+  });
+
   // ── Templates (beta) ────────────────────────────────────────────
   // camelCase model fields ↔ snake_case wire (the generated serializer maps
   // them), plus the two starter-catalog reads.

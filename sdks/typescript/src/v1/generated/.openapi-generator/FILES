@@ -30,6 +30,7 @@ models/Attachment.ts
 models/AttachmentMetaView.ts
 models/AttachmentView.ts
 models/Authentication.ts
+models/ContactEngagementView.ts
 models/ContactImportItemResult.ts
 models/ContactImportResult.ts
 models/ContactImportRow.ts
@@ -51,6 +52,7 @@ models/DeleteAgentResult.ts
 models/DeleteApiKeyResult.ts
 models/DeleteContactResult.ts
 models/DeleteDomainResult.ts
+models/DeleteEngagementResult.ts
 models/DeleteImportBatchResult.ts
 models/DeleteMessageResult.ts
 models/DeleteSuppressionResult.ts
@@ -70,6 +72,7 @@ models/EmailDeliveredData.ts
 models/EmailFailedData.ts
 models/EmailReceivedData.ts
 models/EmailSentData.ts
+models/EmbeddedContactView.ts
 models/ErrorBody.ts
 models/ErrorEnvelope.ts
 models/EventEnvelope.ts
@@ -94,6 +97,7 @@ models/ObjectSerializer.ts
 models/PageAPIKeyView.ts
 models/PageAgentSuppressionView.ts
 models/PageAgentView.ts
+models/PageContactEngagementView.ts
 models/PageContactView.ts
 models/PageConversationSummaryView.ts
 models/PageDomainView.ts
@@ -156,6 +160,7 @@ models/UpdateMessageRequest.ts
 models/UpdateMessageResultView.ts
 models/UpdateTemplateRequest.ts
 models/UpdateWebhookRequest.ts
+models/UpsertEngagementRequest.ts
 models/UsageEventEntry.ts
 models/UserExport.ts
 models/UserExportUser.ts

@@ -15,6 +15,7 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactEngagementView } from '../models/ContactEngagementView.js';
 import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
 import { ContactImportResult } from '../models/ContactImportResult.js';
 import { ContactImportRow } from '../models/ContactImportRow.js';
@@ -35,6 +36,7 @@ import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteEngagementResult } from '../models/DeleteEngagementResult.js';
 import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
@@ -54,6 +56,7 @@ import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
 import { EmailFailedData } from '../models/EmailFailedData.js';
 import { EmailReceivedData } from '../models/EmailReceivedData.js';
 import { EmailSentData } from '../models/EmailSentData.js';
+import { EmbeddedContactView } from '../models/EmbeddedContactView.js';
 import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
@@ -77,6 +80,7 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
 import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
@@ -138,6 +142,7 @@ import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
 import { UpdateWebhookRequest } from '../models/UpdateWebhookRequest.js';
+import { UpsertEngagementRequest } from '../models/UpsertEngagementRequest.js';
 import { UsageEventEntry } from '../models/UsageEventEntry.js';
 import { UserExport } from '../models/UserExport.js';
 import { UserExportUser } from '../models/UserExportUser.js';
@@ -981,6 +986,44 @@ export class ObservableContactsApi {
     }
 
     /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param email
+     * @param address
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteEngagementWithHttpInfo(email: string, address: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<HttpInfo<DeleteEngagementResult>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.deleteEngagement(email, address, confirm, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.deleteEngagementWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param email
+     * @param address
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteEngagement(email: string, address: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<DeleteEngagementResult> {
+        return this.deleteEngagementWithHttpInfo(email, address, confirm, _options).pipe(map((apiResponse: HttpInfo<DeleteEngagementResult>) => apiResponse.data));
+    }
+
+    /**
      * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Reverse a contact import (beta)
      * @param batchId
@@ -1048,6 +1091,42 @@ export class ObservableContactsApi {
      */
     public getContact(address: string, _options?: ConfigurationOptions): Observable<ContactView> {
         return this.getContactWithHttpInfo(address, _options).pipe(map((apiResponse: HttpInfo<ContactView>) => apiResponse.data));
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param email
+     * @param address
+     */
+    public getEngagementWithHttpInfo(email: string, address: string, _options?: ConfigurationOptions): Observable<HttpInfo<ContactEngagementView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getEngagement(email, address, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getEngagementWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param email
+     * @param address
+     */
+    public getEngagement(email: string, address: string, _options?: ConfigurationOptions): Observable<ContactEngagementView> {
+        return this.getEngagementWithHttpInfo(email, address, _options).pipe(map((apiResponse: HttpInfo<ContactEngagementView>) => apiResponse.data));
     }
 
     /**
@@ -1129,6 +1208,54 @@ export class ObservableContactsApi {
     }
 
     /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param email
+     * @param [stage] Only engagements at this exact stage.
+     * @param [replied] Filter on whether the contact has answered since outreach began. Omit for both.
+     * @param [suppressed] Filter on whether sends are blocked. Omit for both.
+     * @param [nextActionBefore] Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+     * @param [lastOutboundBefore] Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client\&#39;s own state write was lost — without it, a failed write can cause a duplicate send.
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listEngagementsWithHttpInfo(email: string, stage?: string, replied?: 'true' | 'false', suppressed?: 'true' | 'false', nextActionBefore?: Date, lastOutboundBefore?: Date, cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<HttpInfo<PageContactEngagementView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.listEngagements(email, stage, replied, suppressed, nextActionBefore, lastOutboundBefore, cursor, limit, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.listEngagementsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param email
+     * @param [stage] Only engagements at this exact stage.
+     * @param [replied] Filter on whether the contact has answered since outreach began. Omit for both.
+     * @param [suppressed] Filter on whether sends are blocked. Omit for both.
+     * @param [nextActionBefore] Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+     * @param [lastOutboundBefore] Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client\&#39;s own state write was lost — without it, a failed write can cause a duplicate send.
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listEngagements(email: string, stage?: string, replied?: 'true' | 'false', suppressed?: 'true' | 'false', nextActionBefore?: Date, lastOutboundBefore?: Date, cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageContactEngagementView> {
+        return this.listEngagementsWithHttpInfo(email, stage, replied, suppressed, nextActionBefore, lastOutboundBefore, cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageContactEngagementView>) => apiResponse.data));
+    }
+
+    /**
      * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Update a contact (beta)
      * @param address
@@ -1164,6 +1291,44 @@ export class ObservableContactsApi {
      */
     public updateContact(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: ConfigurationOptions): Observable<ContactView> {
         return this.updateContactWithHttpInfo(address, updateContactRequest, ifMatch, _options).pipe(map((apiResponse: HttpInfo<ContactView>) => apiResponse.data));
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param email
+     * @param address
+     * @param upsertEngagementRequest
+     */
+    public upsertEngagementWithHttpInfo(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, _options?: ConfigurationOptions): Observable<HttpInfo<ContactEngagementView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.upsertEngagement(email, address, upsertEngagementRequest, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.upsertEngagementWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param email
+     * @param address
+     * @param upsertEngagementRequest
+     */
+    public upsertEngagement(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, _options?: ConfigurationOptions): Observable<ContactEngagementView> {
+        return this.upsertEngagementWithHttpInfo(email, address, upsertEngagementRequest, _options).pipe(map((apiResponse: HttpInfo<ContactEngagementView>) => apiResponse.data));
     }
 
 }

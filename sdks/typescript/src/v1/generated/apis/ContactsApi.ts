@@ -8,15 +8,19 @@ import {canConsumeForm, isCodeInRange} from '../util.js';
 import {SecurityAuthentication} from '../auth/auth.js';
 
 
+import { ContactEngagementView } from '../models/ContactEngagementView.js';
 import { ContactImportResult } from '../models/ContactImportResult.js';
 import { ContactView } from '../models/ContactView.js';
 import { CreateContactRequest } from '../models/CreateContactRequest.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
+import { DeleteEngagementResult } from '../models/DeleteEngagementResult.js';
 import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
+import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
 import { PageContactView } from '../models/PageContactView.js';
 import { UpdateContactRequest } from '../models/UpdateContactRequest.js';
+import { UpsertEngagementRequest } from '../models/UpsertEngagementRequest.js';
 
 /**
  * no description
@@ -122,6 +126,64 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param email 
+     * @param address 
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public async deleteEngagement(email: string, address: string, confirm: 'DELETE', _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("ContactsApi", "deleteEngagement", "email");
+        }
+
+
+        // verify required parameter 'address' is not null or undefined
+        if (address === null || address === undefined) {
+            throw new RequiredError("ContactsApi", "deleteEngagement", "address");
+        }
+
+
+        // verify required parameter 'confirm' is not null or undefined
+        if (confirm === null || confirm === undefined) {
+            throw new RequiredError("ContactsApi", "deleteEngagement", "confirm");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/contacts/{address}'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)))
+            .replace('{' + 'address' + '}', encodeURIComponent(String(address)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.DELETE);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Query Params
+        if (confirm !== undefined) {
+            requestContext.setQueryParam("confirm", ObjectSerializer.serialize(confirm, "'DELETE'", ""));
+        }
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
      * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Reverse a contact import (beta)
      * @param batchId 
@@ -187,6 +249,52 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
 
         // Path Params
         const localVarPath = '/v1/contacts/{address}'
+            .replace('{' + 'address' + '}', encodeURIComponent(String(address)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param email 
+     * @param address 
+     */
+    public async getEngagement(email: string, address: string, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("ContactsApi", "getEngagement", "email");
+        }
+
+
+        // verify required parameter 'address' is not null or undefined
+        if (address === null || address === undefined) {
+            throw new RequiredError("ContactsApi", "getEngagement", "address");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/contacts/{address}'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)))
             .replace('{' + 'address' + '}', encodeURIComponent(String(address)));
 
         // Make Request Context
@@ -330,6 +438,93 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param email 
+     * @param stage Only engagements at this exact stage.
+     * @param replied Filter on whether the contact has answered since outreach began. Omit for both.
+     * @param suppressed Filter on whether sends are blocked. Omit for both.
+     * @param nextActionBefore Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+     * @param lastOutboundBefore Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client\&#39;s own state write was lost — without it, a failed write can cause a duplicate send.
+     * @param cursor Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param limit Maximum number of items to return (1-100).
+     */
+    public async listEngagements(email: string, stage?: string, replied?: 'true' | 'false', suppressed?: 'true' | 'false', nextActionBefore?: Date, lastOutboundBefore?: Date, cursor?: string, limit?: number, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("ContactsApi", "listEngagements", "email");
+        }
+
+
+
+
+
+
+
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/contacts'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Query Params
+        if (stage !== undefined) {
+            requestContext.setQueryParam("stage", ObjectSerializer.serialize(stage, "string", ""));
+        }
+
+        // Query Params
+        if (replied !== undefined) {
+            requestContext.setQueryParam("replied", ObjectSerializer.serialize(replied, "'true' | 'false'", ""));
+        }
+
+        // Query Params
+        if (suppressed !== undefined) {
+            requestContext.setQueryParam("suppressed", ObjectSerializer.serialize(suppressed, "'true' | 'false'", ""));
+        }
+
+        // Query Params
+        if (nextActionBefore !== undefined) {
+            requestContext.setQueryParam("next_action_before", ObjectSerializer.serialize(nextActionBefore, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (lastOutboundBefore !== undefined) {
+            requestContext.setQueryParam("last_outbound_before", ObjectSerializer.serialize(lastOutboundBefore, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (cursor !== undefined) {
+            requestContext.setQueryParam("cursor", ObjectSerializer.serialize(cursor, "string", ""));
+        }
+
+        // Query Params
+        if (limit !== undefined) {
+            requestContext.setQueryParam("limit", ObjectSerializer.serialize(limit, "number", "int64"));
+        }
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
      * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Update a contact (beta)
      * @param address 
@@ -371,6 +566,70 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
         requestContext.setHeaderParam("Content-Type", contentType);
         const serializedBody = ObjectSerializer.stringify(
             ObjectSerializer.serialize(updateContactRequest, "UpdateContactRequest", ""),
+            contentType
+        );
+        requestContext.setBody(serializedBody);
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param email 
+     * @param address 
+     * @param upsertEngagementRequest 
+     */
+    public async upsertEngagement(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("ContactsApi", "upsertEngagement", "email");
+        }
+
+
+        // verify required parameter 'address' is not null or undefined
+        if (address === null || address === undefined) {
+            throw new RequiredError("ContactsApi", "upsertEngagement", "address");
+        }
+
+
+        // verify required parameter 'upsertEngagementRequest' is not null or undefined
+        if (upsertEngagementRequest === null || upsertEngagementRequest === undefined) {
+            throw new RequiredError("ContactsApi", "upsertEngagement", "upsertEngagementRequest");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/contacts/{address}'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)))
+            .replace('{' + 'address' + '}', encodeURIComponent(String(address)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.PUT);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        // Body Params
+        const contentType = ObjectSerializer.getPreferredMediaType([
+            "application/json"
+        ]);
+        requestContext.setHeaderParam("Content-Type", contentType);
+        const serializedBody = ObjectSerializer.stringify(
+            ObjectSerializer.serialize(upsertEngagementRequest, "UpsertEngagementRequest", ""),
             contentType
         );
         requestContext.setBody(serializedBody);
@@ -470,6 +729,42 @@ export class ContactsApiResponseProcessor {
      * Unwraps the actual response sent by the server from the response context and deserializes the response content
      * to the expected objects
      *
+     * @params response Response returned by the server for a request to deleteEngagement
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async deleteEngagementWithHttpInfo(response: ResponseContext): Promise<HttpInfo<DeleteEngagementResult >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: DeleteEngagementResult = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "DeleteEngagementResult", ""
+            ) as DeleteEngagementResult;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: DeleteEngagementResult = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "DeleteEngagementResult", ""
+            ) as DeleteEngagementResult;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
      * @params response Response returned by the server for a request to deleteImportBatch
      * @throws ApiException if the response code was not in [200, 299]
      */
@@ -532,6 +827,42 @@ export class ContactsApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ContactView", ""
             ) as ContactView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to getEngagement
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getEngagementWithHttpInfo(response: ResponseContext): Promise<HttpInfo<ContactEngagementView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: ContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ContactEngagementView", ""
+            ) as ContactEngagementView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: ContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ContactEngagementView", ""
+            ) as ContactEngagementView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 
@@ -614,6 +945,42 @@ export class ContactsApiResponseProcessor {
      * Unwraps the actual response sent by the server from the response context and deserializes the response content
      * to the expected objects
      *
+     * @params response Response returned by the server for a request to listEngagements
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async listEngagementsWithHttpInfo(response: ResponseContext): Promise<HttpInfo<PageContactEngagementView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: PageContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "PageContactEngagementView", ""
+            ) as PageContactEngagementView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: PageContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "PageContactEngagementView", ""
+            ) as PageContactEngagementView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
      * @params response Response returned by the server for a request to updateContact
      * @throws ApiException if the response code was not in [200, 299]
      */
@@ -640,6 +1007,42 @@ export class ContactsApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ContactView", ""
             ) as ContactView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to upsertEngagement
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async upsertEngagementWithHttpInfo(response: ResponseContext): Promise<HttpInfo<ContactEngagementView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: ContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ContactEngagementView", ""
+            ) as ContactEngagementView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: ContactEngagementView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ContactEngagementView", ""
+            ) as ContactEngagementView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

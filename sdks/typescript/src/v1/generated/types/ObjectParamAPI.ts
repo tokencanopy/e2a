@@ -14,6 +14,7 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactEngagementView } from '../models/ContactEngagementView.js';
 import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
 import { ContactImportResult } from '../models/ContactImportResult.js';
 import { ContactImportRow } from '../models/ContactImportRow.js';
@@ -34,6 +35,7 @@ import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteEngagementResult } from '../models/DeleteEngagementResult.js';
 import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
@@ -53,6 +55,7 @@ import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
 import { EmailFailedData } from '../models/EmailFailedData.js';
 import { EmailReceivedData } from '../models/EmailReceivedData.js';
 import { EmailSentData } from '../models/EmailSentData.js';
+import { EmbeddedContactView } from '../models/EmbeddedContactView.js';
 import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
@@ -76,6 +79,7 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
 import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
@@ -137,6 +141,7 @@ import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
 import { UpdateWebhookRequest } from '../models/UpdateWebhookRequest.js';
+import { UpsertEngagementRequest } from '../models/UpsertEngagementRequest.js';
 import { UsageEventEntry } from '../models/UsageEventEntry.js';
 import { UserExport } from '../models/UserExport.js';
 import { UserExportUser } from '../models/UserExportUser.js';
@@ -863,6 +868,30 @@ export interface ContactsApiDeleteContactRequest {
     confirm: 'DELETE'
 }
 
+export interface ContactsApiDeleteEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteEngagement
+     */
+    address: string
+    /**
+     * Must be the literal DELETE — this action is irreversible.
+     * Defaults to: undefined
+     * @type &#39;DELETE&#39;
+     * @memberof ContactsApideleteEngagement
+     */
+    confirm: 'DELETE'
+}
+
 export interface ContactsApiDeleteImportBatchRequest {
     /**
      *
@@ -886,6 +915,23 @@ export interface ContactsApiGetContactRequest {
      * Defaults to: undefined
      * @type string
      * @memberof ContactsApigetContact
+     */
+    address: string
+}
+
+export interface ContactsApiGetEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApigetEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApigetEngagement
      */
     address: string
 }
@@ -946,6 +992,67 @@ export interface ContactsApiListContactsRequest {
     limit?: number
 }
 
+export interface ContactsApiListEngagementsRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    email: string
+    /**
+     * Only engagements at this exact stage.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    stage?: string
+    /**
+     * Filter on whether the contact has answered since outreach began. Omit for both.
+     * Defaults to: undefined
+     * @type &#39;true&#39; | &#39;false&#39;
+     * @memberof ContactsApilistEngagements
+     */
+    replied?: 'true' | 'false'
+    /**
+     * Filter on whether sends are blocked. Omit for both.
+     * Defaults to: undefined
+     * @type &#39;true&#39; | &#39;false&#39;
+     * @memberof ContactsApilistEngagements
+     */
+    suppressed?: 'true' | 'false'
+    /**
+     * Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistEngagements
+     */
+    nextActionBefore?: Date
+    /**
+     * Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client\&#39;s own state write was lost — without it, a failed write can cause a duplicate send.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistEngagements
+     */
+    lastOutboundBefore?: Date
+    /**
+     * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    cursor?: string
+    /**
+     * Maximum number of items to return (1-100).
+     * Minimum: 1
+     * Maximum: 100
+     * Defaults to: 100
+     * @type number
+     * @memberof ContactsApilistEngagements
+     */
+    limit?: number
+}
+
 export interface ContactsApiUpdateContactRequest {
     /**
      *
@@ -967,6 +1074,29 @@ export interface ContactsApiUpdateContactRequest {
      * @memberof ContactsApiupdateContact
      */
     ifMatch?: string
+}
+
+export interface ContactsApiUpsertEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupsertEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupsertEngagement
+     */
+    address: string
+    /**
+     *
+     * @type UpsertEngagementRequest
+     * @memberof ContactsApiupsertEngagement
+     */
+    upsertEngagementRequest: UpsertEngagementRequest
 }
 
 export class ObjectContactsApi {
@@ -1013,6 +1143,24 @@ export class ObjectContactsApi {
     }
 
     /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param param the request object
+     */
+    public deleteEngagementWithHttpInfo(param: ContactsApiDeleteEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteEngagementResult>> {
+        return this.api.deleteEngagementWithHttpInfo(param.email, param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param param the request object
+     */
+    public deleteEngagement(param: ContactsApiDeleteEngagementRequest, options?: ConfigurationOptions): Promise<DeleteEngagementResult> {
+        return this.api.deleteEngagement(param.email, param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
      * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Reverse a contact import (beta)
      * @param param the request object
@@ -1046,6 +1194,24 @@ export class ObjectContactsApi {
      */
     public getContact(param: ContactsApiGetContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
         return this.api.getContact(param.address,  options).toPromise();
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param param the request object
+     */
+    public getEngagementWithHttpInfo(param: ContactsApiGetEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
+        return this.api.getEngagementWithHttpInfo(param.email, param.address,  options).toPromise();
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param param the request object
+     */
+    public getEngagement(param: ContactsApiGetEngagementRequest, options?: ConfigurationOptions): Promise<ContactEngagementView> {
+        return this.api.getEngagement(param.email, param.address,  options).toPromise();
     }
 
     /**
@@ -1085,6 +1251,24 @@ export class ObjectContactsApi {
     }
 
     /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param param the request object
+     */
+    public listEngagementsWithHttpInfo(param: ContactsApiListEngagementsRequest, options?: ConfigurationOptions): Promise<HttpInfo<PageContactEngagementView>> {
+        return this.api.listEngagementsWithHttpInfo(param.email, param.stage, param.replied, param.suppressed, param.nextActionBefore, param.lastOutboundBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param param the request object
+     */
+    public listEngagements(param: ContactsApiListEngagementsRequest, options?: ConfigurationOptions): Promise<PageContactEngagementView> {
+        return this.api.listEngagements(param.email, param.stage, param.replied, param.suppressed, param.nextActionBefore, param.lastOutboundBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
      * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Update a contact (beta)
      * @param param the request object
@@ -1100,6 +1284,24 @@ export class ObjectContactsApi {
      */
     public updateContact(param: ContactsApiUpdateContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
         return this.api.updateContact(param.address, param.updateContactRequest, param.ifMatch,  options).toPromise();
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param param the request object
+     */
+    public upsertEngagementWithHttpInfo(param: ContactsApiUpsertEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
+        return this.api.upsertEngagementWithHttpInfo(param.email, param.address, param.upsertEngagementRequest,  options).toPromise();
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param param the request object
+     */
+    public upsertEngagement(param: ContactsApiUpsertEngagementRequest, options?: ConfigurationOptions): Promise<ContactEngagementView> {
+        return this.api.upsertEngagement(param.email, param.address, param.upsertEngagementRequest,  options).toPromise();
     }
 
 }

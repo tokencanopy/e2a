@@ -19,10 +19,12 @@ var betaOperationIDs = []string{
 	"createTemplate",
 	"deleteAgentSuppression",
 	"deleteContact",
+	"deleteEngagement",
 	"deleteImportBatch",
 	"deleteTemplate",
 	"getAgentProtection",
 	"getContact",
+	"getEngagement",
 	"importContacts",
 	"getMessageLifecycle",
 	"getReview",
@@ -30,6 +32,7 @@ var betaOperationIDs = []string{
 	"getTemplate",
 	"listAgentSuppressions",
 	"listContacts",
+	"listEngagements",
 	"listReviews",
 	"listStarterTemplates",
 	"listTemplates",
@@ -37,6 +40,7 @@ var betaOperationIDs = []string{
 	"rejectReview",
 	"updateContact",
 	"updateTemplate",
+	"upsertEngagement",
 	"validateTemplate",
 }
 

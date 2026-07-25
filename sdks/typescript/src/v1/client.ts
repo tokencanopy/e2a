@@ -82,6 +82,9 @@ import type {
   ImportContactsRequest,
   ContactImportResult,
   DeleteImportBatchResult,
+  ContactEngagementView,
+  UpsertEngagementRequest,
+  DeleteEngagementResult,
   TemplateSummaryView,
   CreateTemplateRequest,
   UpdateTemplateRequest,
@@ -564,6 +567,64 @@ class ContactsResource {
   /** Reverse an import, removing the contacts it created. */
   deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
     return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
+  }
+
+  // ── Per-agent outreach ────────────────────────────────────────────────────
+  // Engagements are one agent's relationship with a contact. Unlike the
+  // account-level methods above, an agent-scoped credential may drive these for
+  // its own agent — that is the outreach loop.
+
+  /** List the contacts an agent is working, with the reply and delivery facts
+   *  e2a derives from real message activity.
+   *
+   *  For a follow-up sweep pass `replied: false` together with BOTH
+   *  `nextActionBefore` and `lastOutboundBefore`. `lastOutboundAt` is
+   *  server-maintained, so including it drops anyone just contacted even if
+   *  your own state write was lost — omit it and a failed write can send twice. */
+  outreach(
+    email: string,
+    params: {
+      stage?: string;
+      replied?: boolean;
+      suppressed?: boolean;
+      nextActionBefore?: Date;
+      lastOutboundBefore?: Date;
+      limit?: number;
+    } = {},
+  ): AutoPager<ContactEngagementView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
+    return new AutoPager(async (cursor) => {
+      const page = await call(() =>
+        this.api.listEngagements(
+          email,
+          params.stage,
+          params.replied === undefined ? undefined : (params.replied ? "true" : "false"),
+          params.suppressed === undefined ? undefined : (params.suppressed ? "true" : "false"),
+          params.nextActionBefore,
+          params.lastOutboundBefore,
+          cursor,
+          params.limit,
+        ));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+
+  /** Fetch one agent's outreach record for a contact. */
+  getOutreach(email: string, address: string): Promise<ContactEngagementView> {
+    return call(() => this.api.getEngagement(email, address));
+  }
+
+  /** Enrol a contact in an agent's outreach, or update the agent-owned fields.
+   *  Omitted fields are left unchanged, so advancing the stage after a send
+   *  does not disturb the schedule. */
+  setOutreach(email: string, address: string, body: UpsertEngagementRequest): Promise<ContactEngagementView> {
+    return call(() => this.api.upsertEngagement(email, address, body));
+  }
+
+  /** Un-enrol a contact from an agent's outreach. The contact itself survives,
+   *  and suppressions are untouched — this is not consent. */
+  deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
+    return call(() => this.api.deleteEngagement(email, address, "DELETE"));
   }
 }
 

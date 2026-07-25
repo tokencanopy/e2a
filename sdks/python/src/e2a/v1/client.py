@@ -88,6 +88,9 @@ from .generated.models import (
     ImportContactsRequest,
     ContactImportResult,
     DeleteImportBatchResult,
+    ContactEngagementView,
+    UpsertEngagementRequest,
+    DeleteEngagementResult,
     UpdateAgentRequest,
     UpdateMessageRequest,
     UpdateMessageResultView,
@@ -767,6 +770,69 @@ class ContactsResource:
         """Reverse an import, removing the contacts it created."""
         return await self._c._write_idempotent(
             lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
+        )
+
+    # ── Per-agent outreach ───────────────────────────────────────────────────
+    # Engagements are one agent's relationship with a contact. Unlike the
+    # account-level methods above, an agent-scoped credential may drive these
+    # for its own agent — that is the outreach loop.
+
+    def outreach(
+        self,
+        email: str,
+        *,
+        stage: Optional[str] = None,
+        replied: Optional[bool] = None,
+        suppressed: Optional[bool] = None,
+        next_action_before: Optional[datetime] = None,
+        last_outbound_before: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> AutoPager[ContactEngagementView]:
+        """List the contacts an agent is working, with the reply and delivery
+        facts e2a derives from real message activity.
+
+        For a follow-up sweep pass ``replied=False`` together with BOTH
+        ``next_action_before`` and ``last_outbound_before``. ``last_outbound_at``
+        is server-maintained, so including it drops anyone just contacted even
+        if your own state write was lost — omit it and a failed write can send
+        the same person twice."""
+
+        def _flag(v: Optional[bool]) -> Optional[str]:
+            return None if v is None else ("true" if v else "false")
+
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_engagements(
+                    email, stage=stage, replied=_flag(replied),
+                    suppressed=_flag(suppressed),
+                    next_action_before=next_action_before,
+                    last_outbound_before=last_outbound_before,
+                    cursor=cursor, limit=limit, _headers=h,
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def get_outreach(self, email: str, address: str) -> ContactEngagementView:
+        """Fetch one agent's outreach record for a contact."""
+        return await self._c._read(lambda h: self._api.get_engagement(email, address, _headers=h))
+
+    async def set_outreach(self, email: str, address: str, body: Body) -> ContactEngagementView:
+        """Enrol a contact in an agent's outreach, or update the agent-owned
+        fields. Omitted fields are left unchanged, so advancing the stage after a
+        send does not disturb the schedule."""
+        req = _coerce(UpsertEngagementRequest, body)
+        return await self._c._write_idempotent(
+            lambda h: self._api.upsert_engagement(email, address, req, _headers=h)
+        )
+
+    async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
+        """Un-enrol a contact from an agent's outreach. The contact itself
+        survives, and suppressions are untouched — this is not consent."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)
         )
 
 
