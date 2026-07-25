@@ -4,10 +4,11 @@
   "type": "module",
   "scripts": {
     "smoke": "node smoke.ts",
-    "pretest": "rm -rf reports/coverage",
+    "pretest": "rm -rf reports/coverage reports/mcp-coverage",
     "test": "node --test --test-concurrency=1 --test-reporter=spec suites/*.test.ts",
     "test:unit": "node --test harness/*.test.ts",
     "coverage:gate": "python3 coverage_gate.py",
+    "coverage:gate:mcp": "python3 mcp_coverage_gate.py",
     "coverage": "npm test; npm run coverage:gate",
     "typecheck": "tsc --noEmit"
   },
