@@ -80,6 +80,16 @@ func (a *API) performSelfSend(
 	// is pre-allocated so the audit rows and deterministic event ids anchor to
 	// it. A review/block verdict persists the row as a hidden hold and
 	// suppresses email.received (published conditionally below).
+	//
+	// Known cost: with the content scan enabled, a self-send runs TWO
+	// sequential detector passes over byte-identical content within one HTTP
+	// request — screenOutbound already scanned it on the egress side
+	// (DeliverOutbound), and this is the ingress pass. With the Gemini
+	// detector wired, each pass is bounded by its 10s timeout, so worst-case
+	// latency and detector spend roughly double per self-send. Deliberate for
+	// now (the two passes run different directions/thresholds and the egress
+	// engine is heuristics-only); reusing/deduping the detector work is a
+	// follow-up candidate.
 	inboundID := identity.NewMessageID()
 	screenRes, gate := inboundscreen.EvaluateLoopback(ctx, a.inboundScreen, agent, inboundID, rawMessage)
 

@@ -55,3 +55,9 @@ override:
   # Agent-to-self loopback delivery — self-send detection and MIME compose.
   - threshold: 95
     path: ^internal/loopback$
+  # Shared inbound-protection evaluation core (gate escalation + piguard scan
+  # + most-severe merge) — the security-critical path for SMTP inbound AND
+  # loopback self-sends. Measured 90.9% when added; only the Gemini-wired
+  # engine branch is untestable without a live credential.
+  - threshold: 88
+    path: ^internal/inboundscreen$

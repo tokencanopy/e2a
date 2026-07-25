@@ -155,6 +155,13 @@ func (s *Store) ExpireAndDeliverLocal(
 	beforeCommit LocalDeliveryTxHook,
 ) (*Message, error) {
 	// Phase 1 (no tx, no lock): snapshot + compose + screen.
+	//
+	// Under multiple sweep replicas, two workers can both pass this snapshot
+	// for the same candidate; the loser of the phase-2 SKIP LOCKED race
+	// discards its compose + screening work — a duplicate detector call
+	// (potentially a Gemini HTTP request) whose result is thrown away.
+	// Acceptable while the TTL sweep is single-threaded (one River
+	// maintenance periodic); revisit if the sweep is ever parallelized.
 	snapshot, _, err := loadExpiredPendingOutboundForLocalDeliverySnapshot(ctx, s.pool, messageID)
 	if err != nil {
 		return nil, err
