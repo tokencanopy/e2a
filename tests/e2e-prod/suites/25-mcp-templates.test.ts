@@ -258,11 +258,17 @@ test("mcp-templates: create_api_key + list_api_keys + delete_api_key — agent-s
   } finally {
     if (id) await callTool(mcp, "delete_api_key", { id, confirm: true });
     // Only remove the agent if this test provisioned it — leave a
-    // pre-existing primary agent alone.
+    // pre-existing primary agent alone. `permanent=true` is required here:
+    // a plain DELETE only soft-deletes (30-day trash) and RESERVES the
+    // address, so the very next run of this suite against the same account
+    // would hit 409 address_in_trash trying to recreate agentEmail — this
+    // suite must be re-runnable back to back on a fresh account.
     if (createdAgent) {
-      const del = await apiClient.delete(`/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE`);
+      const del = await apiClient.delete(
+        `/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE&permanent=true`,
+      );
       if (del.status !== 204 && del.status !== 200) {
-        warn(SUITE, "agent-cleanup-failed", `could not delete probe agent ${agentEmail}: HTTP ${del.status}`);
+        warn(SUITE, "agent-cleanup-failed", `could not permanently delete probe agent ${agentEmail}: HTTP ${del.status}`);
       }
     }
   }

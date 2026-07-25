@@ -41,7 +41,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Tools the black-box suite intentionally does NOT exercise, with the reason.
 # Keep this SHORT and justified — every entry is coverage we knowingly forgo.
-ALLOWLIST: dict[str, str] = {}
+#
+# Each of these three is, per mcp/src/tools/legacy.ts, literally titled
+# "Deprecated alias: <canonical>" and routes straight to that canonical tool,
+# which IS covered elsewhere in this suite. Allowlisting them loses no real
+# signal — the underlying behavior is exercised via the canonical tool — and
+# we deliberately do not want to commit to happy-path testing of deprecated
+# surface. Their continued *advertisement* is still asserted by
+# suites/08-mcp.test.ts, so removal of the alias itself would still be caught.
+ALLOWLIST: dict[str, str] = {
+    "send_email": "deprecated alias for send_message (covered)",
+    "approve_pending_message": "deprecated alias for approve_review (covered)",
+    "reject_pending_message": "deprecated alias for reject_review (covered)",
+}
 
 
 def load_shards(reports_dir: str) -> tuple[set[str], set[str], int]:
