@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
@@ -655,5 +656,53 @@ func TestDeliverWorker_WrappedWebhookNotFoundIsStillTerminal(t *testing.T) {
 	}
 	if d := statusOf(t, sub, id); d.Status != "failed" {
 		t.Errorf("status = %q, want failed", d.Status)
+	}
+}
+
+// closedPoolSubStore returns a SubscriberStore whose every query fails —
+// the row's true state is unreachable, which is exactly the blind-spot the
+// final-attempt guard exists for. Plain pgxpool.New + Close (the readyz
+// precedent): no ping, no migrations, no live DB needed.
+func closedPoolSubStore(t *testing.T) *webhook.SubscriberStore {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), testutil.TestDBURL())
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	pool.Close()
+	return webhook.NewSubscriberStore(pool)
+}
+
+func TestDeliverWorker_RowLoadErrorBeforeFinalAttemptEmitsNothing(t *testing.T) {
+	sub := closedPoolSubStore(t)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{}).WithMetrics(fm)
+	err := w.Work(context.Background(), job("whd_unreachable", 1))
+	if err == nil {
+		t.Fatal("row-load error must return an error so River retries")
+	}
+	if len(fm.attempts) != 0 {
+		t.Errorf("attempts = %+v, want none — nothing was attempted", fm.attempts)
+	}
+}
+
+func TestDeliverWorker_RowLoadErrorOnFinalAttemptIsExhausted(t *testing.T) {
+	// River discards after the final attempt, so a row whose load kept
+	// failing must be terminally written (conditional on still-pending — the
+	// read failing means the row's true state is unknown) and counted
+	// exhausted — otherwise it strands 'pending' with a dead job_id the
+	// reconciler can't see. (The terminal write itself also fails here —
+	// the pool is closed — so the CRITICAL log path runs; what we pin is
+	// the exhausted classification + the returned error.)
+	sub := closedPoolSubStore(t)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{}).WithMetrics(fm)
+	err := w.Work(context.Background(), job("whd_unreachable", webhookdelivery.MaxDeliveryAttempts))
+	if err == nil {
+		t.Fatal("final-attempt row-load error must still return the error (River discards)")
+	}
+	got := fm.one(t)
+	if got.outcome != "exhausted" || got.statusClass != "none" || got.seconds >= 0 {
+		t.Errorf("attempt = %+v, want exhausted/none/negative", got)
 	}
 }

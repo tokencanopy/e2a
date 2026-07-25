@@ -173,7 +173,24 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		return nil // delivery row gone (webhook deleted, cascaded) — nothing to do
 	}
 	if err != nil {
-		return err // DB error — retryable
+		// DB error — retryable. On the FINAL attempt, River discards after
+		// this: give the row its terminal write NOW, or it becomes a poison
+		// row — every dead-job rescue (ReconcilePending rescues discarded
+		// jobs) re-drives it with a fresh 29h21m envelope that fails at
+		// row-load again, leaving it customer-visibly 'pending' forever. The
+		// write is conditional on still-pending — the read failed, so the
+		// row's true state is unknown and a delivered row must never be
+		// clobbered — and last_error is a constant (customer-facing; a raw
+		// pgx error would leak internal hosts/IPs and DB identifiers).
+		// Counted exhausted (attempts consumed without a POST), never
+		// webhook_deleted.
+		if job.Attempt >= MaxDeliveryAttempts {
+			w.emitAttempt("exhausted", "none", -1)
+			if merr := w.subStore.MarkSubscriberFailedIfPending(ctx, job.Args.DeliveryID, job.Attempt, "internal error loading delivery", 0); merr != nil {
+				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after row-load error (row stays pending; the reconciler will re-drive it once this job is discarded): %v", job.Args.DeliveryID, merr)
+			}
+		}
+		return err
 	}
 	if d.Status != "pending" {
 		// Terminal row — idempotent no-op. Covers a re-drive after a crash
@@ -204,7 +221,7 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 			// returned err carries the real detail to River's job-error log.
 			w.emitAttempt("exhausted", "none", -1)
 			if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "internal error resolving webhook", 0); merr != nil {
-				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending, needs manual reconcile): %v", d.ID, merr)
+				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending; the reconciler will re-drive it once this job is discarded): %v", d.ID, merr)
 			}
 		}
 		return err
