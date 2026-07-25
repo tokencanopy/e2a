@@ -236,16 +236,20 @@ func (ua *UserAuth) setCookie(w http.ResponseWriter, name, value string, maxAge 
 	})
 }
 
-func (ua *UserAuth) defaultAgentEmail(ctx context.Context, userID string) string {
-	agents, err := ua.store.ListAgentsByUser(ctx, userID, 0, time.Time{}, "")
+func defaultAgentEmail(ctx context.Context, store *identity.Store, userID string) string {
+	agents, err := store.ListAgentsByUser(ctx, userID, 0, time.Time{}, "")
 	if err != nil || len(agents) == 0 {
 		return ""
 	}
 	return agents[0].EmailAddress()
 }
 
-func (ua *UserAuth) writeCLIHandoffPage(w http.ResponseWriter, r *http.Request, user *identity.User, handoff *cliLoginHandoff) error {
-	key, err := ua.store.CreateAPIKey(r.Context(), user.ID, "CLI login", nil)
+// writeCLIHandoffPage mints a fresh "CLI login" API key for the user and
+// renders the auto-submitting page that POSTs it (plus the CLI's state
+// token) to the loopback listener the CLI opened. Shared by every browser
+// login door that supports the CLI handoff.
+func writeCLIHandoffPage(store *identity.Store, w http.ResponseWriter, r *http.Request, user *identity.User, handoff *cliLoginHandoff) error {
+	key, err := store.CreateAPIKey(r.Context(), user.ID, "CLI login", nil)
 	if err != nil {
 		return fmt.Errorf("failed to create api key: %w", err)
 	}
@@ -255,7 +259,7 @@ func (ua *UserAuth) writeCLIHandoffPage(w http.ResponseWriter, r *http.Request, 
 		"CallbackURL": handoff.CallbackURL,
 		"State":       handoff.State,
 		"APIKey":      key.PlaintextKey,
-		"AgentEmail":  ua.defaultAgentEmail(r.Context(), user.ID),
+		"AgentEmail":  defaultAgentEmail(r.Context(), store, user.ID),
 	})
 }
 
@@ -410,7 +414,7 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			CallbackURL: callbackURL.String(),
 			State:       state.CLIState,
 		}
-		if err := ua.writeCLIHandoffPage(w, r, user, handoff); err != nil {
+		if err := writeCLIHandoffPage(ua.store, w, r, user, handoff); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
