@@ -687,7 +687,13 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// does not silently appear in anyone's outreach list. And because `replied`
 	// is computed as last_inbound_at > first_outbound_at, mail that arrives
 	// before any outbound correctly does not count as a reply.
-	if agent.UserID != "" && headerFrom != "" {
+	//
+	// Unauthenticated senders and screened messages do not count as replies. Sender
+	// authentication is mandatory because the From header is spoofable — a sender
+	// could claim any identity (e.g. MAIL FROM anything, From: victim@example.com)
+	// and falsely mark the agent as having replied to that contact. Held/blocked
+	// messages never reached the agent, so they must not update the engagement record.
+	if agent.UserID != "" && headerFrom != "" && authentication.Passed() && !screenRes.Hold && !screenRes.Blocked() {
 		if _, rerr := srv.store.RecordInboundActivity(ctx, agent.UserID, agent.ID,
 			headerFrom, conversationID, time.Now().UTC()); rerr != nil {
 			log.Printf("[contacts] outreach reply counters not updated for %s: %v", messageID, rerr)
