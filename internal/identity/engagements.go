@@ -374,12 +374,15 @@ func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, li
 		              WHERE m.agent_id = ce.agent_id
 		                AND m.direction = 'outbound'
 		                AND m.deleted_at IS NULL
-		                AND lower(m.recipient) = ce.address) AS actual_out,
+		                AND EXISTS (
+		                  SELECT 1 FROM unnest(m.to_recipients) AS recipient
+		                  WHERE lower(recipient) = lower(ce.address)
+		                )) AS actual_out,
 		            (SELECT count(*) FROM messages m
 		              WHERE m.agent_id = ce.agent_id
 		                AND m.direction = 'inbound'
 		                AND m.deleted_at IS NULL
-		                AND lower(m.sender) = ce.address) AS actual_in
+		                AND lower(m.sender) = lower(ce.address)) AS actual_in
 		       FROM contact_engagements ce
 		      WHERE ce.user_id = $1
 		 )
