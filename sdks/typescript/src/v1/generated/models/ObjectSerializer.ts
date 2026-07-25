@@ -11,12 +11,14 @@ export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
 export * from '../models/AttachmentView.js';
 export * from '../models/Authentication.js';
+export * from '../models/ContactView.js';
 export * from '../models/ConversationDetailView.js';
 export * from '../models/ConversationSummaryView.js';
 export * from '../models/CreateAPIKeyRequest.js';
 export * from '../models/CreateAPIKeyResponse.js';
 export * from '../models/CreateAgentRequest.js';
 export * from '../models/CreateAgentSuppressionRequest.js';
+export * from '../models/CreateContactRequest.js';
 export * from '../models/CreateTemplateRequest.js';
 export * from '../models/CreateWebhookRequest.js';
 export * from '../models/CreateWebhookResponse.js';
@@ -25,6 +27,7 @@ export * from '../models/DMARCResult.js';
 export * from '../models/DNSRecord.js';
 export * from '../models/DeleteAgentResult.js';
 export * from '../models/DeleteApiKeyResult.js';
+export * from '../models/DeleteContactResult.js';
 export * from '../models/DeleteDomainResult.js';
 export * from '../models/DeleteMessageResult.js';
 export * from '../models/DeleteSuppressionResult.js';
@@ -66,6 +69,7 @@ export * from '../models/OAuthConnectionEntry.js';
 export * from '../models/PageAPIKeyView.js';
 export * from '../models/PageAgentSuppressionView.js';
 export * from '../models/PageAgentView.js';
+export * from '../models/PageContactView.js';
 export * from '../models/PageConversationSummaryView.js';
 export * from '../models/PageDomainView.js';
 export * from '../models/PageEventView.js';
@@ -122,6 +126,7 @@ export * from '../models/ThreatCategoryView.js';
 export * from '../models/TooManyRecipientsDetails.js';
 export * from '../models/UnsubscribeOptions.js';
 export * from '../models/UpdateAgentRequest.js';
+export * from '../models/UpdateContactRequest.js';
 export * from '../models/UpdateMessageRequest.js';
 export * from '../models/UpdateMessageResultView.js';
 export * from '../models/UpdateTemplateRequest.js';
@@ -151,12 +156,14 @@ import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { Authentication } from '../models/Authentication.js';
+import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
 import { CreateAPIKeyRequest   , CreateAPIKeyRequestScopeEnum   } from '../models/CreateAPIKeyRequest.js';
 import { CreateAPIKeyResponse } from '../models/CreateAPIKeyResponse.js';
 import { CreateAgentRequest } from '../models/CreateAgentRequest.js';
 import { CreateAgentSuppressionRequest } from '../models/CreateAgentSuppressionRequest.js';
+import { CreateContactRequest } from '../models/CreateContactRequest.js';
 import { CreateTemplateRequest } from '../models/CreateTemplateRequest.js';
 import { CreateWebhookRequest , CreateWebhookRequestEventsEnum     } from '../models/CreateWebhookRequest.js';
 import { CreateWebhookResponse } from '../models/CreateWebhookResponse.js';
@@ -165,6 +172,7 @@ import { DMARCResult } from '../models/DMARCResult.js';
 import { DNSRecord } from '../models/DNSRecord.js';
 import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
+import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
@@ -206,6 +214,7 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
 import { PageEventView } from '../models/PageEventView.js';
@@ -262,6 +271,7 @@ import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions, UnsubscribeOptionsModeEnum   } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
+import { UpdateContactRequest } from '../models/UpdateContactRequest.js';
 import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
@@ -331,12 +341,14 @@ let typeMap: {[index: string]: any} = {
     "AttachmentMetaView": AttachmentMetaView,
     "AttachmentView": AttachmentView,
     "Authentication": Authentication,
+    "ContactView": ContactView,
     "ConversationDetailView": ConversationDetailView,
     "ConversationSummaryView": ConversationSummaryView,
     "CreateAPIKeyRequest": CreateAPIKeyRequest,
     "CreateAPIKeyResponse": CreateAPIKeyResponse,
     "CreateAgentRequest": CreateAgentRequest,
     "CreateAgentSuppressionRequest": CreateAgentSuppressionRequest,
+    "CreateContactRequest": CreateContactRequest,
     "CreateTemplateRequest": CreateTemplateRequest,
     "CreateWebhookRequest": CreateWebhookRequest,
     "CreateWebhookResponse": CreateWebhookResponse,
@@ -345,6 +357,7 @@ let typeMap: {[index: string]: any} = {
     "DNSRecord": DNSRecord,
     "DeleteAgentResult": DeleteAgentResult,
     "DeleteApiKeyResult": DeleteApiKeyResult,
+    "DeleteContactResult": DeleteContactResult,
     "DeleteDomainResult": DeleteDomainResult,
     "DeleteMessageResult": DeleteMessageResult,
     "DeleteSuppressionResult": DeleteSuppressionResult,
@@ -386,6 +399,7 @@ let typeMap: {[index: string]: any} = {
     "PageAPIKeyView": PageAPIKeyView,
     "PageAgentSuppressionView": PageAgentSuppressionView,
     "PageAgentView": PageAgentView,
+    "PageContactView": PageContactView,
     "PageConversationSummaryView": PageConversationSummaryView,
     "PageDomainView": PageDomainView,
     "PageEventView": PageEventView,
@@ -442,6 +456,7 @@ let typeMap: {[index: string]: any} = {
     "TooManyRecipientsDetails": TooManyRecipientsDetails,
     "UnsubscribeOptions": UnsubscribeOptions,
     "UpdateAgentRequest": UpdateAgentRequest,
+    "UpdateContactRequest": UpdateContactRequest,
     "UpdateMessageRequest": UpdateMessageRequest,
     "UpdateMessageResultView": UpdateMessageResultView,
     "UpdateTemplateRequest": UpdateTemplateRequest,

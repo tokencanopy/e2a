@@ -282,6 +282,17 @@ type Deps struct {
 	AddAgentSuppression    func(ctx context.Context, userID, agentID, address, reason, source string, onAdded identity.AgentSuppressionTxHook) (identity.AgentSuppression, bool, error)
 	ListAgentSuppressions  func(ctx context.Context, userID, agentID string, limit int, afterCreatedAt time.Time, afterAddress string) ([]identity.AgentSuppression, error)
 	RemoveAgentSuppression func(ctx context.Context, userID, agentID, address string) (bool, error)
+	// Contacts are ACCOUNT-scoped identity for the people this account
+	// corresponds with. Per-agent outreach state lives on a separate
+	// engagement resource, so nothing here is agent-bound. All of these are
+	// reachable only from account-scoped credentials — an agent credential
+	// reading every contact the account owns would be a scope escalation.
+	CreateContact func(ctx context.Context, userID, address, displayName string, metadata map[string]any, source, importBatchID string) (identity.Contact, error)
+	GetContact    func(ctx context.Context, userID, address string) (identity.Contact, error)
+	ListContacts  func(ctx context.Context, userID string, f identity.ContactFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.Contact, error)
+	UpdateContact func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
+	DeleteContact func(ctx context.Context, userID, address string) (bool, error)
+	CountContacts func(ctx context.Context, userID string) (int, error)
 	// Public managed-unsubscribe capabilities. Resolve accepts only a token hash;
 	// the write capability accepts only the exact scope returned by that lookup,
 	// so the unauthenticated route cannot choose an account, agent, or recipient.
@@ -600,6 +611,7 @@ func (s *Server) registerOperations() {
 	s.registerEvents()
 	s.registerAccount()
 	s.registerAgentSuppressions()
+	s.registerContacts()
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()

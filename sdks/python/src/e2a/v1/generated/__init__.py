@@ -20,6 +20,7 @@ __version__ = "1.0.0"
 __all__ = [
     "AccountApi",
     "AgentsApi",
+    "ContactsApi",
     "ConversationsApi",
     "DomainsApi",
     "EventsApi",
@@ -50,12 +51,14 @@ __all__ = [
     "AttachmentMetaView",
     "AttachmentView",
     "Authentication",
+    "ContactView",
     "ConversationDetailView",
     "ConversationSummaryView",
     "CreateAPIKeyRequest",
     "CreateAPIKeyResponse",
     "CreateAgentRequest",
     "CreateAgentSuppressionRequest",
+    "CreateContactRequest",
     "CreateTemplateRequest",
     "CreateWebhookRequest",
     "CreateWebhookResponse",
@@ -64,6 +67,7 @@ __all__ = [
     "DNSRecord",
     "DeleteAgentResult",
     "DeleteApiKeyResult",
+    "DeleteContactResult",
     "DeleteDomainResult",
     "DeleteMessageResult",
     "DeleteSuppressionResult",
@@ -105,6 +109,7 @@ __all__ = [
     "PageAPIKeyView",
     "PageAgentSuppressionView",
     "PageAgentView",
+    "PageContactView",
     "PageConversationSummaryView",
     "PageDomainView",
     "PageEventView",
@@ -161,6 +166,7 @@ __all__ = [
     "TooManyRecipientsDetails",
     "UnsubscribeOptions",
     "UpdateAgentRequest",
+    "UpdateContactRequest",
     "UpdateMessageRequest",
     "UpdateMessageResultView",
     "UpdateTemplateRequest",
@@ -181,6 +187,7 @@ __all__ = [
 # import apis into sdk package
 from e2a.v1.generated.api.account_api import AccountApi as AccountApi
 from e2a.v1.generated.api.agents_api import AgentsApi as AgentsApi
+from e2a.v1.generated.api.contacts_api import ContactsApi as ContactsApi
 from e2a.v1.generated.api.conversations_api import ConversationsApi as ConversationsApi
 from e2a.v1.generated.api.domains_api import DomainsApi as DomainsApi
 from e2a.v1.generated.api.events_api import EventsApi as EventsApi
@@ -215,12 +222,14 @@ from e2a.v1.generated.models.attachment import Attachment as Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView as AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView as AttachmentView
 from e2a.v1.generated.models.authentication import Authentication as Authentication
+from e2a.v1.generated.models.contact_view import ContactView as ContactView
 from e2a.v1.generated.models.conversation_detail_view import ConversationDetailView as ConversationDetailView
 from e2a.v1.generated.models.conversation_summary_view import ConversationSummaryView as ConversationSummaryView
 from e2a.v1.generated.models.create_api_key_request import CreateAPIKeyRequest as CreateAPIKeyRequest
 from e2a.v1.generated.models.create_api_key_response import CreateAPIKeyResponse as CreateAPIKeyResponse
 from e2a.v1.generated.models.create_agent_request import CreateAgentRequest as CreateAgentRequest
 from e2a.v1.generated.models.create_agent_suppression_request import CreateAgentSuppressionRequest as CreateAgentSuppressionRequest
+from e2a.v1.generated.models.create_contact_request import CreateContactRequest as CreateContactRequest
 from e2a.v1.generated.models.create_template_request import CreateTemplateRequest as CreateTemplateRequest
 from e2a.v1.generated.models.create_webhook_request import CreateWebhookRequest as CreateWebhookRequest
 from e2a.v1.generated.models.create_webhook_response import CreateWebhookResponse as CreateWebhookResponse
@@ -229,6 +238,7 @@ from e2a.v1.generated.models.dmarc_result import DMARCResult as DMARCResult
 from e2a.v1.generated.models.dns_record import DNSRecord as DNSRecord
 from e2a.v1.generated.models.delete_agent_result import DeleteAgentResult as DeleteAgentResult
 from e2a.v1.generated.models.delete_api_key_result import DeleteApiKeyResult as DeleteApiKeyResult
+from e2a.v1.generated.models.delete_contact_result import DeleteContactResult as DeleteContactResult
 from e2a.v1.generated.models.delete_domain_result import DeleteDomainResult as DeleteDomainResult
 from e2a.v1.generated.models.delete_message_result import DeleteMessageResult as DeleteMessageResult
 from e2a.v1.generated.models.delete_suppression_result import DeleteSuppressionResult as DeleteSuppressionResult
@@ -270,6 +280,7 @@ from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView as PageAPIKeyView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView as PageAgentSuppressionView
 from e2a.v1.generated.models.page_agent_view import PageAgentView as PageAgentView
+from e2a.v1.generated.models.page_contact_view import PageContactView as PageContactView
 from e2a.v1.generated.models.page_conversation_summary_view import PageConversationSummaryView as PageConversationSummaryView
 from e2a.v1.generated.models.page_domain_view import PageDomainView as PageDomainView
 from e2a.v1.generated.models.page_event_view import PageEventView as PageEventView
@@ -326,6 +337,7 @@ from e2a.v1.generated.models.threat_category_view import ThreatCategoryView as T
 from e2a.v1.generated.models.too_many_recipients_details import TooManyRecipientsDetails as TooManyRecipientsDetails
 from e2a.v1.generated.models.unsubscribe_options import UnsubscribeOptions as UnsubscribeOptions
 from e2a.v1.generated.models.update_agent_request import UpdateAgentRequest as UpdateAgentRequest
+from e2a.v1.generated.models.update_contact_request import UpdateContactRequest as UpdateContactRequest
 from e2a.v1.generated.models.update_message_request import UpdateMessageRequest as UpdateMessageRequest
 from e2a.v1.generated.models.update_message_result_view import UpdateMessageResultView as UpdateMessageResultView
 from e2a.v1.generated.models.update_template_request import UpdateTemplateRequest as UpdateTemplateRequest

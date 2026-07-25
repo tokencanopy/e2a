@@ -14,12 +14,14 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
 import { CreateAPIKeyRequest } from '../models/CreateAPIKeyRequest.js';
 import { CreateAPIKeyResponse } from '../models/CreateAPIKeyResponse.js';
 import { CreateAgentRequest } from '../models/CreateAgentRequest.js';
 import { CreateAgentSuppressionRequest } from '../models/CreateAgentSuppressionRequest.js';
+import { CreateContactRequest } from '../models/CreateContactRequest.js';
 import { CreateTemplateRequest } from '../models/CreateTemplateRequest.js';
 import { CreateWebhookRequest } from '../models/CreateWebhookRequest.js';
 import { CreateWebhookResponse } from '../models/CreateWebhookResponse.js';
@@ -27,6 +29,7 @@ import { DMARCResult } from '../models/DMARCResult.js';
 import { DNSRecord } from '../models/DNSRecord.js';
 import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
+import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
@@ -68,6 +71,7 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
 import { PageEventView } from '../models/PageEventView.js';
@@ -123,6 +127,7 @@ import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
+import { UpdateContactRequest } from '../models/UpdateContactRequest.js';
 import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
@@ -636,6 +641,151 @@ export class PromiseAgentsApi {
     public updateAgent(email: string, updateAgentRequest: UpdateAgentRequest, _options?: PromiseConfigurationOptions): Promise<AgentView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.updateAgent(email, updateAgentRequest, observableOptions);
+        return result.toPromise();
+    }
+
+
+}
+
+
+
+import { ObservableContactsApi } from './ObservableAPI.js';
+
+import { ContactsApiRequestFactory, ContactsApiResponseProcessor} from "../apis/ContactsApi.js";
+export class PromiseContactsApi {
+    private api: ObservableContactsApi
+
+    public constructor(
+        configuration: Configuration,
+        requestFactory?: ContactsApiRequestFactory,
+        responseProcessor?: ContactsApiResponseProcessor
+    ) {
+        this.api = new ObservableContactsApi(configuration, requestFactory, responseProcessor);
+    }
+
+    /**
+     * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Create a contact (beta)
+     * @param createContactRequest
+     */
+    public createContactWithHttpInfo(createContactRequest: CreateContactRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createContactWithHttpInfo(createContactRequest, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Create a contact (beta)
+     * @param createContactRequest
+     */
+    public createContact(createContactRequest: CreateContactRequest, _options?: PromiseConfigurationOptions): Promise<ContactView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createContact(createContactRequest, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Delete a contact (beta)
+     * @param address
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteContactWithHttpInfo(address: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<HttpInfo<DeleteContactResult>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.deleteContactWithHttpInfo(address, confirm, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Delete a contact (beta)
+     * @param address
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteContact(address: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<DeleteContactResult> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.deleteContact(address, confirm, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Get a contact (beta)
+     * @param address The contact\&#39;s email address, URL-encoded.
+     */
+    public getContactWithHttpInfo(address: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getContactWithHttpInfo(address, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Get a contact (beta)
+     * @param address The contact\&#39;s email address, URL-encoded.
+     */
+    public getContact(address: string, _options?: PromiseConfigurationOptions): Promise<ContactView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getContact(address, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * List contacts (beta)
+     * @param [source] Filter by provenance. Known values: import, manual, inbound.
+     * @param [importBatchId] Filter to the contacts created by one import.
+     * @param [createdAfter] Only contacts created strictly after this instant (RFC 3339).
+     * @param [createdBefore] Only contacts created strictly before this instant (RFC 3339).
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listContactsWithHttpInfo(source?: string, importBatchId?: string, createdAfter?: Date, createdBefore?: Date, cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageContactView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listContactsWithHttpInfo(source, importBatchId, createdAfter, createdBefore, cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * List contacts (beta)
+     * @param [source] Filter by provenance. Known values: import, manual, inbound.
+     * @param [importBatchId] Filter to the contacts created by one import.
+     * @param [createdAfter] Only contacts created strictly after this instant (RFC 3339).
+     * @param [createdBefore] Only contacts created strictly before this instant (RFC 3339).
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listContacts(source?: string, importBatchId?: string, createdAfter?: Date, createdBefore?: Date, cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageContactView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listContacts(source, importBatchId, createdAfter, createdBefore, cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Update a contact (beta)
+     * @param address
+     * @param updateContactRequest
+     * @param [ifMatch] Optional ETag from a prior read. When present it must match the contact\&#39;s current ETag or the write is rejected with 412, preventing a lost update.
+     */
+    public updateContactWithHttpInfo(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.updateContactWithHttpInfo(address, updateContactRequest, ifMatch, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Update a contact (beta)
+     * @param address
+     * @param updateContactRequest
+     * @param [ifMatch] Optional ETag from a prior read. When present it must match the contact\&#39;s current ETag or the write is rejected with 412, preventing a lost update.
+     */
+    public updateContact(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<ContactView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.updateContact(address, updateContactRequest, ifMatch, observableOptions);
         return result.toPromise();
     }
 
