@@ -6324,11 +6324,11 @@ paths:
           required: true
           schema:
             type: string
-        - description: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.
+        - description: "Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta."
           in: header
           name: If-Match
           schema:
-            description: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.
+            description: "Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta."
             type: string
       requestBody:
         content:

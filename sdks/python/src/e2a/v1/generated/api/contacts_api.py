@@ -1228,7 +1228,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1250,7 +1250,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.
+        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -1303,7 +1303,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1325,7 +1325,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.
+        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -1378,7 +1378,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1400,7 +1400,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412, preventing a lost update.
+        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
