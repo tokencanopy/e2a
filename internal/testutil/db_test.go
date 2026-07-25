@@ -201,6 +201,57 @@ func testDBChildEnv(testName, dbURL string) []string {
 	return append(env, testDBErrorChildEnv+"="+testName, "E2A_TEST_DATABASE_URL="+dbURL)
 }
 
+// workspaceSuffix is the per-CHECKOUT half of the isolation. Per-package alone
+// let two agents (or two worktrees, or a second terminal) running the same
+// package share a database and corrupt each other, which is how an unmerged
+// branch's migration ended up producing ~40 spurious failures in a run.
+func TestWorkspaceSuffixIsStablePerPathAndDistinctAcrossPaths(t *testing.T) {
+	const a = "/Users/dev/Desktop/e2a"
+	const b = "/Users/dev/.agents/worktrees/e2a/feature-x"
+
+	if got, again := workspaceSuffix(a), workspaceSuffix(a); got != again {
+		t.Errorf("same path must derive the same suffix: %q vs %q", got, again)
+	}
+	if workspaceSuffix(a) == workspaceSuffix(b) {
+		t.Errorf("different checkouts must derive different suffixes; both gave %q", workspaceSuffix(a))
+	}
+	// Trailing separators and redundant elements name the same checkout.
+	if workspaceSuffix(a) != workspaceSuffix(a+"/") {
+		t.Errorf("path must be cleaned before hashing: %q vs %q", workspaceSuffix(a), workspaceSuffix(a+"/"))
+	}
+	if got := workspaceSuffix(a); !strings.HasPrefix(got, "_ws") || len(got) != len("_ws")+8 {
+		t.Errorf("suffix = %q, want _ws + 8 hex chars", got)
+	}
+	// Unresolvable root degrades to per-package-only rather than failing.
+	if got := workspaceSuffix(""); got != "" {
+		t.Errorf("empty root should yield no workspace component, got %q", got)
+	}
+}
+
+// The derived name must carry BOTH components, so a database is unique to
+// (checkout, package) rather than to package alone.
+func TestTestDBURLIsUniquePerWorkspaceAndPackage(t *testing.T) {
+	u, err := url.Parse(TestDBURL())
+	if err != nil {
+		t.Fatalf("parse TestDBURL: %v", err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if !strings.Contains(name, "_ws") {
+		t.Errorf("dbname = %q, want a _ws<hash> workspace component", name)
+	}
+	if !strings.HasSuffix(name, "_pkg_testutil") {
+		t.Errorf("dbname = %q, want the _pkg_testutil suffix retained", name)
+	}
+	if ws := workspaceSuffix(moduleRootDir()); ws == "" || !strings.Contains(name, ws) {
+		t.Errorf("dbname = %q, want it to contain this checkout's suffix %q", name, ws)
+	}
+	// Postgres truncates identifiers past 63 bytes, which would silently
+	// re-collide the very names this derivation separates.
+	if len(name) > 63 {
+		t.Errorf("dbname %q is %d bytes, over Postgres's 63-byte identifier limit", name, len(name))
+	}
+}
+
 func TestTestDBURLDerivesPerPackageDatabase(t *testing.T) {
 	// Inside a `go test` binary (os.Args[0] ends in ".test"), TestDBURL
 	// appends a per-package suffix to the base database name so packages
