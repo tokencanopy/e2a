@@ -44,15 +44,23 @@ Inputs:
     below environment-aware instead of a permanent staging-shaped excuse.
 
 ENVIRONMENT-AWARE ALLOWLIST: two tiers.
-  - ALWAYS_ALLOWLIST: allowlisted regardless of target (the domain.sending_*
-    pair — needs real DKIM sending-identity provisioning against a *custom*
-    domain, which is a different, still-unbuilt fixture; not something a
-    prod-vs-staging distinction unlocks by itself).
+  - ALWAYS_ALLOWLIST: allowlisted regardless of target. Only
+    domain.sending_failed now — it needs a real AWS-classified sending-identity
+    FAILURE, and no suite has induced one anywhere; prod-vs-staging does not
+    unlock it.
   - STAGING_ONLY_ALLOWLIST: allowlisted ONLY when this run did not target
-    production. These all trace back to the same real-SES-feedback blocker
-    that staging's e2a-staging-smtp IAM policy imposes; production has no
-    such block, so a production run REQUIRES them — an allowlisted-forever
-    entry would let a genuine prod gap hide behind a staging-only excuse.
+    production. Most trace back to the real-SES-feedback blocker staging's
+    e2a-staging-smtp IAM policy imposes; production has no such block, so a
+    production run REQUIRES them — an allowlisted-forever entry would let a
+    genuine prod gap hide behind a staging-only excuse.
+
+    domain.sending_verified is in this tier for a different reason worth
+    knowing: suites/prod/33-domain-sending-identity.test.ts verifies it for
+    real, but that suite lives in suites/prod/ and so runs only under
+    `npm run test:prod`. On a staging run it never executes, and staging has
+    no real SES sending identity to produce the event anyway — so requiring
+    it there would fail the gate for something staging structurally cannot
+    do. Required on prod, where the suite does run.
 
 Usage: python3 event_coverage_gate.py [--openapi PATH] [--reports DIR] [--target-dir DIR]
 Exit 0 = every event type verified (or explicitly allowlisted); 1 = coverage
@@ -71,13 +79,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Allowlisted no matter what the run targeted — see the module doc above.
 ALWAYS_ALLOWLIST = {
-    "domain.sending_verified": "requires real SES sending-identity (DKIM) "
-    "provisioning against a custom domain, verified asynchronously by AWS over "
-    "minutes-to-hours; a throwaway shared-domain e2e agent has no sending identity "
-    "to provision — needs a dedicated custom-domain + sender-identity fixture "
-    "(domain-lifecycle territory), independent of prod-vs-staging.",
-    "domain.sending_failed": "same real SES sending-identity provisioning "
-    "dependency as domain.sending_verified.",
+    "domain.sending_failed": "requires a real SES sending-identity FAILURE "
+    "outcome, as opposed to domain.sending_verified which suites/prod/"
+    "33-domain-sending-identity.test.ts now verifies for real. That suite has "
+    "only ever observed the success path against a correctly-published DNS set; "
+    "deliberately breaking a record to induce a real AWS-classified failure (as "
+    "opposed to a merely-pending state) has not been attempted.",
 }
 
 # Allowlisted ONLY on a non-production run — REQUIRED once the run's target
@@ -108,6 +115,18 @@ STAGING_ONLY_ALLOWLIST = {
     "staging-only-allowlisted rather than un-allowlisted everywhere because no "
     "staging suite wires a webhook to it yet — a reasonable follow-up, not done "
     "here to keep this change scoped to the prod-only suite.",
+    "domain.sending_verified": "verified for real in PRODUCTION by suites/prod/"
+    "33-domain-sending-identity.test.ts — register a custom domain on the "
+    "isolated trymnexa.com zone, publish every returned DNS record (ownership "
+    "TXT, inbound MX, dkim TXT, mail_from_mx, mail_from_spf), verify inbound, "
+    "then poll GET /v1/domains/{domain} until sending_status reaches verified "
+    "and confirm the event via listEvents. Reproduced across separate domains "
+    "and runs, not a fluke. It sits in the STAGING-ONLY tier rather than being "
+    "un-allowlisted outright for a structural reason: that suite lives in "
+    "suites/prod/, so it runs only under `npm run test:prod`. On a staging run "
+    "it never executes, and requiring the event there would fail the gate for "
+    "an event staging cannot produce anyway (no real SES sending identity). "
+    "Required on prod, where the suite does run.",
 }
 
 
