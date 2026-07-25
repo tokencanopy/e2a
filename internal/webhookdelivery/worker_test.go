@@ -12,6 +12,7 @@ import (
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/webhook"
 	"github.com/tokencanopy/e2a/internal/webhookdelivery"
@@ -149,9 +150,15 @@ func (f *fakeEnq) InsertTx(_ context.Context, _ pgx.Tx, _ river.JobArgs, _ *rive
 
 // TestReconcilePending: the one-shot migration enqueues a job + stamps job_id for
 // every pending row with no job, and a re-run is idempotent (no double-enqueue).
+// Uses a REAL River client: the reconciler also rescues rows whose stamped job is
+// dead (missing/terminal), so idempotency requires the stamped ids to reference
+// live river_job rows — a fake enqueuer's synthetic ids would read as pruned jobs.
 func TestReconcilePending(t *testing.T) {
 	pool := testutil.TestDB(t)
 	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
 	store := identity.NewStore(pool)
 	user, err := store.CreateOrGetUser(ctx, "owner-cutover@example.com", "Owner", "google-cutover")
 	if err != nil {
@@ -172,14 +179,18 @@ func TestReconcilePending(t *testing.T) {
 	}
 
 	j := webhookdelivery.NewJobs(sub, fakeDeliverer{}, fakeWebhooks{wh: wh}, pool)
-	j.SetEnqueuer(&fakeEnq{})
+	client, err := jobs.New(pool, jobs.Config{}, j)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	j.SetEnqueuer(client)
 
-	n, err := j.ReconcilePending(ctx, pool)
+	res, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("cutover enqueued %d, want 3", n)
+	if res.Total() != 3 || res.Enqueued != 3 {
+		t.Errorf("cutover result = %+v, want 3 on the IS-NULL arm", res)
 	}
 	// Every row got a job_id.
 	for _, id := range ids {
@@ -192,12 +203,12 @@ func TestReconcilePending(t *testing.T) {
 		}
 	}
 	// Idempotent: a re-run enqueues nothing.
-	n2, err := j.ReconcilePending(ctx, pool)
+	res2, err := j.ReconcilePending(ctx, pool)
 	if err != nil {
 		t.Fatalf("ReconcilePending re-run: %v", err)
 	}
-	if n2 != 0 {
-		t.Errorf("cutover re-run enqueued %d, want 0 (idempotent)", n2)
+	if res2.Total() != 0 {
+		t.Errorf("cutover re-run enqueued %d, want 0 (idempotent)", res2.Total())
 	}
 }
 
@@ -220,6 +231,7 @@ func (f *fakeMetrics) WebhookAttempt(outcome, statusClass string, seconds float6
 	f.attempts = append(f.attempts, attemptRec{outcome, statusClass, seconds})
 }
 
+func (f *fakeMetrics) WebhookDeliveryRescued(int) {} // not under test here
 func (f *fakeMetrics) WebhookFirstAttemptLatency(seconds float64) {
 	f.firstTry = append(f.firstTry, seconds)
 }

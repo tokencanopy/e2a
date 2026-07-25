@@ -46,9 +46,12 @@ type DeliveryPruner interface {
 	DeleteExpiredDeliveries(ctx context.Context) (int64, error)
 }
 
-// SubscriberPruner prunes expired webhook subscriber deliveries (*webhook.SubscriberStore).
+// SubscriberPruner prunes expired webhook subscriber deliveries
+// (*webhook.SubscriberStore): deleted counts terminal expired rows removed,
+// marked counts expired still-pending rows transitioned to 'failed'
+// ("expired before delivery") instead of being silently deleted.
 type SubscriberPruner interface {
-	DeleteExpiredSubscriberDeliveries(ctx context.Context) (int, error)
+	DeleteExpiredSubscriberDeliveries(ctx context.Context) (deleted, marked int, err error)
 }
 
 // WebhookEventPruner prunes expired webhook_events rows (webhookpub outbox).
@@ -73,6 +76,9 @@ type OAuthPruner interface {
 // so tests don't need a real backend; satisfied by *telemetry.Log / telemetry.NoOp.
 type Metrics interface {
 	JanitorRowsDeleted(table string, count int)
+	// WebhookExpiredPending counts delivery rows the subscriber prune marked
+	// failed at their TTL instead of deleting while pending.
+	WebhookExpiredPending(count int)
 }
 
 // Janitor holds the prune dependencies and runs the cleanup sweep. All fields
@@ -150,12 +156,18 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 		log.Printf("Cleaned up %d expired webhook delivery record(s)", deleted)
 	}
 
-	if deleted, err := j.subscribers.DeleteExpiredSubscriberDeliveries(ctx); err != nil {
+	if deleted, marked, err := j.subscribers.DeleteExpiredSubscriberDeliveries(ctx); err != nil {
 		log.Printf("Failed to clean up expired webhook subscriber deliveries: %v", err)
 		errs = append(errs, err)
-	} else if deleted > 0 {
-		log.Printf("Cleaned up %d expired webhook subscriber delivery record(s)", deleted)
-		j.metrics.JanitorRowsDeleted("webhook_subscriber_deliveries", deleted)
+	} else {
+		if deleted > 0 {
+			log.Printf("Cleaned up %d expired webhook subscriber delivery record(s)", deleted)
+			j.metrics.JanitorRowsDeleted("webhook_subscriber_deliveries", deleted)
+		}
+		if marked > 0 {
+			log.Printf("Marked %d expired pending webhook subscriber delivery record(s) failed (expired before delivery)", marked)
+			j.metrics.WebhookExpiredPending(marked)
+		}
 	}
 
 	// webhook_events rows also carry a 30-day TTL (migration 026); without

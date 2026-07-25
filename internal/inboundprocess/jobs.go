@@ -99,12 +99,13 @@ func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	// The stamp is an inline UPDATE inside jobs.ReconcilePending — identical SQL to
 	// store.StampInboundIntakeJobIDTx (which the accept-tx still uses).
-	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
+	res, err := jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
 		Table:     "inbound_intake",
 		JobColumn: "process_job_id",
 		Where:     "status='accepted'",
 		LogPrefix: "[inbound-reconcile]",
 	}, j.EnqueueInboundProcessTx)
+	return res.Total(), err
 }
 
 // EnqueueInboundProcessTx inserts the inbound_process job in the caller's accept-tx

@@ -99,10 +99,11 @@ func (j *Jobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, e
 	// The stamp is an inline UPDATE inside jobs.ReconcilePending — identical SQL to
 	// store.StampNotifyJobIDTx (which the accept-tx still uses). The notified_at IS NULL
 	// guard keeps already-emailed holds out of the reconcile set.
-	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
+	res, err := jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
 		Table:     "messages",
 		JobColumn: "notify_job_id",
 		Where:     "status='pending_review' AND notified_at IS NULL",
 		LogPrefix: "[hitl-notify] reconcile",
 	}, j.EnqueueNotifyTx)
+	return res.Total(), err
 }

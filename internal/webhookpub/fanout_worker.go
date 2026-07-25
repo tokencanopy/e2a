@@ -31,8 +31,14 @@ func (FanOutArgs) Kind() string { return "webhook_fanout" }
 const (
 	// maxFanOutAttempts bounds River's retries of a fan-out job. Fan-out failures are
 	// transient (DB blip, identity read) — a handful of retries rides them out. A
-	// persistent failure (e.g. a matching bug) should surface as a discarded job, not
-	// retry forever the way the legacy pending-row poll did.
+	// persistent failure (e.g. a matching bug) discards the job, and the design is
+	// deliberately RETRY-FOREVER-WITH-OBSERVABILITY from there: the reconciler's
+	// dead-job rescue re-drives the still-pending event with a fresh job each pass
+	// (the outbox's at-least-once contract — a pending event is never abandoned),
+	// and every rescue increments WebhookFanOutRescued
+	// (e2a_webhook_fanout_rescued_total), so a poison event shows up as a
+	// monotonically climbing rescue counter instead of a silent strand or a quiet
+	// discard.
 	maxFanOutAttempts = 10
 
 	// fanOutReconcileInterval is how often the reconciler re-drives pending events with
@@ -168,38 +174,58 @@ type FanOutReconcileArgs struct{}
 
 func (FanOutReconcileArgs) Kind() string { return "webhook_fanout_reconcile" }
 
-// FanOutReconcileWorker re-enqueues any pending event with no fan-out job. It is the
-// LIVE backstop for the best-effort publish path (PublishBestEffortTx must not fail the
-// caller's tx, so an event can commit with its enqueue lost) and any crash window
-// between the event commit and the job insert — turning "recovered only on restart"
-// into "recovered within fanOutReconcileInterval". Idempotent (fanout_job_id IS NULL
-// guard). Mirrors webhookdelivery.ReconcileWorker.
+// FanOutReconcileWorker re-enqueues any pending event with no live fan-out job
+// (never enqueued, or its job is terminal/pruned). It is the LIVE backstop for the
+// best-effort publish path (PublishBestEffortTx must not fail the caller's tx, so an
+// event can commit with its enqueue lost), any crash window between the event commit
+// and the job insert, and a fan-out job discarded after exhausting its attempts —
+// turning "recovered only on restart" (or never) into "recovered within
+// fanOutReconcileInterval". Never double-enqueues on the IS-NULL arm; the dead-job
+// rescue arm is at-least-once under concurrent reconcilers (see
+// jobs.ReconcilePending's EvalPlanQual note). Mirrors webhookdelivery.ReconcileWorker.
 type FanOutReconcileWorker struct {
 	river.WorkerDefaults[FanOutReconcileArgs]
 	jobs *FanOutJobs
 }
 
 func (w *FanOutReconcileWorker) Work(ctx context.Context, _ *river.Job[FanOutReconcileArgs]) error {
-	n, err := w.jobs.ReconcilePending(ctx, w.jobs.pool)
+	res, err := w.jobs.ReconcilePending(ctx, w.jobs.pool)
 	if err != nil {
 		return err // River retries the reconcile job — a transient DB blip is fine
 	}
-	if n > 0 {
-		log.Printf("[webhook-fanout-reconcile] re-enqueued %d stranded events", n)
+	if res.Total() > 0 {
+		log.Printf("[webhook-fanout-reconcile] re-enqueued %d stranded events (%d never-enqueued, %d dead-job rescues)",
+			res.Total(), res.Enqueued, res.Rescued)
 	}
+	// Rescues get their own counter: a climbing rate is the poison-event signal
+	// (a deterministically failing event burns a fresh 10-attempt envelope per
+	// rescue, forever — see maxFanOutAttempts).
+	w.jobs.metrics.WebhookFanOutRescued(res.Rescued)
 	return nil
 }
 
-// ReconcilePending enqueues a fan-out job for every pending webhook_events row with no
-// job yet (fanout_job_id IS NULL). Runs at startup (cutover) AND on the live schedule
-// (FanOutReconcileWorker). Idempotent: the per-row FOR UPDATE + fanout_job_id IS NULL
-// guard means a re-run (or a concurrent replica) never double-enqueues. Returns the
-// number of events enqueued.
-func (j *FanOutJobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+// ReconcilePending enqueues a fan-out job for every pending webhook_events row that
+// has no live job: fanout_job_id IS NULL, or (RescueDeadJobs) stamped with a job
+// River has discarded (maxFanOutAttempts exhausted), cancelled, completed without
+// the event terminalizing, or already pruned. Without the dead-job arm, an event
+// whose fan-out job burned all its attempts was stranded forever: still 'pending'
+// (so never swept by the janitor, by design — the outbox is at-least-once), stamped
+// (so invisible to an IS-NULL-only reconciler). Re-driving is safe: the FanOutWorker
+// re-reads status under a pending guard and the (event_id, webhook_id) unique index
+// dedups delivery inserts. The rescue arm is deliberately NOT age-gated (unlike
+// webhookdelivery's): the pending-events set is transient and tiny, so the per-tick
+// join cost is negligible. Runs at startup (cutover) AND on the live schedule
+// (FanOutReconcileWorker). A re-run never double-enqueues on the IS-NULL arm; the
+// dead-job arm is at-least-once under concurrent reconcilers (see
+// jobs.ReconcilePending's EvalPlanQual note) — a duplicate fan-out job is a no-op
+// against a terminal event and a deduped insert against a pending one. Returns the
+// per-arm counts.
+func (j *FanOutJobs) ReconcilePending(ctx context.Context, pool *pgxpool.Pool) (jobs.ReconcileResult, error) {
 	return jobs.ReconcilePending(ctx, pool, jobs.ReconcileSpec{
-		Table:     "webhook_events",
-		JobColumn: "fanout_job_id",
-		Where:     "status='pending'",
-		LogPrefix: "[webhook-fanout-reconcile]",
+		Table:          "webhook_events",
+		JobColumn:      "fanout_job_id",
+		Where:          "status='pending'",
+		LogPrefix:      "[webhook-fanout-reconcile]",
+		RescueDeadJobs: true,
 	}, j.EnqueueFanOutTx)
 }

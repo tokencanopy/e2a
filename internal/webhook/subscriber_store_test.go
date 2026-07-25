@@ -80,8 +80,151 @@ func TestSubscriberStore_DeliveryLifecycle(t *testing.T) {
 	}
 
 	// Expiry sweep runs (nothing expired here — just exercise the path).
-	if _, err := ss.DeleteExpiredSubscriberDeliveries(ctx); err != nil {
+	if _, _, err := ss.DeleteExpiredSubscriberDeliveries(ctx); err != nil {
 		t.Fatalf("DeleteExpiredSubscriberDeliveries: %v", err)
+	}
+}
+
+// TestSubscriberStore_RecordAttemptOnTerminalRowIsNoop pins the status='pending'
+// guard on RecordSubscriberAttempt: a worker mid-POST racing the expiry
+// janitor's mark-failed (or any terminal write) must not resurrect the row to
+// an in-flight state or clobber its terminal error when its non-final attempt
+// result lands late.
+func TestSubscriberStore_RecordAttemptOnTerminalRowIsNoop(t *testing.T) {
+	pool := testutil.TestDB(t)
+	istore := identity.NewStore(pool)
+	ss := webhook.NewSubscriberStore(pool)
+	ctx := context.Background()
+	user, _ := istore.CreateOrGetUser(ctx, "wsd-guard@example.com", "Owner", "google-wsd-guard")
+	wh, _ := istore.CreateWebhook(ctx, user.ID, "https://example.com/hook", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	id, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", []byte(`{"type":"email.received"}`))
+	if err != nil {
+		t.Fatalf("InsertPendingForTest: %v", err)
+	}
+	if err := ss.MarkSubscriberFailed(ctx, id, 8, "expired before delivery", 0); err != nil {
+		t.Fatalf("MarkSubscriberFailed: %v", err)
+	}
+
+	// The late attempt write must be a no-op on the terminal row.
+	if err := ss.RecordSubscriberAttempt(ctx, id, 3, "late attempt", 500); err != nil {
+		t.Fatalf("RecordSubscriberAttempt: %v", err)
+	}
+	d, err := ss.GetSubscriberDeliveryByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetSubscriberDeliveryByID: %v", err)
+	}
+	if d.Status != "failed" {
+		t.Errorf("status = %q, want failed (terminal row must not be resurrected)", d.Status)
+	}
+	if d.Attempts != 8 || d.LastError != "expired before delivery" {
+		t.Errorf("attempts=%d last_error=%q, want untouched 8/%q", d.Attempts, d.LastError, "expired before delivery")
+	}
+
+	// Sanity: the same write still applies to a pending row.
+	id2, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", []byte(`{"type":"email.received"}`))
+	if err != nil {
+		t.Fatalf("InsertPendingForTest 2: %v", err)
+	}
+	if err := ss.RecordSubscriberAttempt(ctx, id2, 1, "boom", 500); err != nil {
+		t.Fatalf("RecordSubscriberAttempt (pending): %v", err)
+	}
+	if d, _ := ss.GetSubscriberDeliveryByID(ctx, id2); d.Status != "pending" || d.Attempts != 1 {
+		t.Errorf("pending row after attempt: status=%q attempts=%d, want pending/1", d.Status, d.Attempts)
+	}
+}
+
+// TestSubscriberStore_ExpiredPendingMarkedFailedNotSilentlyDeleted is the
+// unguarded-janitor regression test: a row that reaches its 30-day TTL while
+// still 'pending' (a strand, or a row snoozing behind a long-disabled webhook)
+// must never silently vanish. The sweep instead marks it terminally 'failed'
+// ("expired before delivery") — observable in the delivery-history API until
+// the NEXT sweep deletes it as a normal terminal expired row. Terminal expired
+// rows keep being deleted as before; unexpired rows are untouched.
+func TestSubscriberStore_ExpiredPendingMarkedFailedNotSilentlyDeleted(t *testing.T) {
+	pool := testutil.TestDB(t)
+	istore := identity.NewStore(pool)
+	ss := webhook.NewSubscriberStore(pool)
+	ctx := context.Background()
+	user, _ := istore.CreateOrGetUser(ctx, "wsd-expire@example.com", "Owner", "google-wsd-expire")
+	wh, _ := istore.CreateWebhook(ctx, user.ID, "https://example.com/hook", "", []string{"email.received"}, identity.WebhookFilters{})
+	env := []byte(`{"type":"email.received"}`)
+
+	insert := func() string {
+		t.Helper()
+		id, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+		if err != nil {
+			t.Fatalf("InsertPendingForTest: %v", err)
+		}
+		return id
+	}
+	expire := func(id string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx,
+			`UPDATE webhook_subscriber_deliveries SET expires_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
+			t.Fatalf("expire %s: %v", id, err)
+		}
+	}
+
+	expPending := insert()
+	expFailed := insert()
+	expDelivered := insert()
+	freshPending := insert()
+	if err := ss.MarkSubscriberFailed(ctx, expFailed, 8, "gave up", 500); err != nil {
+		t.Fatalf("MarkSubscriberFailed: %v", err)
+	}
+	if err := ss.MarkDelivered(ctx, expDelivered, 200); err != nil {
+		t.Fatalf("MarkDelivered: %v", err)
+	}
+	expire(expPending)
+	expire(expFailed)
+	expire(expDelivered)
+
+	// Sweep 1: terminal expired rows deleted; the expired PENDING row survives,
+	// now observable-terminal instead of silently gone — and is reported via the
+	// marked count (the janitor logs it and emits WebhookExpiredPending).
+	n1, marked1, err := ss.DeleteExpiredSubscriberDeliveries(ctx)
+	if err != nil {
+		t.Fatalf("DeleteExpiredSubscriberDeliveries: %v", err)
+	}
+	if n1 != 2 {
+		t.Errorf("sweep 1 deleted %d rows, want 2 (the terminal expired rows only)", n1)
+	}
+	if marked1 != 1 {
+		t.Errorf("sweep 1 marked %d rows, want 1 (the expired pending row)", marked1)
+	}
+	d, err := ss.GetSubscriberDeliveryByID(ctx, expPending)
+	if err != nil {
+		t.Fatalf("expired pending row is gone after sweep 1 — it was deleted while pending: %v", err)
+	}
+	if d.Status != "failed" {
+		t.Errorf("expired pending row status = %q, want failed (marked, not deleted)", d.Status)
+	}
+	if d.LastError != "expired before delivery" {
+		t.Errorf("expired pending row last_error = %q, want %q", d.LastError, "expired before delivery")
+	}
+	fresh, err := ss.GetSubscriberDeliveryByID(ctx, freshPending)
+	if err != nil {
+		t.Fatalf("unexpired pending row is gone after sweep 1: %v", err)
+	}
+	if fresh.Status != "pending" {
+		t.Errorf("unexpired pending row status = %q, want untouched pending", fresh.Status)
+	}
+
+	// Sweep 2: the marked row is now a normal terminal expired row — deleted,
+	// and nothing new to mark.
+	n2, marked2, err := ss.DeleteExpiredSubscriberDeliveries(ctx)
+	if err != nil {
+		t.Fatalf("DeleteExpiredSubscriberDeliveries (sweep 2): %v", err)
+	}
+	if n2 != 1 {
+		t.Errorf("sweep 2 deleted %d rows, want 1 (the previously marked row)", n2)
+	}
+	if marked2 != 0 {
+		t.Errorf("sweep 2 marked %d rows, want 0", marked2)
+	}
+	if _, err := ss.GetSubscriberDeliveryByID(ctx, expPending); err == nil {
+		t.Error("marked row still present after sweep 2, want deleted")
 	}
 }
 

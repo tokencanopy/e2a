@@ -427,10 +427,11 @@ func main() {
 		// One-shot cutover: the legacy SubscriberRetryWorker is gone, so enqueue
 		// every pre-existing pending row now — idempotent (job_id IS NULL guard),
 		// harmless for rows already carrying a job.
-		if n, cerr := webhookDeliveryJobs.ReconcilePending(ctx, pool); cerr != nil {
+		if res, cerr := webhookDeliveryJobs.ReconcilePending(ctx, pool); cerr != nil {
 			log.Printf("[webhook-delivery] cutover: %v", cerr)
-		} else if n > 0 {
-			log.Printf("[webhook-delivery] cutover enqueued %d pending deliveries", n)
+		} else if res.Total() > 0 {
+			log.Printf("[webhook-delivery] cutover enqueued %d pending deliveries (%d never-enqueued, %d dead-job rescues)",
+				res.Total(), res.Enqueued, res.Rescued)
 		}
 		log.Printf("[webhook-delivery] engine=river")
 		// Webhook fan-out cutover (E2A_WEBHOOK_FANOUT_MODE=river): wire the shared
@@ -444,10 +445,11 @@ func main() {
 		if fanoutJobs != nil {
 			fanoutJobs.SetEnqueuer(jobsClient)
 			webhookOutbox.SetFanOutEnqueuer(fanoutJobs)
-			if n, cerr := fanoutJobs.ReconcilePending(ctx, pool); cerr != nil {
+			if res, cerr := fanoutJobs.ReconcilePending(ctx, pool); cerr != nil {
 				log.Printf("[webhook-fanout] cutover: %v", cerr)
-			} else if n > 0 {
-				log.Printf("[webhook-fanout] cutover enqueued %d pending events", n)
+			} else if res.Total() > 0 {
+				log.Printf("[webhook-fanout] cutover enqueued %d pending events (%d never-enqueued, %d dead-job rescues)",
+					res.Total(), res.Enqueued, res.Rescued)
 			}
 			log.Printf("[webhook-fanout] engine=river")
 		}

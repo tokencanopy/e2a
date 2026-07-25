@@ -86,12 +86,12 @@ func TestReconcilePending_EnqueuesOnlyStrandedRows(t *testing.T) {
 
 	enq := &stampEnqueue{}
 	// Batch 0 exercises the DefaultReconcileBatch fallback.
-	n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
 	if err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("enqueued count = %d, want 1", n)
+	if res.Total() != 1 || res.Enqueued != 1 {
+		t.Errorf("result = %+v, want exactly 1 on the IS-NULL arm", res)
 	}
 	if len(enq.ids) != 1 || enq.ids[0] != "stranded" {
 		t.Errorf("enqueueTx called with %v, want [stranded]", enq.ids)
@@ -118,15 +118,15 @@ func TestReconcilePending_IdempotentSecondRun(t *testing.T) {
 	insertReconcileRow(t, pool, spec.Table, "r2", "pending", nil)
 
 	enq := &stampEnqueue{}
-	if n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue); err != nil || n != 2 {
-		t.Fatalf("first pass: n=%d err=%v, want 2 nil", n, err)
+	if res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue); err != nil || res.Total() != 2 {
+		t.Fatalf("first pass: res=%+v err=%v, want 2 nil", res, err)
 	}
-	n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("second pass enqueued %d rows, want 0", n)
+	if res.Total() != 0 {
+		t.Errorf("second pass enqueued %d rows, want 0", res.Total())
 	}
 	if len(enq.ids) != 2 {
 		t.Errorf("enqueueTx called %d times total, want 2", len(enq.ids))
@@ -156,12 +156,12 @@ func TestReconcilePending_EnqueueFailureSkipsRowForNextPass(t *testing.T) {
 		return 2001, nil
 	}
 
-	n, err := jobs.ReconcilePending(ctx, pool, spec, enqueue)
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enqueue)
 	if err != nil {
 		t.Fatalf("first pass returned error %v, want nil (per-row failures are skipped)", err)
 	}
-	if n != 1 {
-		t.Errorf("first pass enqueued %d rows, want 1 (only the healthy row)", n)
+	if res.Total() != 1 {
+		t.Errorf("first pass enqueued %d rows, want 1 (only the healthy row)", res.Total())
 	}
 	if got := rowJobID(t, pool, spec.Table, "bad"); got != nil {
 		t.Errorf("failed row job id = %v, want NULL (retry next pass)", *got)
@@ -171,12 +171,12 @@ func TestReconcilePending_EnqueueFailureSkipsRowForNextPass(t *testing.T) {
 	}
 
 	failOnce = false
-	n, err = jobs.ReconcilePending(ctx, pool, spec, enqueue)
+	res, err = jobs.ReconcilePending(ctx, pool, spec, enqueue)
 	if err != nil {
 		t.Fatalf("retry pass: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("retry pass enqueued %d rows, want 1 (the previously failed row)", n)
+	if res.Total() != 1 {
+		t.Errorf("retry pass enqueued %d rows, want 1 (the previously failed row)", res.Total())
 	}
 	if got := rowJobID(t, pool, spec.Table, "bad"); got == nil || *got != 2001 {
 		t.Errorf("retried row job id = %v, want 2001", got)
@@ -196,24 +196,24 @@ func TestReconcilePending_BatchCapsOnePass(t *testing.T) {
 
 	spec.Batch = 2
 	enq := &stampEnqueue{}
-	n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
 	if err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("pass 1 enqueued %d rows, want capped at Batch=2", n)
+	if res.Total() != 2 {
+		t.Errorf("pass 1 enqueued %d rows, want capped at Batch=2", res.Total())
 	}
 	if len(enq.ids) != 2 {
 		t.Errorf("pass 1 enqueueTx calls = %d, want 2", len(enq.ids))
 	}
 
-	total := n
-	for n > 0 {
-		n, err = jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	total := res.Total()
+	for res.Total() > 0 {
+		res, err = jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
 		if err != nil {
 			t.Fatalf("drain pass: %v", err)
 		}
-		total += n
+		total += res.Total()
 	}
 	if total != 5 {
 		t.Errorf("drained %d rows total, want 5", total)
@@ -247,13 +247,13 @@ func TestReconcilePending_SkipsRowStampedConcurrently(t *testing.T) {
 
 	enq := &stampEnqueue{}
 	type result struct {
-		n   int
+		res jobs.ReconcileResult
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
-		n, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
-		done <- result{n, err}
+		res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+		done <- result{res, err}
 	}()
 
 	// Give the reconcile time to scan (sees committed NULL) and block on the
@@ -268,8 +268,8 @@ func TestReconcilePending_SkipsRowStampedConcurrently(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("ReconcilePending: %v", res.err)
 		}
-		if res.n != 0 {
-			t.Errorf("enqueued %d rows, want 0 (row was stamped concurrently)", res.n)
+		if res.res.Total() != 0 {
+			t.Errorf("enqueued %d rows, want 0 (row was stamped concurrently)", res.res.Total())
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("reconcile did not finish after the blocking lock was released")
@@ -279,6 +279,170 @@ func TestReconcilePending_SkipsRowStampedConcurrently(t *testing.T) {
 	}
 	if got := rowJobID(t, pool, spec.Table, "raced"); got == nil || *got != 777 {
 		t.Errorf("row job id = %v, want the concurrent stamp 777", got)
+	}
+}
+
+// insertRiverJob inserts a bare river_job row in the given state and returns
+// its id, so dead-job-rescue tests can stamp rows with jobs in every state.
+// Terminal states get the finalized_at that river_job's CHECK constraint
+// requires. The caller must have applied River's schema (jobs.Migrate).
+func insertRiverJob(t *testing.T, pool *pgxpool.Pool, state string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO river_job (state, kind, args, max_attempts, finalized_at)
+		 VALUES ($1::river_job_state, 'jobs_reconcile_test', '{}'::jsonb, 4,
+		         CASE WHEN $1 IN ('cancelled','completed','discarded') THEN now() END)
+		 RETURNING id`, state).Scan(&id); err != nil {
+		t.Fatalf("insert river_job(%s): %v", state, err)
+	}
+	return id
+}
+
+// TestReconcilePending_RescueDeadJobs covers the opt-in dead-job rescue
+// (spec.RescueDeadJobs): a row whose stamped job id refers to a river_job that
+// no longer exists (pruned) or is in a terminal state (cancelled / discarded /
+// completed) can never be worked again — it must be rescued (fresh job
+// enqueued, id re-stamped) exactly like the JobColumn IS NULL strand. Rows
+// whose stamped job is still live (available/running/scheduled/retryable) and
+// rows not matching Where stay untouched, and the plain IS NULL strand keeps
+// working alongside.
+func TestReconcilePending_RescueDeadJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+	spec := reconcileScratch(t, pool, "jobs_reconcile_dead")
+	// The rescue queries join river_job r, whose own `state` column would make
+	// the scratch table's unqualified `state` ambiguous — qualify with the `t`
+	// alias every ReconcilePending query binds to the row table.
+	spec.Where = "t.state = 'pending'"
+	spec.RescueDeadJobs = true
+
+	missing := int64(1) << 60 // never a real river_job id
+	dead := map[string]int64{
+		"dead-missing":   missing,
+		"dead-cancelled": insertRiverJob(t, pool, "cancelled"),
+		"dead-discarded": insertRiverJob(t, pool, "discarded"),
+		"dead-completed": insertRiverJob(t, pool, "completed"),
+	}
+	live := map[string]int64{
+		"live-available": insertRiverJob(t, pool, "available"),
+		"live-running":   insertRiverJob(t, pool, "running"),
+		"live-scheduled": insertRiverJob(t, pool, "scheduled"),
+		"live-retryable": insertRiverJob(t, pool, "retryable"),
+	}
+	for id, jobID := range dead {
+		jid := jobID
+		insertReconcileRow(t, pool, spec.Table, id, "pending", &jid)
+	}
+	for id, jobID := range live {
+		jid := jobID
+		insertReconcileRow(t, pool, spec.Table, id, "pending", &jid)
+	}
+	insertReconcileRow(t, pool, spec.Table, "stranded-null", "pending", nil)
+	doneDead := dead["dead-discarded"]
+	insertReconcileRow(t, pool, spec.Table, "done-dead-job", "done", &doneDead)
+
+	enq := &stampEnqueue{}
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if res.Enqueued != 1 || res.Rescued != 4 {
+		t.Errorf("result = %+v, want Enqueued=1 (NULL row) Rescued=4 (dead-job rows)", res)
+	}
+	for id, oldJobID := range dead {
+		got := rowJobID(t, pool, spec.Table, id)
+		if got == nil || *got == oldJobID {
+			t.Errorf("%s job id = %v, want re-stamped fresh id (old %d)", id, got, oldJobID)
+		}
+	}
+	for id, jobID := range live {
+		if got := rowJobID(t, pool, spec.Table, id); got == nil || *got != jobID {
+			t.Errorf("%s job id = %v, want untouched live job %d", id, got, jobID)
+		}
+	}
+	if got := rowJobID(t, pool, spec.Table, "stranded-null"); got == nil {
+		t.Error("stranded-null row was not enqueued alongside the dead-job rescues")
+	}
+	if got := rowJobID(t, pool, spec.Table, "done-dead-job"); got == nil || *got != doneDead {
+		t.Errorf("non-matching row job id = %v, want untouched %d (Where must still gate rescue)", got, doneDead)
+	}
+}
+
+// TestReconcilePending_RescueWhereGatesDeadArmOnly pins RescueWhere's scope: it
+// narrows ONLY the dead-job arm (scan + locked re-check) — a gated dead-job row
+// is skipped, an ungated one is rescued, and the IS NULL arm ignores the gate
+// entirely (a "gated" NULL row is still enqueued).
+func TestReconcilePending_RescueWhereGatesDeadArmOnly(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+	spec := reconcileScratch(t, pool, "jobs_reconcile_gate")
+	spec.Where = "t.state = 'pending'"
+	spec.RescueDeadJobs = true
+	spec.RescueWhere = "t.id NOT LIKE 'gated-%'"
+
+	gatedDead := insertRiverJob(t, pool, "discarded")
+	openDead := insertRiverJob(t, pool, "discarded")
+	insertReconcileRow(t, pool, spec.Table, "gated-dead", "pending", &gatedDead)
+	insertReconcileRow(t, pool, spec.Table, "open-dead", "pending", &openDead)
+	insertReconcileRow(t, pool, spec.Table, "gated-null", "pending", nil)
+
+	enq := &stampEnqueue{}
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if res.Enqueued != 1 || res.Rescued != 1 {
+		t.Errorf("result = %+v, want Enqueued=1 (NULL arm ignores gate) Rescued=1 (only the ungated dead row)", res)
+	}
+	if got := rowJobID(t, pool, spec.Table, "gated-dead"); got == nil || *got != gatedDead {
+		t.Errorf("gated dead row job id = %v, want untouched %d (RescueWhere must gate it)", got, gatedDead)
+	}
+	if got := rowJobID(t, pool, spec.Table, "open-dead"); got == nil || *got == openDead {
+		t.Errorf("ungated dead row job id = %v, want re-stamped fresh id (old %d)", got, openDead)
+	}
+	if got := rowJobID(t, pool, spec.Table, "gated-null"); got == nil {
+		t.Error("NULL-job row was not enqueued — RescueWhere must not gate the IS NULL arm")
+	}
+}
+
+// TestReconcilePending_DefaultSpecIgnoresDeadJobs pins the default (opt-out)
+// behavior: without RescueDeadJobs a stamped row is NEVER re-driven, even when
+// its job is gone. Load-bearing for outboundsend, which shares this machinery
+// but must not re-enqueue a discarded send job (its TerminalReconcileWorker
+// settles those rows terminally instead — re-driving would resend email).
+func TestReconcilePending_DefaultSpecIgnoresDeadJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+	spec := reconcileScratch(t, pool, "jobs_reconcile_nodead")
+
+	missing := int64(1) << 60
+	discarded := insertRiverJob(t, pool, "discarded")
+	insertReconcileRow(t, pool, spec.Table, "dead-missing", "pending", &missing)
+	insertReconcileRow(t, pool, spec.Table, "dead-discarded", "pending", &discarded)
+
+	enq := &stampEnqueue{}
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enq.enqueue)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if res.Total() != 0 || len(enq.ids) != 0 {
+		t.Errorf("default spec enqueued res=%+v ids=%v, want 0 (dead-job rescue must be opt-in)", res, enq.ids)
+	}
+	if got := rowJobID(t, pool, spec.Table, "dead-missing"); got == nil || *got != missing {
+		t.Errorf("dead-missing job id = %v, want untouched %d", got, missing)
+	}
+	if got := rowJobID(t, pool, spec.Table, "dead-discarded"); got == nil || *got != discarded {
+		t.Errorf("dead-discarded job id = %v, want untouched %d", got, discarded)
 	}
 }
 
@@ -294,12 +458,12 @@ func TestReconcilePending_BadSpecReturnsError(t *testing.T) {
 		LogPrefix: "[jobs-test-reconcile]",
 	}
 	enq := &stampEnqueue{}
-	n, err := jobs.ReconcilePending(context.Background(), pool, spec, enq.enqueue)
+	res, err := jobs.ReconcilePending(context.Background(), pool, spec, enq.enqueue)
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent table, got nil")
 	}
-	if n != 0 {
-		t.Errorf("n = %d, want 0 on scan error", n)
+	if res.Total() != 0 {
+		t.Errorf("result = %+v, want 0 on scan error", res)
 	}
 	if len(enq.ids) != 0 {
 		t.Errorf("enqueueTx called with %v, want no calls on scan error", enq.ids)

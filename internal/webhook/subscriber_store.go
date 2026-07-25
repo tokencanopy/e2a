@@ -117,20 +117,25 @@ func (s *SubscriberStore) GetSubscriberDeliveryByID(ctx context.Context, deliver
 // at the cap — retired with the legacy worker.) attemptN is the River job's
 // attempt number, written verbatim so the history API's attempts count matches
 // River's.
+//
+// The status='pending' guard makes the write a no-op on a row that terminalized
+// mid-attempt: without it, a worker mid-POST racing the expiry janitor's
+// mark-failed would resurrect the row to 'pending' when its non-final attempt
+// failed. Semantically the method only ever applies to in-flight rows anyway.
 func (s *SubscriberStore) RecordSubscriberAttempt(ctx context.Context, deliveryID string, attemptN int, errMsg string, statusCode int) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE webhook_subscriber_deliveries
-		    SET status = 'pending', attempts = $2, last_attempt_at = now(),
+		    SET attempts = $2, last_attempt_at = now(),
 		        last_error = $3, last_status_code = $4
-		  WHERE id = $1`,
+		  WHERE id = $1 AND status = 'pending'`,
 		deliveryID, attemptN, errMsg, statusCode,
 	)
 	return err
 }
 
 // MarkSubscriberFailed transitions a delivery to terminal 'failed' — called by
-// the DeliverWorker on the last (River-exhausted) attempt, and as an ErrorHandler
-// backstop on discard. Records the final attempt count + error.
+// the DeliverWorker on the last (River-exhausted) attempt. Records the final
+// attempt count + error.
 func (s *SubscriberStore) MarkSubscriberFailed(ctx context.Context, deliveryID string, attemptN int, errMsg string, statusCode int) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE webhook_subscriber_deliveries
@@ -176,32 +181,68 @@ func (s *SubscriberStore) InsertPendingForTest(ctx context.Context, webhookID, e
 	return id, nil
 }
 
-// DeleteExpiredSubscriberDeliveries removes rows whose expires_at has
-// passed. Migration 025 sets a 30-day TTL on every row; without this
-// janitor the table grows monotonically and query plans degrade.
-// Mirrors DeliveryStore.DeleteExpiredDeliveries for the legacy table.
-// expiredDeleteBatch bounds one DELETE in the batched retention sweep —
+// expiredDeleteBatch bounds one statement in the batched retention sweep —
 // webhook_subscriber_deliveries scales with delivery volume, so the janitor prunes it
 // in ctid-bounded chunks to keep each statement's lock/WAL small. Caller's ctx bounds
 // total runtime; a partial sweep resumes next hour (idempotent).
 const expiredDeleteBatch = 5000
 
-func (s *SubscriberStore) DeleteExpiredSubscriberDeliveries(ctx context.Context) (int, error) {
-	var total int
+// DeleteExpiredSubscriberDeliveries enforces the 30-day TTL (migration 025) in two
+// phases; without it the table grows monotonically and query plans degrade. Mirrors
+// DeliveryStore.DeleteExpiredDeliveries for the legacy table, with one refinement:
+//
+//  1. DELETE expired rows already in a terminal state (delivered/failed) — as before.
+//  2. Expired rows still 'pending' are NOT deleted but marked terminally 'failed'
+//     ("expired before delivery"), so a delivery record never silently vanishes
+//     while pending: the transition is counted (the caller logs it and emits the
+//     WebhookExpiredPending metric) and visible in the delivery-history API until
+//     the NEXT sweep deletes the now-terminal row.
+//
+// Phase 2's population should be ~empty now that the delivery reconciler also
+// rescues dead-job strands; what remains is essentially rows snoozing behind a
+// webhook disabled for longer than the TTL. Marking those failed (instead of a
+// bare `status <> 'pending'` guard on the DELETE) keeps them from becoming
+// immortal — unbounded growth behind a permanently-disabled webhook. Phase 2 runs
+// AFTER phase 1 so a freshly marked row survives until the following sweep. The
+// DeliverWorker treats any non-pending row as a no-op, so a still-snoozing job
+// waking up later never POSTs a row marked here.
+//
+// Returns the rows deleted (phase 1) and the rows marked failed (phase 2).
+func (s *SubscriberStore) DeleteExpiredSubscriberDeliveries(ctx context.Context) (deleted, marked int, err error) {
 	for {
 		tag, err := s.pool.Exec(ctx,
 			`DELETE FROM webhook_subscriber_deliveries WHERE ctid IN (
-			   SELECT ctid FROM webhook_subscriber_deliveries WHERE expires_at <= now() LIMIT $1)`,
+			   SELECT ctid FROM webhook_subscriber_deliveries
+			    WHERE expires_at <= now() AND status <> 'pending' LIMIT $1)`,
 			expiredDeleteBatch)
 		if err != nil {
-			return total, err
+			return deleted, marked, err
 		}
 		n := int(tag.RowsAffected())
-		total += n
+		deleted += n
 		if n < expiredDeleteBatch {
-			return total, nil
+			break
 		}
 	}
+
+	for {
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE webhook_subscriber_deliveries
+			    SET status = 'failed', last_error = 'expired before delivery'
+			  WHERE ctid IN (
+			   SELECT ctid FROM webhook_subscriber_deliveries
+			    WHERE expires_at <= now() AND status = 'pending' LIMIT $1)`,
+			expiredDeleteBatch)
+		if err != nil {
+			return deleted, marked, err
+		}
+		n := int(tag.RowsAffected())
+		marked += n
+		if n < expiredDeleteBatch {
+			break
+		}
+	}
+	return deleted, marked, nil
 }
 
 // ListDeliveriesByWebhook returns one page of delivery rows for the webhook,

@@ -176,9 +176,11 @@ func (o *outbox) Enabled() bool {
 // DeleteExpiredWebhookEvents removes terminal rows whose expires_at has
 // passed. Migration 026 sets a 30-day TTL on every event row; without
 // this janitor the table grows monotonically and the (user_id,
-// created_at) index degrades. Mirrors
-// webhook.SubscriberStore.DeleteExpiredSubscriberDeliveries for the
-// parallel slice-2 delivery table.
+// created_at) index degrades. The parallel slice-2 sweep
+// (webhook.SubscriberStore.DeleteExpiredSubscriberDeliveries) differs
+// deliberately: delivery rows expired while pending are marked failed
+// then pruned (their retry budget is finite), whereas pending EVENT
+// rows are retried forever — see below.
 //
 // Returns the number of rows deleted.
 //

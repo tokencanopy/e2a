@@ -63,6 +63,11 @@ type Metrics interface {
 	// skipped_disabled), which would otherwise drag the duration
 	// quantiles toward zero.
 	WebhookAttempt(outcome, statusClass string, seconds float64)
+
+	// WebhookDeliveryRescued counts delivery rows the reconciler's dead-job
+	// arm re-drove (fresh job replacing a terminal/pruned one). A climbing
+	// rate is the poison-row signal.
+	WebhookDeliveryRescued(count int)
 	// WebhookFirstAttemptLatency records event→first-attempt latency for
 	// one subscriber delivery (attempt start − webhook_events.created_at).
 	// Observed only on a first-delivery row's FIRST HTTP attempt — retries,
@@ -170,16 +175,23 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 	if err != nil {
 		return err // DB error — retryable
 	}
-	if d.Status == "delivered" {
-		return nil // already delivered (re-drive after a crash post-MarkDelivered) — idempotent no-op
+	if d.Status != "pending" {
+		// Terminal row — idempotent no-op. Covers a re-drive after a crash
+		// post-MarkDelivered ('delivered') and a job waking against a row the
+		// expiry janitor already marked 'failed' (expired before delivery) or
+		// whose terminal write landed after all: a terminal row must never be
+		// POSTed again.
+		return nil
 	}
 
 	wh, err := w.webhooks.GetWebhookByIDInternal(ctx, d.WebhookID)
 	if err != nil {
 		// Webhook deleted — terminal. Write the terminal status; if that write
 		// fails, return the error (retryable) rather than cancelling with an
-		// unmarked row — a JobCancel here would strand the row 'pending' with a
-		// dead job that the reconciler (keyed on job_id IS NULL) can't recover.
+		// unmarked row — a JobCancel here would leave the row 'pending' with a
+		// dead job until the reconciler's dead-job rescue re-drives it, an
+		// avoidable extra delivery cycle when the retryable error path settles
+		// it directly.
 		if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook not found", 0); merr != nil {
 			return merr
 		}
@@ -241,12 +253,16 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 
 	if job.Attempt >= MaxDeliveryAttempts {
 		w.emitAttempt("exhausted", statusClassOf(out.StatusCode), dur)
-		// Last attempt — River discards after this regardless of return value, so the
-		// terminal 'failed' write is the row's last chance. markFailedReliably retries
-		// it; only a sustained DB outage in this exact window leaves the row stranded
-		// (logged CRITICAL — not reachable via any normal River transition).
+		// Last attempt — River discards after this regardless of return value, so
+		// this is the row's best chance at its terminal 'failed' write.
+		// markFailedReliably retries it; if a sustained DB outage swallows every
+		// try, the row stays 'pending' with a soon-discarded job and the
+		// reconciler's dead-job rescue re-drives it with a fresh job (a fresh
+		// retry envelope, ending in another terminal-write window) — logged
+		// CRITICAL because reaching this line at all means the DB was down
+		// across every retry of a single-row UPDATE.
 		if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, out.Error, out.StatusCode); merr != nil {
-			log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending, needs manual reconcile): %v", d.ID, merr)
+			log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending; the reconciler will re-drive it once this job is discarded): %v", d.ID, merr)
 		}
 		return fmt.Errorf("webhook delivery failed (final attempt %d, status %d): %s", job.Attempt, out.StatusCode, out.Error)
 	}
@@ -260,10 +276,11 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 }
 
 // markFailedReliably writes the terminal 'failed' status, retrying a transient DB
-// error a few times. The terminal write is what keeps a row's status in sync with
-// its (about-to-be-terminal) River job; if it were lost, the row would sit
-// 'pending' with a dead job_id — invisible to the reconciler, which keys on
-// job_id IS NULL. Bounded, short backoff so the (rare) failure case adds < ~1s.
+// error a few times. The terminal write keeps the row's status in sync with its
+// (about-to-be-terminal) River job; if it is lost, the row sits 'pending' with a
+// dead job_id until the reconciler's dead-job rescue re-drives it — recoverable,
+// but only after another full delivery cycle, so this write still tries hard.
+// Bounded, short backoff so the (rare) failure case adds < ~1s.
 func (w *DeliverWorker) markFailedReliably(ctx context.Context, id string, attempt int, errMsg string, statusCode int) error {
 	var err error
 	for i := 0; i < 3; i++ {

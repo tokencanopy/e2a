@@ -12,6 +12,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
@@ -179,27 +180,64 @@ func TestFanOutWorker_Integration_EventGoneReturnsNil(t *testing.T) {
 	}
 }
 
+// fanOutJobCount counts the webhook_fanout river_jobs carrying the given event id
+// with id > sinceID. The harness truncates e2a tables between tests but never
+// river_job, and seedPendingEvent's ids are deterministic — so counts must be
+// scoped past a baseline (maxRiverJobID at test start) or a previous run's
+// leftover job for the same event id pollutes them.
+func fanOutJobCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, eventID string, sinceID int64) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM river_job WHERE kind = 'webhook_fanout' AND args->>'event_id' = $1 AND id > $2`,
+		eventID, sinceID).Scan(&n); err != nil {
+		t.Fatalf("count fan-out jobs for %s: %v", eventID, err)
+	}
+	return n
+}
+
+// maxRiverJobID returns the current high-water river_job id (0 when empty), the
+// baseline for fanOutJobCount.
+func maxRiverJobID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(id), 0) FROM river_job`).Scan(&id); err != nil {
+		t.Fatalf("read max river_job id: %v", err)
+	}
+	return id
+}
+
 // TestFanOutJobs_Integration_ReconcilePending: a pending event with no fan-out job is
 // re-enqueued and its fanout_job_id stamped; a re-run does not double-enqueue it.
+// Uses a REAL River client: the reconciler also rescues events whose stamped job is
+// dead (missing/terminal), so the idempotency assertion requires the stamped id to
+// reference a live river_job — a fake enqueuer's synthetic id would read as pruned.
 func TestFanOutJobs_Integration_ReconcilePending(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
 
 	userID, _, webhookID := seedWebhookFixture(t, ctx, pool, store, "fo_recon")
 	t.Cleanup(func() { cleanupWebhookFixture(ctx, pool, userID, webhookID) })
 
 	eventID := seedPendingEvent(t, ctx, pool, userID, "msg_fo_rc", webhookpub.EventEmailReceived)
+	baseJobID := maxRiverJobID(t, ctx, pool)
 
-	enq := &fakeFanOutEnq{}
 	j := webhookpub.NewFanOutJobs(pool, store, &fakeDeliveryEnqueuer{}, nil)
-	j.SetEnqueuer(enq)
+	client, err := jobs.New(pool, jobs.Config{}, j)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	j.SetEnqueuer(client)
 
 	if _, err := j.ReconcilePending(ctx, pool); err != nil {
 		t.Fatalf("ReconcilePending: %v", err)
 	}
 
-	// Our event got a job stamped and the fake saw its id.
+	// Our event got a job stamped and a real webhook_fanout job carries its id.
 	var jobID *int64
 	if err := pool.QueryRow(ctx, `SELECT fanout_job_id FROM webhook_events WHERE id = $1`, eventID).Scan(&jobID); err != nil {
 		t.Fatalf("read fanout_job_id: %v", err)
@@ -207,24 +245,130 @@ func TestFanOutJobs_Integration_ReconcilePending(t *testing.T) {
 	if jobID == nil {
 		t.Fatalf("fanout_job_id = nil, want stamped after reconcile")
 	}
-	var sawOurs bool
-	for _, a := range enq.args {
-		if a.EventID == eventID {
-			sawOurs = true
-		}
-	}
-	if !sawOurs {
-		t.Errorf("reconcile did not enqueue a fan-out job for %s", eventID)
+	if n := fanOutJobCount(t, ctx, pool, eventID, baseJobID); n != 1 {
+		t.Errorf("webhook_fanout jobs for %s = %d, want 1", eventID, n)
 	}
 
-	// Re-run: our event now has a job, so the fanout_job_id IS NULL guard skips it.
-	before := len(enq.args)
+	// Re-run: our event now has a live job, so the reconciler skips it.
 	if _, err := j.ReconcilePending(ctx, pool); err != nil {
 		t.Fatalf("ReconcilePending (re-run): %v", err)
 	}
-	for _, a := range enq.args[before:] {
-		if a.EventID == eventID {
-			t.Errorf("re-run re-enqueued already-stamped event %s", eventID)
+	if n := fanOutJobCount(t, ctx, pool, eventID, baseJobID); n != 1 {
+		t.Errorf("after re-run, webhook_fanout jobs for %s = %d, want 1 (idempotent)", eventID, n)
+	}
+}
+
+// TestFanOutJobs_Integration_RescuesDeadFanOutJob is the fan-out strand
+// regression test: a webhook_fanout job that River discarded (maxFanOutAttempts
+// exhausted) — or that River's pruner already deleted — leaves the event
+// 'pending' with fanout_job_id stamped, invisible to a reconciler keyed only on
+// fanout_job_id IS NULL. The reconciler must rescue such events (fresh job,
+// re-stamped id) and the rescued event must then fan out to completion.
+func TestFanOutJobs_Integration_RescuesDeadFanOutJob(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("jobs.Migrate: %v", err)
+	}
+
+	userID, _, webhookID := seedWebhookFixture(t, ctx, pool, store, "fo_dead")
+	t.Cleanup(func() { cleanupWebhookFixture(ctx, pool, userID, webhookID) })
+
+	evDiscarded := seedPendingEvent(t, ctx, pool, userID, "msg_fo_dead_d", webhookpub.EventEmailReceived)
+	evMissing := seedPendingEvent(t, ctx, pool, userID, "msg_fo_dead_m", webhookpub.EventEmailReceived)
+	evAlive := seedPendingEvent(t, ctx, pool, userID, "msg_fo_dead_a", webhookpub.EventEmailReceived)
+
+	insertJob := func(state string) int64 {
+		var id int64
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO river_job (state, kind, args, max_attempts, finalized_at)
+			 VALUES ($1::river_job_state, 'webhook_fanout', '{}'::jsonb, 10,
+			         CASE WHEN $1 IN ('cancelled','completed','discarded') THEN now() END)
+			 RETURNING id`, state).Scan(&id); err != nil {
+			t.Fatalf("insert river_job(%s): %v", state, err)
 		}
+		return id
+	}
+	discardedJob := insertJob("discarded")
+	aliveJob := insertJob("available")
+	missingJob := int64(1) << 60 // never a real river_job id (pruned strand)
+	stamp := func(eventID string, jobID int64) {
+		if _, err := pool.Exec(ctx,
+			`UPDATE webhook_events SET fanout_job_id = $2 WHERE id = $1`, eventID, jobID); err != nil {
+			t.Fatalf("stamp %s: %v", eventID, err)
+		}
+	}
+	stamp(evDiscarded, discardedJob)
+	stamp(evMissing, missingJob)
+	stamp(evAlive, aliveJob)
+
+	j := webhookpub.NewFanOutJobs(pool, store, &fakeDeliveryEnqueuer{}, nil)
+	client, err := jobs.New(pool, jobs.Config{}, j)
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	j.SetEnqueuer(client)
+
+	res, err := j.ReconcilePending(ctx, pool)
+	if err != nil {
+		t.Fatalf("ReconcilePending: %v", err)
+	}
+	if res.Rescued != 2 || res.Enqueued != 0 {
+		t.Errorf("reconcile result = %+v, want exactly 2 rescues (discarded-job + missing-job strands)", res)
+	}
+
+	fanoutJobIDOf := func(eventID string) int64 {
+		var jobID *int64
+		if err := pool.QueryRow(ctx, `SELECT fanout_job_id FROM webhook_events WHERE id = $1`, eventID).Scan(&jobID); err != nil {
+			t.Fatalf("read fanout_job_id for %s: %v", eventID, err)
+		}
+		if jobID == nil {
+			t.Fatalf("event %s has NULL fanout_job_id", eventID)
+		}
+		return *jobID
+	}
+	if got := fanoutJobIDOf(evDiscarded); got == discardedJob {
+		t.Errorf("discarded-job event still stamped %d, want a fresh job id", got)
+	}
+	if got := fanoutJobIDOf(evMissing); got == missingJob {
+		t.Errorf("missing-job event still stamped %d, want a fresh job id", got)
+	}
+	if got := fanoutJobIDOf(evAlive); got != aliveJob {
+		t.Errorf("live-job event fanout_job_id = %d, want untouched %d", got, aliveJob)
+	}
+
+	// Idempotent re-run (single reconciler): rescued events now carry live jobs —
+	// a re-run enqueues nothing. (Concurrent reconcilers are at-least-once on
+	// this arm; see jobs.ReconcilePending.)
+	res2, err := j.ReconcilePending(ctx, pool)
+	if err != nil {
+		t.Fatalf("ReconcilePending re-run: %v", err)
+	}
+	if res2.Total() != 0 {
+		t.Errorf("re-run enqueued %d events, want 0 (rescued events carry live jobs)", res2.Total())
+	}
+
+	// And a rescued event actually fans out to completion.
+	enq := &fakeDeliveryEnqueuer{}
+	w := webhookpub.NewFanOutWorker(pool, store, enq, nil)
+	if err := w.Work(ctx, &river.Job[webhookpub.FanOutArgs]{Args: webhookpub.FanOutArgs{EventID: evDiscarded}}); err != nil {
+		t.Fatalf("Work on rescued event: %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM webhook_events WHERE id = $1`, evDiscarded).Scan(&status); err != nil {
+		t.Fatalf("read event status: %v", err)
+	}
+	if status != "processed" {
+		t.Errorf("rescued event status = %q, want processed", status)
+	}
+	var deliveries int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM webhook_subscriber_deliveries WHERE event_id = $1 AND webhook_id = $2`,
+		evDiscarded, webhookID).Scan(&deliveries); err != nil {
+		t.Fatalf("count deliveries: %v", err)
+	}
+	if deliveries != 1 {
+		t.Errorf("deliveries for rescued event = %d, want 1", deliveries)
 	}
 }
