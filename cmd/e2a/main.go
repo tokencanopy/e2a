@@ -24,6 +24,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
@@ -413,10 +414,11 @@ func main() {
 	// the one place it becomes live — without it, drift in the materialized
 	// outreach counters would never be detected or corrected.
 	cleanupJanitor.SetEngagementReconciler(store)
-	// contact.due wake-up sweep. Wired here for the same reason as the
-	// reconciler: the Janitor treats both as optional, so this is the only
-	// place they become live.
-	cleanupJanitor.SetDueEngagementPublisher(store, janitor.NewContactDuePublisher(outboxPublisher))
+	// contact.due wake-up: its own River periodic on the maintenance lane, not
+	// part of the janitor. It is a scheduled product event with user-visible
+	// latency, not a prune, so it gets its own interval and metrics.
+	contactDueSweeper := contactdue.NewSweeper(store, contactdue.NewOutboxPublisher(outboxPublisher), nil)
+	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 
 	if len(registrars) > 0 {

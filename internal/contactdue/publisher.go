@@ -1,4 +1,4 @@
-package janitor
+package contactdue
 
 import (
 	"context"
@@ -7,20 +7,20 @@ import (
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
 
-// ContactDuePublisher emits contact.due through the standard webhook outbox, so
+// OutboxPublisher emits contact.due through the standard webhook outbox, so
 // the wake-up inherits durable at-least-once fan-out, retries, HMAC signing,
 // and SSRF-guarded delivery rather than getting a bespoke delivery path.
-type ContactDuePublisher struct {
+type OutboxPublisher struct {
 	publisher interface {
 		Publish(ctx context.Context, e webhookpub.Event)
 	}
 }
 
-// NewContactDuePublisher builds the publisher over an outbox publisher.
-func NewContactDuePublisher(p interface {
+// NewOutboxPublisher builds the publisher over the webhook outbox.
+func NewOutboxPublisher(p interface {
 	Publish(ctx context.Context, e webhookpub.Event)
-}) *ContactDuePublisher {
-	return &ContactDuePublisher{publisher: p}
+}) *OutboxPublisher {
+	return &OutboxPublisher{publisher: p}
 }
 
 // PublishContactDue emits the wake-up for one claimed engagement.
@@ -32,7 +32,7 @@ func NewContactDuePublisher(p interface {
 // It deliberately does NOT carry a suggested action or body. e2a wakes the
 // agent; the agent decides and writes. Putting content here would be the first
 // step toward e2a owning the sequence.
-func (p *ContactDuePublisher) PublishContactDue(ctx context.Context, d identity.DueEngagement) error {
+func (p *OutboxPublisher) PublishContactDue(ctx context.Context, d identity.DueEngagement) error {
 	if p == nil || p.publisher == nil {
 		return nil
 	}
