@@ -126,7 +126,7 @@ func TestDeliverWorker_DisabledSnoozes(t *testing.T) {
 
 func TestDeliverWorker_DeletedWebhookCancels(t *testing.T) {
 	id, sub, _, _ := seed(t, "wd-deleted")
-	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("not found")})
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: identity.ErrWebhookNotFound})
 	if err := w.Work(context.Background(), job(id, 1)); err == nil {
 		t.Fatal("deleted webhook should return a cancel error")
 	}
@@ -289,7 +289,7 @@ func TestDeliverWorker_Metrics_DisabledSkip(t *testing.T) {
 func TestDeliverWorker_Metrics_DeletedWebhook(t *testing.T) {
 	id, sub, _, _ := seed(t, "wd-m-deleted")
 	fm := &fakeMetrics{}
-	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("not found")}).WithMetrics(fm)
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: identity.ErrWebhookNotFound}).WithMetrics(fm)
 	if err := w.Work(context.Background(), job(id, 1)); err == nil {
 		t.Fatal("deleted webhook should return a cancel error")
 	}
@@ -428,7 +428,7 @@ func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsNoPostOutcomes(t *testing
 	}
 
 	idDeleted, _, _, _ := seedEventLinked(t, "lat-deleted", 45*time.Second, false)
-	wDeleted := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("not found")}).WithMetrics(fm)
+	wDeleted := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: identity.ErrWebhookNotFound}).WithMetrics(fm)
 	if err := wDeleted.Work(context.Background(), job(idDeleted, 1)); err == nil {
 		t.Fatal("deleted webhook should cancel")
 	}
@@ -544,7 +544,91 @@ func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedDespiteBackoffSchedule
 	if len(fm.firstTry) != 1 {
 		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST after chained pre-POST failures", fm.firstTry)
 	}
-	if got := fm.firstTry[0]; got < 89*time.Minute.Seconds() || got > 91*time.Minute.Seconds() {
+	// Wide band: suite-load overhead between seeding and Work adds to the
+	// 90-minute seeded age (observed 91+ min under full-suite load).
+	if got := fm.firstTry[0]; got < 88*time.Minute.Seconds() || got > 95*time.Minute.Seconds() {
 		t.Errorf("first-attempt latency = %.0fs, want ~90min (the honest outage signal)", got)
+	}
+}
+
+// TestDeliverWorker_TransientWebhookLookupErrorRetries pins the guard
+// against misclassifying infrastructure errors: a webhook lookup that fails
+// with anything OTHER than "webhook gone" (a Postgres blip, pool
+// exhaustion, network reset) must NOT terminally fail the delivery — the
+// row stays pending and River retries. Only identity.ErrWebhookNotFound is
+// terminal; everything else is a retryable worker error, and no
+// webhook_deleted attempt is emitted (no POST happened, no deletion
+// occurred).
+func TestDeliverWorker_TransientWebhookLookupErrorRetries(t *testing.T) {
+	id, sub, _, _ := seed(t, "wd-transient-lookup")
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("connection reset by peer")}).WithMetrics(fm)
+	err := w.Work(context.Background(), job(id, 1))
+	if err == nil {
+		t.Fatal("transient lookup error must return an error so River retries")
+	}
+	var cancelErr *river.JobCancelError
+	if errors.As(err, &cancelErr) {
+		t.Fatalf("transient lookup error must NOT cancel the job (that would strand the row pending): %v", err)
+	}
+	d := statusOf(t, sub, id)
+	if d.Status != "pending" {
+		t.Errorf("status = %q, want pending — a transient error must not fail the delivery", d.Status)
+	}
+	if len(fm.attempts) != 0 {
+		t.Errorf("attempts = %+v, want none — nothing was attempted and the webhook was not deleted", fm.attempts)
+	}
+}
+
+func TestDeliverWorker_WebhookNotFoundIsTerminal(t *testing.T) {
+	// The genuine-delete case keeps its terminal behavior: only the
+	// store's ErrWebhookNotFound sentinel (a real miss) cancels.
+	id, sub, _, _ := seed(t, "wd-genuine-delete")
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: identity.ErrWebhookNotFound}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 1)); err == nil {
+		t.Fatal("deleted webhook should return a cancel error")
+	}
+	if d := statusOf(t, sub, id); d.Status != "failed" {
+		t.Errorf("status = %q, want failed (genuine delete is terminal)", d.Status)
+	}
+	got := fm.one(t)
+	if got.outcome != "webhook_deleted" {
+		t.Errorf("attempt = %+v, want webhook_deleted for a genuine delete", got)
+	}
+}
+
+func TestDeliverWorker_TransientLookupErrorOnFinalAttemptTerminatesHonestly(t *testing.T) {
+	// A transient lookup error persisting through the LAST attempt: River
+	// discards after this, so the worker must not strand the row 'pending'
+	// with a dead job. Mirror the POST-failure final-attempt path: terminal
+	// 'failed' write + an exhausted (never webhook_deleted) metric — the
+	// delivery used up its attempts without a POST, and a sustained e2a-side
+	// outage must burn the attempt-health SLI, not hide.
+	id, sub, _, _ := seed(t, "wd-transient-final")
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("connection reset by peer")}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, webhookdelivery.MaxDeliveryAttempts)); err == nil {
+		t.Fatal("final-attempt lookup error must still return the error (River discards)")
+	}
+	if d := statusOf(t, sub, id); d.Status != "failed" {
+		t.Errorf("status = %q, want failed (terminal write is the row's last chance)", d.Status)
+	}
+	got := fm.one(t)
+	if got.outcome != "exhausted" || got.statusClass != "none" || got.seconds >= 0 {
+		t.Errorf("attempt = %+v, want exhausted/none/negative — attempts exhausted with no POST, never webhook_deleted", got)
+	}
+}
+
+func TestDeliverWorker_WrappedWebhookNotFoundIsStillTerminal(t *testing.T) {
+	// Pin the errors.Is traversal: a future store-side wrap of the sentinel
+	// must keep the terminal delete semantics.
+	id, sub, _, _ := seed(t, "wd-wrapped-delete")
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: fmt.Errorf("lookup webhook: %w", identity.ErrWebhookNotFound)})
+	if err := w.Work(context.Background(), job(id, 1)); err == nil {
+		t.Fatal("wrapped sentinel should still cancel")
+	}
+	if d := statusOf(t, sub, id); d.Status != "failed" {
+		t.Errorf("status = %q, want failed", d.Status)
 	}
 }

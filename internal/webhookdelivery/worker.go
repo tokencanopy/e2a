@@ -175,8 +175,30 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 	}
 
 	wh, err := w.webhooks.GetWebhookByIDInternal(ctx, d.WebhookID)
+	if err != nil && !errors.Is(err, identity.ErrWebhookNotFound) {
+		// Anything but a genuine miss is an infrastructure error (Postgres
+		// blip, pool exhaustion, network reset) — retryable. Terminally
+		// cancelling here would permanently fail a deliverable row, mislabel
+		// it "webhook not found", and hide the loss behind the
+		// customer-fault webhook_deleted metric.
+		if job.Attempt >= MaxDeliveryAttempts {
+			// Final attempt — River discards after this regardless, so the
+			// terminal 'failed' write is the row's last chance (mirrors the
+			// POST-failure path below): without it the row would sit
+			// 'pending' with a dead job_id the reconciler can't see. The
+			// delivery exhausted its attempts without a POST — count it as
+			// exhausted (e2a-side, in the attempt-health denominator), never
+			// webhook_deleted.
+			w.emitAttempt("exhausted", "none", -1)
+			if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook lookup error: "+err.Error(), 0); merr != nil {
+				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending, needs manual reconcile): %v", d.ID, merr)
+			}
+		}
+		return err
+	}
 	if err != nil {
-		// Webhook deleted — terminal. Write the terminal status; if that write
+		// Webhook deleted (the store's ErrWebhookNotFound sentinel — a real
+		// miss) — terminal. Write the terminal status; if that write
 		// fails, return the error (retryable) rather than cancelling with an
 		// unmarked row — a JobCancel here would strand the row 'pending' with a
 		// dead job that the reconciler (keyed on job_id IS NULL) can't recover.
