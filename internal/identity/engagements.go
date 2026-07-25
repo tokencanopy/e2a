@@ -429,3 +429,87 @@ func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, li
 	}
 	return drift, nil
 }
+
+// DueEngagement is one engagement whose next_action_at has passed and which has
+// not yet been notified for that value.
+type DueEngagement struct {
+	UserID             string
+	AgentEmail         string
+	Address            string
+	Stage              string
+	NextActionAt       time.Time
+	LastOutboundAt     *time.Time
+	OutboundCount      int
+	LastConversationID string
+	DisplayName        string
+	ContactMetadata    map[string]any
+	Replied            bool
+}
+
+// ClaimDueEngagements returns engagements ready for a contact.due event and
+// marks them notified in the same transaction, so a concurrent or retried sweep
+// cannot emit the same wake-up twice for one next_action_at value.
+//
+// TWO FAIL-CLOSED EXCLUSIONS, both load-bearing:
+//
+//   - SUPPRESSED addresses are skipped. A due-event is an invitation to send,
+//     and waking an agent to mail someone who unsubscribed is the single worst
+//     thing this feature could do.
+//   - TRASHED agents are skipped. Deleting an agent must stop its outreach
+//     immediately, not 30 days later when retention expires.
+//
+// Both are joins rather than stored flags, so they cannot go stale relative to
+// the state the send path enforces.
+func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit int) ([]DueEngagement, error) {
+	rows, err := s.pool.Query(ctx,
+		`UPDATE contact_engagements ce
+		    SET notified_next_action_at = ce.next_action_at,
+		        updated_at = now()
+		  WHERE ce.id IN (
+		        SELECT c.id
+		          FROM contact_engagements c
+		          JOIN agent_identities a ON a.id = c.agent_id AND a.deleted_at IS NULL
+		         WHERE c.next_action_at IS NOT NULL
+		           AND c.next_action_at <= $1
+		           AND c.notified_next_action_at IS DISTINCT FROM c.next_action_at
+		           AND NOT EXISTS (
+		                 SELECT 1 FROM agent_suppressions s
+		                  WHERE s.user_id = c.user_id AND s.agent_id = c.agent_id AND s.address = c.address)
+		           AND NOT EXISTS (
+		                 SELECT 1 FROM suppressions s
+		                  WHERE s.user_id = c.user_id AND s.address = c.address)
+		         ORDER BY c.next_action_at
+		         LIMIT $2
+		         FOR UPDATE SKIP LOCKED
+		  )
+		  RETURNING ce.user_id, ce.agent_id, ce.address, ce.stage, ce.next_action_at,
+		            ce.last_outbound_at, ce.outbound_count, ce.last_conversation_id,
+		            (ce.last_inbound_at IS NOT NULL AND ce.first_outbound_at IS NOT NULL
+		             AND ce.last_inbound_at > ce.first_outbound_at) AS replied,
+		            (SELECT display_name FROM contacts WHERE id = ce.contact_id),
+		            (SELECT metadata FROM contacts WHERE id = ce.contact_id)`,
+		now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DueEngagement
+	for rows.Next() {
+		var d DueEngagement
+		var meta []byte
+		if err := rows.Scan(&d.UserID, &d.AgentEmail, &d.Address, &d.Stage, &d.NextActionAt,
+			&d.LastOutboundAt, &d.OutboundCount, &d.LastConversationID, &d.Replied,
+			&d.DisplayName, &meta); err != nil {
+			return nil, err
+		}
+		d.ContactMetadata = map[string]any{}
+		if len(meta) > 0 {
+			if err := json.Unmarshal(meta, &d.ContactMetadata); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}

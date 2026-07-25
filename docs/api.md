@@ -725,7 +725,7 @@ own **per-webhook signing secret** that signs the payloads sent to it.
 
 Agent-scoped suppression management is beta. The authenticated list, create,
 and delete operations and their request/response schemas may change before
-they are declared stable. `agent.suppression_added` is a beta event emitted
+they are declared stable. `agent.suppression_added`, `contact.due` is a beta event emitted
 once when a new exact-agent
 block is created. Its current payload is
 `{agent_email, address, source}`, where `source` is `unsubscribe` or `manual`.

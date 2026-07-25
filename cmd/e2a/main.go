@@ -413,6 +413,10 @@ func main() {
 	// the one place it becomes live — without it, drift in the materialized
 	// outreach counters would never be detected or corrected.
 	cleanupJanitor.SetEngagementReconciler(store)
+	// contact.due wake-up sweep. Wired here for the same reason as the
+	// reconciler: the Janitor treats both as optional, so this is the only
+	// place they become live.
+	cleanupJanitor.SetDueEngagementPublisher(store, janitor.NewContactDuePublisher(outboxPublisher))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 
 	if len(registrars) > 0 {

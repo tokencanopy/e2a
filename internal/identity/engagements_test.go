@@ -569,3 +569,156 @@ func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
 		t.Errorf("suppression lookup = %v — consent must survive agent deletion", blocked)
 	}
 }
+
+// dueFixture builds a live agent plus an enrolled, past-due contact.
+func dueFixture(t *testing.T, store *identity.Store, tag string) (*identity.User, string) {
+	t.Helper()
+	ctx := context.Background()
+	user := newContactOwner(t, store, tag)
+	domain := tag + ".example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	agent := "raise@" + domain
+	if _, err := store.CreateAgent(ctx, agent, domain, "", "https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	return user, agent
+}
+
+func armDue(t *testing.T, store *identity.Store, userID, agent, address string) {
+	t.Helper()
+	past := time.Now().Add(-time.Hour).UTC()
+	p := &past
+	stage := "touch1"
+	if _, _, err := store.UpsertEngagement(context.Background(), userID, agent, address, &stage, &p, nil); err != nil {
+		t.Fatalf("arm %s: %v", address, err)
+	}
+}
+
+// TestClaimDueEngagementsFiresOncePerSchedule pins the dedupe contract: a due
+// engagement wakes the agent exactly once for a given next_action_at, and
+// re-arms when a new one is written. Without this the sweep would re-fire every
+// few minutes forever.
+func TestClaimDueEngagementsFiresOncePerSchedule(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := dueFixture(t, store, "duefire")
+	armDue(t, store, user.ID, agent, "partner@duefire.vc")
+
+	first, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim = %d rows err=%v, want 1", len(first), err)
+	}
+	if first[0].Address != "partner@duefire.vc" || first[0].Stage != "touch1" {
+		t.Errorf("claimed payload = %+v", first[0])
+	}
+
+	second, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if len(second) != 0 {
+		t.Errorf("second sweep re-fired %d engagement(s) — the wake-up must fire once per schedule", len(second))
+	}
+
+	// Writing a new schedule re-arms it.
+	later := time.Now().Add(-time.Minute).UTC()
+	lp := &later
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, agent, "partner@duefire.vc", nil, &lp, nil); err != nil {
+		t.Fatalf("re-arm: %v", err)
+	}
+	third, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil || len(third) != 1 {
+		t.Errorf("re-armed claim = %d rows err=%v, want 1", len(third), err)
+	}
+}
+
+// TestClaimDueEngagementsSkipsSuppressed is the most important guard in the
+// feature. A due-event is an invitation to send; waking an agent to mail
+// someone who unsubscribed is the worst thing this could do.
+func TestClaimDueEngagementsSkipsSuppressed(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := dueFixture(t, store, "duesupp")
+	armDue(t, store, user.ID, agent, "ok@duesupp.vc")
+	armDue(t, store, user.ID, agent, "unsubscribed@duesupp.vc")
+	armDue(t, store, user.ID, agent, "accountblocked@duesupp.vc")
+
+	if _, _, err := store.AddAgentSuppression(ctx, user.ID, agent, "unsubscribed@duesupp.vc",
+		"asked to stop", "unsubscribe", nil); err != nil {
+		t.Fatalf("agent suppression: %v", err)
+	}
+	if _, err := store.AddSuppression(ctx, user.ID, "accountblocked@duesupp.vc", "bounced", "manual", ""); err != nil {
+		t.Fatalf("account suppression: %v", err)
+	}
+
+	due, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var addrs []string
+	for _, d := range due {
+		addrs = append(addrs, d.Address)
+	}
+	if len(addrs) != 1 || addrs[0] != "ok@duesupp.vc" {
+		t.Errorf("due = %v, want only [ok@duesupp.vc] — a suppressed contact must never trigger a wake-up", addrs)
+	}
+}
+
+// TestClaimDueEngagementsSkipsTrashedAgents pins that deleting an agent stops
+// its outreach immediately, rather than 30 days later when trash retention
+// expires and the rows are finally purged.
+func TestClaimDueEngagementsSkipsTrashedAgents(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := dueFixture(t, store, "duetrash")
+	armDue(t, store, user.ID, agent, "partner@duetrash.vc")
+
+	if err := store.SoftDeleteAgent(ctx, agent, user.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	due, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("a trashed agent emitted %d due-event(s) — deletion must stop outreach at once", len(due))
+	}
+
+	// Restoring the agent brings its outreach back.
+	if err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	due, err = store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil || len(due) != 1 {
+		t.Errorf("restored agent claim = %d err=%v, want 1", len(due), err)
+	}
+}
+
+// TestClaimDueEngagementsIgnoresFutureSchedules pins the obvious-but-critical
+// case: nothing fires early.
+func TestClaimDueEngagementsIgnoresFutureSchedules(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := dueFixture(t, store, "duefuture")
+
+	future := time.Now().Add(48 * time.Hour).UTC()
+	fp := &future
+	stage := "touch1"
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, agent, "later@duefuture.vc", &stage, &fp, nil); err != nil {
+		t.Fatalf("arm future: %v", err)
+	}
+	due, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("a future schedule fired %d event(s) early", len(due))
+	}
+}

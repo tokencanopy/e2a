@@ -88,6 +88,11 @@ type Metrics interface {
 // check cannot dominate a maintenance run on a large account.
 const engagementReconcileBatch = 500
 
+// dueEngagementBatch bounds one wake-up sweep. Anything not claimed this pass
+// is picked up on the next, so a large campaign coming due at once spreads
+// across runs instead of flooding a subscriber in a single burst.
+const dueEngagementBatch = 200
+
 type Janitor struct {
 	messages     MessagePruner
 	deliveries   DeliveryPruner
@@ -98,7 +103,10 @@ type Janitor struct {
 	// engagements is optional (nil when contacts are not wired) — the sweep is
 	// a consistency check, not a prune, so its absence must not break cleanup.
 	engagements EngagementReconciler
-	metrics     Metrics
+	// contact.due wake-up sweep; both nil unless wired.
+	dueClaimer   DueEngagementClaimer
+	duePublisher DuePublisher
+	metrics      Metrics
 }
 
 // EngagementReconciler recomputes the materialized contact-engagement counters
@@ -114,6 +122,26 @@ type EngagementReconciler interface {
 
 // SetEngagementReconciler wires the contact-engagement consistency sweep.
 func (j *Janitor) SetEngagementReconciler(r EngagementReconciler) { j.engagements = r }
+
+// DueEngagementClaimer atomically claims engagements whose next_action_at has
+// passed and marks them notified, so a retried sweep cannot wake an agent twice
+// for one schedule.
+type DueEngagementClaimer interface {
+	ClaimDueEngagements(ctx context.Context, now time.Time, limit int) ([]identity.DueEngagement, error)
+}
+
+// DuePublisher emits the wake-up event for a claimed engagement.
+type DuePublisher interface {
+	PublishContactDue(ctx context.Context, d identity.DueEngagement) error
+}
+
+// SetDueEngagementPublisher wires the contact.due wake-up sweep. Both
+// collaborators are required; either being nil disables the sweep entirely,
+// because claiming without publishing would silently consume the schedule and
+// the agent would never be woken.
+func (j *Janitor) SetDueEngagementPublisher(c DueEngagementClaimer, p DuePublisher) {
+	j.dueClaimer, j.duePublisher = c, p
+}
 
 // New builds the Janitor. oauth may be nil (interface, not a typed-nil pointer)
 // to skip the OAuth cleanup pass.
@@ -144,6 +172,28 @@ func New(
 // run or spins River's retry.
 func (j *Janitor) Sweep(ctx context.Context) error {
 	var errs []error
+
+	// contact.due: wake agents whose outreach is due. Claim-and-mark is atomic
+	// in the store, so a failed publish costs at most one missed wake-up rather
+	// than a duplicate one — the safer direction, since a duplicate event
+	// invites a duplicate email.
+	if j.dueClaimer != nil && j.duePublisher != nil {
+		if due, err := j.dueClaimer.ClaimDueEngagements(ctx, time.Now().UTC(), dueEngagementBatch); err != nil {
+			log.Printf("Failed to claim due contact engagements: %v", err)
+			errs = append(errs, err)
+		} else {
+			for _, d := range due {
+				if perr := j.duePublisher.PublishContactDue(ctx, d); perr != nil {
+					log.Printf("Failed to publish contact.due for agent=%s address=%s: %v",
+						d.AgentEmail, d.Address, perr)
+					errs = append(errs, perr)
+				}
+			}
+			if len(due) > 0 {
+				log.Printf("Published %d contact.due event(s)", len(due))
+			}
+		}
+	}
 
 	// Contact-engagement counters: a consistency check rather than a prune.
 	// Bounded per run so one pass cannot dominate the maintenance job; drift

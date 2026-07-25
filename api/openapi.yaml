@@ -848,7 +848,7 @@ components:
         description:
           type: string
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -866,6 +866,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -875,6 +876,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
@@ -898,7 +900,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -909,6 +911,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
@@ -4057,6 +4060,7 @@ components:
             - email.flagged
             - email.blocked
             - email.review_requested
+            - contact.due
           type: string
       type: object
     TestWebhookResponse:
@@ -4180,7 +4184,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -4198,6 +4202,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -4207,6 +4212,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
@@ -4480,7 +4486,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -4491,6 +4497,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
