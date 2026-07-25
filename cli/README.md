@@ -195,11 +195,12 @@ e2a send --to alice@example.com --subject "Hi" --html-file body.html \
 e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 ```
 
-Common `send`/`reply` flags: `--to` (repeatable), `--subject`, `--body` /
-`--body-file`, `--html-file` (text fallback derived if no `--body`), `--attach`
-(repeatable; max 10 files, 10 MB each, 25 MB total), `--conversation-id`
-(alias `--conversation`), `--reply-to`, `--idempotency-key`, `--agent`, `--json`
-(print the full send result).
+Common `send`/`reply` flags: `--body` / `--body-file`, `--html-file` (text
+fallback derived if no `--body`), `--attach` (repeatable; max 10 files, 10 MB
+each, 25 MB total), `--reply-to`, `--idempotency-key`, `--agent`, `--json`
+(print the full send result). `send`-only: `--to` (repeatable), `--subject`,
+`--conversation-id` (alias `--conversation`) — `reply` infers these from the
+message being replied to and rejects them as unknown flags.
 
 ### `e2a messages`
 

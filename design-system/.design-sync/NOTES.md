@@ -53,14 +53,14 @@ Durable, human-readable notes for future syncs. Committed.
 ## Accepted deviations (the oracle can't see these)
 
 - **`[FONT_MISSING]` — accepted, system substitutes.** The CSS references
-  `"Geist"` (`--f-ui`) and `"JetBrains Mono"` (`--f-mono`), but this package does
+  `"Inter"` (`--f-ui`) and `"JetBrains Mono"` (`--f-mono`), but this package does
   not vendor the woff2 files (the app loads them via `next/font`). Both panels of
   the compare oracle fall back to the same system fonts, so grades pass while
-  claude.ai/design users see system sans/mono instead of Geist/JetBrains Mono.
+  claude.ai/design users see system sans/mono instead of Inter/JetBrains Mono.
   This is acceptable for now — the tokens declare close system fallbacks
   (`-apple-system …`, `ui-monospace …`). **To make it faithful:** add the woff2s
-  (e.g. the `geist` and `@fontsource/jetbrains-mono` packages) and wire
-  `cfg.extraFonts` with matching `@font-face` blocks, then inject the same
+  (e.g. the `@fontsource/inter` and `@fontsource/jetbrains-mono` packages) and
+  wire `cfg.extraFonts` with matching `@font-face` blocks, then inject the same
   `@font-face` into `.design-sync/sb-reference/iframe.html` so the oracle verifies
   with the real fonts on both sides.
 
