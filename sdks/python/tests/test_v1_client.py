@@ -1363,7 +1363,7 @@ async def test_protection_read_modify_write_accepts_view(httpx_mock):
 # ?confirm=DELETE guard the raw API requires.
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_get_url_encodes_the_address(httpx_mock):
     httpx_mock.add_response(
         json={
@@ -1385,7 +1385,7 @@ async def test_contacts_get_url_encodes_the_address(httpx_mock):
     assert "/v1/contacts/partner%40fund.vc" in str(req.url)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_create_posts_body_and_returns_canonical_address(httpx_mock):
     httpx_mock.add_response(
         status_code=201,
@@ -1408,7 +1408,7 @@ async def test_contacts_create_posts_body_and_returns_canonical_address(httpx_mo
     assert json.loads(req.content)["address"] == "A. Partner <Partner@Fund.VC>"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_update_sends_only_given_fields(httpx_mock):
     httpx_mock.add_response(
         json={
@@ -1430,7 +1430,7 @@ async def test_contacts_update_sends_only_given_fields(httpx_mock):
     assert json.loads(req.content) == {"display_name": "Renamed"}
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_delete_supplies_confirm_guard(httpx_mock):
     httpx_mock.add_response(json={"deleted": True, "address": "partner@fund.vc"})
     async with _client() as c:
@@ -1441,7 +1441,7 @@ async def test_contacts_delete_supplies_confirm_guard(httpx_mock):
     assert "confirm=DELETE" in str(req.url)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_import_returns_per_row_results(httpx_mock):
     httpx_mock.add_response(
         json={
@@ -1470,7 +1470,7 @@ async def test_contacts_import_returns_per_row_results(httpx_mock):
     assert "/v1/contacts/import" in str(req.url)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_delete_import_reverses_a_batch(httpx_mock):
     httpx_mock.add_response(
         json={
@@ -1489,7 +1489,7 @@ async def test_contacts_delete_import_reverses_a_batch(httpx_mock):
     assert "confirm=DELETE" in str(req.url)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_contacts_list_auto_pages(httpx_mock):
     httpx_mock.add_response(
         json={
