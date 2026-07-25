@@ -54,5 +54,8 @@ mcp/coverage/
 # TS SDK ergonomic-surface coverage-gate shards (npm run test:live --workspace @e2a/sdk)
 sdks/typescript/test/coverage/reports/
 
+# CLI command-coverage gate shards (npm run test:e2e:coverage --workspace @e2a/cli)
+cli/test/reports/
+
 # Isolated feature worktrees.
 .worktrees/

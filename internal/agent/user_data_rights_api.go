@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"time"
@@ -91,7 +90,7 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User) (*ide
 	res.OAuthAuthCodesDeleted = oauthCounts.AuthCodes
 	res.OAuthAccessTokensDeleted = oauthCounts.AccessTokens
 	res.OAuthRefreshTokensDeleted = oauthCounts.RefreshTokens
-	log.Printf("[api] user deleted: id=%s email=%s removed=%+v", user.ID, user.Email, res)
+	log.Printf("[api] user deleted: id=%s removed=%+v", user.ID, res)
 	return res, nil
 }
 
@@ -127,8 +126,9 @@ func (a *API) notifyBillingUserDeleted(ctx context.Context, userID string) error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("billing hook returned %d: %s", resp.StatusCode, string(b))
+		// Status code only: the sidecar's response body is third-party text that
+		// would flow into logs via callers' err=%v. The sidecar logs its own errors.
+		return fmt.Errorf("billing hook returned status %d", resp.StatusCode)
 	}
 	return nil
 }

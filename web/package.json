@@ -15,7 +15,7 @@
   "dependencies": {
     "@e2a/ui": "file:../design-system",
     "dompurify": "^3.4.12",
-    "next": "^16.2.10",
+    "next": "^16.2.11",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "swr": "^2.4.2"
@@ -23,7 +23,7 @@
   "devDependencies": {
     "@mdx-js/loader": "^3.1.1",
     "@mdx-js/react": "^3.1.1",
-    "@next/mdx": "^16.2.10",
+    "@next/mdx": "^16.2.11",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -34,11 +34,11 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.2.11",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
     "tailwindcss": "^4",
-    "ts-jest": "^29.4.11",
+    "ts-jest": "^29.4.12",
     "typescript": "^5"
   }
 }

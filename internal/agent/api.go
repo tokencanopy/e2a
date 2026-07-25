@@ -30,6 +30,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/limits"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/piguard"
@@ -1120,8 +1121,8 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 	}
 
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to=%v slug=%s conv_id=%s subject=%q approval_expires_at=%s",
-		msg.ID, msgType, msg.Status, agent.EmailAddress(), req.To, slug, req.ConversationID, req.Subject, msg.ApprovalExpiresAt.Format(time.RFC3339))
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d approval_expires_at=%s",
+		msg.ID, msgType, msg.Status, agent.EmailAddress(), len(req.To), logredact.AddressDomains(req.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject), msg.ApprovalExpiresAt.Format(time.RFC3339))
 
 	a.publishPendingApproval(ctx, a.buildPendingApprovalEvent(agent, msg, req, msgType), msg.ID)
 	return msg, nil
@@ -1310,7 +1311,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		// on metering; the pre-check remains the quota gate.
 		a.recordLoopbackUsage(ctx, user.ID, agent)
 		slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-		log.Printf("[mail:%s] dir=outbound type=%s method=loopback status=sent from=%s to=%s slug=%s conv_id=%s subject=%q", outMsg.ID, msgType, agent.EmailAddress(), agent.EmailAddress(), slug, req.ConversationID, req.Subject)
+		log.Printf("[mail:%s] dir=outbound type=%s method=loopback status=sent from=%s to=%s slug=%s conv_id=%s subject_len=%d", outMsg.ID, msgType, agent.EmailAddress(), agent.EmailAddress(), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 		return &OutboundResult{MessageID: outMsg.ID, SentAs: "own_address", Method: "loopback"}, nil
 	}
 
@@ -1324,7 +1325,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// (email.sent / email.failed + metering). Missing queue wiring is a startup bug;
 	// fail closed here as defense in depth and never submit inline.
 	if a.outboundEnq == nil {
-		log.Printf("[api] outbound queue unavailable: agent=%s to=%v", agent.Domain, req.To)
+		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To))
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
 	comp, cerr := a.sender.ComposeForAccept(agent, req)
@@ -1335,7 +1336,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if outbound.IsValidationError(cerr) {
 			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: cerr.Error()}
 		}
-		log.Printf("[api] async compose failed: agent=%s to=%v error=%v", agent.Domain, req.To, cerr)
+		log.Printf("[api] async compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
 	var accepted *identity.Message
@@ -1367,14 +1368,14 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		accepted = msg
 		return nil
 	}); txErr != nil {
-		log.Printf("[api] async accept tx failed: agent=%s to=%v error=%v", agent.Domain, req.To, txErr)
+		log.Printf("[api] async accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
 	if verdict.Annotate() {
 		a.annotateAndAudit(ctx, agent, accepted.ID, req, verdict)
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to=%v slug=%s conv_id=%s subject=%q", accepted.ID, msgType, agent.EmailAddress(), comp.To, slug, req.ConversationID, req.Subject)
+	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
@@ -1454,7 +1455,7 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 	// Missing queue wiring is a startup bug; fail closed before provider I/O
 	// and never submit inline (same contract as DeliverOutbound).
 	if a.outboundEnq == nil {
-		log.Printf("[api] outbound queue unavailable: agent=%s to=%v (platform %s)", agent.Domain, req.To, msgType)
+		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v (platform %s)", agent.Domain, len(req.To), logredact.AddressDomains(req.To), msgType)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
 	comp, cerr := a.sender.ComposePlatformForAccept(req)
@@ -1465,7 +1466,7 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		if outbound.IsValidationError(cerr) {
 			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: cerr.Error()}
 		}
-		log.Printf("[api] platform compose failed: agent=%s to=%v error=%v", agent.Domain, req.To, cerr)
+		log.Printf("[api] platform compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
 	var accepted *identity.Message
@@ -1484,12 +1485,12 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		accepted = msg
 		return nil
 	}); txErr != nil {
-		log.Printf("[api] platform accept tx failed: agent=%s to=%v error=%v", agent.Domain, req.To, txErr)
+		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to=%v slug=%s conv_id=%s subject=%q platform_originated=true",
-		accepted.ID, msgType, comp.EnvelopeFrom, comp.To, slug, req.ConversationID, req.Subject)
+	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d platform_originated=true",
+		accepted.ID, msgType, comp.EnvelopeFrom, len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
@@ -1646,11 +1647,8 @@ func (a *API) handleFeedback(w http.ResponseWriter, r *http.Request) {
 
 	if attempted == 0 {
 		// No delivery channel configured — log-only graceful fallback.
-		safeMsg := strings.ReplaceAll(req.Message, "\n", " ")
-		if len([]rune(safeMsg)) > 200 {
-			safeMsg = string([]rune(safeMsg)[:200])
-		}
-		log.Printf("feedback: no delivery channel configured, logging only: [%s] %s", req.Category, safeMsg)
+		safeMsg := logredact.Truncate(strings.ReplaceAll(req.Message, "\n", " "), 60)
+		log.Printf("feedback: no delivery channel configured, logging only: [%s] message_len=%d preview=%q", req.Category, utf8.RuneCountInString(req.Message), safeMsg)
 	} else if delivered == 0 {
 		http.Error(w, "failed to submit feedback", http.StatusInternalServerError)
 		return
