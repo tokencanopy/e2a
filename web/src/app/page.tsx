@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useAuth } from "./components/AuthProvider";
 import { Eyebrow } from "@e2a/ui";
 import { TokenCanopyBadge } from "./components/loft/TokenCanopyBadge";
+import { SIGN_IN_URL } from "../lib/site";
 
 // Onboarding surfaces, in the order an agent-native user meets them: install
 // the plugin in your coding agent, or point any MCP runtime at the hosted
@@ -171,7 +172,7 @@ export default function Home() {
                    be doors into the app — so the primary becomes the only
                    one and points at the dashboard. */
                 <a
-                  href="/api/auth/login"
+                  href={SIGN_IN_URL}
                   className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
                   style={{ color: "var(--fg-muted)" }}
                 >

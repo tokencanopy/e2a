@@ -101,6 +101,11 @@ function closeServer(server: Server): Promise<void> {
 }
 
 function buildBrowserLoginURL(apiUrl: string, callbackUrl: string, cliState: string): string {
+  // Always the legacy Google door. The OIDC door (/api/auth/oidc/login)
+  // doesn't support the cli_callback/cli_state flow (it ignores query
+  // params and always lands on /dashboard), and the server exposes no
+  // public auth-methods endpoint the CLI could consult at runtime — so
+  // there is no deployment-agnostic way to discover a different door.
   const loginUrl = new URL("/api/auth/login", apiUrl);
   loginUrl.searchParams.set("cli_callback", callbackUrl);
   loginUrl.searchParams.set("cli_state", cliState);

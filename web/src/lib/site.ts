@@ -32,3 +32,20 @@ export const FEEDBACK_EMAIL = process.env.NEXT_PUBLIC_FEEDBACK_EMAIL || "";
 // configured, so forks don't accidentally inherit the upstream property.
 export const GOOGLE_SITE_VERIFICATION =
   process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
+
+// Sign-in entry point for the dashboard's "Sign in" links. Defaults to the
+// legacy Google OAuth door, which every self-host deployment has. The hosted
+// deployment bakes in NEXT_PUBLIC_E2A_SIGN_IN_URL=/api/auth/oidc/login at
+// image build time to make the TokenCanopy OIDC door (multi-provider chooser)
+// the default. The OIDC route only exists when the server runs with
+// E2A_OIDC_ENABLED=true, so self-hosters must leave this unset — pointing it
+// at /api/auth/oidc/login without the server flag is a dead link.
+export const LEGACY_SIGN_IN_URL = "/api/auth/login";
+export const SIGN_IN_URL =
+  process.env.NEXT_PUBLIC_E2A_SIGN_IN_URL || LEGACY_SIGN_IN_URL;
+
+// Button copy derived from the same variable: the legacy door IS Google, but
+// the OIDC door leads to a multi-provider chooser (Google/Microsoft/GitHub),
+// so naming Google there would be wrong.
+export const SIGN_IN_LABEL =
+  SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Sign in with Google" : "Sign in";

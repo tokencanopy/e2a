@@ -1,6 +1,6 @@
 "use client";
 
-import { SITE_URL } from "../../lib/site";
+import { SIGN_IN_URL, SITE_URL, LEGACY_SIGN_IN_URL } from "../../lib/site";
 
 /**
  * Detects in-app browsers (WebViews) that Google OAuth blocks.
@@ -26,19 +26,22 @@ export function SignInLink({
     if (isInAppBrowser()) {
       e.preventDefault();
       // Try to open in system browser on iOS/Android
-      const url = window.location.origin + "/api/auth/login";
+      const url = window.location.origin + SIGN_IN_URL;
       // iOS: window.open in in-app browsers sometimes opens Safari
       window.open(url, "_blank");
-      // Also show a message in case the open didn't work
+      // Also show a message in case the open didn't work. The WebView block
+      // is Google's, so only name Google when the legacy door is configured.
+      const door =
+        SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Google Sign-In" : "Sign-in";
       alert(
-        `Google Sign-In doesn't work in this browser. Please open ${SITE_URL} in Safari or Chrome to sign in.`
+        `${door} doesn't work in this browser. Please open ${SITE_URL} in Safari or Chrome to sign in.`
       );
     }
   };
 
   return (
     <a
-      href="/api/auth/login"
+      href={SIGN_IN_URL}
       className={className}
       style={style}
       onClick={handleClick}

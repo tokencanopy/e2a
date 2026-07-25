@@ -55,13 +55,20 @@ ARG NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=
 # https://e2a.dev) so checkout/portal POSTs land on the Caddy-fronted
 # sidecar at /api/billing/*.
 ARG NEXT_PUBLIC_BILLING_API=
+# Empty keeps the dashboard's sign-in links on the legacy Google door
+# (/api/auth/login), which every deployment has. The hosted deployment sets
+# this to /api/auth/oidc/login so the TokenCanopy OIDC door (multi-provider
+# chooser) is the default. Only set this when the server runs with
+# E2A_OIDC_ENABLED=true — the OIDC route doesn't exist otherwise.
+ARG NEXT_PUBLIC_E2A_SIGN_IN_URL=
 
 ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_SITE_NAME=$NEXT_PUBLIC_SITE_NAME \
     NEXT_PUBLIC_AGENTS_DOMAIN=$NEXT_PUBLIC_AGENTS_DOMAIN \
     NEXT_PUBLIC_FEEDBACK_EMAIL=$NEXT_PUBLIC_FEEDBACK_EMAIL \
     NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=$NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION \
-    NEXT_PUBLIC_BILLING_API=$NEXT_PUBLIC_BILLING_API
+    NEXT_PUBLIC_BILLING_API=$NEXT_PUBLIC_BILLING_API \
+    NEXT_PUBLIC_E2A_SIGN_IN_URL=$NEXT_PUBLIC_E2A_SIGN_IN_URL
 
 COPY web ./
 RUN npm run build
