@@ -26,7 +26,7 @@ import { fail, info, writeReport } from "../../harness/report.ts";
 // second consecutive run starts from the same empty baseline. Do not leave
 // the account AT its cap — the whole point of the cleanup discipline is that
 // this suite can run indefinitely without manual intervention.
-const SUITE = "30-quota-enforcement";
+const SUITE = "prod/33-quota-enforcement";
 const base = new ApiClient();
 
 if (!base.env.quotaApiKey) {

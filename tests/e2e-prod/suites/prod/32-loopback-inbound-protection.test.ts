@@ -47,7 +47,7 @@ import { fail, info, writeReport } from "../../harness/report.ts";
 // run the identical scenario) — it belongs here because it is a direct,
 // deliberate live-prod verification of a fix that reached prod unverified
 // against this exact posture; see the task brief that requested it.
-const SUITE = "32-loopback-inbound-protection";
+const SUITE = "prod/32-loopback-inbound-protection";
 const client = new ApiClient();
 
 interface SendResult {

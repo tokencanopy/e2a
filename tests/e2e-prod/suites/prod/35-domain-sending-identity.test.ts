@@ -46,7 +46,7 @@ import { writeReport, info, warn, fail } from "../../harness/report.ts";
 //   6. create a custom-domain agent, confirming domain_verified=true.
 //   7. teardown: agent BEFORE domain (domain_has_agents guard), then all 5
 //      Cloudflare records unconditionally.
-const SUITE = "33-domain-sending-identity";
+const SUITE = "prod/35-domain-sending-identity";
 const client = new ApiClient();
 
 // Event-type coverage recorder for event_coverage_gate.py, same shard
