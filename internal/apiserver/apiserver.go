@@ -207,6 +207,13 @@ func BuildDeps(p Params) httpapi.Deps {
 		ListAgentSuppressions:  p.Store.ListAgentSuppressions,
 		RemoveAgentSuppression: p.Store.RemoveAgentSuppression,
 
+		CreateContact: p.Store.CreateContact,
+		GetContact:    p.Store.GetContactByAddress,
+		ListContacts:  p.Store.ListContacts,
+		UpdateContact: p.Store.UpdateContact,
+		DeleteContact: p.Store.DeleteContact,
+		CountContacts: p.Store.CountContacts,
+
 		ListProtectionEventsByMessage: p.Store.ListProtectionEventsByMessage,
 		GetUsage: func(ctx context.Context, userID string) httpapi.LimitsUsageView {
 			var u httpapi.LimitsUsageView
