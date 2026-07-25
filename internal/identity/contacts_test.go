@@ -312,3 +312,151 @@ func TestListContactsFilters(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestImportContactsMergePreservesProvenance is the re-import invariant at the
+// storage layer. Uploading a corrected spreadsheet must refresh identity while
+// leaving where the contact came from alone — the same rule that will protect
+// outreach state once engagements hang off these rows.
+func TestImportContactsMergePreservesProvenance(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "impmerge")
+
+	first, err := store.ImportContacts(ctx, user.ID, "imp_first", []identity.ContactImportRow{
+		{Address: "partner@impmerge.vc", DisplayName: strPtr("Original"),
+			Metadata: map[string]any{"fund": "Example Capital"}},
+	}, true)
+	if err != nil || first[0].Status != identity.ImportStatusCreated {
+		t.Fatalf("first import = %#v err=%v", first, err)
+	}
+
+	second, err := store.ImportContacts(ctx, user.ID, "imp_second", []identity.ContactImportRow{
+		{Address: "partner@impmerge.vc", DisplayName: strPtr("Corrected")},
+	}, true)
+	if err != nil || second[0].Status != identity.ImportStatusUpdated {
+		t.Fatalf("re-import = %#v err=%v", second, err)
+	}
+
+	got, err := store.GetContactByAddress(ctx, user.ID, "partner@impmerge.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DisplayName != "Corrected" {
+		t.Errorf("display_name = %q, want Corrected", got.DisplayName)
+	}
+	if got.ImportBatchID != "imp_first" {
+		t.Errorf("import_batch_id = %q, want imp_first — a merge must not rewrite provenance", got.ImportBatchID)
+	}
+}
+
+// TestImportContactsSkipsIntraBatchDuplicates pins that a spreadsheet listing
+// the same person twice (in any case form) reports the second row rather than
+// racing itself inside the transaction.
+func TestImportContactsSkipsIntraBatchDuplicates(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "impdupe")
+
+	out, err := store.ImportContacts(ctx, user.ID, "imp_dupe", []identity.ContactImportRow{
+		{Address: "dupe@impdupe.vc", DisplayName: strPtr("First")},
+		{Address: "A. Dupe <DUPE@impdupe.vc>", DisplayName: strPtr("Same person")},
+	}, true)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusCreated {
+		t.Errorf("row 0 = %#v, want created", out[0])
+	}
+	if out[1].Status != identity.ImportStatusSkipped || out[1].Code != "duplicate_in_batch" {
+		t.Errorf("row 1 = %#v, want skipped/duplicate_in_batch", out[1])
+	}
+}
+
+// TestDeleteImportBatchIsTenantScoped pins that a batch id from one account is
+// meaningless in another, and reports not-found rather than deleting nothing
+// silently.
+func TestDeleteImportBatchIsTenantScoped(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	alice := newContactOwner(t, store, "impalice")
+	bob := newContactOwner(t, store, "impbob")
+
+	if _, err := store.ImportContacts(ctx, alice.ID, "imp_shared", []identity.ContactImportRow{
+		{Address: "partner@impiso.vc"},
+	}, true); err != nil {
+		t.Fatalf("alice import: %v", err)
+	}
+
+	if _, _, err := store.DeleteImportBatch(ctx, bob.ID, "imp_shared"); !errors.Is(err, identity.ErrImportBatchNotFound) {
+		t.Errorf("bob reversal err = %v, want ErrImportBatchNotFound", err)
+	}
+	if _, err := store.GetContactByAddress(ctx, alice.ID, "partner@impiso.vc"); err != nil {
+		t.Errorf("alice's contact removed by bob's reversal: %v", err)
+	}
+
+	deleted, _, err := store.DeleteImportBatch(ctx, alice.ID, "imp_shared")
+	if err != nil || deleted != 1 {
+		t.Errorf("alice reversal deleted=%d err=%v, want 1", deleted, err)
+	}
+}
+
+// TestImportMergeOmittedMetadataIsPreserved pins the behaviour a live e2e
+// caught the hard way: re-importing a corrected spreadsheet that no longer
+// carries a metadata column must NOT erase what the first import wrote.
+//
+// Omitted means "leave alone" (matching PATCH on the same resource); an
+// explicitly supplied object — including an empty one — replaces.
+func TestImportMergeOmittedMetadataIsPreserved(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "impmeta")
+
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_a", []identity.ContactImportRow{
+		{Address: "partner@impmeta.vc", DisplayName: strPtr("Original"),
+			Metadata: map[string]any{"fund": "Example Capital", "check": "1-3M"}},
+	}, true); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	// Re-import with NO metadata key at all.
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_b", []identity.ContactImportRow{
+		{Address: "partner@impmeta.vc", DisplayName: strPtr("Corrected")},
+	}, true); err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+
+	got, err := store.GetContactByAddress(ctx, user.ID, "partner@impmeta.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DisplayName != "Corrected" {
+		t.Errorf("display_name = %q, want Corrected", got.DisplayName)
+	}
+	if got.Metadata["fund"] != "Example Capital" || got.Metadata["check"] != "1-3M" {
+		t.Errorf("metadata = %#v — a narrower re-import erased columns it did not carry", got.Metadata)
+	}
+
+	// An explicit object still replaces.
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_c", []identity.ContactImportRow{
+		{Address: "partner@impmeta.vc", Metadata: map[string]any{"fund": "Other Capital"}},
+	}, true); err != nil {
+		t.Fatalf("explicit-metadata import: %v", err)
+	}
+	got, err = store.GetContactByAddress(ctx, user.ID, "partner@impmeta.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DisplayName != "Corrected" {
+		t.Errorf("display_name = %q — an import row without a name column erased the name", got.DisplayName)
+	}
+	if got.Metadata["fund"] != "Other Capital" {
+		t.Errorf("metadata = %#v, want fund=Other Capital", got.Metadata)
+	}
+	if _, stale := got.Metadata["check"]; stale {
+		t.Errorf("metadata = %#v — an explicit object must REPLACE, not merge key-by-key", got.Metadata)
+	}
+}

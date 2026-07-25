@@ -158,6 +158,77 @@ func newContactsServer(t *testing.T, mutate func(*Deps, *contactFixture)) *httpt
 			defer fixture.mu.Unlock()
 			return len(fixture.rows), nil
 		},
+		ImportContacts: func(_ context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error) {
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			outcomes := make([]identity.ContactImportOutcome, len(rows))
+			seen := map[string]int{}
+			for i, row := range rows {
+				address := identity.NormalizeMailboxAddress(row.Address)
+				if first, dup := seen[address]; dup {
+					outcomes[i] = identity.ContactImportOutcome{
+						Index: i, Address: address, Status: identity.ImportStatusSkipped,
+						Code:    "duplicate_in_batch",
+						Message: fmt.Sprintf("duplicate of row %d in this batch", first),
+					}
+					continue
+				}
+				seen[address] = i
+				k := fixture.key(userID, address)
+				existing, exists := fixture.rows[k]
+				if exists && !merge {
+					outcomes[i] = identity.ContactImportOutcome{
+						Index: i, Address: address, Status: identity.ImportStatusSkipped,
+						Code: "already_exists",
+					}
+					continue
+				}
+				metadata := row.Metadata
+				if metadata == nil {
+					metadata = map[string]any{}
+				}
+				status := identity.ImportStatusCreated
+				name := ""
+				if row.DisplayName != nil {
+					name = *row.DisplayName
+				} else if exists {
+					name = existing.DisplayName
+				}
+				c := identity.Contact{
+					ID: "cnt_" + address, Address: address, DisplayName: name,
+					Metadata: metadata, Source: identity.ContactSourceImport,
+					ImportBatchID: batchID, CreatedAt: clock, UpdatedAt: clock,
+				}
+				if exists {
+					// merge: refresh identity, keep provenance where it was.
+					status = identity.ImportStatusUpdated
+					c.ID = existing.ID
+					c.Source = existing.Source
+					c.ImportBatchID = existing.ImportBatchID
+					c.CreatedAt = existing.CreatedAt
+				}
+				fixture.rows[k] = c
+				outcomes[i] = identity.ContactImportOutcome{Index: i, Address: address, Status: status}
+			}
+			return outcomes, nil
+		},
+		DeleteImportBatch: func(_ context.Context, userID, batchID string) (int, int, error) {
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			var keys []string
+			for k, c := range fixture.rows {
+				if strings.HasPrefix(k, userID+"\x00") && c.ImportBatchID == batchID {
+					keys = append(keys, k)
+				}
+			}
+			if len(keys) == 0 {
+				return 0, 0, identity.ErrImportBatchNotFound
+			}
+			for _, k := range keys {
+				delete(fixture.rows, k)
+			}
+			return len(keys), 0, nil
+		},
 		CursorSecret: "contacts-test-secret",
 	}
 	if mutate != nil {

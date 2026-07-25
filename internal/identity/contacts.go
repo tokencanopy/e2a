@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,9 @@ var (
 	// ErrContactExists is returned when creating an address the account
 	// already holds. Callers that want upsert semantics use UpsertContact.
 	ErrContactExists = errors.New("contact already exists")
+	// ErrImportBatchNotFound means no contacts remain that were created by
+	// that batch — absent, already reversed, or another account's.
+	ErrImportBatchNotFound = errors.New("import batch not found")
 )
 
 // ContactSource records how a contact first entered the account. It is
@@ -222,4 +226,171 @@ func nullableTime(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// ContactImportRow is one inbound row of a bulk import, before validation.
+type ContactImportRow struct {
+	Address string
+	// Nil means the upload did not carry a name column for this row, so an
+	// existing name is left alone. A non-nil empty string explicitly clears it.
+	// Same rule as Metadata below, and as PATCH on the contact resource.
+	DisplayName *string
+	Metadata    map[string]any
+}
+
+// ContactImportOutcome is the per-row result of a bulk import. Every submitted
+// row gets exactly one outcome, so a caller can reconcile its spreadsheet
+// line-by-line rather than diffing counts.
+type ContactImportOutcome struct {
+	Index   int
+	Address string
+	Status  string // created | updated | skipped | failed
+	Code    string
+	Message string
+}
+
+// Import outcome statuses.
+const (
+	ImportStatusCreated = "created"
+	ImportStatusUpdated = "updated"
+	ImportStatusSkipped = "skipped"
+	ImportStatusFailed  = "failed"
+)
+
+// NewImportBatchID mints an import batch identifier.
+func NewImportBatchID() string { return "imp_" + generateID() }
+
+// ImportContacts applies one batch in a single transaction.
+//
+// Rows are expected to be pre-validated by the caller (address canonicalized,
+// metadata bounded); rows the caller already rejected are passed with a
+// non-empty Code and are recorded as failures without touching the database.
+//
+// merge=true refreshes display_name and metadata on an existing contact but
+// deliberately leaves source and import_batch_id alone: re-importing a
+// corrected spreadsheet must not rewrite where a contact originally came from,
+// and must not disturb any state hanging off it. merge=false skips existing
+// rows entirely.
+func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows []ContactImportRow, merge bool) ([]ContactImportOutcome, error) {
+	outcomes := make([]ContactImportOutcome, len(rows))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Collapse duplicates WITHIN the batch before touching the database, so a
+	// spreadsheet listing the same person twice reports the second occurrence
+	// explicitly instead of racing itself inside one transaction.
+	seen := map[string]int{}
+
+	for i, row := range rows {
+		address := NormalizeMailboxAddress(row.Address)
+		if first, dup := seen[address]; dup {
+			outcomes[i] = ContactImportOutcome{
+				Index: i, Address: address, Status: ImportStatusSkipped,
+				Code:    "duplicate_in_batch",
+				Message: fmt.Sprintf("duplicate of row %d in this batch", first),
+			}
+			continue
+		}
+		seen[address] = i
+
+		// A row that OMITS metadata leaves the existing value alone; a row that
+		// supplies one (even an empty object) replaces it. This mirrors PATCH
+		// on the same resource, and matters because a corrected spreadsheet is
+		// often narrower than the original — re-uploading it must not silently
+		// erase the columns it no longer carries.
+		var encoded []byte
+		if row.Metadata != nil {
+			var err error
+			if encoded, err = json.Marshal(row.Metadata); err != nil {
+				outcomes[i] = ContactImportOutcome{
+					Index: i, Address: address, Status: ImportStatusFailed,
+					Code: "invalid_request", Message: "metadata is not serializable",
+				}
+				continue
+			}
+		}
+		// On INSERT an absent metadata still needs a concrete value.
+		insertMetadata := encoded
+		if insertMetadata == nil {
+			insertMetadata = []byte("{}")
+		}
+		insertName := ""
+		if row.DisplayName != nil {
+			insertName = *row.DisplayName
+		}
+
+		var stored string
+		var inserted bool
+		if merge {
+			err = tx.QueryRow(ctx,
+				`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
+				      VALUES ($1, $2, $3, $4, $5, 'import', $6)
+				 ON CONFLICT (user_id, address) DO UPDATE
+				    SET display_name = COALESCE($8, contacts.display_name),
+				        metadata     = COALESCE($7::jsonb, contacts.metadata),
+				        updated_at   = now()
+				  RETURNING address, (xmax = 0)`,
+				NewContactID(), userID, address, insertName, insertMetadata, batchID, encoded, row.DisplayName).
+				Scan(&stored, &inserted)
+		} else {
+			err = tx.QueryRow(ctx,
+				`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
+				      VALUES ($1, $2, $3, $4, $5, 'import', $6)
+				 ON CONFLICT (user_id, address) DO NOTHING
+				  RETURNING address, true`,
+				NewContactID(), userID, address, insertName, insertMetadata, batchID).
+				Scan(&stored, &inserted)
+			if errors.Is(err, pgx.ErrNoRows) {
+				outcomes[i] = ContactImportOutcome{
+					Index: i, Address: address, Status: ImportStatusSkipped,
+					Code: "already_exists", Message: "contact already exists and on_conflict is skip",
+				}
+				continue
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		status := ImportStatusUpdated
+		if inserted {
+			status = ImportStatusCreated
+		}
+		outcomes[i] = ContactImportOutcome{Index: i, Address: stored, Status: status}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return outcomes, nil
+}
+
+// DeleteImportBatch reverses an import, returning how many contacts it removed
+// and how many it deliberately kept.
+//
+// It removes only contacts that batch CREATED (import_batch_id still points at
+// it). A contact whose provenance moved, or that a later merge re-pointed, is
+// retained — reversing an upload must not delete a record the user has since
+// built history on.
+func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (deleted int, retained int, err error) {
+	var total int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM contacts WHERE user_id = $1 AND import_batch_id = $2`,
+		userID, batchID).Scan(&total); err != nil {
+		return 0, 0, err
+	}
+	if total == 0 {
+		return 0, 0, ErrImportBatchNotFound
+	}
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM contacts WHERE user_id = $1 AND import_batch_id = $2`,
+		userID, batchID)
+	if err != nil {
+		return 0, 0, err
+	}
+	deleted = int(tag.RowsAffected())
+	return deleted, total - deleted, nil
 }

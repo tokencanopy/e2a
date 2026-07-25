@@ -11,6 +11,9 @@ export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
 export * from '../models/AttachmentView.js';
 export * from '../models/Authentication.js';
+export * from '../models/ContactImportItemResult.js';
+export * from '../models/ContactImportResult.js';
+export * from '../models/ContactImportRow.js';
 export * from '../models/ContactView.js';
 export * from '../models/ConversationDetailView.js';
 export * from '../models/ConversationSummaryView.js';
@@ -29,6 +32,7 @@ export * from '../models/DeleteAgentResult.js';
 export * from '../models/DeleteApiKeyResult.js';
 export * from '../models/DeleteContactResult.js';
 export * from '../models/DeleteDomainResult.js';
+export * from '../models/DeleteImportBatchResult.js';
 export * from '../models/DeleteMessageResult.js';
 export * from '../models/DeleteSuppressionResult.js';
 export * from '../models/DeleteTemplateResult.js';
@@ -54,6 +58,7 @@ export * from '../models/EventView.js';
 export * from '../models/FieldError.js';
 export * from '../models/ForwardRequest.js';
 export * from '../models/HoldReasonView.js';
+export * from '../models/ImportContactsRequest.js';
 export * from '../models/LimitExceededDetails.js';
 export * from '../models/LimitExceededEnvelope.js';
 export * from '../models/LimitExceededErrorBody.js';
@@ -156,6 +161,9 @@ import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { Authentication } from '../models/Authentication.js';
+import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
+import { ContactImportResult } from '../models/ContactImportResult.js';
+import { ContactImportRow } from '../models/ContactImportRow.js';
 import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
@@ -174,6 +182,7 @@ import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
 import { DeleteTemplateResult } from '../models/DeleteTemplateResult.js';
@@ -199,6 +208,7 @@ import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
+import { ImportContactsRequest , ImportContactsRequestOnConflictEnum   } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
 import { LimitExceededEnvelope } from '../models/LimitExceededEnvelope.js';
 import { LimitExceededErrorBody, LimitExceededErrorBodyCodeEnum      } from '../models/LimitExceededErrorBody.js';
@@ -308,6 +318,7 @@ let enumsMap: Set<string> = new Set<string>([
     "DMARCResultPolicyEnum",
     "DMARCResultStatusEnum",
     "EmailBouncedDataBounceTypeEnum",
+    "ImportContactsRequestOnConflictEnum",
     "LimitExceededErrorBodyCodeEnum",
     "MessageLifecycleTransitionDirectionEnum",
     "MessageLifecycleTransitionOutcomeEnum",
@@ -341,6 +352,9 @@ let typeMap: {[index: string]: any} = {
     "AttachmentMetaView": AttachmentMetaView,
     "AttachmentView": AttachmentView,
     "Authentication": Authentication,
+    "ContactImportItemResult": ContactImportItemResult,
+    "ContactImportResult": ContactImportResult,
+    "ContactImportRow": ContactImportRow,
     "ContactView": ContactView,
     "ConversationDetailView": ConversationDetailView,
     "ConversationSummaryView": ConversationSummaryView,
@@ -359,6 +373,7 @@ let typeMap: {[index: string]: any} = {
     "DeleteApiKeyResult": DeleteApiKeyResult,
     "DeleteContactResult": DeleteContactResult,
     "DeleteDomainResult": DeleteDomainResult,
+    "DeleteImportBatchResult": DeleteImportBatchResult,
     "DeleteMessageResult": DeleteMessageResult,
     "DeleteSuppressionResult": DeleteSuppressionResult,
     "DeleteTemplateResult": DeleteTemplateResult,
@@ -384,6 +399,7 @@ let typeMap: {[index: string]: any} = {
     "FieldError": FieldError,
     "ForwardRequest": ForwardRequest,
     "HoldReasonView": HoldReasonView,
+    "ImportContactsRequest": ImportContactsRequest,
     "LimitExceededDetails": LimitExceededDetails,
     "LimitExceededEnvelope": LimitExceededEnvelope,
     "LimitExceededErrorBody": LimitExceededErrorBody,

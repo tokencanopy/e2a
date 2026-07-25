@@ -26,6 +26,9 @@ from e2a.v1.generated.models.attachment import Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView
 from e2a.v1.generated.models.authentication import Authentication
+from e2a.v1.generated.models.contact_import_item_result import ContactImportItemResult
+from e2a.v1.generated.models.contact_import_result import ContactImportResult
+from e2a.v1.generated.models.contact_import_row import ContactImportRow
 from e2a.v1.generated.models.contact_view import ContactView
 from e2a.v1.generated.models.conversation_detail_view import ConversationDetailView
 from e2a.v1.generated.models.conversation_summary_view import ConversationSummaryView
@@ -44,6 +47,7 @@ from e2a.v1.generated.models.delete_agent_result import DeleteAgentResult
 from e2a.v1.generated.models.delete_api_key_result import DeleteApiKeyResult
 from e2a.v1.generated.models.delete_contact_result import DeleteContactResult
 from e2a.v1.generated.models.delete_domain_result import DeleteDomainResult
+from e2a.v1.generated.models.delete_import_batch_result import DeleteImportBatchResult
 from e2a.v1.generated.models.delete_message_result import DeleteMessageResult
 from e2a.v1.generated.models.delete_suppression_result import DeleteSuppressionResult
 from e2a.v1.generated.models.delete_template_result import DeleteTemplateResult
@@ -69,6 +73,7 @@ from e2a.v1.generated.models.event_view import EventView
 from e2a.v1.generated.models.field_error import FieldError
 from e2a.v1.generated.models.forward_request import ForwardRequest
 from e2a.v1.generated.models.hold_reason_view import HoldReasonView
+from e2a.v1.generated.models.import_contacts_request import ImportContactsRequest
 from e2a.v1.generated.models.limit_exceeded_details import LimitExceededDetails
 from e2a.v1.generated.models.limit_exceeded_envelope import LimitExceededEnvelope
 from e2a.v1.generated.models.limit_exceeded_error_body import LimitExceededErrorBody

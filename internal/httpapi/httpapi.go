@@ -293,6 +293,14 @@ type Deps struct {
 	UpdateContact func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
 	DeleteContact func(ctx context.Context, userID, address string) (bool, error)
 	CountContacts func(ctx context.Context, userID string) (int, error)
+	// Bulk import. ImportContacts applies one batch in a single transaction and
+	// returns a per-row outcome, so a malformed row fails alone rather than
+	// rejecting the upload. SuppressedAddresses lets the handler MARK rows the
+	// account has already blocked without dropping them — the count a user sees
+	// stays honest.
+	ImportContacts      func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error)
+	DeleteImportBatch   func(ctx context.Context, userID, batchID string) (deleted int, retained int, err error)
+	SuppressedAddresses func(ctx context.Context, userID string, addresses []string) ([]string, error)
 	// Public managed-unsubscribe capabilities. Resolve accepts only a token hash;
 	// the write capability accepts only the exact scope returned by that lookup,
 	// so the unauthenticated route cannot choose an account, agent, or recipient.
@@ -612,6 +620,7 @@ func (s *Server) registerOperations() {
 	s.registerAccount()
 	s.registerAgentSuppressions()
 	s.registerContacts()
+	s.registerContactImport()
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()

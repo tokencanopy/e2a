@@ -214,6 +214,15 @@ func BuildDeps(p Params) httpapi.Deps {
 		DeleteContact: p.Store.DeleteContact,
 		CountContacts: p.Store.CountContacts,
 
+		ImportContacts:    p.Store.ImportContacts,
+		DeleteImportBatch: p.Store.DeleteImportBatch,
+		// Account-wide suppression view for import marking: agentID is empty so
+		// this asks only "has the account blocked this address", which is the
+		// right scope for an import that is not yet bound to a sending agent.
+		SuppressedAddresses: func(ctx context.Context, userID string, addresses []string) ([]string, error) {
+			return p.Store.EffectiveSuppressions(ctx, userID, "", addresses)
+		},
+
 		ListProtectionEventsByMessage: p.Store.ListProtectionEventsByMessage,
 		GetUsage: func(ctx context.Context, userID string) httpapi.LimitsUsageView {
 			var u httpapi.LimitsUsageView

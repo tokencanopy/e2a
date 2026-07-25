@@ -14,6 +14,9 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
+import { ContactImportResult } from '../models/ContactImportResult.js';
+import { ContactImportRow } from '../models/ContactImportRow.js';
 import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
@@ -31,6 +34,7 @@ import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
 import { DeleteTemplateResult } from '../models/DeleteTemplateResult.js';
@@ -56,6 +60,7 @@ import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
+import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
 import { LimitExceededEnvelope } from '../models/LimitExceededEnvelope.js';
 import { LimitExceededErrorBody } from '../models/LimitExceededErrorBody.js';
@@ -858,6 +863,23 @@ export interface ContactsApiDeleteContactRequest {
     confirm: 'DELETE'
 }
 
+export interface ContactsApiDeleteImportBatchRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteImportBatch
+     */
+    batchId: string
+    /**
+     * Must be the literal DELETE — this action is irreversible.
+     * Defaults to: undefined
+     * @type &#39;DELETE&#39;
+     * @memberof ContactsApideleteImportBatch
+     */
+    confirm: 'DELETE'
+}
+
 export interface ContactsApiGetContactRequest {
     /**
      * The contact\&#39;s email address, URL-encoded.
@@ -866,6 +888,15 @@ export interface ContactsApiGetContactRequest {
      * @memberof ContactsApigetContact
      */
     address: string
+}
+
+export interface ContactsApiImportContactsRequest {
+    /**
+     *
+     * @type ImportContactsRequest
+     * @memberof ContactsApiimportContacts
+     */
+    importContactsRequest: ImportContactsRequest
 }
 
 export interface ContactsApiListContactsRequest {
@@ -982,6 +1013,24 @@ export class ObjectContactsApi {
     }
 
     /**
+     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param param the request object
+     */
+    public deleteImportBatchWithHttpInfo(param: ContactsApiDeleteImportBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteImportBatchResult>> {
+        return this.api.deleteImportBatchWithHttpInfo(param.batchId, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param param the request object
+     */
+    public deleteImportBatch(param: ContactsApiDeleteImportBatchRequest, options?: ConfigurationOptions): Promise<DeleteImportBatchResult> {
+        return this.api.deleteImportBatch(param.batchId, param.confirm,  options).toPromise();
+    }
+
+    /**
      * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Get a contact (beta)
      * @param param the request object
@@ -997,6 +1046,24 @@ export class ObjectContactsApi {
      */
     public getContact(param: ContactsApiGetContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
         return this.api.getContact(param.address,  options).toPromise();
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param param the request object
+     */
+    public importContactsWithHttpInfo(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactImportResult>> {
+        return this.api.importContactsWithHttpInfo(param.importContactsRequest,  options).toPromise();
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param param the request object
+     */
+    public importContacts(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<ContactImportResult> {
+        return this.api.importContacts(param.importContactsRequest,  options).toPromise();
     }
 
     /**

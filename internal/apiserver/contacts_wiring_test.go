@@ -21,12 +21,15 @@ func TestContactDepsAreWired(t *testing.T) {
 	deps := apiserver.BuildDeps(p)
 
 	for name, wired := range map[string]bool{
-		"CreateContact": deps.CreateContact != nil,
-		"GetContact":    deps.GetContact != nil,
-		"ListContacts":  deps.ListContacts != nil,
-		"UpdateContact": deps.UpdateContact != nil,
-		"DeleteContact": deps.DeleteContact != nil,
-		"CountContacts": deps.CountContacts != nil,
+		"CreateContact":       deps.CreateContact != nil,
+		"GetContact":          deps.GetContact != nil,
+		"ListContacts":        deps.ListContacts != nil,
+		"UpdateContact":       deps.UpdateContact != nil,
+		"DeleteContact":       deps.DeleteContact != nil,
+		"CountContacts":       deps.CountContacts != nil,
+		"ImportContacts":      deps.ImportContacts != nil,
+		"DeleteImportBatch":   deps.DeleteImportBatch != nil,
+		"SuppressedAddresses": deps.SuppressedAddresses != nil,
 	} {
 		if !wired {
 			t.Errorf("Deps.%s is nil — the endpoint would return 501 not_implemented in the real binary", name)

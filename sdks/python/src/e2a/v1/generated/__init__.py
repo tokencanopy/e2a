@@ -51,6 +51,9 @@ __all__ = [
     "AttachmentMetaView",
     "AttachmentView",
     "Authentication",
+    "ContactImportItemResult",
+    "ContactImportResult",
+    "ContactImportRow",
     "ContactView",
     "ConversationDetailView",
     "ConversationSummaryView",
@@ -69,6 +72,7 @@ __all__ = [
     "DeleteApiKeyResult",
     "DeleteContactResult",
     "DeleteDomainResult",
+    "DeleteImportBatchResult",
     "DeleteMessageResult",
     "DeleteSuppressionResult",
     "DeleteTemplateResult",
@@ -94,6 +98,7 @@ __all__ = [
     "FieldError",
     "ForwardRequest",
     "HoldReasonView",
+    "ImportContactsRequest",
     "LimitExceededDetails",
     "LimitExceededEnvelope",
     "LimitExceededErrorBody",
@@ -222,6 +227,9 @@ from e2a.v1.generated.models.attachment import Attachment as Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView as AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView as AttachmentView
 from e2a.v1.generated.models.authentication import Authentication as Authentication
+from e2a.v1.generated.models.contact_import_item_result import ContactImportItemResult as ContactImportItemResult
+from e2a.v1.generated.models.contact_import_result import ContactImportResult as ContactImportResult
+from e2a.v1.generated.models.contact_import_row import ContactImportRow as ContactImportRow
 from e2a.v1.generated.models.contact_view import ContactView as ContactView
 from e2a.v1.generated.models.conversation_detail_view import ConversationDetailView as ConversationDetailView
 from e2a.v1.generated.models.conversation_summary_view import ConversationSummaryView as ConversationSummaryView
@@ -240,6 +248,7 @@ from e2a.v1.generated.models.delete_agent_result import DeleteAgentResult as Del
 from e2a.v1.generated.models.delete_api_key_result import DeleteApiKeyResult as DeleteApiKeyResult
 from e2a.v1.generated.models.delete_contact_result import DeleteContactResult as DeleteContactResult
 from e2a.v1.generated.models.delete_domain_result import DeleteDomainResult as DeleteDomainResult
+from e2a.v1.generated.models.delete_import_batch_result import DeleteImportBatchResult as DeleteImportBatchResult
 from e2a.v1.generated.models.delete_message_result import DeleteMessageResult as DeleteMessageResult
 from e2a.v1.generated.models.delete_suppression_result import DeleteSuppressionResult as DeleteSuppressionResult
 from e2a.v1.generated.models.delete_template_result import DeleteTemplateResult as DeleteTemplateResult
@@ -265,6 +274,7 @@ from e2a.v1.generated.models.event_view import EventView as EventView
 from e2a.v1.generated.models.field_error import FieldError as FieldError
 from e2a.v1.generated.models.forward_request import ForwardRequest as ForwardRequest
 from e2a.v1.generated.models.hold_reason_view import HoldReasonView as HoldReasonView
+from e2a.v1.generated.models.import_contacts_request import ImportContactsRequest as ImportContactsRequest
 from e2a.v1.generated.models.limit_exceeded_details import LimitExceededDetails as LimitExceededDetails
 from e2a.v1.generated.models.limit_exceeded_envelope import LimitExceededEnvelope as LimitExceededEnvelope
 from e2a.v1.generated.models.limit_exceeded_error_body import LimitExceededErrorBody as LimitExceededErrorBody

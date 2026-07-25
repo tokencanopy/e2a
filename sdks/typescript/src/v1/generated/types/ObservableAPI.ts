@@ -15,6 +15,9 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
+import { ContactImportResult } from '../models/ContactImportResult.js';
+import { ContactImportRow } from '../models/ContactImportRow.js';
 import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
@@ -32,6 +35,7 @@ import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
 import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
 import { DeleteTemplateResult } from '../models/DeleteTemplateResult.js';
@@ -57,6 +61,7 @@ import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
+import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
 import { LimitExceededEnvelope } from '../models/LimitExceededEnvelope.js';
 import { LimitExceededErrorBody } from '../models/LimitExceededErrorBody.js';
@@ -976,6 +981,42 @@ export class ObservableContactsApi {
     }
 
     /**
+     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param batchId
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteImportBatchWithHttpInfo(batchId: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<HttpInfo<DeleteImportBatchResult>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.deleteImportBatch(batchId, confirm, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.deleteImportBatchWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param batchId
+     * @param confirm Must be the literal DELETE — this action is irreversible.
+     */
+    public deleteImportBatch(batchId: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<DeleteImportBatchResult> {
+        return this.deleteImportBatchWithHttpInfo(batchId, confirm, _options).pipe(map((apiResponse: HttpInfo<DeleteImportBatchResult>) => apiResponse.data));
+    }
+
+    /**
      * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Get a contact (beta)
      * @param address The contact\&#39;s email address, URL-encoded.
@@ -1007,6 +1048,40 @@ export class ObservableContactsApi {
      */
     public getContact(address: string, _options?: ConfigurationOptions): Observable<ContactView> {
         return this.getContactWithHttpInfo(address, _options).pipe(map((apiResponse: HttpInfo<ContactView>) => apiResponse.data));
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param importContactsRequest
+     */
+    public importContactsWithHttpInfo(importContactsRequest: ImportContactsRequest, _options?: ConfigurationOptions): Observable<HttpInfo<ContactImportResult>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.importContacts(importContactsRequest, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.importContactsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param importContactsRequest
+     */
+    public importContacts(importContactsRequest: ImportContactsRequest, _options?: ConfigurationOptions): Observable<ContactImportResult> {
+        return this.importContactsWithHttpInfo(importContactsRequest, _options).pipe(map((apiResponse: HttpInfo<ContactImportResult>) => apiResponse.data));
     }
 
     /**

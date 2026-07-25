@@ -79,7 +79,7 @@ func (s *Server) registerEvents() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "redeliverEvent", Method: http.MethodPost, Path: "/v1/events/{id}/redeliver",
 		Summary: "Redeliver an event", Tags: []string{"events"},
-		Description: "Re-enqueue webhook delivery for an event. With a webhook_id, replays to that subscriber; without, fans out to every originally-matched subscriber. Auto-deduplicated within a short window — receivers must dedup on event id. Returns 202 Accepted: the redelivery is durably enqueued for async submission, not delivered synchronously — the per-subscriber outcome surfaces via the delivery log, and each delivery's status is 'pending' (or 'scheduled' for the fan-out).",
+		Description:   "Re-enqueue webhook delivery for an event. With a webhook_id, replays to that subscriber; without, fans out to every originally-matched subscriber. Auto-deduplicated within a short window — receivers must dedup on event id. Returns 202 Accepted: the redelivery is durably enqueued for async submission, not delivered synchronously — the per-subscriber outcome surfaces via the delivery log, and each delivery's status is 'pending' (or 'scheduled' for the fan-out).",
 		Security:      []map[string][]string{{"bearer": {}}},
 		DefaultStatus: http.StatusAccepted,
 	}, s.handleRedeliverEvent)
