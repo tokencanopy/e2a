@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +74,7 @@ func newEngagementsServer(t *testing.T, mutate func(*Deps, *engagementFixture)) 
 			e, exists := fixture.rows[k]
 			if !exists {
 				e = identity.ContactEngagement{
+					ID:         "eng_" + identity.NormalizeMailboxAddress(address),
 					AgentEmail: identity.NormalizeEmail(agentID),
 					Address:    identity.NormalizeMailboxAddress(address),
 					ContactID:  "cnt_" + identity.NormalizeMailboxAddress(address),
@@ -100,11 +103,11 @@ func newEngagementsServer(t *testing.T, mutate func(*Deps, *engagementFixture)) 
 			}
 			return e, nil
 		},
-		ListEngagements: func(_ context.Context, userID, agentID string, f identity.EngagementFilter, limit int, _ time.Time, _ string) ([]identity.ContactEngagement, error) {
+		ListEngagements: func(_ context.Context, userID, agentID string, f identity.EngagementFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ContactEngagement, error) {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			prefix := userID + "\x00" + identity.NormalizeEmail(agentID) + "\x00"
-			var out []identity.ContactEngagement
+			var filtered []identity.ContactEngagement
 			for k, e := range fixture.rows {
 				if !strings.HasPrefix(k, prefix) {
 					continue
@@ -122,7 +125,34 @@ func newEngagementsServer(t *testing.T, mutate func(*Deps, *engagementFixture)) 
 					(e.NextActionAt == nil || e.NextActionAt.After(f.NextActionBefore)) {
 					continue
 				}
-				out = append(out, e)
+				filtered = append(filtered, e)
+			}
+			// Sort by (created_at DESC, id DESC) like the store does
+			slices.SortFunc(filtered, func(a, b identity.ContactEngagement) int {
+				cmp := b.CreatedAt.Compare(a.CreatedAt) // DESC
+				if cmp != 0 {
+					return cmp
+				}
+				// ID DESC (higher IDs first in DESC order means reverse string compare)
+				if a.ID > b.ID {
+					return -1
+				} else if a.ID < b.ID {
+					return 1
+				}
+				return 0
+			})
+
+			// Apply keyset pagination: (created_at, id) < (afterCreatedAt, afterID)
+			var out []identity.ContactEngagement
+			for _, e := range filtered {
+				if !afterCreatedAt.IsZero() || afterID != "" {
+					cmp := e.CreatedAt.Compare(afterCreatedAt)
+					if cmp < 0 || (cmp == 0 && e.ID < afterID) {
+						out = append(out, e)
+					}
+				} else {
+					out = append(out, e)
+				}
 			}
 			if limit > 0 && len(out) > limit {
 				out = out[:limit]
@@ -415,5 +445,86 @@ func TestGetMissingEngagement(t *testing.T) {
 	code, body := sendJSON(t, http.MethodGet, srv.URL+raisePath+"/absent%40fund.vc", "raise-agent", nil)
 	if code != http.StatusNotFound || errCode(body) != "engagement_not_found" {
 		t.Errorf("GET absent = %d %v; want 404 engagement_not_found", code, body)
+	}
+}
+
+// TestEngagementPaginationDoesNotSkipOrDuplicate pins that keyset pagination
+// uses the correct identifier (engagement id, not contact_id). With the wrong
+// identifier, the cursor carries the wrong value and pages skip or duplicate rows.
+func TestEngagementPaginationDoesNotSkipOrDuplicate(t *testing.T) {
+	// Every engagement here shares ONE created_at. That is not contrived — a
+	// bulk enrolment (an import) creates many rows in the same instant — and it
+	// is the only situation in which the cursor's id matters at all. With
+	// distinct timestamps the id tiebreak is never consulted, so a cursor
+	// carrying the wrong id paginates correctly by accident and the test proves
+	// nothing.
+	srv := newEngagementsServer(t, func(d *Deps, f *engagementFixture) {
+		base := d.UpsertEngagement
+		d.UpsertEngagement = func(ctx context.Context, userID, agentID, address string, stage *string, next **time.Time, m map[string]any) (identity.ContactEngagement, bool, error) {
+			e, created, err := base(ctx, userID, agentID, address, stage, next, m)
+			if err == nil {
+				f.mu.Lock()
+				e.CreatedAt = time.Unix(1700000000, 0).UTC() // identical for every row
+				f.rows[f.key(userID, agentID, address)] = e
+				f.mu.Unlock()
+			}
+			return e, created, err
+		}
+	})
+
+	const total = 5
+	for i := 0; i < total; i++ {
+		enrollVia(t, srv, "account", fmt.Sprintf("p%d@page.vc", i), map[string]any{"stage": "touch1"})
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; page <= total; page++ {
+		u := srv.URL + raisePath + "?limit=2"
+		if cursor != "" {
+			u += "&cursor=" + url.QueryEscape(cursor)
+		}
+		code, body := sendJSON(t, http.MethodGet, u, "raise-agent", nil)
+		if code != http.StatusOK {
+			t.Fatalf("page %d = %d %v", page, code, body)
+		}
+		items, _ := body["items"].([]any)
+		for _, raw := range items {
+			it, _ := raw.(map[string]any)
+			addr, _ := it["address"].(string)
+			if seen[addr] {
+				t.Fatalf("%s appeared on more than one page — the cursor is not keyed on the "+
+					"column the store orders by", addr)
+			}
+			seen[addr] = true
+		}
+		next, _ := body["next_cursor"].(string)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != total {
+		t.Errorf("paged over %d engagements, want %d — rows were skipped, which is what a "+
+			"cursor carrying the wrong id causes", len(seen), total)
+	}
+}
+
+func TestUpsertEngagementClearsScheduleWithNull(t *testing.T) {
+	srv := newEngagementsServer(t, nil)
+	path := raisePath + "/partner%40fund.vc"
+
+	// First, set a schedule
+	sendJSON(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "touch1", "next_action_at": "2026-07-29T09:00:00Z"})
+
+	// Now clear it with an explicit null
+	code, body := sendJSON(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"next_action_at": nil})
+	if code != http.StatusOK {
+		t.Fatalf("PUT with null = %d %v", code, body)
+	}
+	if body["next_action_at"] != nil {
+		t.Errorf("next_action_at = %v after clearing with null, want nil", body["next_action_at"])
 	}
 }

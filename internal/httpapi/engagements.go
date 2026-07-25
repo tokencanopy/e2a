@@ -113,7 +113,7 @@ type listEngagementsOutput struct {
 // attempting one is a 422 rather than a silent no-op.
 type UpsertEngagementRequest struct {
 	Stage        *string        `json:"stage,omitempty" maxLength:"128" doc:"Set the outreach stage. Omit to leave unchanged."`
-	NextActionAt *time.Time     `json:"next_action_at,omitempty" doc:"Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule."`
+	NextActionAt *time.Time     `json:"next_action_at,omitempty" nullable:"true" doc:"Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule."`
 	Metadata     map[string]any `json:"metadata,omitempty" doc:"Replace the relationship metadata. Omit to leave unchanged."`
 }
 
@@ -247,7 +247,7 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	if hasMore {
 		last := rows[len(rows)-1]
 		next, err = EncodeCursor(s.deps.CursorSecret, engagementsCursor{
-			CreatedAt: last.CreatedAt, ID: last.ContactID, AgentEmail: ag.ID, Filters: fingerprint,
+			CreatedAt: last.CreatedAt, ID: last.ID, AgentEmail: ag.ID, Filters: fingerprint,
 		})
 		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
