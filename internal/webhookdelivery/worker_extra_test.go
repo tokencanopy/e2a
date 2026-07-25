@@ -147,7 +147,7 @@ func TestDeliverWorker_PrevSigningSecretWithinGraceIsHonored(t *testing.T) {
 func TestDeliverWorker_TerminalWriteFailureIsReturned(t *testing.T) {
 	id, sub, _, _ := seed(t, "wd-markfail")
 	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}},
-		fakeWebhooks{err: errors.New("webhook gone")})
+		fakeWebhooks{err: identity.ErrWebhookNotFound})
 	err := w.Work(context.Background(), job(id, -1))
 	if err == nil {
 		t.Fatal("Work returned nil even though the terminal 'failed' write never succeeded")
@@ -197,7 +197,7 @@ func TestDeliverWorker_TerminalWriteHonorsContextCancel(t *testing.T) {
 	workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}},
-		fakeWebhooks{err: errors.New("webhook gone")})
+		fakeWebhooks{err: identity.ErrWebhookNotFound})
 	err = w.Work(workCtx, job(id, 1))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Work error = %v, want context.DeadlineExceeded (cancel must abort the retry backoff)", err)

@@ -86,7 +86,7 @@ acceptance SLI below deliberately excludes them.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received (connect/DNS/SSRF-blocked). |
+| `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts — including a delivery that exhausted its retries on a pre-POST infrastructure error, e.g. a sustained webhook-lookup outage), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received — connect/DNS/SSRF-blocked, or no POST was ever made. |
 | `e2a_webhook_attempt_duration_seconds` | histogram | — | HTTP POST duration per attempt. |
 | `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (no recorded prior attempt — regardless of River attempt number, so a first POST delayed by pre-POST failures still observes). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), eventless `/test` deliveries, and jobs that sat through a customer-disabled window (River snooze) never observe. |
 | `e2a_outbox_events_published_total` | counter | `type` | Events written to the outbox (fan-out input). |
@@ -238,6 +238,13 @@ snooze, and no POST happens:
 sum(rate(e2a_webhook_attempts_total{outcome="delivered"}[5m]))
 / sum(rate(e2a_webhook_attempts_total{outcome=~"delivered|retryable_failure|exhausted"}[5m]))
 ```
+
+One deliberate gap: a delivery retrying a *pre-POST* infrastructure error
+(e.g. a webhook-lookup DB outage) emits nothing until it exhausts — up to
+the 29h21m retry envelope — because no attempt happens to count. River's
+job-error logs and `e2a_queue_oldest_age_seconds{queue="webhook"}` cover
+the window; the first `exhausted` sample lands the SLI impact when the
+envelope runs out.
 
 **Webhook event→first attempt** — p95 latency from event creation to the
 first HTTP attempt (covers fan-out, queue wait, and worker pickup):
