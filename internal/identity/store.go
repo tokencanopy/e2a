@@ -1182,7 +1182,12 @@ func (s *Store) ListDomainsByUser(ctx context.Context, userID string, limit int,
 	        COALESCE(d.dkim_selector, ''), COALESCE(d.dkim_public_key, ''),
 	        d.sending_status, COALESCE(d.sending_error, ''), d.sending_dns_records, d.sending_last_checked_at,
 	        COALESCE(d.sending_dkim_status, ''), COALESCE(d.sending_mail_from_status, ''),
-	        (SELECT count(*) FROM agent_identities a WHERE a.registered_domain = d.domain AND a.user_id = d.user_id) AS agent_count
+	        -- Trashed agents are excluded: a soft-deleted agent is not "on" the
+	        -- domain from the caller's point of view (it does not appear in
+	        -- list_agents), so counting it here over-reports.
+	        (SELECT count(*) FROM agent_identities a
+	           WHERE a.registered_domain = d.domain AND a.user_id = d.user_id
+	             AND a.deleted_at IS NULL) AS agent_count
 	 FROM domains d
 	 WHERE d.user_id = $1`
 	args := []interface{}{userID}
@@ -1230,17 +1235,29 @@ func (s *Store) TouchDomainLastChecked(ctx context.Context, domain, userID strin
 	return nil
 }
 
-// HasAgentsOnDomain checks whether the owned domain still has agents.
-func (s *Store) HasAgentsOnDomain(ctx context.Context, domain, userID string) (bool, error) {
-	var count int
-	err := s.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM agent_identities WHERE registered_domain = $1 AND user_id = $2`,
+// CountAgentsOnDomain reports how many agents still sit on the owned domain,
+// split into LIVE and TRASHED. Both block the delete, and deliberately so: the
+// FK agent_identities.registered_domain -> domains.domain is ON DELETE NO ACTION
+// (migration 001), and a trashed agent is still a row. It also still owns its
+// address for the 30-day restore window, so dropping the domain under it would
+// break restore.
+//
+// The split exists purely so the caller can say WHICH kind is blocking. A
+// trashed agent is invisible to list_agents, so "agents exist" alone sends
+// someone hunting for agents they cannot see; naming the trash and the remedy
+// turns a dead end into a signpost.
+func (s *Store) CountAgentsOnDomain(ctx context.Context, domain, userID string) (live, trashed int, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT
+		   COUNT(*) FILTER (WHERE deleted_at IS NULL),
+		   COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)
+		 FROM agent_identities WHERE registered_domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
-	).Scan(&count)
+	).Scan(&live, &trashed)
 	if err != nil {
-		return false, err
+		return 0, 0, err
 	}
-	return count > 0, nil
+	return live, trashed, nil
 }
 
 // ErrDomainHasAgents is returned when a domain delete is blocked by existing agents.

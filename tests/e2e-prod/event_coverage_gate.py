@@ -26,23 +26,46 @@ Inputs:
     would go quietly stale exactly when a 16th event type is added without a
     matching gate update.
   - reports/event-coverage/*.json: shards written by
-    suites/21-webhook-events.test.ts, each a JSON array of event-type strings
-    the suite VERIFIED this run. "Verified" is a deliberately high bar (see
-    that suite's module doc): the suite records a type here ONLY after BOTH
-    halves of its dual assertion passed — (1) the event's own
-    delivery_status.matched_webhooks >= 1 (event-scoped fanout) AND (2) a
-    listWebhookDeliveries entry for OUR webhook with attempts >= 1
-    (webhook-scoped delivery attempt). Neither alone proves emission (see
-    21-webhook-events.test.ts's module doc for why); merely subscribing a
-    webhook to a type, or a type appearing in listEvents, is NOT enough to be
-    recorded. There is no dedicated harness recorder for this (unlike
-    coverage.ts / mcp-coverage.ts) — the shard-writing lives directly in the
-    suite file so this gate stays a thin consumer of it, like the other two.
+    suites/21-webhook-events.test.ts AND suites/prod/*.test.ts, each a JSON
+    array of event-type strings the suite VERIFIED this run. "Verified" is a
+    deliberately high bar (see 21-webhook-events.test.ts's module doc): a
+    type is recorded ONLY after BOTH halves of the dual assertion passed —
+    (1) the event's own delivery_status.matched_webhooks >= 1 (event-scoped
+    fanout) AND (2) a listWebhookDeliveries entry for OUR webhook with
+    attempts >= 1 (webhook-scoped delivery attempt). Neither alone proves
+    emission; merely subscribing a webhook to a type, or a type appearing in
+    listEvents, is NOT enough to be recorded. There is no dedicated harness
+    recorder for this (unlike coverage.ts / mcp-coverage.ts) — the
+    shard-writing lives directly in each suite file so this gate stays a
+    thin consumer of it, like the other two.
+  - reports/target/*.json: shards written by harness/target.ts, used via
+    target_env.py to decide whether THIS run targeted production — see that
+    module's doc for the full mechanism. This is what makes the allowlist
+    below environment-aware instead of a permanent staging-shaped excuse.
 
-Usage: python3 event_coverage_gate.py [--openapi PATH] [--reports DIR]
+ENVIRONMENT-AWARE ALLOWLIST: two tiers.
+  - ALWAYS_ALLOWLIST: allowlisted regardless of target. Only
+    domain.sending_failed now — it needs a real AWS-classified sending-identity
+    FAILURE, and no suite has induced one anywhere; prod-vs-staging does not
+    unlock it.
+  - STAGING_ONLY_ALLOWLIST: allowlisted ONLY when this run did not target
+    production. Most trace back to the real-SES-feedback blocker staging's
+    e2a-staging-smtp IAM policy imposes; production has no such block, so a
+    production run REQUIRES them — an allowlisted-forever entry would let a
+    genuine prod gap hide behind a staging-only excuse.
+
+    domain.sending_verified is in this tier for a different reason worth
+    knowing: suites/prod/33-domain-sending-identity.test.ts verifies it for
+    real, but that suite lives in suites/prod/ and so runs only under
+    `npm run test:prod`. On a staging run it never executes, and staging has
+    no real SES sending identity to produce the event anyway — so requiring
+    it there would fail the gate for something staging structurally cannot
+    do. Required on prod, where the suite does run.
+
+Usage: python3 event_coverage_gate.py [--openapi PATH] [--reports DIR] [--target-dir DIR]
 Exit 0 = every event type verified (or explicitly allowlisted); 1 = coverage
-gap; 2 = usage/IO error (including "no shards", which must never read as a
-pass).
+gap; 2 = usage/IO error (including "no shards" for either coverage or target
+data, which must never read as a pass).
 """
 import argparse
 import glob
@@ -50,47 +73,60 @@ import json
 import os
 import sys
 
+from target_env import resolve_target
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Event types the black-box conformance suite intentionally does NOT verify
-# real emission for, with the SPECIFIC reason staging cannot produce each.
-# Keep this list SHORT and justified — every entry is coverage we're
-# knowingly forgoing, deferred to a prod-only differential suite (already
-# planned as the next phase) where the real infrastructure exists.
-ALLOWLIST = {
+# Allowlisted no matter what the run targeted — see the module doc above.
+ALWAYS_ALLOWLIST = {
+    "domain.sending_failed": "requires a real SES sending-identity FAILURE "
+    "outcome, as opposed to domain.sending_verified which suites/prod/"
+    "33-domain-sending-identity.test.ts now verifies for real. That suite has "
+    "only ever observed the success path against a correctly-published DNS set; "
+    "deliberately breaking a record to induce a real AWS-classified failure (as "
+    "opposed to a merely-pending state) has not been attempted.",
+}
+
+# Allowlisted ONLY on a non-production run — REQUIRED once the run's target
+# shards (reports/target/*.json) show production. See the module doc above.
+STAGING_ONLY_ALLOWLIST = {
     "email.delivered": "requires real SES delivery feedback (SNS); staging's "
-    "e2a-staging-smtp IAM policy denies ses:SendRawEmail to the bounce/complaint "
-    "mailbox-simulator addresses, so delivery feedback cannot be produced there "
-    "— deferred to the prod-only differential suite.",
-    "email.bounced": "same SES delivery-feedback blocker as email.delivered — "
-    "staging's e2a-staging-smtp IAM policy denies ses:SendRawEmail to the bounce "
-    "simulator address — deferred to the prod-only differential suite.",
-    "email.complained": "same SES delivery-feedback blocker as email.delivered — "
-    "staging's e2a-staging-smtp IAM policy denies ses:SendRawEmail to the complaint "
-    "simulator address — deferred to the prod-only differential suite.",
+    "e2a-staging-smtp IAM policy denies ses:SendRawEmail to the mailbox-simulator "
+    "addresses, so delivery feedback cannot be produced there. Verified in "
+    "production by suites/prod/31-ses-feedback.test.ts.",
+    "email.bounced": "same SES delivery-feedback blocker as email.delivered. "
+    "Verified in production by suites/prod/31-ses-feedback.test.ts.",
+    "email.complained": "same SES delivery-feedback blocker as email.delivered. "
+    "Verified in production by suites/prod/31-ses-feedback.test.ts.",
     "domain.suppression_added": "a suppression is created only by a real SES "
     "bounce/complaint (no createSuppression API — see coverage_gate.py's "
-    "deleteSuppression entry), which staging cannot produce for the same reason "
-    "as email.bounced/complained — deferred to the prod-only differential suite.",
-    "agent.suppression_added": "same real-bounce dependency as "
-    "domain.suppression_added — staging cannot produce the real bounce needed to "
-    "seed an agent-scoped suppression — deferred to the prod-only differential suite.",
-    # domain.sending_verified was allowlisted here until suites/prod/33-domain-sending-identity.test.ts
-    # (2026-07) verified real emission against production: register a custom
-    # domain on the isolated trymnexa.com zone, publish ALL returned DNS
-    # records (ownership TXT, inbound MX, dkim TXT, mail_from_mx, mail_from_spf),
-    # verify inbound, then poll GET /v1/domains/{domain} until sending_status
-    # reaches "verified" and confirm the domain.sending_verified event via
-    # listEvents. Live-verified twice (two separate domains, two separate
-    # runs) — genuinely reproducible, not a fluke. domain.sending_failed stays
-    # allowlisted below: that suite has never observed a real SES failure
-    # outcome (only the verified path), so removing it would be unverified.
-    "domain.sending_failed": "requires a real SES sending-identity FAILURE "
-    "outcome (as opposed to domain.sending_verified, which suites/prod/"
-    "33-domain-sending-identity.test.ts now verifies for real) — the prod-only "
-    "suite has only ever observed the success path against a correctly-published "
-    "DNS set; deliberately breaking a record to induce a real AWS-classified "
-    "failure (as opposed to a merely-pending state) has not been attempted.",
+    "STAGING_ONLY_ALLOWLIST deleteSuppression entry), which staging cannot "
+    "produce for the same reason as email.bounced/complained. Verified in "
+    "production by suites/prod/31-ses-feedback.test.ts.",
+    "agent.suppression_added": "NOTE: unlike domain.suppression_added, this one "
+    "does not actually require a real bounce — internal/delivery/consumer.go's "
+    "SES-feedback path only ever fires domain.suppression_added (account-scoped); "
+    "an agent-scoped suppression is created solely by the manual "
+    "createAgentSuppression API or the unsubscribe-token flow, both already "
+    "black-box testable anywhere (see suites/24-agent-suppressions.test.ts). It "
+    "was allowlisted here under the same blanket real-bounce justification as its "
+    "siblings, which doesn't actually apply to it. Verified in production by "
+    "suites/prod/31-ses-feedback.test.ts (via the manual-create path); kept "
+    "staging-only-allowlisted rather than un-allowlisted everywhere because no "
+    "staging suite wires a webhook to it yet — a reasonable follow-up, not done "
+    "here to keep this change scoped to the prod-only suite.",
+    "domain.sending_verified": "verified for real in PRODUCTION by suites/prod/"
+    "33-domain-sending-identity.test.ts — register a custom domain on the "
+    "isolated trymnexa.com zone, publish every returned DNS record (ownership "
+    "TXT, inbound MX, dkim TXT, mail_from_mx, mail_from_spf), verify inbound, "
+    "then poll GET /v1/domains/{domain} until sending_status reaches verified "
+    "and confirm the event via listEvents. Reproduced across separate domains "
+    "and runs, not a fluke. It sits in the STAGING-ONLY tier rather than being "
+    "un-allowlisted outright for a structural reason: that suite lives in "
+    "suites/prod/, so it runs only under `npm run test:prod`. On a staging run "
+    "it never executes, and requiring the event there would fail the gate for "
+    "an event staging cannot produce anyway (no real SES sending identity). "
+    "Required on prod, where the suite does run.",
 }
 
 
@@ -123,6 +159,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--openapi", default=os.path.join(HERE, "../../api/openapi.yaml"))
     ap.add_argument("--reports", default=os.path.join(HERE, "reports", "event-coverage"))
+    ap.add_argument("--target-dir", default=os.path.join(HERE, "reports", "target"))
     args = ap.parse_args()
 
     if not os.path.exists(args.openapi):
@@ -132,8 +169,8 @@ def main():
     all_types = set(load_event_types(args.openapi))
 
     # An allowlist entry that no longer names a real event type is a silent hole
-    # (e.g. the type was renamed) — fail loudly so the allowlist can't drift stale.
-    stale = set(ALLOWLIST) - all_types
+    # (e.g. the type was renamed) — fail loudly so either tier can't drift stale.
+    stale = (set(ALWAYS_ALLOWLIST) | set(STAGING_ONLY_ALLOWLIST)) - all_types
     if stale:
         print(
             f"event_coverage_gate: allowlist entries not in the spec (renamed/removed?): {sorted(stale)}",
@@ -141,10 +178,24 @@ def main():
         )
         return 2
 
+    try:
+        targeted_prod, target_shard_count, hosts = resolve_target(args.target_dir)
+    except ValueError as e:
+        print(f"event_coverage_gate: {e}", file=sys.stderr)
+        return 2
+
+    allowlist = dict(ALWAYS_ALLOWLIST)
+    if targeted_prod:
+        env_label = "PRODUCTION"
+    else:
+        env_label = "non-production (staging/self-hosted)"
+        allowlist.update(STAGING_ONLY_ALLOWLIST)
+
     if not os.path.isdir(args.reports):
         print(
             f"event_coverage_gate: no shard directory at {args.reports}. "
-            "Run suites/21-webhook-events.test.ts first; an absent run is not a pass.",
+            "Run suites/21-webhook-events.test.ts (and, on a prod run, suites/prod/*.test.ts) first; "
+            "an absent run is not a pass.",
             file=sys.stderr,
         )
         return 2
@@ -166,9 +217,10 @@ def main():
         print(f"event_coverage_gate: shard(s) verified unknown event type(s) not in the spec: {unknown}", file=sys.stderr)
 
     missing = all_types - verified
-    allowlisted = missing & set(ALLOWLIST)
-    uncovered = missing - set(ALLOWLIST)
+    allowlisted = missing & set(allowlist)
+    uncovered = missing - set(allowlist)
 
+    print(f"Target environment   : {env_label}  ({target_shard_count} target shard(s): {hosts})")
     print(f"Webhook event types : {len(all_types)}  (CreateWebhookRequest.events enum, api/openapi.yaml)")
     print(f"Verified (dual-assertion emission) : {len(verified & all_types)}")
     print(f"Allowlisted          : {len(allowlisted)} " + (str(sorted(allowlisted)) if allowlisted else ""))
@@ -177,10 +229,12 @@ def main():
     if uncovered:
         print(f"\nUNVERIFIED ({len(uncovered)}):")
         for t in sorted(uncovered):
-            print(f"  - {t}")
+            tier = " (staging-only allowlist, REQUIRED on this prod run)" if t in STAGING_ONLY_ALLOWLIST else ""
+            print(f"  - {t}{tier}")
         print(
             "\nGATE: FAIL — the above event type(s) are in the spec but no suite verifies real emission "
-            "(add a test to suites/21-webhook-events.test.ts, or an ALLOWLIST entry with a specific reason)."
+            "for this target environment (add a test to suites/21-webhook-events.test.ts or "
+            "suites/prod/*.test.ts, or an ALLOWLIST entry with a specific reason)."
         )
         return 1
 

@@ -26,7 +26,7 @@ emission). Exercised paths that don't map to a /v1 operationId are reported (as
 (the harness only records successes — see harness/coverage.ts), i.e. the operation
 was actually exercised, not merely probed with a rejected request.
 
-Usage: python3 coverage_gate.py [--openapi PATH] [--reports DIR]
+Usage: python3 coverage_gate.py [--openapi PATH] [--reports DIR] [--target-dir DIR]
 Exit 0 = all covered (or allowlisted); 1 = coverage gap; 2 = usage/IO error.
 """
 import argparse
@@ -35,16 +35,27 @@ import json
 import os
 import sys
 
+from target_env import resolve_target
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Operations the black-box conformance suite intentionally does NOT exercise, with
 # the reason. Keep this list SHORT and justified — every entry is coverage we're
-# knowingly forgoing.
-ALLOWLIST = {
+# knowingly forgoing. Allowlisted no matter what the run targeted.
+ALWAYS_ALLOWLIST = {
     "deleteAccount": "destructive — the suite must never delete its own account",
-    "deleteSuppression": "no happy path black-box: a suppression is created only by a "
-    "real SES bounce/complaint (no createSuppression API), so there's nothing to delete; "
-    "the 404-unknown-address path is exercised by 19-account",
+}
+
+# Allowlisted ONLY on a non-production run (see target_env.py for the
+# mechanism) — REQUIRED once the run's target shards show production.
+STAGING_ONLY_ALLOWLIST = {
+    "deleteSuppression": "no happy path black-box on staging: a suppression is created "
+    "only by a real SES bounce/complaint (no createSuppression API), and staging's "
+    "e2a-staging-smtp IAM policy denies ses:SendRawEmail to the bounce/complaint "
+    "mailbox-simulator addresses, so there's nothing to delete there; the "
+    "404-unknown-address path is exercised by 19-account. Production has no such "
+    "block — suites/prod/31-ses-feedback.test.ts creates a real account suppression "
+    "via a real bounce/complaint and exercises this happy path.",
 }
 
 
@@ -103,6 +114,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--openapi", default=os.path.join(HERE, "../../api/openapi.yaml"))
     ap.add_argument("--reports", default=os.path.join(HERE, "reports", "coverage"))
+    ap.add_argument("--target-dir", default=os.path.join(HERE, "reports", "target"))
     args = ap.parse_args()
 
     if not os.path.exists(args.openapi):
@@ -113,11 +125,24 @@ def main():
     all_ids = {opid for _, _, opid in ops}
 
     # An allowlist entry that no longer matches a real operationId is a silent hole
-    # (e.g. the op was renamed) — fail loudly so the allowlist can't drift stale.
-    stale = set(ALLOWLIST) - all_ids
+    # (e.g. the op was renamed) — fail loudly so either tier can't drift stale.
+    stale = (set(ALWAYS_ALLOWLIST) | set(STAGING_ONLY_ALLOWLIST)) - all_ids
     if stale:
         print(f"coverage_gate: allowlist entries not in the spec (renamed/removed?): {sorted(stale)}", file=sys.stderr)
         return 2
+
+    try:
+        targeted_prod, target_shard_count, hosts = resolve_target(args.target_dir)
+    except ValueError as e:
+        print(f"coverage_gate: {e}", file=sys.stderr)
+        return 2
+
+    allowlist = dict(ALWAYS_ALLOWLIST)
+    if targeted_prod:
+        env_label = "PRODUCTION"
+    else:
+        env_label = "non-production (staging/self-hosted)"
+        allowlist.update(STAGING_ONLY_ALLOWLIST)
 
     shards = glob.glob(os.path.join(args.reports, "*.json"))
     if not shards:
@@ -138,9 +163,10 @@ def main():
             non_v1.add(pair)
 
     missing = all_ids - covered_ids
-    allowlisted = missing & set(ALLOWLIST)
-    uncovered = missing - set(ALLOWLIST)
+    allowlisted = missing & set(allowlist)
+    uncovered = missing - set(allowlist)
 
+    print(f"Target environment : {env_label}  ({target_shard_count} target shard(s): {hosts})")
     print(f"OpenAPI operations : {len(all_ids)}  (/v1 operationId scope)")
     print(f"Covered (2xx)      : {len(covered_ids)}")
     print(f"Allowlisted        : {len(allowlisted)} " + (str(sorted(allowlisted)) if allowlisted else ""))
@@ -155,8 +181,9 @@ def main():
         print(f"\nUNCOVERED ({len(uncovered)}):")
         for opid in sorted(uncovered):
             m, t, _ = next(o for o in ops if o[2] == opid)
-            print(f"  - {opid:28s} {m} /{'/'.join(t)}")
-        print("\nGATE: FAIL — the above operation(s) are in the spec but no suite exercises them.")
+            tier = " (staging-only allowlist, REQUIRED on this prod run)" if opid in STAGING_ONLY_ALLOWLIST else ""
+            print(f"  - {opid:28s} {m} /{'/'.join(t)}{tier}")
+        print("\nGATE: FAIL — the above operation(s) are in the spec but no suite exercises them for this target environment.")
         return 1
 
     print("\nGATE: PASS — every OpenAPI operation is exercised (or explicitly allowlisted).")
