@@ -1,0 +1,5 @@
+# Shards written by tests/resource_coverage_lib/tracker.py (mark_covered()),
+# read by tests/resource_coverage_gate.py. Same rationale as
+# tests/e2e-prod/.gitignore's `reports/`: these are per-run output, not
+# source, and must never be checked in stale.
+reports/
