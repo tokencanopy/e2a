@@ -53,6 +53,7 @@ type Prom struct {
 	outboxFailures  *prometheus.CounterVec
 	redeliver       *prometheus.CounterVec
 	janitorDeleted  *prometheus.CounterVec
+	contactDue      *prometheus.CounterVec
 	notifyMissed    prometheus.Counter
 	publisherLag    prometheus.Gauge
 
@@ -268,6 +269,10 @@ func NewProm() *Prom {
 			Name: "e2a_janitor_rows_deleted_total",
 			Help: "Rows deleted by the cleanup janitor, by table.",
 		}, []string{"table"}),
+		contactDue: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_contact_due_events_total",
+			Help: "contact.due outreach wake-ups, by outcome.",
+		}, []string{"outcome"}),
 		notifyMissed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_notify_missed_total",
 			Help: "Fallback-poll wakeups that LISTEN/NOTIFY missed.",
@@ -287,7 +292,7 @@ func NewProm() *Prom {
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
-		p.outboxFailures, p.redeliver, p.janitorDeleted, p.notifyMissed, p.publisherLag,
+		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
 	return p
 }
@@ -439,6 +444,24 @@ func (p *Prom) RedeliverRequests(scope string) {
 func (p *Prom) JanitorRowsDeleted(table string, count int) {
 	if count > 0 {
 		p.janitorDeleted.WithLabelValues(enum(tableSet, table)).Add(float64(count))
+	}
+}
+
+// ContactDuePublished counts wake-ups that reached the outbox. A sustained
+// zero while engagements are enrolled and scheduled means the sweep is not
+// running, which is silent from the outside — the agent simply never wakes.
+func (p *Prom) ContactDuePublished(count int) {
+	if count > 0 {
+		p.contactDue.WithLabelValues("published").Add(float64(count))
+	}
+}
+
+// ContactDueFailed counts wake-ups whose publish failed. Non-zero means an
+// agent was NOT woken for a schedule that has already been consumed, so the
+// miss will not retry — worth alerting on rather than merely graphing.
+func (p *Prom) ContactDueFailed(count int) {
+	if count > 0 {
+		p.contactDue.WithLabelValues("failed").Add(float64(count))
 	}
 }
 

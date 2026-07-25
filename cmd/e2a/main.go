@@ -417,7 +417,7 @@ func main() {
 	// contact.due wake-up: its own River periodic on the maintenance lane, not
 	// part of the janitor. It is a scheduled product event with user-visible
 	// latency, not a prune, so it gets its own interval and metrics.
-	contactDueSweeper := contactdue.NewSweeper(store, contactdue.NewOutboxPublisher(outboxPublisher), nil)
+	contactDueSweeper := contactdue.NewSweeper(store, contactdue.NewOutboxPublisher(outboxPublisher), metrics)
 	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 

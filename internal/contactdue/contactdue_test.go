@@ -186,3 +186,56 @@ func TestSweepContinuesPastAPublishFailure(t *testing.T) {
 		t.Errorf("re-sweep = %d err=%v; a consumed schedule must not re-fire", n, err)
 	}
 }
+
+// countingMetrics records what the sweep reported.
+type countingMetrics struct{ published, failed int }
+
+func (m *countingMetrics) ContactDuePublished(n int) { m.published += n }
+func (m *countingMetrics) ContactDueFailed(n int)    { m.failed += n }
+
+// TestSweepReportsMetrics guards a defect this package shipped with: the
+// Metrics interface existed and main.go passed nil, so every wake-up fired
+// with no observability at all. A sweep that stops running is invisible from
+// the outside — the agent simply never wakes — so the counter is the only
+// signal that would show it.
+func TestSweepReportsMetrics(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := liveAgent(t, store, "metrics")
+	armPastDue(t, store, user.ID, agent, "partner@metrics.vc")
+
+	m := &countingMetrics{}
+	if _, err := contactdue.NewSweeper(store, &capturingPublisher{}, m).Sweep(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if m.published != 1 {
+		t.Errorf("published metric = %d, want 1 — wake-ups are firing unobserved", m.published)
+	}
+	if m.failed != 0 {
+		t.Errorf("failed metric = %d, want 0", m.failed)
+	}
+}
+
+// TestSweepReportsFailedPublishes pins that a failed wake-up is counted
+// separately. It is the more important of the two: the schedule has already
+// been consumed, so nothing retries and the miss is permanent.
+func TestSweepReportsFailedPublishes(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := liveAgent(t, store, "metricsfail")
+	armPastDue(t, store, user.ID, agent, "partner@metricsfail.vc")
+
+	m := &countingMetrics{}
+	pub := &capturingPublisher{err: errors.New("subscriber unreachable")}
+	if _, err := contactdue.NewSweeper(store, pub, m).Sweep(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if m.failed != 1 {
+		t.Errorf("failed metric = %d, want 1 — a permanently missed wake-up went unreported", m.failed)
+	}
+	if m.published != 0 {
+		t.Errorf("published metric = %d, want 0", m.published)
+	}
+}
