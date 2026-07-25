@@ -188,9 +188,12 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 			// 'pending' with a dead job_id the reconciler can't see. The
 			// delivery exhausted its attempts without a POST — count it as
 			// exhausted (e2a-side, in the attempt-health denominator), never
-			// webhook_deleted.
+			// webhook_deleted. last_error is a CONSTANT: it is returned
+			// verbatim by GET /v1/webhooks/{id}/deliveries, and a raw pgx
+			// error would leak internal hosts/IPs and DB identifiers. The
+			// returned err carries the real detail to River's job-error log.
 			w.emitAttempt("exhausted", "none", -1)
-			if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook lookup error: "+err.Error(), 0); merr != nil {
+			if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "internal error resolving webhook", 0); merr != nil {
 				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending, needs manual reconcile): %v", d.ID, merr)
 			}
 		}

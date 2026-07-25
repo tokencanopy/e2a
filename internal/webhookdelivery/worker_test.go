@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -544,10 +545,12 @@ func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedDespiteBackoffSchedule
 	if len(fm.firstTry) != 1 {
 		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST after chained pre-POST failures", fm.firstTry)
 	}
-	// Wide band: suite-load overhead between seeding and Work adds to the
-	// 90-minute seeded age (observed 91+ min under full-suite load).
-	if got := fm.firstTry[0]; got < 88*time.Minute.Seconds() || got > 95*time.Minute.Seconds() {
-		t.Errorf("first-attempt latency = %.0fs, want ~90min (the honest outage signal)", got)
+	// Lower bound only: the seeded age compares Postgres now() against the
+	// host's time.Now(), and Docker VM clock drift makes any tight upper
+	// bound flaky. The assertion that matters: the outage-scale sample is
+	// recorded, not skipped or clamped.
+	if got := fm.firstTry[0]; got < time.Hour.Seconds() {
+		t.Errorf("first-attempt latency = %.0fs, want the honest outage-scale signal (>1h), got a small value", got)
 	}
 }
 
@@ -611,8 +614,18 @@ func TestDeliverWorker_TransientLookupErrorOnFinalAttemptTerminatesHonestly(t *t
 	if err := w.Work(context.Background(), job(id, webhookdelivery.MaxDeliveryAttempts)); err == nil {
 		t.Fatal("final-attempt lookup error must still return the error (River discards)")
 	}
-	if d := statusOf(t, sub, id); d.Status != "failed" {
+	d := statusOf(t, sub, id)
+	if d.Status != "failed" {
 		t.Errorf("status = %q, want failed (terminal write is the row's last chance)", d.Status)
+	}
+	// last_error is customer-facing (GET /v1/webhooks/{id}/deliveries): it
+	// must be a constant, never the raw pgx error (which leaks internal
+	// hosts/IPs and DB identifiers).
+	if d.LastError != "internal error resolving webhook" {
+		t.Errorf("last_error = %q, want the constant %q", d.LastError, "internal error resolving webhook")
+	}
+	if strings.Contains(d.LastError, "connection reset") {
+		t.Errorf("last_error leaks the raw infrastructure error: %q", d.LastError)
 	}
 	got := fm.one(t)
 	if got.outcome != "exhausted" || got.statusClass != "none" || got.seconds >= 0 {
