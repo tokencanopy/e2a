@@ -55,7 +55,7 @@ ENVIRONMENT-AWARE ALLOWLIST: two tiers.
     genuine prod gap hide behind a staging-only excuse.
 
     domain.sending_verified is in this tier for a different reason worth
-    knowing: suites/prod/33-domain-sending-identity.test.ts verifies it for
+    knowing: suites/prod/35-domain-sending-identity.test.ts verifies it for
     real, but that suite lives in suites/prod/ and so runs only under
     `npm run test:prod`. On a staging run it never executes, and staging has
     no real SES sending identity to produce the event anyway — so requiring

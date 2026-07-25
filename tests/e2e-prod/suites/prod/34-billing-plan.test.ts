@@ -28,7 +28,7 @@ import { info, writeReport } from "../../harness/report.ts";
 // request with 401 — the same negative-space CSRF/authn discipline
 // 13-billing-surface.test.ts already applies to /api/billing/checkout and
 // /api/billing/portal.
-const SUITE = "31-billing-plan";
+const SUITE = "prod/34-billing-plan";
 const client = new ApiClient();
 const siteClient = new ApiClient(client.env, undefined, client.env.siteUrl);
 
