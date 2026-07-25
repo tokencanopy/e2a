@@ -19,6 +19,11 @@ type fakeStore struct {
 	loadErr     error
 	markSentErr error
 	releaseErr  error
+	// settleStatus/settleAt override MarkFailed's default StatusFailed return,
+	// mirroring the production store's evidence-settle branch, which rewrites
+	// occurred_at to the provider-accept evidence time for the durable write.
+	settleStatus delivery.Status
+	settleAt     time.Time
 	// terminalAfterFailure mirrors the production store: once MarkFailed commits,
 	// a retry can no longer claim the terminal message and ClaimSend returns nil.
 	terminalAfterFailure bool
@@ -57,9 +62,17 @@ func (f *fakeStore) MarkSent(_ context.Context, id string, _ int64, _ int, _ tim
 	f.sent = append(f.sent, sentCall{id, provider, sentAs})
 	return f.markSentErr
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, _ messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, error) {
+func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, _ messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
 	f.failed = append(f.failed, failedCall{id: id, attempt: attempt, occurredAt: occurredAt, detail: detail, source: source, blockedRecipients: blockedRecipients})
-	return delivery.StatusFailed, nil
+	status := f.settleStatus
+	if status == "" {
+		status = delivery.StatusFailed
+	}
+	at := f.settleAt
+	if at.IsZero() {
+		at = occurredAt
+	}
+	return status, at, nil
 }
 func (f *fakeStore) PreserveTerminalFailure(context.Context, string, int64, int, time.Time, string, delivery.FailureSource, messagelifecycle.ReasonCode, []string) error {
 	return nil

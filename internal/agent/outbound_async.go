@@ -227,11 +227,15 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 // The returned delivery.Status tells the caller what actually happened so
 // metrics/logging report truth, not intent: StatusSent (evidence settle),
 // StatusFailed (failure recorded), or "" (no-op — row gone, already
-// terminal, or evidence raced the CAS; nothing was written).
-func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, error) {
+// terminal, or evidence raced the CAS; nothing was written). The returned
+// time is the occurred_at the write actually used: the provider-accept
+// evidence time on an evidence settle, the caller's occurredAt on a failure,
+// zero on a no-op.
+func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
 	detail = messagelifecycle.SafeDiagnostic(detail)
 	blockedRecipients = normalizeBlockedRecipients(blockedRecipients)
 	var settled delivery.Status
+	var settledAt time.Time
 	var resolved *identity.OutboundSentInfo
 	var resolvedProviderID string
 	if err := a.store.WithTx(ctx, func(tx pgx.Tx) error {
@@ -244,6 +248,7 @@ func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jo
 			attempt = 0
 			occurredAt = info.ProviderAcceptedAt
 			settled = delivery.StatusSent
+			settledAt = occurredAt
 			return a.finalizeSentTx(ctx, tx, info, jobID, attempt, occurredAt, providerID)
 		}
 		finfo, err := a.store.MarkOutboundFailedTx(ctx, tx, messageID, detail, source)
@@ -255,6 +260,7 @@ func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jo
 			return nil
 		}
 		settled = delivery.StatusFailed
+		settledAt = occurredAt
 		if _, err := tx.Exec(ctx, `UPDATE messages SET delivery_failure_reason_code=$2 WHERE id=$1`, messageID, string(reason)); err != nil {
 			return err
 		}
@@ -273,12 +279,12 @@ func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jo
 		e.ID = webhookpub.DeterministicEventID(messageID, webhookpub.EventEmailFailed)
 		return a.outbox.PublishTx(ctx, tx, e)
 	}); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	if resolved != nil {
 		log.Printf("[outbound-send] %s: terminal-failure guard settled as sent on provider evidence (provider id %q)", messageID, resolvedProviderID)
 	}
-	return settled, nil
+	return settled, settledAt, nil
 }
 
 func (a *outboundSendStore) PreserveTerminalFailure(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error {

@@ -222,13 +222,19 @@ type attemptRec struct {
 }
 
 // fakeMetrics records WebhookAttempt calls for assertion.
-type fakeMetrics struct{ attempts []attemptRec }
+type fakeMetrics struct {
+	attempts []attemptRec
+	firstTry []float64
+}
 
 func (f *fakeMetrics) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	f.attempts = append(f.attempts, attemptRec{outcome, statusClass, seconds})
 }
 
 func (f *fakeMetrics) WebhookDeliveryRescued(int) {} // not under test here
+func (f *fakeMetrics) WebhookFirstAttemptLatency(seconds float64) {
+	f.firstTry = append(f.firstTry, seconds)
+}
 
 // one asserts exactly one attempt was recorded and returns it.
 func (f *fakeMetrics) one(t *testing.T) attemptRec {
@@ -331,6 +337,148 @@ func TestDeliverWorker_Metrics_StatusClassMapping(t *testing.T) {
 	}
 }
 
+// ── Event→first-attempt latency SLI (docs/observability.md) ──────
+
+// seedEventLinked creates a user + webhook, a webhook_events row aged
+// eventAge, and a pending delivery row linked to it (mirroring the fan-out
+// insert). replay=true marks the delivery as a customer-initiated replay
+// (replay_id set), which must never feed the first-attempt SLI.
+func seedEventLinked(t *testing.T, prefix string, eventAge time.Duration, replay bool) (string, *webhook.SubscriberStore, *identity.Store, *identity.Webhook) {
+	t.Helper()
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	store := identity.NewStore(pool)
+	user, err := store.CreateOrGetUser(ctx, "owner-"+prefix+"@example.com", "Owner", "google-"+prefix)
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	wh, err := store.CreateWebhook(ctx, user.ID, "https://example.com/hook", "", []string{"email.received"}, identity.WebhookFilters{})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	eventID := "evt_" + prefix
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO webhook_events (id, user_id, type, envelope, created_at)
+		 VALUES ($1, $2, 'email.received', '{}'::jsonb, now() - make_interval(secs => $3))`,
+		eventID, user.ID, eventAge.Seconds()); err != nil {
+		t.Fatalf("insert webhook_events row: %v", err)
+	}
+	deliveryID := "whd_" + prefix
+	var replayID *string
+	if replay {
+		replayID = &eventID // any non-null value marks a replay row
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO webhook_subscriber_deliveries
+		     (id, webhook_id, event_id, replay_id, event_type, event_payload, status)
+		 VALUES ($1, $2, $3, $4, 'email.received', '{}'::jsonb, 'pending')`,
+		deliveryID, wh.ID, eventID, replayID); err != nil {
+		t.Fatalf("insert delivery row: %v", err)
+	}
+	sub := webhook.NewSubscriberStore(pool)
+	return deliveryID, sub, store, wh
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedOnFirstAttempt(t *testing.T) {
+	id, sub, _, wh := seedEventLinked(t, "lat-first", 45*time.Second, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want exactly one sample", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 40 || got > 50 {
+		t.Errorf("first-attempt latency = %.1fs, want ~45s (attempt start − event created_at)", got)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyAlsoOnFailedFirstAttempt(t *testing.T) {
+	// The SLI measures event→first-attempt regardless of that attempt's
+	// outcome — a failed first POST is still the first attempt.
+	id, sub, _, wh := seedEventLinked(t, "lat-fail", 30*time.Second, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: false, StatusCode: 500, Error: "boom"}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 1)); err == nil {
+		t.Fatal("Work returned nil on a retryable failure")
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want one sample even for a failed first attempt", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 25 || got > 35 {
+		t.Errorf("first-attempt latency = %.1fs, want ~30s", got)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsRetries(t *testing.T) {
+	id, sub, _, wh := seedEventLinked(t, "lat-retry", 45*time.Second, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: false, StatusCode: 500, Error: "boom"}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	// First attempt fails and records the attempt; the retry (job attempt 2)
+	// must NOT observe — the SLO is event→FIRST attempt only.
+	if err := w.Work(context.Background(), job(id, 1)); err == nil {
+		t.Fatal("first attempt should fail (retryable)")
+	}
+	if err := w.Work(context.Background(), job(id, 2)); err == nil {
+		t.Fatal("second attempt should fail (retryable)")
+	}
+	if len(fm.firstTry) != 1 {
+		t.Errorf("first-attempt latencies = %v, want exactly one sample across two attempts", fm.firstTry)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsNoPostOutcomes(t *testing.T) {
+	// skipped_disabled and webhook_deleted perform no HTTP POST, so there is
+	// no attempt to time — they must not observe even on job attempt 1.
+	idDisabled, sub, _, wh := seedEventLinked(t, "lat-disabled", 45*time.Second, false)
+	wh.Enabled = false
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(idDisabled, 1)); err == nil {
+		t.Fatal("disabled webhook should snooze")
+	}
+
+	idDeleted, _, _, _ := seedEventLinked(t, "lat-deleted", 45*time.Second, false)
+	wDeleted := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{err: errors.New("not found")}).WithMetrics(fm)
+	if err := wDeleted.Work(context.Background(), job(idDeleted, 1)); err == nil {
+		t.Fatal("deleted webhook should cancel")
+	}
+
+	if len(fm.firstTry) != 0 {
+		t.Errorf("first-attempt latencies = %v, want none for no-POST outcomes", fm.firstTry)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsReplayRows(t *testing.T) {
+	// A replay row's baseline would be the ORIGINAL event's created_at —
+	// observing it would record the customer's replay lag (days) as a giant
+	// false outlier. Only first-delivery rows (replay_id NULL) feed the SLI.
+	id, sub, _, wh := seedEventLinked(t, "lat-replay", 72*time.Hour, true)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 0 {
+		t.Errorf("first-attempt latencies = %v, want none for a replay row", fm.firstTry)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsEventlessRows(t *testing.T) {
+	// Test-endpoint deliveries (InsertPendingForTest) carry no event link —
+	// there is no event created_at to measure against, so no sample.
+	id, sub, _, wh := seed(t, "wd-m-noevent")
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 0 {
+		t.Errorf("first-attempt latencies = %v, want none without an event link", fm.firstTry)
+	}
+}
+
 func TestDeliverWorker_NextRetryMatchesEnvelope(t *testing.T) {
 	w := webhookdelivery.NewDeliverWorker(nil, nil, nil)
 	want := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour}
@@ -348,5 +496,67 @@ func TestDeliverWorker_NextRetryMatchesEnvelope(t *testing.T) {
 	}
 	if total != 29*time.Hour+21*time.Minute {
 		t.Errorf("retry envelope spans %v, want 29h21m", total)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedWhenFirstPostIsNotRiverAttemptOne(t *testing.T) {
+	// If a transient pre-POST error (e.g. a DB blip on the row load) consumes
+	// River attempt 1, the delivery's first HTTP attempt happens at job
+	// attempt 2 — it is STILL the first attempt and must be observed, or the
+	// slowest first attempts (the incident population) never reach the SLI.
+	id, sub, _, wh := seedEventLinked(t, "lat-att2", 45*time.Second, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	if err := w.Work(context.Background(), job(id, 2)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 40 || got > 50 {
+		t.Errorf("first-attempt latency = %.1fs, want ~45s", got)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencySkipsSnoozedJobs(t *testing.T) {
+	// A disabled webhook snoozes the River job WITHOUT burning an attempt
+	// (River counts snoozes in job metadata), so the eventual first POST
+	// still runs at job attempt 1 — but its latency would be the customer's
+	// entire disabled window (hours to days), not e2a's event→attempt
+	// latency. Snoozed jobs never observe.
+	id, sub, _, wh := seedEventLinked(t, "lat-snoozed", 26*time.Hour, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	snoozedJob := job(id, 1)
+	snoozedJob.Metadata = []byte(`{"snoozes":3}`)
+	if err := w.Work(context.Background(), snoozedJob); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 0 {
+		t.Errorf("first-attempt latencies = %v, want none for a job that sat through a disabled window", fm.firstTry)
+	}
+}
+
+func TestDeliverWorker_Metrics_FirstAttemptLatencyObservedDespiteBackoffSchedule(t *testing.T) {
+	// Chained PRE-POST failures (e.g. a DB blip on the row load) record no
+	// attempt, so the row still shows attempts == 0 when the true first POST
+	// finally runs — deep into the retry envelope (scheduled_at far past
+	// created_at). That first POST MUST observe: a schedule-shift heuristic
+	// would false-skip exactly the outage population this SLI exists to
+	// catch. Only an actual snooze (metadata) excludes.
+	id, sub, _, wh := seedEventLinked(t, "lat-backoff", 90*time.Minute, false)
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	lateJob := job(id, 4)
+	lateJob.CreatedAt = time.Now().Add(-90 * time.Minute).UTC()
+	lateJob.ScheduledAt = time.Now().Add(-time.Minute).UTC() // deep in the backoff envelope, never snoozed
+	if err := w.Work(context.Background(), lateJob); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(fm.firstTry) != 1 {
+		t.Fatalf("first-attempt latencies = %v, want one sample for the true first POST after chained pre-POST failures", fm.firstTry)
+	}
+	if got := fm.firstTry[0]; got < 89*time.Minute.Seconds() || got > 91*time.Minute.Seconds() {
+		t.Errorf("first-attempt latency = %.0fs, want ~90min (the honest outage signal)", got)
 	}
 }

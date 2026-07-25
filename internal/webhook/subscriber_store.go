@@ -28,6 +28,16 @@ type SubscriberDelivery struct {
 	NextRetryAt    time.Time
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
+	// ReplayID is non-nil for customer-initiated replay rows (a re-delivery
+	// of an old event), nil for first-delivery rows. The first-attempt
+	// latency SLI observes first-delivery rows only: a replay's baseline
+	// would be the ORIGINAL event's created_at, recording the replay lag
+	// as a false outlier.
+	ReplayID *string
+	// EventCreatedAt is the originating webhook_events row's created_at —
+	// the baseline of the event→first-attempt latency SLI. Nil for rows
+	// without an event link (the /test endpoint's deliveries).
+	EventCreatedAt *time.Time
 }
 
 // SubscriberStore manages webhook_subscriber_deliveries. Parallel to
@@ -75,17 +85,24 @@ func (s *SubscriberStore) MarkDelivered(ctx context.Context, deliveryID string, 
 // GetSubscriberDeliveryByID loads a single delivery row by id — the River
 // DeliverWorker's entry point (it holds only the delivery id and reads the
 // payload + webhook_id here). Returns pgx.ErrNoRows if the row is gone.
+// The replay_id + joined webhook_events.created_at feed the
+// event→first-attempt latency SLI (LEFT JOIN: rows without an event link,
+// e.g. /test deliveries, load a nil EventCreatedAt).
 func (s *SubscriberStore) GetSubscriberDeliveryByID(ctx context.Context, deliveryID string) (*SubscriberDelivery, error) {
 	var d SubscriberDelivery
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, webhook_id, event_type, event_payload, message_id,
-		        status, attempts, max_attempts, COALESCE(last_error, ''),
-		        last_status_code, last_attempt_at, next_retry_at, created_at, expires_at
-		   FROM webhook_subscriber_deliveries WHERE id = $1`,
+		`SELECT d.id, d.webhook_id, d.event_type, d.event_payload, d.message_id,
+		        d.status, d.attempts, d.max_attempts, COALESCE(d.last_error, ''),
+		        d.last_status_code, d.last_attempt_at, d.next_retry_at, d.created_at, d.expires_at,
+		        d.replay_id, ev.created_at
+		   FROM webhook_subscriber_deliveries d
+		   LEFT JOIN webhook_events ev ON ev.id = d.event_id
+		  WHERE d.id = $1`,
 		deliveryID,
 	).Scan(&d.ID, &d.WebhookID, &d.EventType, &d.EventPayload, &d.MessageID,
 		&d.Status, &d.Attempts, &d.MaxAttempts, &d.LastError,
-		&d.LastStatusCode, &d.LastAttemptAt, &d.NextRetryAt, &d.CreatedAt, &d.ExpiresAt)
+		&d.LastStatusCode, &d.LastAttemptAt, &d.NextRetryAt, &d.CreatedAt, &d.ExpiresAt,
+		&d.ReplayID, &d.EventCreatedAt)
 	if err != nil {
 		return nil, err
 	}

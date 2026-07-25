@@ -14,6 +14,7 @@ package webhookdelivery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -67,6 +68,11 @@ type Metrics interface {
 	// arm re-drove (fresh job replacing a terminal/pruned one). A climbing
 	// rate is the poison-row signal.
 	WebhookDeliveryRescued(count int)
+	// WebhookFirstAttemptLatency records event→first-attempt latency for
+	// one subscriber delivery (attempt start − webhook_events.created_at).
+	// Observed only on a first-delivery row's FIRST HTTP attempt — retries,
+	// replays, and the no-POST outcomes never observe.
+	WebhookFirstAttemptLatency(seconds float64)
 }
 
 // statusClassOf maps an HTTP status code to its metrics label ("1xx".."5xx"),
@@ -120,6 +126,32 @@ func (w *DeliverWorker) emitAttempt(outcome, statusClass string, seconds float64
 	if w.metrics != nil {
 		w.metrics.WebhookAttempt(outcome, statusClass, seconds)
 	}
+}
+
+// emitFirstAttemptLatency records the event→first-attempt latency, tolerating
+// an unwired backend.
+func (w *DeliverWorker) emitFirstAttemptLatency(seconds float64) {
+	if w.metrics != nil {
+		w.metrics.WebhookFirstAttemptLatency(seconds)
+	}
+}
+
+// snoozeCount reports how often River snoozed this job. The disabled-webhook
+// deferral is this worker's ONLY snooze source, so a non-zero count means
+// the job sat through a customer-disabled window. River's job executor
+// increments a "snoozes" counter in the job's metadata JSON on every snooze
+// (absent before the first); JobRow.Metadata is the public carrier.
+func snoozeCount(job *river.Job[WebhookDeliverArgs]) int {
+	if job == nil || len(job.Metadata) == 0 {
+		return 0
+	}
+	var md struct {
+		Snoozes int `json:"snoozes"`
+	}
+	if err := json.Unmarshal(job.Metadata, &md); err != nil {
+		return 0
+	}
+	return md.Snoozes
 }
 
 // NextRetry overrides River's client-wide policy for webhook jobs only, returning
@@ -185,6 +217,35 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 	out := w.deliverer.Deliver(ctx, wh.URL, d.EventPayload, wh.SigningSecret, prevSecret,
 		d.EventType, strconv.Itoa(webhookpub.SchemaVersion))
 	dur := time.Since(start).Seconds()
+	// Event→first-attempt latency SLI: observed ONLY on this delivery row's
+	// first HTTP attempt — the row shows no recorded prior attempt — and only
+	// for first-delivery rows. Not gated on River's attempt number: if
+	// transient pre-POST errors consume early attempts, the true first POST
+	// runs later and must still be observed, or the slowest first attempts
+	// (the incident population) never reach the SLI. A replay row (replay_id
+	// set) is excluded: its baseline would be the ORIGINAL event's
+	// created_at, recording the customer's replay lag as a giant false
+	// outlier. The no-POST outcomes (webhook_deleted,
+	// skipped_disabled) returned above and never reach here; the SLO
+	// measures the first attempt regardless of its outcome. At-most-once:
+	// once any attempt is recorded the row never observes again.
+	//
+	// Disabled-window exclusion: the disabled path is this worker's ONLY
+	// snooze source, and River counts snoozes in job metadata — a snoozed
+	// job sat through a customer-disabled window (hour-scale, possibly
+	// days), which is not e2a's event→attempt latency, so it never observes.
+	// (River does not burn the attempt number on snooze, so job.Attempt
+	// cannot discriminate; a scheduled_at heuristic would false-skip jobs
+	// whose chained PRE-POST failures walked the retry envelope with zero
+	// recorded attempts — the exact incident population this SLI exists to
+	// catch.) The residual — a crash after the POST but before the attempt
+	// record — can double-observe on the retry; that is the same accepted
+	// residual as at-least-once delivery itself, and rare.
+	if d.Attempts == 0 && d.ReplayID == nil && d.EventCreatedAt != nil && snoozeCount(job) == 0 {
+		if latency := start.Sub(*d.EventCreatedAt).Seconds(); latency > 0 {
+			w.emitFirstAttemptLatency(latency)
+		}
+	}
 	if out.Success {
 		w.emitAttempt("delivered", statusClassOf(out.StatusCode), dur)
 		return w.subStore.MarkDelivered(ctx, d.ID, out.StatusCode) // nil → River completes the job

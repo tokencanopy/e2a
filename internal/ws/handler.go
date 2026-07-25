@@ -3,11 +3,14 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/httpapi"
@@ -61,6 +64,20 @@ func (h *Handler) ServeWithEmail(w http.ResponseWriter, r *http.Request, rawEmai
 	h.serve(w, r, rawEmail)
 }
 
+// reject counts the handshake rejection and writes the canonical error
+// envelope — the two always happen together, so a future early return can't
+// skip the counter. reason ∈ the WSHandshakeRejected enum; status/code/msg
+// shape the (unchanged) client-facing response.
+func (h *Handler) reject(w http.ResponseWriter, r *http.Request, reason string, status int, code, msg string) {
+	h.metrics.WSHandshakeRejected(reason)
+	if status == http.StatusUnauthorized {
+		// RFC 6750 §3 — set before WriteError writes the status line, since
+		// headers can't be added once the status is flushed.
+		w.Header().Set("WWW-Authenticate", `Bearer realm="e2a"`)
+	}
+	httpapi.WriteError(w, r, status, code, msg)
+}
+
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string) {
 	// Authenticate via the `Authorization: Bearer <api_key>` handshake header —
 	// the standard shape for non-browser WebSocket clients (matches OpenAI
@@ -82,16 +99,24 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string)
 	// prod stack the authChallenge middleware also (re)asserts it on any 401.
 	token := bearerToken(r)
 	if token == "" {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="e2a"`)
-		httpapi.WriteError(w, r, http.StatusUnauthorized, "unauthorized",
+		h.reject(w, r, "unauthorized", http.StatusUnauthorized, "unauthorized",
 			"missing credential — send Authorization: Bearer <api_key>")
 		return
 	}
 
 	principal, err := h.store.GetPrincipalByAPIKey(r.Context(), token)
 	if err != nil || principal == nil || principal.User == nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="e2a"`)
-		httpapi.WriteError(w, r, http.StatusUnauthorized, "unauthorized", "invalid token")
+		// A genuinely unknown/revoked/expired key surfaces as pgx.ErrNoRows
+		// (or a nil principal) — a client fault. Any OTHER store error is an
+		// e2a-side failure to serve the handshake and is counted
+		// internal_error so a DB outage burns the handshake SLI instead of
+		// hiding inside the client-fault bucket. The 401 response is
+		// unchanged either way.
+		reason := "unauthorized"
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			reason = "internal_error"
+		}
+		h.reject(w, r, reason, http.StatusUnauthorized, "unauthorized", "invalid token")
 		return
 	}
 
@@ -101,7 +126,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string)
 	email := identity.NormalizeEmail(rawEmail)
 	agent, err := h.store.GetAgentByEmail(r.Context(), email)
 	if err != nil {
-		httpapi.WriteError(w, r, http.StatusNotFound, "not_found", "agent not found")
+		// Same split as the credential check: pgx.ErrNoRows is a genuinely
+		// unknown address (client fault); any other store error is e2a-side
+		// (internal_error). The 404 response is unchanged either way.
+		reason := "not_found"
+		if !errors.Is(err, pgx.ErrNoRows) {
+			reason = "internal_error"
+		}
+		h.reject(w, r, reason, http.StatusNotFound, "not_found", "agent not found")
 		return
 	}
 	// Tenant ownership: the agent must belong to the credential's user. A
@@ -112,14 +144,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string)
 	// across tenants; collapsing both into 404 closes it (mirrors the REST
 	// resolveOwnedAgent, which likewise refuses to distinguish the two).
 	if agent.UserID != principal.User.ID {
-		httpapi.WriteError(w, r, http.StatusNotFound, "not_found", "agent not found")
+		h.reject(w, r, "not_found", http.StatusNotFound, "not_found", "agent not found")
 		return
 	}
 	// Agent-scope confinement (HIGH-1): an agent-scoped credential is pinned to
 	// its one bound agent — it may not open a different agent's stream even
 	// within the same account. Mirrors the REST resolveOwnedAgent pin.
 	if principal.Scope == identity.ScopeAgent && principal.AgentID != agent.ID {
-		httpapi.WriteError(w, r, http.StatusForbidden, "forbidden", "not authorized for this agent")
+		h.reject(w, r, "forbidden", http.StatusForbidden, "forbidden", "not authorized for this agent")
 		return
 	}
 
@@ -134,6 +166,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string)
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
+		h.metrics.WSHandshakeRejected("upgrade_failed")
 		log.Printf("[ws] upgrade failed for %s: %v", email, err)
 		return
 	}

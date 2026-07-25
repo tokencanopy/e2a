@@ -77,6 +77,7 @@ type terminalCandidate struct {
 	attempt                  int
 	state                    string
 	finalizedAt              *time.Time
+	acceptedAt               time.Time // messages.created_at — the latency SLI baseline
 	failureSource            delivery.FailureSource
 	detail                   string
 	failureReason            string
@@ -97,6 +98,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		        COALESCE(r.attempt, 0),
 		        CASE WHEN r.id IS NULL THEN 'missing' ELSE r.state::text END,
 		        r.finalized_at,
+		        m.created_at,
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_detail,''),COALESCE(m.delivery_failure_reason_code,''),
 		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.delivery_failure_blocked_recipients
 		   FROM messages m
@@ -120,7 +122,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 	candidates := make([]terminalCandidate, 0)
 	for rows.Next() {
 		var candidate terminalCandidate
-		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients); err != nil {
+		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.acceptedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients); err != nil {
 			return err
 		}
 		candidates = append(candidates, candidate)
@@ -166,7 +168,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// fails it with provenance 'local' so later authoritative evidence can
 		// still correct it. The stored detail of a deferred final attempt is
 		// preferred over this generic sweep detail.
-		settled, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
+		settled, settledAt, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
 		if err != nil {
 			if processed > 0 {
 				log.Printf("[outbound-terminal-reconcile] processed %d candidates", processed)
@@ -177,12 +179,15 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// guarded write actually did. Evidence-settled rows (the reconciler's
 		// priority population: submitted, crashed before MarkSent) count as
 		// "sent", not as a false failure; a no-op (row already terminal)
-		// counts nothing.
+		// counts nothing. emitTerminal uses the write's EFFECTIVE occurred_at
+		// (settledAt — the provider-accept evidence time on an evidence
+		// settle), so the latency measures acceptance→provider-accept, not
+		// acceptance→sweep.
 		switch settled {
 		case delivery.StatusFailed:
-			w.metrics.OutboundTerminal(terminalOutcome(source, reason, candidate.failureBlockedRecipients))
+			emitTerminal(w.metrics, terminalOutcome(source, reason, candidate.failureBlockedRecipients), candidate.acceptedAt, settledAt)
 		case delivery.StatusSent:
-			w.metrics.OutboundTerminal(terminalSent)
+			emitTerminal(w.metrics, terminalSent, candidate.acceptedAt, settledAt)
 		}
 		if w.ramp != nil {
 			if err := w.ramp.Resolve(ctx, candidate.messageID); err != nil {
