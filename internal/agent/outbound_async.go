@@ -189,11 +189,21 @@ func (a *outboundSendStore) recordOutreachSend(ctx context.Context, info *identi
 	if info == nil || info.Message == nil || a.store == nil {
 		return
 	}
-	if _, err := a.store.RecordOutboundActivity(ctx, info.UserID, info.Message.AgentID,
-		info.Message.Recipient, info.Message.ConversationID, occurredAt); err != nil {
-		// Best-effort by design; ReconcileEngagementCounts corrects drift and
-		// reports it, so a missed update surfaces there rather than silently.
-		log.Printf("[contacts] outreach send counters not updated for %s: %v", info.Message.ID, err)
+	// Recipients come from ToRecipients, NOT Message.Recipient: the terminal
+	// path populates the array and leaves the scalar empty, so keying off the
+	// scalar silently matched nothing. One send to several people advances each
+	// of their engagements.
+	for _, rcpt := range info.Message.ToRecipients {
+		if rcpt == "" {
+			continue
+		}
+		if _, err := a.store.RecordOutboundActivity(ctx, info.UserID, info.Message.AgentID,
+			rcpt, info.Message.ConversationID, occurredAt); err != nil {
+			// Best-effort by design; ReconcileEngagementCounts corrects drift and
+			// reports it, so a missed update surfaces there rather than silently.
+			log.Printf("[contacts] outreach send counters not updated for %s -> %s: %v",
+				info.Message.ID, rcpt, err)
+		}
 	}
 }
 
