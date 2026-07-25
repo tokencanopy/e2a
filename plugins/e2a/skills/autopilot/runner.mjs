@@ -13,8 +13,8 @@
 
 import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 
