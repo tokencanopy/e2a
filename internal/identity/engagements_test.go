@@ -505,3 +505,67 @@ func TestReconcileEngagementCountsCorrectsDrift(t *testing.T) {
 		t.Errorf("second pass reported %+v, want none — the sweep must be idempotent", drift)
 	}
 }
+
+// TestPurgeDeletedAgentsRemovesEngagements drives the REAL hard-delete path,
+// not the PurgeEngagementsForAgent helper.
+//
+// That distinction is the point. The helper had a passing test and was never
+// called from anywhere, so the invariant it guarded — a recreated agent must
+// not inherit a dead campaign — was unenforced in production. This exercises
+// the path the janitor actually runs.
+//
+// It also pins the asymmetry: outreach state dies with the agent, consent
+// survives it.
+func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "purgepath")
+
+	if _, err := store.ClaimOrCreateDomain(ctx, "purgepath.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agentAddr = "raise@purgepath.example.com"
+	if _, err := store.CreateAgent(ctx, agentAddr, "purgepath.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	enroll(t, store, user.ID, agentAddr, "partner@purgepath.vc", "touch3")
+	if _, err := store.AddSuppression(ctx, user.ID, "partner@purgepath.vc", "unsubscribed", "manual", ""); err != nil {
+		t.Fatalf("suppress: %v", err)
+	}
+
+	// Trash the agent and age it past retention so the purge sweep claims it.
+	if err := store.SoftDeleteAgent(ctx, agentAddr, user.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE agent_identities SET deleted_at = now() - interval '400 days' WHERE id = $1`,
+		agentAddr); err != nil {
+		t.Fatalf("age the trash: %v", err)
+	}
+
+	if _, err := store.PurgeDeletedAgents(ctx); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// A recreated agent at the same address must inherit nothing operational.
+	var remaining int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM contact_engagements WHERE agent_id = $1`, agentAddr).Scan(&remaining); err != nil {
+		t.Fatalf("count engagements: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("%d engagement(s) survived the agent purge — a recreated agent would resume a dead campaign", remaining)
+	}
+
+	// ...but every prior refusal still stands.
+	blocked, err := store.EffectiveSuppressions(ctx, user.ID, agentAddr, []string{"partner@purgepath.vc"})
+	if err != nil {
+		t.Fatalf("suppression lookup: %v", err)
+	}
+	if len(blocked) != 1 {
+		t.Errorf("suppression lookup = %v — consent must survive agent deletion", blocked)
+	}
+}

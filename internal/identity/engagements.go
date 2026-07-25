@@ -361,6 +361,8 @@ type EngagementCountDrift struct {
 // warns about exactly this class). Rather than hope, the janitor recomputes
 // periodically and reports corrections — a non-empty result is a bug signal
 // that a hook was missed, not routine maintenance.
+// An empty userID reconciles across every account, which is how the janitor
+// calls it; a specific userID scopes it to one tenant for targeted use.
 func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, limit int) ([]EngagementCountDrift, error) {
 	rows, err := s.pool.Query(ctx,
 		`WITH actual AS (
@@ -380,7 +382,7 @@ func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, li
 		                AND m.deleted_at IS NULL
 		                AND lower(m.sender) = ce.address) AS actual_in
 		       FROM contact_engagements ce
-		      WHERE ce.user_id = $1
+		      WHERE ($1 = '' OR ce.user_id = $1)
 		 )
 		 SELECT agent_id, address, stored_out, actual_out, stored_in, actual_in
 		   FROM actual
@@ -420,7 +422,7 @@ func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, li
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE contact_engagements
 			    SET outbound_count = $3, inbound_count = $4, updated_at = now()
-			  WHERE user_id = $1 AND agent_id = $2 AND address = $5`,
+			  WHERE ($1 = '' OR user_id = $1) AND agent_id = $2 AND address = $5`,
 			userID, c.agentID, c.outbound, c.inbound, c.address); err != nil {
 			return drift, err
 		}
