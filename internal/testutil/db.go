@@ -54,8 +54,10 @@ func baseTestDBURL() string {
 // pools, the in-process contract server — lands on the same database.
 // Non-test binaries (cmd/e2a-contract-server) and E2A_TEST_DB_SHARED=1 get
 // the base URL verbatim. Missing databases self-provision on first open
-// (see OpenPreparedTestDB); concurrent SESSIONS running the SAME package
-// still contend, so per-session base URLs remain the guidance in AGENTS.md.
+// (see OpenPreparedTestDB). Concurrent sessions, agents, and worktrees are
+// isolated by the per-workspace component below, so handing each runner its
+// own base URL is no longer required — only useful for pointing a run at an
+// entirely separate server.
 func TestDBURL() string {
 	base := baseTestDBURL()
 	suffix := derivedDBSuffix()
@@ -76,8 +78,25 @@ func TestDBURL() string {
 		return base
 	}
 	u.Path = u.Path + suffix
+	// Postgres truncates identifiers past maxPostgresIdentifier bytes, and it does
+	// so SILENTLY. Truncation lands at the END — inside the package component — so
+	// sibling packages sharing a prefix collapse onto ONE database: internal/identity
+	// and internal/idempotency both become ..._pkg_ide, then truncate each other's
+	// tables under -p 4. That is exactly the corruption this derivation exists to
+	// prevent, so a base too long to derive from has to fail loudly rather than
+	// quietly reintroduce it.
+	if name := strings.TrimPrefix(u.Path, "/"); len(name) > maxPostgresIdentifier {
+		panic(fmt.Sprintf("testutil: derived test database name %q is %d bytes, over Postgres's "+
+			"%d-byte identifier limit — Postgres would truncate it silently and collide sibling "+
+			"packages onto one database. Shorten the base in E2A_TEST_DATABASE_URL; the derived "+
+			"suffix needs %d bytes.", name, len(name), maxPostgresIdentifier, len(suffix)))
+	}
 	return u.String()
 }
+
+// maxPostgresIdentifier is Postgres's NAMEDATALEN-1 ceiling for identifiers,
+// database names included. Measured in BYTES, which is what len() reports.
+const maxPostgresIdentifier = 63
 
 // derivedDBSuffix derives the database-name suffix beneath the configured base:
 // a per-WORKSPACE component plus a per-PACKAGE component, or "" when the process
