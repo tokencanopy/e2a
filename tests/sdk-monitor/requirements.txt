@@ -2,4 +2,4 @@
 # this MUST stay a pinned PyPI release — never a path/editable dep on
 # ../../sdks/python. A broken publish has to surface here, not be papered over
 # by local source. Bump this on every Python SDK release (see README.md).
-e2a==5.3.0
+e2a==5.4.0
