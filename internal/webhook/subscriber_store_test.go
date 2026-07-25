@@ -251,3 +251,66 @@ func TestSubscriberStore_MarkDeliveredBumpsLastDeliveredAt(t *testing.T) {
 		t.Error("last_delivered_at not bumped on the webhook row after MarkDelivered")
 	}
 }
+
+// TestMarkSubscriberFailedIfPending pins the blind terminal write used when
+// the worker cannot read the row (a final-attempt row-load failure): it must
+// fail a PENDING row but never clobber a row that already reached a terminal
+// state (the read failing means the row's true state is unknown).
+func TestMarkSubscriberFailedIfPending(t *testing.T) {
+	pool := testutil.TestDB(t)
+	istore := identity.NewStore(pool)
+	ss := webhook.NewSubscriberStore(pool)
+	ctx := context.Background()
+	user, _ := istore.CreateOrGetUser(ctx, "wsd-cond@example.com", "Owner", "google-wsd-cond")
+	wh, _ := istore.CreateWebhook(ctx, user.ID, "https://example.com/hook", "", []string{"email.received"}, identity.WebhookFilters{})
+	env := []byte(`{"type":"email.received"}`)
+
+	// Pending row → failed, with the constant customer-safe last_error.
+	pendingID, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+	if err != nil {
+		t.Fatalf("InsertPendingForTest: %v", err)
+	}
+	if err := ss.MarkSubscriberFailedIfPending(ctx, pendingID, 8, "internal error loading delivery", 0); err != nil {
+		t.Fatalf("MarkSubscriberFailedIfPending on pending row: %v", err)
+	}
+	d, _ := ss.GetSubscriberDeliveryByID(ctx, pendingID)
+	if d.Status != "failed" || d.Attempts != 8 || d.LastError != "internal error loading delivery" {
+		t.Errorf("pending row: status=%q attempts=%d last_error=%q, want failed/8/constant", d.Status, d.Attempts, d.LastError)
+	}
+
+	// Already-failed row → untouched (the original, more informative
+	// last_error must survive).
+	failedID, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+	if err != nil {
+		t.Fatalf("InsertPendingForTest (failed): %v", err)
+	}
+	if err := ss.MarkSubscriberFailed(ctx, failedID, 8, "smtp 550 rejected", 550); err != nil {
+		t.Fatalf("MarkSubscriberFailed: %v", err)
+	}
+	if err := ss.MarkSubscriberFailedIfPending(ctx, failedID, 8, "internal error loading delivery", 0); err != nil {
+		t.Fatalf("MarkSubscriberFailedIfPending on failed row: %v", err)
+	}
+	if d, _ := ss.GetSubscriberDeliveryByID(ctx, failedID); d.Status != "failed" || d.LastError != "smtp 550 rejected" {
+		t.Errorf("failed row: status=%q last_error=%q, want failed with the ORIGINAL last_error", d.Status, d.LastError)
+	}
+
+	// Delivered row → untouched (never clobbered).
+	deliveredID, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+	if err != nil {
+		t.Fatalf("InsertPendingForTest 2: %v", err)
+	}
+	if err := ss.MarkDelivered(ctx, deliveredID, 200); err != nil {
+		t.Fatalf("MarkDelivered: %v", err)
+	}
+	if err := ss.MarkSubscriberFailedIfPending(ctx, deliveredID, 8, "internal error loading delivery", 0); err != nil {
+		t.Fatalf("MarkSubscriberFailedIfPending on delivered row: %v", err)
+	}
+	if d, _ := ss.GetSubscriberDeliveryByID(ctx, deliveredID); d.Status != "delivered" {
+		t.Errorf("delivered row: status=%q, want delivered (must not be clobbered)", d.Status)
+	}
+
+	// Missing row → no error, no panic (the blind write tolerates a gone row).
+	if err := ss.MarkSubscriberFailedIfPending(ctx, "whd_does_not_exist", 8, "internal error loading delivery", 0); err != nil {
+		t.Errorf("MarkSubscriberFailedIfPending on missing row: %v, want nil", err)
+	}
+}

@@ -192,6 +192,103 @@ describe("DomainCard — outbound sending section", () => {
   });
 });
 
+// The header chips are the only place both capability axes are visible without
+// expanding the DNS section. The axes are independent, so the card must be able
+// to show a domain that can receive but not send — and vice versa.
+describe("DomainCard — capability header chips", () => {
+  const sendingRecords: DNSRecord[] = [
+    makeRecord(),
+    makeRecord({
+      type: "MX",
+      name: "bounce.mail.example.com",
+      value: "feedback-smtp.us-east-1.amazonses.com",
+      priority: 10,
+      purpose: "mail_from_mx",
+    }),
+  ];
+
+  it("omits the outbound chip when the sending feature is off server-side", () => {
+    // No mail_from records ⇒ sending not configured on this deployment. The card
+    // must look exactly as it did before the outbound chip existed.
+    renderCard(makeDomain());
+    expect(screen.queryByText(/^Outbound/)).not.toBeInTheDocument();
+  });
+
+  it("shows Outbound pending while the sending identity is provisioning", () => {
+    renderCard(
+      makeDomain({
+        dns_records: sendingRecords,
+        capabilities: { inbound: "verified", outbound: "pending" },
+      }),
+    );
+    expect(screen.getByText("Outbound pending")).toBeInTheDocument();
+  });
+
+  it("shows Outbound ready once the sending identity is verified", () => {
+    renderCard(
+      makeDomain({
+        dns_records: sendingRecords,
+        capabilities: { inbound: "verified", outbound: "verified" },
+      }),
+    );
+    expect(screen.getByText("Outbound ready")).toBeInTheDocument();
+  });
+
+  it("shows Outbound failed when the sending identity failed", () => {
+    renderCard(
+      makeDomain({
+        dns_records: sendingRecords,
+        capabilities: { inbound: "verified", outbound: "failed" },
+      }),
+    );
+    expect(screen.getByText("Outbound failed")).toBeInTheDocument();
+  });
+
+  // The point of reading `capabilities` at all: when the axes diverge the card
+  // reports each one honestly instead of inferring both from one boolean.
+  it("reports the axes independently — can send but not receive", () => {
+    renderCard(
+      makeDomain({
+        verified: false,
+        dns_records: sendingRecords,
+        capabilities: { inbound: "pending", outbound: "verified" },
+      }),
+    );
+    expect(screen.getByText("Unverified")).toBeInTheDocument();
+    expect(screen.getByText("Outbound ready")).toBeInTheDocument();
+    // Inbound is not ready, so creating an inbox is still gated behind verify.
+    expect(
+      screen.getByRole("button", { name: /Verify domain/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("prefers capabilities over a disagreeing legacy verified flag", () => {
+    renderCard(
+      makeDomain({
+        verified: false,
+        capabilities: { inbound: "verified", outbound: "none" },
+      }),
+    );
+    expect(screen.getByText("Verified")).toBeInTheDocument();
+    // Inbound-ready ⇒ the create-inbox affordance replaces the verify button.
+    expect(screen.getByRole("link", { name: /Create inbox/ })).toBeInTheDocument();
+  });
+
+  it("falls back to the legacy fields when capabilities is absent", () => {
+    // A server predating `capabilities` omits it entirely; the card must still
+    // derive both axes rather than rendering an empty/none state.
+    renderCard(
+      makeDomain({
+        verified: true,
+        dns_records: sendingRecords,
+        sending_status: "verified",
+      }),
+    );
+    expect(screen.getByText("Verified")).toBeInTheDocument();
+    expect(screen.getByText("Outbound ready")).toBeInTheDocument();
+  });
+});
+
 describe("DomainCard — verify flow", () => {
   it("calls the verify endpoint, notifies the parent, and overlays the probe result", async () => {
     const onVerified = jest.fn();

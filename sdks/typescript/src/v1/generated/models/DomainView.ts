@@ -11,11 +11,13 @@
  */
 
 import { DNSRecord } from '../models/DNSRecord.js';
+import { DomainCapabilities } from '../models/DomainCapabilities.js';
 import { SendingRampView } from '../models/SendingRampView.js';
 import { HttpFile } from '../http/http.js';
 
 export class DomainView {
     'agentCount': number;
+    'capabilities': DomainCapabilities;
     'createdAt': Date;
     'dnsRecords': Array<DNSRecord>;
     'domain': string;
@@ -41,6 +43,12 @@ export class DomainView {
             "baseName": "agent_count",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "capabilities",
+            "baseName": "capabilities",
+            "type": "DomainCapabilities",
+            "format": ""
         },
         {
             "name": "createdAt",

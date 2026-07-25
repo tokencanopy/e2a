@@ -56,6 +56,7 @@ from e2a.v1.generated.models.delete_webhook_result import DeleteWebhookResult
 from e2a.v1.generated.models.delivery_status_json import DeliveryStatusJSON
 from e2a.v1.generated.models.deployment_info_view import DeploymentInfoView
 from e2a.v1.generated.models.domain import Domain
+from e2a.v1.generated.models.domain_capabilities import DomainCapabilities
 from e2a.v1.generated.models.domain_sending_failed_data import DomainSendingFailedData
 from e2a.v1.generated.models.domain_sending_verified_data import DomainSendingVerifiedData
 from e2a.v1.generated.models.domain_suppression_added_data import DomainSuppressionAddedData

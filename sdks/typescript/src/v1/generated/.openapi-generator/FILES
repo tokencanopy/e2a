@@ -60,6 +60,7 @@ models/DeleteWebhookResult.ts
 models/DeliveryStatusJSON.ts
 models/DeploymentInfoView.ts
 models/Domain.ts
+models/DomainCapabilities.ts
 models/DomainSendingFailedData.ts
 models/DomainSendingVerifiedData.ts
 models/DomainSuppressionAddedData.ts

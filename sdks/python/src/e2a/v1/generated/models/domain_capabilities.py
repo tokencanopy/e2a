@@ -14,37 +14,21 @@
 
 from __future__ import annotations
 import pprint
-import re  # noqa: F401
 import json
 
-from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
-from typing import Any, ClassVar, Dict, List, Optional
-from e2a.v1.generated.models.dns_record import DNSRecord
-from e2a.v1.generated.models.domain_capabilities import DomainCapabilities
-from e2a.v1.generated.models.sending_ramp_view import SendingRampView
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from typing import Any, ClassVar, Dict, List
 from typing import Optional, Set
 from typing_extensions import Self
 
-class DomainView(BaseModel):
+class DomainCapabilities(BaseModel):
     """
-    DomainView
+    DomainCapabilities
     """ # noqa: E501
-    agent_count: StrictInt
-    capabilities: DomainCapabilities
-    created_at: datetime
-    dns_records: List[DNSRecord]
-    domain: StrictStr
-    last_checked_at: Optional[datetime] = None
-    sending_error: Optional[StrictStr] = None
-    sending_last_checked_at: Optional[datetime] = None
-    sending_ramp: SendingRampView
-    sending_status: StrictStr = Field(description="Async SES sending-identity state (rollup). Open set; tolerate unknown values. Known values: none, pending, verified, failed.")
-    verification_token: StrictStr
-    verified: StrictBool
-    verified_at: Optional[datetime] = None
+    inbound: StrictStr = Field(description="Whether this domain can RECEIVE mail — the inbound axis. Restates the legacy verified boolean: verified once inbound verification has passed (which requires BOTH the ownership TXT and the inbound MX), pending otherwise. Open set; tolerate unknown values (new values may be added). Known values: verified, pending — those are the only two this axis emits, because it restates a boolean. There is deliberately NO inbound failure state today: a missing, unreachable, or wrong MX leaves the axis pending indefinitely rather than reporting failed, so treat pending as \"not proven yet\" and not as \"in flight\". Diagnose which record is at fault via dns_records[].status or the live probe on POST /v1/domains/{domain}/verify — unlike the outbound axis, there is no inbound equivalent of sending_error.")
+    outbound: StrictStr = Field(description="Whether agents on this domain can SEND as their own address — the outbound axis. Restates the domain-level sending_status rollup over the async SES sending identity (DKIM + custom MAIL FROM). Open set; tolerate unknown values. Known values: none (not provisioned), pending (provisioning, or awaiting DNS publish/propagation), verified (agents send as their own address, DKIM-aligned), failed (consult sending_error). Independent of inbound: a domain can be outbound-pending while inbound is verified, and the per-record statuses in dns_records show which record to fix.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_count", "capabilities", "created_at", "dns_records", "domain", "last_checked_at", "sending_error", "sending_last_checked_at", "sending_ramp", "sending_status", "verification_token", "verified", "verified_at"]
+    __properties: ClassVar[List[str]] = ["inbound", "outbound"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -64,7 +48,7 @@ class DomainView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of DomainView from a JSON string"""
+        """Create an instance of DomainCapabilities from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -87,19 +71,6 @@ class DomainView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
-        # override the default output from pydantic by calling `to_dict()` of capabilities
-        if self.capabilities:
-            _dict['capabilities'] = self.capabilities.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of each item in dns_records (list)
-        _items = []
-        if self.dns_records:
-            for _item_dns_records in self.dns_records:
-                if _item_dns_records:
-                    _items.append(_item_dns_records.to_dict())
-            _dict['dns_records'] = _items
-        # override the default output from pydantic by calling `to_dict()` of sending_ramp
-        if self.sending_ramp:
-            _dict['sending_ramp'] = self.sending_ramp.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -109,7 +80,7 @@ class DomainView(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of DomainView from a dict"""
+        """Create an instance of DomainCapabilities from a dict"""
         if obj is None:
             return None
 
@@ -117,19 +88,8 @@ class DomainView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "agent_count": obj.get("agent_count"),
-            "capabilities": DomainCapabilities.from_dict(obj["capabilities"]) if obj.get("capabilities") is not None else None,
-            "created_at": obj.get("created_at"),
-            "dns_records": [DNSRecord.from_dict(_item) for _item in obj["dns_records"]] if obj.get("dns_records") is not None else None,
-            "domain": obj.get("domain"),
-            "last_checked_at": obj.get("last_checked_at"),
-            "sending_error": obj.get("sending_error"),
-            "sending_last_checked_at": obj.get("sending_last_checked_at"),
-            "sending_ramp": SendingRampView.from_dict(obj["sending_ramp"]) if obj.get("sending_ramp") is not None else None,
-            "sending_status": obj.get("sending_status"),
-            "verification_token": obj.get("verification_token"),
-            "verified": obj.get("verified"),
-            "verified_at": obj.get("verified_at")
+            "inbound": obj.get("inbound"),
+            "outbound": obj.get("outbound")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

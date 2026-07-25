@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "e2a"
-version = "5.3.0"
+version = "5.4.0"
 description = "Python SDK for the e2a protocol — email-to-agent authentication"
 readme = "README.md"
 license = "Apache-2.0"

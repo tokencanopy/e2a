@@ -176,6 +176,80 @@ func TestDomainViewSendingRecords(t *testing.T) {
 	})
 }
 
+// TestDomainViewCapabilities pins the derived per-axis capabilities object. The
+// load-bearing property is that it CANNOT drift: it is a restatement of state
+// the view already computes, not a second source of truth. `inbound` must always
+// equal the status stamped on the inbound DNS records, and `outbound` must always
+// equal the domain-level sending_status rollup.
+func TestDomainViewCapabilities(t *testing.T) {
+	s := New(Deps{SMTPDomain: "mx.e2a.dev", SESRegion: "us-east-1"})
+
+	cases := []struct {
+		name          string
+		verified      bool
+		sendingStatus string
+		wantInbound   string
+		wantOutbound  string
+	}{
+		{"just registered, nothing published", false, "", "pending", "none"},
+		{"inbound verified, sending unprovisioned", true, "none", "verified", "none"},
+		{"inbound verified, sending in flight", true, "pending", "verified", "pending"},
+		{"both axes good", true, "verified", "verified", "verified"},
+		{"inbound verified, sending failed", true, "failed", "verified", "failed"},
+		// The axes are independent in BOTH directions. This combination is the
+		// shape an outbound-only (send-only) domain would report.
+		{"inbound pending, sending verified", false, "verified", "pending", "verified"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := s.domainView(&identity.Domain{
+				Domain: "acme.com", Verified: tc.verified, VerificationToken: "tok",
+				DKIMSelector: "e2a202606", DKIMPublicKey: "PUBKEY",
+				SendingStatus: tc.sendingStatus,
+			})
+			if v.Capabilities.Inbound != tc.wantInbound {
+				t.Errorf("capabilities.inbound = %q, want %q", v.Capabilities.Inbound, tc.wantInbound)
+			}
+			if v.Capabilities.Outbound != tc.wantOutbound {
+				t.Errorf("capabilities.outbound = %q, want %q", v.Capabilities.Outbound, tc.wantOutbound)
+			}
+			// Anti-drift, inbound: same value the inbound records are stamped with.
+			m := byPurpose(v.DNSRecords)
+			if v.Capabilities.Inbound != m["ownership"].Status || v.Capabilities.Inbound != m["inbound_mx"].Status {
+				t.Errorf("capabilities.inbound %q must equal the inbound record statuses (ownership=%q inbound_mx=%q)",
+					v.Capabilities.Inbound, m["ownership"].Status, m["inbound_mx"].Status)
+			}
+			// Anti-drift, outbound: exactly the rollup field, normalization included.
+			if v.Capabilities.Outbound != v.SendingStatus {
+				t.Errorf("capabilities.outbound %q must equal the sending_status rollup %q",
+					v.Capabilities.Outbound, v.SendingStatus)
+			}
+		})
+	}
+
+	// capabilities.outbound is deliberately the ROLLUP, not a per-axis value: when
+	// DKIM and MAIL FROM disagree, the domain cannot send as its own address, so
+	// the capability is the all-or-nothing answer while dns_records[].status
+	// carries the per-record detail. Guards against someone "improving" this into
+	// a per-axis derivation and silently reporting a capability the domain lacks.
+	t.Run("outbound stays the rollup when SES axes diverge", func(t *testing.T) {
+		v := s.domainView(&identity.Domain{
+			Domain: "acme.com", Verified: true, VerificationToken: "tok",
+			DKIMSelector: "e2a202606", DKIMPublicKey: "PUBKEY",
+			SendingStatus:         "failed",
+			SendingDkimStatus:     "verified",
+			SendingMailFromStatus: "failed",
+		})
+		if v.Capabilities.Outbound != "failed" {
+			t.Fatalf("capabilities.outbound = %q, want the failed rollup even though the DKIM axis is verified", v.Capabilities.Outbound)
+		}
+		if m := byPurpose(v.DNSRecords); m["dkim"].Status != "verified" {
+			t.Fatalf("per-record detail must still show the healthy DKIM axis: %+v", m["dkim"])
+		}
+	})
+}
+
 // TestDomainViewSendingPerAxis is the key regression for the per-axis fix: when
 // SES reports the DKIM and custom MAIL FROM axes separately, each sending record
 // must reflect its OWN axis instead of the all-or-nothing sending_status rollup,
