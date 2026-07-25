@@ -75,13 +75,22 @@ ALLOWLIST = {
     "agent.suppression_added": "same real-bounce dependency as "
     "domain.suppression_added — staging cannot produce the real bounce needed to "
     "seed an agent-scoped suppression — deferred to the prod-only differential suite.",
-    "domain.sending_verified": "requires real SES sending-identity (DKIM) "
-    "provisioning against a custom domain, verified asynchronously by AWS over "
-    "minutes-to-hours; a throwaway shared-domain e2e agent has no sending identity "
-    "to provision — deferred to the prod-only differential suite.",
-    "domain.sending_failed": "same real SES sending-identity provisioning "
-    "dependency as domain.sending_verified — deferred to the prod-only "
-    "differential suite.",
+    # domain.sending_verified was allowlisted here until suites/prod/33-domain-sending-identity.test.ts
+    # (2026-07) verified real emission against production: register a custom
+    # domain on the isolated trymnexa.com zone, publish ALL returned DNS
+    # records (ownership TXT, inbound MX, dkim TXT, mail_from_mx, mail_from_spf),
+    # verify inbound, then poll GET /v1/domains/{domain} until sending_status
+    # reaches "verified" and confirm the domain.sending_verified event via
+    # listEvents. Live-verified twice (two separate domains, two separate
+    # runs) — genuinely reproducible, not a fluke. domain.sending_failed stays
+    # allowlisted below: that suite has never observed a real SES failure
+    # outcome (only the verified path), so removing it would be unverified.
+    "domain.sending_failed": "requires a real SES sending-identity FAILURE "
+    "outcome (as opposed to domain.sending_verified, which suites/prod/"
+    "33-domain-sending-identity.test.ts now verifies for real) — the prod-only "
+    "suite has only ever observed the success path against a correctly-published "
+    "DNS set; deliberately breaking a record to induce a real AWS-classified "
+    "failure (as opposed to a merely-pending state) has not been attempted.",
 }
 
 
