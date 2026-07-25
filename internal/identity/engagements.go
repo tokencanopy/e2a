@@ -288,3 +288,142 @@ func (s *Store) PurgeEngagementsForAgent(ctx context.Context, userID, agentID st
 	}
 	return int(tag.RowsAffected()), nil
 }
+
+// RecordOutboundActivity updates an engagement's derived counters after a
+// message is accepted for delivery to that address.
+//
+// UPDATE-ONLY BY DESIGN: it never creates an engagement. An agent sends mail
+// for all sorts of reasons — replies, one-off notes, transactional messages —
+// and auto-enrolling every recipient would fill the outreach list with people
+// nobody is running a campaign against. Enrolment is an explicit act
+// (UpsertEngagement or an import); this only maintains the record of one that
+// already exists.
+//
+// first_outbound_at is set once and never moved, because `replied` is defined
+// against it: moving it would silently un-reply everyone who had answered.
+//
+// Returns whether a row was updated, so callers can distinguish "no engagement"
+// from a failure.
+func (s *Store) RecordOutboundActivity(ctx context.Context, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE contact_engagements
+		    SET first_outbound_at    = COALESCE(first_outbound_at, $4),
+		        last_outbound_at     = GREATEST(COALESCE(last_outbound_at, $4), $4),
+		        outbound_count       = outbound_count + 1,
+		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
+		        updated_at           = now()
+		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
+		userID, NormalizeEmail(agentID), NormalizeMailboxAddress(address), at.UTC(), conversationID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// RecordInboundActivity updates an engagement's derived counters when mail
+// arrives from that address.
+//
+// Update-only for the same reason as the outbound side: a stranger writing in
+// must not silently appear in an outreach list. Because `replied` is computed
+// as last_inbound_at > first_outbound_at, an inbound message that arrives
+// before any outbound simply does not count as a reply — which is correct, and
+// is why this can be a blind update rather than needing to inspect state.
+func (s *Store) RecordInboundActivity(ctx context.Context, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE contact_engagements
+		    SET last_inbound_at      = GREATEST(COALESCE(last_inbound_at, $4), $4),
+		        inbound_count        = inbound_count + 1,
+		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
+		        updated_at           = now()
+		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
+		userID, NormalizeEmail(agentID), NormalizeMailboxAddress(address), at.UTC(), conversationID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// EngagementCountDrift is one engagement whose materialized counters disagree
+// with the messages table.
+type EngagementCountDrift struct {
+	AgentID string
+	Address string
+	Field   string
+	Stored  int
+	Actual  int
+}
+
+// ReconcileEngagementCounts recomputes the materialized counters from messages
+// and corrects any that have drifted, returning what it fixed.
+//
+// Materialized counters are the price of making the outreach query cheap, and
+// drift is the known risk of that trade (the schema-change rule in AGENTS.md
+// warns about exactly this class). Rather than hope, the janitor recomputes
+// periodically and reports corrections — a non-empty result is a bug signal
+// that a hook was missed, not routine maintenance.
+func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, limit int) ([]EngagementCountDrift, error) {
+	rows, err := s.pool.Query(ctx,
+		`WITH actual AS (
+		     SELECT ce.id,
+		            ce.agent_id,
+		            ce.address,
+		            ce.outbound_count AS stored_out,
+		            ce.inbound_count  AS stored_in,
+		            (SELECT count(*) FROM messages m
+		              WHERE m.agent_id = ce.agent_id
+		                AND m.direction = 'outbound'
+		                AND m.deleted_at IS NULL
+		                AND lower(m.recipient) = ce.address) AS actual_out,
+		            (SELECT count(*) FROM messages m
+		              WHERE m.agent_id = ce.agent_id
+		                AND m.direction = 'inbound'
+		                AND m.deleted_at IS NULL
+		                AND lower(m.sender) = ce.address) AS actual_in
+		       FROM contact_engagements ce
+		      WHERE ce.user_id = $1
+		 )
+		 SELECT agent_id, address, stored_out, actual_out, stored_in, actual_in
+		   FROM actual
+		  WHERE stored_out <> actual_out OR stored_in <> actual_in
+		  LIMIT $2`,
+		userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type correction struct {
+		agentID, address  string
+		outbound, inbound int
+	}
+	var corrections []correction
+	var drift []EngagementCountDrift
+	for rows.Next() {
+		var agentID, address string
+		var storedOut, actualOut, storedIn, actualIn int
+		if err := rows.Scan(&agentID, &address, &storedOut, &actualOut, &storedIn, &actualIn); err != nil {
+			return nil, err
+		}
+		if storedOut != actualOut {
+			drift = append(drift, EngagementCountDrift{agentID, address, "outbound_count", storedOut, actualOut})
+		}
+		if storedIn != actualIn {
+			drift = append(drift, EngagementCountDrift{agentID, address, "inbound_count", storedIn, actualIn})
+		}
+		corrections = append(corrections, correction{agentID, address, actualOut, actualIn})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, c := range corrections {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE contact_engagements
+			    SET outbound_count = $3, inbound_count = $4, updated_at = now()
+			  WHERE user_id = $1 AND agent_id = $2 AND address = $5`,
+			userID, c.agentID, c.outbound, c.inbound, c.address); err != nil {
+			return drift, err
+		}
+	}
+	return drift, nil
+}

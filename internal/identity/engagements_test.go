@@ -320,3 +320,188 @@ func TestPurgeEngagementsForAgentSparesConsent(t *testing.T) {
 		t.Errorf("suppression lookup = %v err=%v — consent must survive agent deletion", blocked, err)
 	}
 }
+
+// TestRecordActivityNeverCreatesAnEngagement is the rule that keeps the
+// outreach list meaningful. An agent sends mail for all sorts of reasons —
+// replies, one-off notes, transactional messages — and if every recipient were
+// auto-enrolled the due list would fill with people nobody is running a
+// campaign against, which is exactly the noise this feature exists to remove.
+func TestRecordActivityNeverCreatesAnEngagement(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "actcreate")
+	now := time.Now().UTC()
+
+	updated, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "stranger@act.vc", "conv-1", now)
+	if err != nil {
+		t.Fatalf("outbound: %v", err)
+	}
+	if updated {
+		t.Error("outbound activity created an engagement for an un-enrolled recipient")
+	}
+	updated, err = store.RecordInboundActivity(ctx, user.ID, "raise@e.com", "stranger@act.vc", "conv-1", now)
+	if err != nil {
+		t.Fatalf("inbound: %v", err)
+	}
+	if updated {
+		t.Error("inbound activity created an engagement for an unknown sender")
+	}
+	if _, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "stranger@act.vc"); !errors.Is(err, identity.ErrEngagementNotFound) {
+		t.Errorf("an engagement appeared from activity alone: %v", err)
+	}
+}
+
+// TestRecordOutboundPinsFirstContact pins that first_outbound_at is set once
+// and never moves. `replied` is defined against it, so moving it on a later
+// send would silently un-reply everyone who had already answered.
+func TestRecordOutboundPinsFirstContact(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "actfirst")
+	enroll(t, store, user.ID, "raise@e.com", "partner@act.vc", "touch1")
+
+	first := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
+	reply := first.Add(time.Hour)
+	second := first.Add(48 * time.Hour)
+
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@act.vc", "conv-1", first); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if _, err := store.RecordInboundActivity(ctx, user.ID, "raise@e.com", "partner@act.vc", "conv-1", reply); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@act.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !e.Replied() {
+		t.Fatal("a reply after the first send did not register as replied")
+	}
+
+	// A later send must not rewrite history and un-reply them.
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@act.vc", "conv-1", second); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	e, err = store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@act.vc")
+	if err != nil {
+		t.Fatalf("get after second send: %v", err)
+	}
+	if e.FirstOutboundAt == nil || !e.FirstOutboundAt.Equal(first) {
+		t.Errorf("first_outbound_at = %v, want %v — it must be pinned to the first contact",
+			e.FirstOutboundAt, first)
+	}
+	if !e.Replied() {
+		t.Error("a later send un-replied a contact who had already answered")
+	}
+	if e.OutboundCount != 2 || e.InboundCount != 1 {
+		t.Errorf("counts = out:%d in:%d, want 2 and 1", e.OutboundCount, e.InboundCount)
+	}
+}
+
+// TestRecordActivityIgnoresOutOfOrderTimestamps pins that a late-arriving or
+// retried record cannot move a timestamp backwards. Delivery is at-least-once
+// and workers retry, so out-of-order arrival is normal rather than exceptional.
+func TestRecordActivityIgnoresOutOfOrderTimestamps(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "actorder")
+	enroll(t, store, user.ID, "raise@e.com", "partner@order.vc", "touch1")
+
+	recent := time.Now().UTC().Truncate(time.Second)
+	stale := recent.Add(-24 * time.Hour)
+
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@order.vc", "", recent); err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@order.vc", "", stale); err != nil {
+		t.Fatalf("stale: %v", err)
+	}
+	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@order.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if e.LastOutboundAt == nil || !e.LastOutboundAt.Equal(recent) {
+		t.Errorf("last_outbound_at = %v, want %v — a stale record moved it backwards",
+			e.LastOutboundAt, recent)
+	}
+}
+
+// TestRecordActivityIsScopedPerAgent pins that a send from one agent does not
+// touch a sibling agent's record of the same person.
+func TestRecordActivityIsScopedPerAgent(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "actscope")
+	enroll(t, store, user.ID, "raise@e.com", "partner@scope.vc", "touch1")
+	enroll(t, store, user.ID, "support@e.com", "partner@scope.vc", "new")
+
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@scope.vc", "", time.Now().UTC()); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	support, err := store.GetEngagement(ctx, user.ID, "support@e.com", "partner@scope.vc")
+	if err != nil {
+		t.Fatalf("support get: %v", err)
+	}
+	if support.OutboundCount != 0 || support.LastOutboundAt != nil {
+		t.Errorf("raise@'s send updated support@'s record: count=%d last=%v",
+			support.OutboundCount, support.LastOutboundAt)
+	}
+}
+
+// TestReconcileEngagementCountsCorrectsDrift pins the safety net for
+// materialized counters. Drift is the known cost of not computing these on
+// read, so the sweep must both detect and correct it — and report what it
+// found, because a non-empty result means a hook was missed.
+func TestReconcileEngagementCountsCorrectsDrift(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "actrecon")
+	enroll(t, store, user.ID, "raise@e.com", "partner@recon.vc", "touch1")
+
+	// Simulate a missed hook by inflating the stored counter directly.
+	if _, err := pool.Exec(ctx,
+		`UPDATE contact_engagements SET outbound_count = 7 WHERE user_id = $1`, user.ID); err != nil {
+		t.Fatalf("seed drift: %v", err)
+	}
+
+	drift, err := store.ReconcileEngagementCounts(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(drift) == 0 {
+		t.Fatal("reconcile reported no drift despite a counter of 7 with no messages")
+	}
+	found := false
+	for _, d := range drift {
+		if d.Field == "outbound_count" && d.Stored == 7 && d.Actual == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("drift report = %+v, want outbound_count 7 -> 0", drift)
+	}
+
+	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@recon.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if e.OutboundCount != 0 {
+		t.Errorf("outbound_count = %d after reconcile, want 0 — drift detected but not corrected", e.OutboundCount)
+	}
+
+	// A second pass must report nothing: the sweep is idempotent, so a
+	// non-empty result is always a real signal.
+	drift, err = store.ReconcileEngagementCounts(ctx, user.ID, 100)
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if len(drift) != 0 {
+		t.Errorf("second pass reported %+v, want none — the sweep must be idempotent", drift)
+	}
+}
