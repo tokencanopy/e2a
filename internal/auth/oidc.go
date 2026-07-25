@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/logredact"
 )
 
 const (
@@ -301,7 +303,20 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	token, err := rs.oauthConfig.Exchange(r.Context(), code, oauth2.VerifierOption(verifierCookie.Value))
 	if err != nil {
-		log.Printf("[auth] OIDC code exchange failed: %v", err)
+		// A *oauth2.RetrieveError formats the provider's FULL raw HTTP response
+		// body into its Error() string — third-party text of unbounded size that
+		// must not land in logs verbatim. Log the status + RFC 6749 error code
+		// only; anything else is hard-truncated.
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(err, &retrieveErr) {
+			status := 0
+			if retrieveErr.Response != nil {
+				status = retrieveErr.Response.StatusCode
+			}
+			log.Printf("[auth] OIDC code exchange failed: provider returned HTTP %d (oauth error=%q)", status, retrieveErr.ErrorCode)
+		} else {
+			log.Printf("[auth] OIDC code exchange failed: %s", logredact.Truncate(err.Error(), 200))
+		}
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}

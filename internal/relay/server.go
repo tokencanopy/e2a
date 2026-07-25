@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-smtp"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/inboundpolicy"
 	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/limits"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/piguard"
 	"github.com/tokencanopy/e2a/internal/usage"
@@ -216,10 +218,10 @@ func (b *backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		// Reachable only via a trusted proxy peer presenting a non-TCP-family
 		// PROXY header; the session degrades to SPF=none, so make the
 		// misbehaving front-end visible.
-		log.Printf("relay: non-TCP remote address %v (%T); SPF will be skipped for this session", c.Conn().RemoteAddr(), c.Conn().RemoteAddr())
+		log.Printf("relay: non-TCP remote address %s (%T); SPF will be skipped for this session", logredact.IPNetwork(c.Conn().RemoteAddr().String()), c.Conn().RemoteAddr())
 	}
 	sid := newSessionID()
-	log.Printf("[%s] new session from %s", sid, remoteIP)
+	log.Printf("[%s] new session from %s", sid, logredact.IPNetwork(remoteIP.String()))
 	return &session{relay: b.relay, id: sid, remoteIP: remoteIP, heloDomain: c.Hostname()}, nil
 }
 
@@ -244,24 +246,28 @@ func (s *session) AuthPlain(username, password string) error {
 
 func (s *session) Mail(from string, opts *smtp.MailOptions) error {
 	s.from = from
-	log.Printf("[%s] [%s] MAIL FROM", s.id, from)
+	// External human sender: log only the domain (the full address is retained
+	// on the persisted message row, not in the shipped logs).
+	log.Printf("[%s] [%s] MAIL FROM", s.id, logredact.AddressDomain(from))
 	return nil
 }
 
 func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	log.Printf("[%s] [%s] RCPT TO: %s", s.id, s.from, to)
+	// `to` is an address in OUR agent namespace (the tracing key) — keep it in
+	// full; the external sender is reduced to its domain.
+	log.Printf("[%s] [%s] RCPT TO: %s", s.id, logredact.AddressDomain(s.from), to)
 
 	// Reject unknown or unverified recipients at SMTP level.
 	// The sender's mail server will generate a bounce notification.
 	ctx := context.Background()
 	agent, err := s.relay.resolveAgent(ctx, to)
 	if err != nil {
-		log.Printf("[%s] [%s] rejecting %s: no agent found", s.id, s.from, to)
+		log.Printf("[%s] [%s] rejecting %s: no agent found", s.id, logredact.AddressDomain(s.from), to)
 		s.relay.recordSMTPInbound("rejected_unknown_recipient", 0)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not found"}
 	}
 	if !agent.DomainVerified {
-		log.Printf("[%s] [%s] rejecting %s: domain not verified", s.id, s.from, to)
+		log.Printf("[%s] [%s] rejecting %s: domain not verified", s.id, logredact.AddressDomain(s.from), to)
 		s.relay.recordSMTPInbound("rejected_unverified_domain", 0)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not found"}
 	}
@@ -275,11 +281,11 @@ func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if s.relay.enforcer != nil && agent.UserID != "" {
 		if err := s.relay.enforcer.CheckMessageSend(ctx, agent.UserID); err != nil {
 			if le, ok := limits.IsLimitExceeded(err); ok {
-				log.Printf("[%s] [%s] rejecting %s: limit exceeded (%s)", s.id, s.from, to, le.Resource)
+				log.Printf("[%s] [%s] rejecting %s: limit exceeded (%s)", s.id, logredact.AddressDomain(s.from), to, le.Resource)
 				s.relay.recordSMTPInbound("rejected_quota", 0)
 				return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 2, 2}, Message: "mailbox quota exceeded"}
 			}
-			log.Printf("[%s] [%s] limits check error (failing open): %v", s.id, s.from, err)
+			log.Printf("[%s] [%s] limits check error (failing open): %v", s.id, logredact.AddressDomain(s.from), err)
 		}
 	}
 
@@ -304,7 +310,7 @@ func (s *session) Data(r io.Reader) error {
 	if threadInfo.From != "" {
 		senderEmail = threadInfo.From
 	}
-	log.Printf("[%s] [%s] DATA recipients=%v size=%d bytes", s.id, senderEmail, s.recipients, len(body))
+	log.Printf("[%s] [%s] DATA recipients=%v size=%d bytes", s.id, logredact.AddressDomain(senderEmail), s.recipients, len(body))
 
 	// Queue-first async path (E2A_INBOUND_MODE=async): durably accept the raw MIME to
 	// inbound_intake + enqueue a River processing job, all before 250 — processing
@@ -390,7 +396,7 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// SPF/DKIM/DMARC against the TRUE envelope MAIL FROM (RFC 7208), not the From
 	// header — else SPF-alignment is a tautology (adversarial review F5).
 	authentication := srv.authenticate(ctx, in.RemoteIP, envelopeFrom, in.HELODomain, in.Body, author)
-	log.Printf("[%s] [%s] email auth from %s (envelope %s): SPF=%s DKIM=%d DMARC=%s", in.TraceID, headerFrom, in.RemoteIP, envelopeFrom, authentication.SPF.Status, len(authentication.DKIM), authentication.DMARC.Status)
+	log.Printf("[%s] [%s] email auth from %s (envelope %s): SPF=%s DKIM=%d DMARC=%s", in.TraceID, logredact.AddressDomain(headerFrom), logredact.IPNetwork(in.RemoteIP.String()), logredact.AddressDomain(envelopeFrom), authentication.SPF.Status, len(authentication.DKIM), authentication.DMARC.Status)
 
 	agent, err := srv.resolveAgent(ctx, in.Recipient)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -658,7 +664,7 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 		}
 		// Do NOT swallow — surface to deliverMessages so the SMTP session returns a
 		// 451 and the sender retries, instead of a 250 that silently drops the mail.
-		log.Printf("[%s] [%s] failed to record inbound message: %v", in.TraceID, headerFrom, err)
+		log.Printf("[%s] [%s] failed to record inbound message: %v", in.TraceID, logredact.AddressDomain(headerFrom), err)
 		return err
 	}
 	_ = inboundMsg
@@ -679,8 +685,8 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 
 	slug, _, _ := strings.Cut(rcpt, "@")
 
-	log.Printf("[mail:%s] dir=inbound from=%s to=%s slug=%s conv_id=%s subject=%q verified=%t",
-		messageID, headerFrom, rcpt, slug, conversationID, threadInfo.Subject, authentication.Passed())
+	log.Printf("[mail:%s] dir=inbound from_domain=%s to=%s slug=%s conv_id=%s subject_len=%d verified=%t",
+		messageID, logredact.AddressDomain(headerFrom), rcpt, slug, conversationID, utf8.RuneCountInString(threadInfo.Subject), authentication.Passed())
 
 	// Inbound events (email.received + flagged/blocked/review_requested variants)
 	// are written to the outbox (webhook_events) above, in the message tx; the

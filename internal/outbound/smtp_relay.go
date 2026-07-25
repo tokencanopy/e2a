@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/logredact"
 )
 
 var smtpRetryBackoffs = []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second}
@@ -71,8 +72,8 @@ func (r *SMTPRelay) SendWithEnvelopeContext(ctx context.Context, envelopeFrom st
 			return "", lastErr
 		}
 		if attempt < len(smtpRetryBackoffs) {
-			log.Printf("[smtp-relay] transient error sending to %v (attempt %d/%d), retrying in %s: %v",
-				recipients, attempt+1, len(smtpRetryBackoffs)+1, smtpRetryBackoffs[attempt], lastErr)
+			log.Printf("[smtp-relay] transient error sending to recipient_count=%d recipient_domains=%v (attempt %d/%d), retrying in %s: %v",
+				len(recipients), logredact.AddressDomains(recipients), attempt+1, len(smtpRetryBackoffs)+1, smtpRetryBackoffs[attempt], lastErr)
 			select {
 			case <-time.After(smtpRetryBackoffs[attempt]):
 			case <-ctx.Done():

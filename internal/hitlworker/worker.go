@@ -20,6 +20,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/inboundpolicy"
 	"github.com/tokencanopy/e2a/internal/inboundscreen"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/loopback"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -276,7 +277,12 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 		return true
 	}
 	if len(suppressed) > 0 {
-		w.autoReject(ctx, c.MessageID, "auto-approve blocked: recipient(s) on the suppression list: "+strings.Join(suppressed, ", "))
+		// Domains only: this reason string is logged verbatim by autoReject
+		// (reason=%q), so full external recipient addresses must not ride in it.
+		// The owner can identify the exact suppressed recipient from the
+		// message's stored recipient list.
+		w.autoReject(ctx, c.MessageID, fmt.Sprintf("auto-approve blocked: %d recipient(s) on the suppression list (domains: %s)",
+			len(suppressed), strings.Join(logredact.AddressDomains(suppressed), ", ")))
 		return true
 	}
 	w.attachReferencesChain(ctx, agent.ID, &req)
@@ -333,8 +339,8 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 		log.Printf("[hitl-worker] auto-approve %s: accept+enqueue: %v", c.MessageID, err)
 		return true
 	}
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to=%v auto_approved=true delivery=async",
-		sent.ID, sent.Type, sent.Status, agent.ID, sent.ToRecipients)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v auto_approved=true delivery=async",
+		sent.ID, sent.Type, sent.Status, agent.ID, len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients))
 	// review_approved fires now (hold resolved to approved); the delivery outcome
 	// arrives later via email.sent/email.failed from the SendWorker. No metering
 	// here — the SendWorker meters on MarkSent.
@@ -446,8 +452,8 @@ func (w *Worker) autoApproveLoopback(ctx context.Context, agent *identity.AgentI
 		}
 	}
 
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to=%v auto_sent=true",
-		sent.ID, sent.Type, sent.Status, agent.ID, sent.ToRecipients)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v auto_sent=true",
+		sent.ID, sent.Type, sent.Status, agent.ID, len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients))
 	// Mirror the user-driven approve: fire email.review_approved (the send
 	// already happened; this is the post-side-effect notification).
 	w.emitOutboundApproved(agent, sent)
