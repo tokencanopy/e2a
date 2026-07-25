@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "smoke": "node smoke.ts",
-    "pretest": "rm -rf reports/coverage reports/mcp-coverage reports/event-coverage",
+    "pretest": "rm -rf reports/coverage reports/mcp-coverage reports/event-coverage reports/target",
     "test": "node --test --test-concurrency=1 --test-reporter=spec suites/*.test.ts",
+    "pretest:prod": "rm -rf reports/coverage reports/mcp-coverage reports/event-coverage reports/target",
+    "test:prod": "node --test --test-concurrency=1 --test-reporter=spec suites/*.test.ts suites/prod/*.test.ts",
     "test:unit": "node --test harness/*.test.ts",
     "coverage:gate": "python3 coverage_gate.py",
     "coverage:gate:mcp": "python3 mcp_coverage_gate.py",
