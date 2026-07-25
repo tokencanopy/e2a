@@ -3,7 +3,11 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -197,7 +201,47 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 			result.Failed++
 		}
 	}
+	logImportOutcome(user.ID, result)
 	return &importContactsOutput{Body: result}, nil
+}
+
+// logImportOutcome writes one operational line per import.
+//
+// Bulk import is the one contact operation worth logging: it is a single
+// user-visible action whose outcome is a mixture, and a support question about
+// it ("I uploaded 500 and only 480 landed") is unanswerable without a trace.
+// Per-request logging for the rest of the surface would be noise.
+//
+// Deliberately NO addresses. The whole payload is other people's email
+// addresses, and this is exactly the "full PII payloads" the logging rules
+// exclude. Failure CODES plus the batch id are enough to answer the support
+// question, and the caller already has the per-row detail in the response.
+func logImportOutcome(userID string, r ContactImportResult) {
+	codes := map[string]int{}
+	suppressed := 0
+	for _, item := range r.Results {
+		if item.Code != "" {
+			codes[item.Code]++
+		}
+		if item.Suppressed {
+			suppressed++
+		}
+	}
+	log.Printf("[contacts] import batch=%s user=%s rows=%d created=%d updated=%d skipped=%d failed=%d suppressed=%d",
+		r.BatchID, userID, len(r.Results), r.Created, r.Updated, r.Skipped, r.Failed, suppressed)
+	if len(codes) > 0 {
+		// Sorted so the line is stable and greppable across runs.
+		keys := make([]string, 0, len(codes))
+		for k := range codes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%d", k, codes[k]))
+		}
+		log.Printf("[contacts] import batch=%s reasons %s", r.BatchID, strings.Join(parts, " "))
+	}
 }
 
 // markSuppressedImportRows flags rows whose address the account already

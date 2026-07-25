@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -326,5 +329,45 @@ func TestImportBatchDeleteIsTenantScoped(t *testing.T) {
 	code, _ = sendJSON(t, http.MethodGet, srv.URL+"/v1/contacts/mine%40imp.vc", "account", nil)
 	if code != http.StatusOK {
 		t.Errorf("owner's contact was removed by a stranger's batch delete: %d", code)
+	}
+}
+
+// TestImportLoggingCarriesNoAddresses pins the constraint most likely to erode
+// as this logging gets extended: an import payload is entirely other people's
+// email addresses, and logging them would put a customer's contact list into
+// operational logs and any downstream log sink.
+//
+// Counts and failure codes answer the support question ("I uploaded 500 and
+// 480 landed") without that, and the caller already has per-row detail in the
+// response body.
+func TestImportLoggingCarriesNoAddresses(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	srv := newContactsServer(t, nil)
+	code, body := importBody(t, srv, map[string]any{"contacts": []any{
+		map[string]any{"address": "private@investor.vc"},
+		map[string]any{"address": "not-an-email"},
+	}})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d %v", code, body)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "[contacts] import batch=") {
+		t.Errorf("no import summary was logged; a partial-failure upload leaves no trace: %q", logged)
+	}
+	if !strings.Contains(logged, "failed=1") {
+		t.Errorf("import summary omits the failure count: %q", logged)
+	}
+	for _, pii := range []string{"private@investor.vc", "investor.vc"} {
+		if strings.Contains(logged, pii) {
+			t.Errorf("import log leaked a contact address (%q) into operational logs: %q", pii, logged)
+		}
+	}
+	// The failure REASON is fine and useful — it is a code, not a person.
+	if !strings.Contains(logged, "invalid_recipient") {
+		t.Errorf("import log omits the failure reason code: %q", logged)
 	}
 }
