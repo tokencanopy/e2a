@@ -80,6 +80,11 @@ class UpsertEngagementRequest(BaseModel):
             for _key, _value in self.additional_properties.items():
                 _dict[_key] = _value
 
+        # set to None if next_action_at (nullable) is None
+        # and model_fields_set contains the field
+        if self.next_action_at is None and "next_action_at" in self.model_fields_set:
+            _dict['next_action_at'] = None
+
         return _dict
 
     @classmethod
