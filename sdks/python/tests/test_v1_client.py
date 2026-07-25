@@ -1355,3 +1355,169 @@ async def test_protection_read_modify_write_accepts_view(httpx_mock):
     body = json.loads(put.content)
     assert body["holds"]["on_expiry"] == "reject"  # the mutation survived coercion
     assert body["inbound"]["gate"]["allowlist"] == ["partner@acme.com"]
+
+
+# ── Contacts (beta) ──────────────────────────────────────────────────────────
+# Contacts are account-level identity. The address is the resource key, so these
+# pin that it is URL-encoded on the wire and that the SDK supplies the
+# ?confirm=DELETE guard the raw API requires.
+
+
+@pytest.mark.asyncio
+async def test_contacts_get_url_encodes_the_address(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "A. Partner",
+            "metadata": {"fund": "Example Capital"},
+            "source": "import",
+            "import_batch_id": "imp_1",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        contact = await c.contacts.get("partner@fund.vc")
+    assert contact.display_name == "A. Partner"
+    assert contact.import_batch_id == "imp_1"
+    req = httpx_mock.get_requests()[-1]
+    # The @ must not reach the path raw — this is the encoded-routing contract.
+    assert "/v1/contacts/partner%40fund.vc" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_contacts_create_posts_body_and_returns_canonical_address(httpx_mock):
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "A. Partner",
+            "metadata": {},
+            "source": "manual",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    async with _client() as c:
+        contact = await c.contacts.create(
+            {"address": "A. Partner <Partner@Fund.VC>", "display_name": "A. Partner"}
+        )
+    assert contact.address == "partner@fund.vc"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "POST"
+    assert json.loads(req.content)["address"] == "A. Partner <Partner@Fund.VC>"
+
+
+@pytest.mark.asyncio
+async def test_contacts_update_sends_only_given_fields(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "Renamed",
+            "metadata": {"fund": "Example Capital"},
+            "source": "import",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        contact = await c.contacts.update("partner@fund.vc", {"display_name": "Renamed"})
+    # Metadata survives a name-only patch — omitting the key is what tells the
+    # server to leave the stored value alone.
+    assert contact.metadata == {"fund": "Example Capital"}
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "PATCH"
+    assert json.loads(req.content) == {"display_name": "Renamed"}
+
+
+@pytest.mark.asyncio
+async def test_contacts_delete_supplies_confirm_guard(httpx_mock):
+    httpx_mock.add_response(json={"deleted": True, "address": "partner@fund.vc"})
+    async with _client() as c:
+        result = await c.contacts.delete("partner@fund.vc")
+    assert result.deleted is True
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "confirm=DELETE" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_contacts_import_returns_per_row_results(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "batch_id": "imp_9",
+            "created": 1,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 1,
+            "results": [
+                {"index": 0, "address": "ok@fund.vc", "status": "created", "suppressed": True},
+                {"index": 1, "status": "failed", "code": "invalid_recipient", "message": "bad"},
+            ],
+        }
+    )
+    async with _client() as c:
+        result = await c.contacts.import_(
+            {"contacts": [{"address": "ok@fund.vc"}, {"address": "nope"}]}
+        )
+    assert result.batch_id == "imp_9"
+    # A suppressed row is still reported as created — marked, never dropped.
+    assert result.results[0].status == "created"
+    assert result.results[0].suppressed is True
+    assert result.results[1].code == "invalid_recipient"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "POST"
+    assert "/v1/contacts/import" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_contacts_delete_import_reverses_a_batch(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "batch_id": "imp_9",
+            "contacts_deleted": 2,
+            "contacts_retained": 0,
+        }
+    )
+    async with _client() as c:
+        result = await c.contacts.delete_import("imp_9")
+    assert result.contacts_deleted == 2
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "/v1/contacts/imports/imp_9" in str(req.url)
+    assert "confirm=DELETE" in str(req.url)
+
+
+@pytest.mark.asyncio
+async def test_contacts_list_auto_pages(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "items": [
+                {
+                    "address": "a@x.vc", "display_name": "", "metadata": {},
+                    "source": "manual",
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            "next_cursor": "cur_2",
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "items": [
+                {
+                    "address": "b@x.vc", "display_name": "", "metadata": {},
+                    "source": "manual",
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            "next_cursor": None,
+        }
+    )
+    async with _client() as c:
+        items = await c.contacts.list().to_list(limit=50)
+    assert [i.address for i in items] == ["a@x.vc", "b@x.vc"]
+    assert "cursor=cur_2" in str(httpx_mock.get_requests()[-1].url)
