@@ -189,8 +189,9 @@ Key packages, grouped (name — a few words each):
   River worker), `delivery` SES bounce/complaint feedback via SNS
   (`POST /webhooks/ses`, signature-verified, fail-closed).
 - Inbound screening: `inboundprocess`/`inboundpolicy` async worker +
-  allow/review/block decisions; `piguard` prompt-injection/phishing
-  screening — dependency-free heuristics plus optional Gemini
+  allow/review/block decisions; `inboundscreen` shared screening core used by
+  both the SMTP and loopback self-send paths; `piguard` prompt-injection/
+  phishing screening — dependency-free heuristics plus optional Gemini
   LLM-as-detector (`GEMINI_API_KEY`, kill switch
   `E2A_GEMINI_DETECTOR_ENABLED=false`).
 - HITL & lifecycle: `hitlworker`/`hitlnotify` review holds (`pending_review`)
@@ -208,11 +209,12 @@ Key packages, grouped (name — a few words each):
   entitlements; `sendramp` per-domain recipient-volume ramping.
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
-- Misc/infra: `ratelimit`; `telemetry` (metrics interface); `emailtemplate`+
-  `startertemplates` (server templates + starter catalog); `mailfrom`
-  (custom MAIL FROM); `selftest` (prober's self-test); `openapicompat`
-  (compat-gate normalization); `config` (YAML+env); `testutil` (test
-  harness); `e2e` (end-to-end suites).
+- Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
+  PII redaction for process logs before centralized log shipping;
+  `emailtemplate`+`startertemplates` (server templates + starter catalog);
+  `mailfrom` (custom MAIL FROM); `selftest` (prober's self-test);
+  `openapicompat` (compat-gate normalization); `config` (YAML+env);
+  `testutil` (test harness); `e2e` (end-to-end suites).
 
 Async-migration feature flags: inbound async processing is opt-in
 (`E2A_INBOUND_MODE=async`, default `sync`) and webhook fan-out on River is
@@ -262,7 +264,8 @@ manually on every API change even though the template won't remind you.
   --forward` proxies WebSocket messages to a local HTTP endpoint. **Exit codes
   (`cli/src/exit.ts`) are a frozen contract** — 0 ok, 1 transient, 2 usage,
   3 held-for-review, 4 auth, 5 permanent request error, 6 timeout,
-  7 send-outcome. Add new codes, never renumber.
+  7 send-outcome, 8 warn (`doctor` warnings only), 9 config (`doctor` found a
+  definite configuration failure). Add new codes, never renumber.
 - **MCP server** (`mcp/`): inbox tools over the REST API; hosted HTTP
   transport (image `ghcr.io/tokencanopy/e2a-mcp-http`). **npm publishing is
   retired** (`@e2a/mcp-server` frozen at 0.4.0) — do not configure a trusted
