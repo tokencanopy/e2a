@@ -192,7 +192,7 @@ function ConsentInner() {
             the common case. */}
         <p className="mt-4">
           <a className="text-sm text-accent underline" href={loginURL}>
-            Sign in and return to this authorization
+            Sign in with Google and return to this authorization
           </a>
         </p>
       </ConsentShell>

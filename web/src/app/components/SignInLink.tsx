@@ -25,14 +25,16 @@ export function SignInLink({
   const handleClick = (e: React.MouseEvent) => {
     if (isInAppBrowser()) {
       e.preventDefault();
-      // Try to open in system browser on iOS/Android
-      const url = window.location.origin + SIGN_IN_URL;
+      // Try to open in system browser on iOS/Android. Build via the URL
+      // constructor so an operator-supplied absolute SIGN_IN_URL (or one
+      // missing its leading slash) can't produce a concatenated dead link.
+      const url = new URL(SIGN_IN_URL, window.location.origin).href;
       // iOS: window.open in in-app browsers sometimes opens Safari
       window.open(url, "_blank");
       // Also show a message in case the open didn't work. The WebView block
       // is Google's, so only name Google when the legacy door is configured.
       const door =
-        SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Google Sign-In" : "Sign-in";
+        SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Google Sign-In" : "Sign in";
       alert(
         `${door} doesn't work in this browser. Please open ${SITE_URL} in Safari or Chrome to sign in.`
       );

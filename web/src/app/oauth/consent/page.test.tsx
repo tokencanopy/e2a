@@ -144,7 +144,7 @@ describe("ConsentPage", () => {
     render(<ConsentPage />);
     expect(screen.getByText(/Sign in to continue/i)).toBeInTheDocument();
     const linkWithReturnTo = screen.getByRole("link", {
-      name: /Sign in and return to this authorization/i,
+      name: /Sign in with Google and return to this authorization/i,
     }) as HTMLAnchorElement;
     expect(linkWithReturnTo.getAttribute("href")).toMatch(
       /^\/api\/auth\/login\?return_to=/,
