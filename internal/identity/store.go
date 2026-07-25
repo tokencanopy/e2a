@@ -1182,7 +1182,12 @@ func (s *Store) ListDomainsByUser(ctx context.Context, userID string, limit int,
 	        COALESCE(d.dkim_selector, ''), COALESCE(d.dkim_public_key, ''),
 	        d.sending_status, COALESCE(d.sending_error, ''), d.sending_dns_records, d.sending_last_checked_at,
 	        COALESCE(d.sending_dkim_status, ''), COALESCE(d.sending_mail_from_status, ''),
-	        (SELECT count(*) FROM agent_identities a WHERE a.registered_domain = d.domain AND a.user_id = d.user_id) AS agent_count
+	        -- Trashed agents are excluded: a soft-deleted agent is not "on" the
+	        -- domain from the caller's point of view (it does not appear in
+	        -- list_agents), so counting it here over-reports.
+	        (SELECT count(*) FROM agent_identities a
+	           WHERE a.registered_domain = d.domain AND a.user_id = d.user_id
+	             AND a.deleted_at IS NULL) AS agent_count
 	 FROM domains d
 	 WHERE d.user_id = $1`
 	args := []interface{}{userID}
@@ -1230,11 +1235,19 @@ func (s *Store) TouchDomainLastChecked(ctx context.Context, domain, userID strin
 	return nil
 }
 
-// HasAgentsOnDomain checks whether the owned domain still has agents.
+// HasAgentsOnDomain checks whether the owned domain still has LIVE agents.
+//
+// Trashed agents do not block the delete. Counting them did, and it produced a
+// dead end: deleting an agent soft-deletes it (migration 063), so a caller who
+// deleted every agent on a domain and then deleted the domain got
+// 400 domain_has_agents while list_agents showed nothing on it. The only escape
+// was permanent deletion — irreversible — which is a bad thing to force on
+// someone whose only mistake was following the documented order.
 func (s *Store) HasAgentsOnDomain(ctx context.Context, domain, userID string) (bool, error) {
 	var count int
 	err := s.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM agent_identities WHERE registered_domain = $1 AND user_id = $2`,
+		`SELECT COUNT(*) FROM agent_identities
+		   WHERE registered_domain = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		normalizeDomain(domain), userID,
 	).Scan(&count)
 	if err != nil {
