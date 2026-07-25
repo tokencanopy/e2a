@@ -32,6 +32,45 @@ function extractText(r: { content?: Array<{ type: string; text?: string }> }): s
   return r.content?.find((c) => c.type === "text")?.text ?? "";
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A single self-send loopback message, shared by the get_message and
+// reply_to_message happy-path tests below. Self-send (an agent emailing
+// itself) is the reliable way to produce a real inbound message on the
+// shared domain without needing an external MX — the same mechanism the
+// staging loopback path relies on. Sharing one fixture between both tests
+// keeps mail volume down against the free-plan monthly cap instead of
+// self-sending twice.
+interface MessageFixture {
+  id: string;
+  subject: string;
+}
+let messageFixturePromise: Promise<MessageFixture> | undefined;
+function messageFixture(): Promise<MessageFixture> {
+  messageFixturePromise ??= (async () => {
+    const pinnedAgent = apiClient.env.primaryAgentEmail;
+    const subject = uniqueSubject("mcp-ext get-msg fixture");
+    const send = await apiClient.post<{ message_id: string }>(
+      `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
+      { body: { to: [pinnedAgent], subject, text: "12-mcp-extended self-send fixture" }, expect: [200, 202] },
+    );
+    if (!send.body?.message_id) {
+      throw new Error(`self-send fixture did not return a message_id: ${send.raw.slice(0, 200)}`);
+    }
+    for (let i = 0; i < 12; i++) {
+      const poll = await apiClient.get<{ items: Array<{ id: string; subject: string }> }>(
+        `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
+        { query: { direction: "inbound", read_status: "all", limit: 20 } },
+      );
+      const m = poll.body?.items?.find((x) => x.subject === subject);
+      if (m) return { id: m.id, subject };
+      await sleep(1500);
+    }
+    throw new Error(`self-send fixture "${subject}" never appeared for ${pinnedAgent}`);
+  })();
+  return messageFixturePromise;
+}
+
 async function ensureHitlAgent(): Promise<string> {
   const slug = uniqueSlug("mcpe");
   const c = await apiClient.post<{ email: string }>("/v1/agents", {
@@ -187,20 +226,16 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   }
   // The MCP get_message tool fetches via the AGENT-scoped endpoint
   // GET /v1/agents/{agent_email}/messages/{id} — anti-enumeration
-  // 404s on any message that doesn't belong to the pinned agent. We
-  // pull candidate IDs from the same scope so the test exercises the
-  // happy path instead of accidentally tripping the cross-agent guard.
-  const pinnedAgent = apiClient.env.primaryAgentEmail;
-  const listMsgs = await apiClient.get<{ items: Array<{ id: string }> }>(
-    `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
-    { query: { limit: 1 } },
-  );
-  const id = listMsgs.body?.items?.[0]?.id;
-  if (!id) {
-    info(SUITE, "get-msg-no-fixture", `no messages in agent ${pinnedAgent}'s inbox — cannot probe get_message happy path`);
-    return;
-  }
-  const r = await callTool(mcp, "get_message", { message_id: id });
+  // 404s on any message that doesn't belong to the pinned agent. Rather
+  // than hoping the pinned agent's inbox already has something in it
+  // (a prior version of this test silently `return`ed when it was empty,
+  // which let the suite report all-green while never actually exercising
+  // get_message's happy path), we produce a real fixture via self-send.
+  const { id } = await messageFixture();
+  // The conformance credential here is account-scoped (no agent_email to
+  // pin — see the 08-mcp "whoami" test), so get_message needs an explicit
+  // `email` to resolve which agent's mailbox to read from.
+  const r = await callTool(mcp, "get_message", { message_id: id, email: apiClient.env.primaryAgentEmail });
   if (r.isError) {
     fail(SUITE, "get-msg-error", `get_message isError for our own ${id}: ${extractText(r).slice(0, 200)}`);
     return;
@@ -210,9 +245,37 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   assert.equal(returnedId, id, `expected id ${id}, got ${returnedId}`);
 
   // Bogus id — should isError.
-  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}` });
+  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}`, email: apiClient.env.primaryAgentEmail });
   if (!r2.isError) {
     info(SUITE, "get-msg-bogus-not-error", "get_message with bogus id did not surface as error");
+  }
+});
+
+test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
+  const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
+  if (!list.tools.find((t) => t.name === "reply_to_message")) {
+    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
+    return;
+  }
+  const { id } = await messageFixture();
+  // Same account-scoped-credential caveat as get_message above.
+  const r = await callTool(mcp, "reply_to_message", {
+    message_id: id,
+    text: "reply from 12-mcp-extended happy path",
+    email: apiClient.env.primaryAgentEmail,
+  });
+  assert.equal(r.isError, undefined, `reply_to_message isError: ${extractText(r).slice(0, 200)}`);
+  const parsed = JSON.parse(extractText(r)) as { message_id?: string; status?: string };
+  assert.ok(parsed.message_id?.startsWith("msg_"), `expected msg_ prefix, got "${parsed.message_id}"`);
+  assert.ok(
+    parsed.status === "accepted" || parsed.status === "sent" || parsed.status === "pending_review",
+    `reply_to_message must report accepted/sent/pending_review, got "${parsed.status}"`,
+  );
+  if (parsed.status === "pending_review") {
+    const cleanupReview = await apiClient.post(`/v1/reviews/${parsed.message_id}/reject`, {
+      body: { reason: "e2e mcp reply cleanup" },
+    });
+    assert.equal(cleanupReview.status, 200, `cleanup rejection failed: ${cleanupReview.status}`);
   }
 });
 
