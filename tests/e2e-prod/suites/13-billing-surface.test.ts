@@ -190,8 +190,20 @@ test("billing: POST /api/billing/webhook with invalid signature returns 400", as
 
 // --- Static pricing page ---
 
-test("billing: GET /pricing returns 200 HTML", async () => {
+// /pricing is an OPTIONAL, deployment-specific marketing route, not part of the
+// v1 contract. Prod serves it from this repo's static `pricing/` directory;
+// staging deliberately does not (Caddyfile.staging: "Differences from prod: no
+// /pricing (prod-only marketing)"), and a self-hoster has no reason to. So a 404
+// means "this deployment doesn't host the page", which is not a defect — only a
+// deployment that DOES serve it is held to the content contract below. Asserting
+// it unconditionally made this suite record a permanent FAIL finding against
+// staging, invisible until findings started gating the run.
+test("billing: GET /pricing returns 200 HTML where the deployment serves it", async () => {
   const r = await siteClient.get("/pricing", { apiKey: null });
+  if (r.status === 404) {
+    info(SUITE, "pricing-not-hosted", `/pricing is not served by this deployment (404) — prod-only marketing route`);
+    return;
+  }
   if (r.status !== 200) {
     fail(SUITE, "pricing-non-200", `/pricing returned ${r.status}: ${r.raw.slice(0, 200)}`);
     return;
