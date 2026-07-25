@@ -27,9 +27,9 @@
     "test:types": "tsc -p tsconfig.type-tests.json",
     "test:contract": "vitest run test/v1/contract.test.ts test/v1/contract-client.test.ts",
     "pretest:live": "rm -rf test/coverage/reports",
-    "test:live": "vitest run test/e2e.test.ts test/e2e-*.test.ts",
+    "test:live": "vitest run --no-file-parallelism test/e2e.test.ts test/e2e-*.test.ts",
     "coverage:gate": "node test/coverage/gate.mjs",
-    "coverage:live": "npm run test:live; npm run coverage:gate",
+    "coverage:live": "npm run test:live && npm run coverage:gate",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
