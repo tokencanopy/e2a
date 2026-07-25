@@ -6,6 +6,7 @@ import { DomainSelector } from "./DomainSelector";
 import { DNSSetupCard } from "./DNSSetupCard";
 import { VerifyDomainCard } from "./VerifyDomainCard";
 import { CustomAgentForm } from "./CustomAgentForm";
+import { canReceive } from "../../../components/onboarding/state";
 import type { DomainInfo } from "../../../components/onboarding/types";
 import type { AgentData } from "../../../components/types";
 
@@ -22,7 +23,9 @@ type ChecklistPhase = "select_domain" | "dns_and_verify" | "create_agent";
 
 function derivePhase(domain: DomainInfo | null): ChecklistPhase {
   if (!domain) return "select_domain";
-  if (!domain.verified) return "dns_and_verify";
+  // Inbound axis, not the legacy boolean: this gate is about whether the
+  // domain can RECEIVE mail, which is what the DNS/verify phase resolves.
+  if (!canReceive(domain)) return "dns_and_verify";
   return "create_agent";
 }
 

@@ -10,11 +10,10 @@
  * Do not edit the class manually.
  */
 
-import { HttpFile } from '../http/http.js';
 
 export class DomainCapabilities {
     /**
-    * Whether this domain can RECEIVE mail — the inbound axis. Restates the legacy verified boolean: verified once inbound verification has passed (which requires BOTH the ownership TXT and the inbound MX), pending otherwise. Open set; tolerate unknown values. Known values: verified, pending, none, failed — only verified and pending are currently emitted; the others are documented for forward compatibility.
+    * Whether this domain can RECEIVE mail — the inbound axis. Restates the legacy verified boolean: verified once inbound verification has passed (which requires BOTH the ownership TXT and the inbound MX), pending otherwise. Open set; tolerate unknown values (new values may be added). Known values: verified, pending — those are the only two this axis emits, because it restates a boolean. There is deliberately NO inbound failure state today: a missing, unreachable, or wrong MX leaves the axis pending indefinitely rather than reporting failed, so treat pending as \"not proven yet\" and not as \"in flight\". Diagnose which record is at fault via dns_records[].status or the live probe on POST /v1/domains/{domain}/verify — unlike the outbound axis, there is no inbound equivalent of sending_error.
     */
     'inbound': string;
     /**
