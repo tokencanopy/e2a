@@ -147,6 +147,23 @@ func (s *SubscriberStore) MarkSubscriberFailed(ctx context.Context, deliveryID s
 	return err
 }
 
+// MarkSubscriberFailedIfPending is MarkSubscriberFailed conditional on the row
+// still being 'pending' — the BLIND terminal write for the final-attempt
+// row-load failure, where the read error means the row's true state is
+// unknown. It must never clobber a row that already reached a terminal state
+// (e.g. delivered by a path the failed read couldn't see). A missing row is
+// a no-op, not an error.
+func (s *SubscriberStore) MarkSubscriberFailedIfPending(ctx context.Context, deliveryID string, attemptN int, errMsg string, statusCode int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE webhook_subscriber_deliveries
+		    SET status = 'failed', attempts = $2, last_attempt_at = now(),
+		        last_error = $3, last_status_code = $4
+		  WHERE id = $1 AND status = 'pending'`,
+		deliveryID, attemptN, errMsg, statusCode,
+	)
+	return err
+}
+
 // generateDeliveryID returns a prefixed id of the form whd_<32-hex>.
 // 16 bytes of entropy is more than enough — the row is short-lived
 // (30-day expiry), and the prefix follows the rest of the e2a id
