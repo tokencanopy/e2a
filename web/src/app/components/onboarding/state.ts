@@ -4,12 +4,37 @@
 import type {
   AddressType,
   ChecklistStep,
+  DomainCapabilityStatus,
   DomainInfo,
   DomainProgress,
   CustomFlowStep,
 } from "./types";
 import type { DashboardAgent } from "../types";
 import { AGENTS_DOMAIN } from "../../../lib/site";
+
+// ── Capability axes ──────────────────────────────────────
+
+// A domain has two independent capabilities: it can receive mail (inbound) and
+// it can send as its own address (outbound). The backend reports both under
+// `capabilities`; these readers prefer that field and fall back to the legacy
+// `verified` / `sending_status` pair, which a server predating `capabilities`
+// still returns. Read every axis through these — never off `verified` directly,
+// which names only the inbound axis while looking domain-wide.
+
+/** Inbound (can-receive) capability: ownership TXT + inbound MX. */
+export function inboundCapability(domain: DomainInfo): DomainCapabilityStatus {
+  return domain.capabilities?.inbound ?? (domain.verified ? "verified" : "pending");
+}
+
+/** Outbound (send-as-own-address) capability: the SES sending identity rollup. */
+export function outboundCapability(domain: DomainInfo): DomainCapabilityStatus {
+  return domain.capabilities?.outbound ?? domain.sending_status ?? "none";
+}
+
+/** Whether the domain can receive mail today — the gate for creating an inbox. */
+export function canReceive(domain: DomainInfo): boolean {
+  return inboundCapability(domain) === "verified";
+}
 
 // ── Checklist derivation ─────────────────────────────────
 
@@ -20,7 +45,7 @@ export function deriveChecklistStep(
 ): ChecklistStep {
   const domainAgents = agents.filter((a) => a.domain === domain.domain);
 
-  if (!domain.verified) return "domain_added";
+  if (!canReceive(domain)) return "domain_added";
   if (domainAgents.length === 0) return "domain_verified";
   return "agent_created";
 }

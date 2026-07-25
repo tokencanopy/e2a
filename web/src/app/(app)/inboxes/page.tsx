@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useAuth } from "../../components/AuthProvider";
 import { AgentPromptCard, AGENT_PROMPTS } from "../../components/AgentPromptCard";
 import { listDomains } from "../../components/onboarding/api";
+import { canReceive } from "../../components/onboarding/state";
 import { useAgents } from "../../components/hooks/useAgents";
 import { domainsKey } from "../../../lib/swrKeys";
 import type { DashboardAgent } from "../../components/types";
@@ -142,7 +143,10 @@ export default function DashboardPage() {
     return `${Math.floor(min / 60)}h`;
   }, [indexedAt, tick]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const verifiedDomains = domains.filter((d) => d.verified).length;
+  // Counts domains that can RECEIVE mail — the inbound axis, which is what
+  // this stat has always meant. Read through the helper so it stays correct
+  // once a domain can be outbound-capable without being inbound-verified.
+  const verifiedDomains = domains.filter((d: DomainInfo) => canReceive(d)).length;
   const inboxLabel = agents.length === 1 ? "inbox" : "inboxes";
   const domainLabel = verifiedDomains === 1 ? "verified domain" : "verified domains";
 

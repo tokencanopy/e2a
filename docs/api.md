@@ -355,6 +355,21 @@ Custom sending/receiving domains and their DNS verification.
   fetch / delete (delete deprovisions the sending identity; irreversible).
 - `POST /v1/domains/{domain}/verify` — verify ownership via the TXT record.
 
+Every domain response (list, fetch, and register) carries **`capabilities`** —
+`{ inbound, outbound }` — the per-axis rollup of what the domain can actually
+do. `inbound` is whether it can receive mail (the ownership TXT plus the inbound
+MX); `outbound` is whether agents on it can send as their own address (the async
+SES sending identity: DKIM + custom MAIL FROM). The two axes are provisioned on
+different schedules and are independent in both directions, so read them
+separately rather than treating one as implying the other. `capabilities`
+restates the legacy `verified` boolean (inbound) and `sending_status`
+(outbound) — prefer it, since `verified` names only the inbound axis while
+reading as though it covered the domain as a whole. Both legacy fields keep
+working unchanged. Per-record detail stays in `dns_records[].status`:
+`capabilities.outbound` is the all-or-nothing rollup, so when DKIM is healthy
+but the MAIL FROM records are not, `outbound` reads `failed` while the `dkim`
+record still reads `verified`.
+
 The domain surface deliberately speaks **two record-state vocabularies**, one
 per axis. `dns_records[].status` (on `GET /v1/domains/{domain}`) is the
 **persisted** verification state of each record — `verified | pending |

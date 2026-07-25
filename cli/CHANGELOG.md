@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+
+Additive only — no flag, output-field, or exit-code meaning changes to any
+command that shipped in 2.0.0.
+
+**Added:** `e2a messages lifecycle <message-id>` (beta) — print a message's
+observed lifecycle transitions (send, delivery, bounce, review, deletion, …)
+as the canonical lifecycle page in JSON. Flags: `--cursor` (continue from a
+prior page), `--limit` (page size, 1–100), `--agent` (owning inbox, or the
+configured `agent_email`), `--json`. Beta because it tracks the beta
+`GET /v1/agents/{email}/messages/{id}/lifecycle` API surface.
+
+**Documented:** `listen --once` with `--text`/`--json` fetches the message over
+the API `GET`, which marks it read — the same side effect as `messages get`.
+Behavior is unchanged; it was previously undocumented.
 
 **Added:** `e2a doctor` — read-only diagnostics for the production email path.
 Checks CLI config and credential scope, API connectivity (`GET /v1/info`),

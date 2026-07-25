@@ -264,6 +264,9 @@ export type APIKeyData = {
 export type DomainInfo = {
   domain: string;
   verified: boolean;
+  // Per-axis capability rollup (inbound = receive, outbound = send as own
+  // address). Optional — a server predating the field omits it.
+  capabilities?: { inbound: string; outbound: string };
   verification_token: string;
   dns_records: Array<{
     type: string;

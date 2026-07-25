@@ -63,7 +63,8 @@ python3 "$ROOT/scripts/strip-unused-generated-imports.py" \
   field_validator "$DEST/models/dmarc_result.py" \
   re "$DEST/models/spf_result.py" \
   field_validator "$DEST/models/spf_result.py" \
-  re "$DEST/models/sending_ramp_view.py"
+  re "$DEST/models/sending_ramp_view.py" \
+  re "$DEST/models/domain_capabilities.py"
 
 # OpenAPI Generator leaves multiple terminal newlines on standalone component
 # models. Keep the dedicated push envelope deterministic for diff hygiene.

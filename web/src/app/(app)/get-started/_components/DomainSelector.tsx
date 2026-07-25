@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Field } from "../../../components/Field";
 import { registerDomain } from "../../../components/onboarding/api";
-import { isValidDomain } from "../../../components/onboarding/state";
+import { canReceive, isValidDomain } from "../../../components/onboarding/state";
 import { track } from "../../../components/onboarding/analytics";
 import type { DomainInfo } from "../../../components/onboarding/types";
 
@@ -73,12 +73,12 @@ export function DomainSelector({
                 <code className="text-sm font-mono font-medium break-all">{d.domain}</code>
                 <span
                   className={`ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                    d.verified
+                    canReceive(d)
                       ? "bg-green-100 text-green-700"
                       : "bg-amber-100 text-amber-700"
                   }`}
                 >
-                  {d.verified ? "Verified" : "Unverified"}
+                  {canReceive(d) ? "Verified" : "Unverified"}
                 </span>
               </div>
               <span className="text-xs text-muted shrink-0">Select</span>
