@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,10 +43,27 @@ func TestTruncateAll_CleansInboundIntakeWithoutExclusiveTableLock(t *testing.T) 
 		t.Fatalf("inbound_intake rows before cleanup = %d, want 1", before)
 	}
 
-	cleanupCtx, cancel := context.WithTimeout(ctx, time.Second)
+	// The budget here is a safety net against a genuine hang, NOT the assertion.
+	// What proves the invariant is the SQLSTATE below: truncateAll sets
+	// lock_timeout, so a conflicting lock surfaces as 55P03 (lock_not_available)
+	// within seconds rather than blocking until this context expires.
+	//
+	// It must stay generous. An earlier version budgeted one second and treated
+	// ANY error as proof of a lock conflict, which made this test flaky in CI:
+	// under `make cover` (-p 4, every package provisioning a database and
+	// applying all migrations against one Postgres) cleanup legitimately exceeds
+	// a second, and the deadline error was reported as a lock problem that did
+	// not exist. Slowness and lock contention are different failures and this
+	// test must only fail for the second one.
+	cleanupCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	if err := truncateAll(cleanupCtx, pool); err != nil {
-		t.Fatalf("cleanup should not require exclusive access to inbound_intake: %v", err)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			t.Fatalf("cleanup blocked on a conflicting lock while a reader held ACCESS SHARE on "+
+				"inbound_intake — it must be cleaned with DELETE, not TRUNCATE: %v", err)
+		}
+		t.Fatalf("cleanup failed for a non-lock reason: %v", err)
 	}
 
 	if err := reader.Rollback(ctx); err != nil {

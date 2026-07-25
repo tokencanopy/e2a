@@ -230,8 +230,24 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // calls this helper hundreds of times; repeatedly truncating inbound_intake also
 // recreates and fsyncs its three indexes and requires an ACCESS EXCLUSIVE lock.
 // Any future FK-less table MUST be added to the DELETE section here.
+// truncateAllLockTimeout bounds how long cleanup will WAIT ON A LOCK — not how
+// long it may take. Cleanup is expected to be lock-free (inbound_intake is
+// DELETEd precisely so a concurrent reader's ACCESS SHARE cannot block it), so a
+// wait this long means something genuinely holds a conflicting lock. Failing
+// fast with SQLSTATE 55P03 (lock_not_available) makes that case
+// self-identifying, instead of hanging until the caller's context expires and
+// reporting an indistinguishable deadline error.
+//
+// Deliberately NOT a statement timeout: cleanup is legitimately slow under a
+// loaded parallel run (`-p 4` across every package), and slowness must not be
+// conflated with a lock conflict — that conflation is what made
+// TestTruncateAll_CleansInboundIntakeWithoutExclusiveTableLock flaky in CI.
+const truncateAllLockTimeout = "5s"
+
 func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
+		SET LOCAL lock_timeout = '`+truncateAllLockTimeout+`';
+
 		DELETE FROM inbound_intake;
 
 		TRUNCATE oauth_pkce_requests, oauth_refresh_tokens, oauth_access_tokens,
