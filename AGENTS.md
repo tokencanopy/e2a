@@ -88,30 +88,39 @@ make openapi-compat-check  # oasdiff backward-compat gate vs origin/main:api/ope
 make openapi-compat-test   # runs the compat-gate's own test harness (scripts/test-openapi-compat.sh)
 ```
 
-DB-backed tests need
-`E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable"`.
+DB-backed tests default to
+`E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable"`;
+exporting your own value overrides it (the Make targets honor the environment).
 The test harness (`internal/testutil/db.go`) truncates tables between tests
-and auto-applies all migrations on connect. Each test binary automatically
-derives a **per-package database** (`<base>_pkg_<package>`, self-provisioned
-on first run) from the configured base URL, so parallel packages (`-p 4` in
-the Make targets) cannot truncate each other; `E2A_TEST_DB_SHARED=1` forces
-the old single-DB behavior. **Concurrent sessions/agents/worktrees running
-the SAME package still contend** — give each runner its own base database:
+and auto-applies all migrations on connect. Each test binary derives its
+database name beneath the configured base along **two** dimensions
+(`<base>_ws<workspace>_pkg_<package>`, self-provisioned on first run):
 
-```bash
-psql "postgres://e2a:e2a@localhost:5433/e2a" -c 'CREATE DATABASE e2a_test_<name>'
-export E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test_<name>?sslmode=disable"
-```
+- **per package**, so parallel packages (`-p 4` in the Make targets) cannot
+  truncate each other;
+- **per workspace** — a digest of the module root's path — so **two checkouts
+  never collide**. Concurrent sessions, agents, and worktrees are isolated
+  automatically, with nothing to configure.
 
-A fresh base database needs no manual setup — the harness creates the
-per-package databases and applies all `migrations/*.sql` on connect (the
-BASE database itself must exist). Per-package databases accumulate on the
-local server; they are disposable — drop any `*_pkg_*` database at will,
-the next run recreates it. Note that dropping a BASE database does not drop
-its `_pkg_` siblings (harmless — migrate+truncate on connect — but a "reset"
-that only recreates the base leaves them behind). `-p 1` is no longer required for
-cross-package isolation; it remains useful only when reproducing ordering-
-sensitive failures.
+`E2A_TEST_DB_SHARED=1` forces the old single-DB behavior. Point a run at an
+entirely separate server by exporting `E2A_TEST_DATABASE_URL`.
+
+A fresh base database needs no manual setup — the harness creates the derived
+databases and applies all `migrations/*.sql` on connect (the BASE database
+itself must exist). Derived databases accumulate on the local server; they are
+disposable — drop any `*_pkg_*` database at will, the next run recreates it.
+Note that dropping a BASE database does not drop its derived siblings
+(harmless — migrate+truncate on connect — but a "reset" that only recreates
+the base leaves them behind). `-p 1` is no longer required for cross-package
+isolation; it remains useful only when reproducing ordering-sensitive failures.
+
+**Filesystem-walking guards must never walk from the module root.** Walk a
+known subtree (`<root>/internal`) or ask git for the file list
+(`git ls-files --cached --others --exclude-standard`). Checkouts and worktrees
+placed under the root would otherwise be scanned as if they were this tree —
+which is exactly how the log-redaction guard started reporting other branches'
+stale code as violations. Keeping worktrees OUTSIDE the module root avoids the
+class entirely.
 
 ### TypeScript (npm workspaces — always use `--workspace` and `npm ci`)
 
