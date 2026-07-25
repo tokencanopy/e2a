@@ -28,6 +28,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -167,9 +168,14 @@ type API struct {
 	unsubscribeIssuer ManagedUnsubscribeIssuer
 	// screen runs outbound content screening (Slice 5). Stateless heuristics
 	// engine; mirrors the relay's inbound piguard engine.
-	screen    *piguard.Engine
-	smtpRelay *outbound.SMTPRelay
-	userAuth  *auth.UserAuth
+	screen *piguard.Engine
+	// inboundScreen runs inbound content screening for the loopback self-send
+	// paths — the same engine construction (heuristics + optional Gemini) the
+	// relay uses for SMTP inbound, so a self-send's inbox leg is judged
+	// identically to a wire roundtrip of the same message.
+	inboundScreen *piguard.Engine
+	smtpRelay     *outbound.SMTPRelay
+	userAuth      *auth.UserAuth
 	// oidcAuth wires optional, generic OpenID Connect browser login. Nil means
 	// both OIDC routes are absent; it is independent of legacy Google login.
 	oidcAuth   *auth.OIDCAuth
@@ -511,16 +517,17 @@ func (a *API) SetDomainTeardownHook(h func(ctx context.Context, tx pgx.Tx, domai
 
 func NewAPI(store *identity.Store, sender *outbound.Sender, smtpRelay *outbound.SMTPRelay, userAuth *auth.UserAuth, usage usage.UsageTracker, smtpDomain, fromDomain, sharedDomain, publicURL string, production bool) *API {
 	return &API{
-		store:        store,
-		sender:       sender,
-		screen:       buildAgentScreenEngine(),
-		smtpRelay:    smtpRelay,
-		userAuth:     userAuth,
-		usage:        usage,
-		smtpDomain:   smtpDomain,
-		fromDomain:   fromDomain,
-		sharedDomain: sharedDomain,
-		publicURL:    publicURL,
+		store:         store,
+		sender:        sender,
+		screen:        buildAgentScreenEngine(),
+		inboundScreen: inboundscreen.BuildEngine(),
+		smtpRelay:     smtpRelay,
+		userAuth:      userAuth,
+		usage:         usage,
+		smtpDomain:    smtpDomain,
+		fromDomain:    fromDomain,
+		sharedDomain:  sharedDomain,
+		publicURL:     publicURL,
 		// Default the API/issuer URL to the web URL; SetAPIURL overrides it
 		// for split web/API-host deployments.
 		apiURL:     publicURL,

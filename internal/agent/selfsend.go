@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/inboundpolicy"
+	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/loopback"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -73,6 +75,24 @@ func (a *API) performSelfSend(
 		return nil, fmt.Errorf("self-send compose: %w", err)
 	}
 
+	// Inbound-leg protection (gate + content scan) over the composed MIME —
+	// the same evaluation the relay runs for SMTP inbound. The inbound row id
+	// is pre-allocated so the audit rows and deterministic event ids anchor to
+	// it. A review/block verdict persists the row as a hidden hold and
+	// suppresses email.received (published conditionally below).
+	//
+	// Known cost: with the content scan enabled, a self-send runs TWO
+	// sequential detector passes over byte-identical content within one HTTP
+	// request — screenOutbound already scanned it on the egress side
+	// (DeliverOutbound), and this is the ingress pass. With the Gemini
+	// detector wired, each pass is bounded by its 10s timeout, so worst-case
+	// latency and detector spend roughly double per self-send. Deliberate for
+	// now (the two passes run different directions/thresholds and the egress
+	// engine is heuristics-only); reusing/deduping the detector work is a
+	// follow-up candidate.
+	inboundID := identity.NewMessageID()
+	screenRes, gate := inboundscreen.EvaluateLoopback(ctx, a.inboundScreen, agent, inboundID, rawMessage)
+
 	var outboundMsg *identity.Message
 	var receivedEvent webhookpub.Event
 	err = a.store.WithTx(ctx, func(tx pgx.Tx) error {
@@ -87,9 +107,9 @@ func (a *API) performSelfSend(
 		}
 
 		inboundMsg, txErr := a.store.CreateInboundMessageAuthenticatedInTx(
-			ctx, tx, "", agent.ID, identity.InboundAuth{HeaderFrom: email, StoredSender: loopbackDisplayFrom(req, email)}, email, providerID, req.Subject,
-			req.ConversationID, "unread", rawMessage, false, "",
-			[]string{email}, nil, replyToList(req.ReplyTo), identity.InboundScreening{},
+			ctx, tx, inboundID, agent.ID, identity.InboundAuth{HeaderFrom: email, StoredSender: loopbackDisplayFrom(req, email)}, email, providerID, req.Subject,
+			req.ConversationID, "unread", rawMessage, gate.Flagged, gate.Reason,
+			[]string{email}, nil, replyToList(req.ReplyTo), screenRes.Denorm,
 		)
 		if txErr != nil {
 			return fmt.Errorf("self-send inbound row: %w", txErr)
@@ -116,7 +136,7 @@ func (a *API) performSelfSend(
 		}
 
 		if a.outbox != nil {
-			if receivedEvent, txErr = a.publishLoopbackEventsTx(ctx, tx, agent, outboundMsg, inboundMsg, req, msgType, rawMessage, []messagelifecycle.MessageLifecycleTransition{submittedOutbound}, []messagelifecycle.MessageLifecycleTransition{acceptedInbound}); txErr != nil {
+			if receivedEvent, txErr = a.publishLoopbackEventsTx(ctx, tx, agent, outboundMsg, inboundMsg, req, msgType, rawMessage, []messagelifecycle.MessageLifecycleTransition{submittedOutbound}, []messagelifecycle.MessageLifecycleTransition{acceptedInbound}, gate, screenRes); txErr != nil {
 				return txErr
 			}
 		}
@@ -136,12 +156,32 @@ func (a *API) performSelfSend(
 
 	if a.outbox != nil {
 		a.emit().OutboxEventsPublished(webhookpub.EventEmailSent)
-		a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
+		if !screenRes.Hold {
+			a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
+		}
+		a.emitLoopbackScreeningMetrics(gate, screenRes)
 	}
+	// Screening audit rows are appended best-effort ONCE after the commit: a
+	// crash between commit and this write loses the audit rows (nothing
+	// re-drives a committed local delivery; an idempotent client retry replays
+	// the cached response without re-screening). Accepted: the verdict itself
+	// is durable on the message row; only the drill-down audit is best-effort.
+	// The deterministic ids dedupe the rare full re-execution.
+	a.writeProtectionEvents(ctx, inboundID, screenRes.Events)
+	// receivedEvent.MessageID is empty when delivery was suppressed (held), so
+	// the WebSocket push no-ops for holds.
 	a.pushLoopbackReceived(ctx, agent.ID, receivedEvent.MessageID)
 	return outboundMsg, nil
 }
 
+// publishLoopbackEventsTx publishes the outcome events for a loopback local
+// delivery inside the delivery transaction. email.sent always fires (the
+// outbound leg is terminally delivered); email.received fires only when the
+// inbound leg is actually delivered — a review/block hold suppresses it,
+// publishing email.review_requested / email.blocked instead (plus
+// email.flagged on the delivered gate-flag path), mirroring the relay's
+// inbound event semantics. Returns the zero Event when email.received was
+// suppressed.
 func (a *API) publishLoopbackEventsTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -151,6 +191,8 @@ func (a *API) publishLoopbackEventsTx(
 	msgType string,
 	rawMessage []byte,
 	outboundTransitions, inboundTransitions []messagelifecycle.MessageLifecycleTransition,
+	gate inboundpolicy.Decision,
+	screenRes inboundscreen.Result,
 ) (webhookpub.Event, error) {
 	sentResult := &outbound.SendResult{
 		Method: "loopback", To: []string{agent.EmailAddress()},
@@ -165,9 +207,17 @@ func (a *API) publishLoopbackEventsTx(
 		return webhookpub.Event{}, fmt.Errorf("self-send email.sent event: %w", err)
 	}
 
-	receivedEvent := buildLoopbackReceivedEvent(agent, inboundMsg, req, rawMessage, inboundTransitions)
-	if err := a.outbox.PublishTx(ctx, tx, receivedEvent); err != nil {
-		return webhookpub.Event{}, fmt.Errorf("self-send email.received event: %w", err)
+	var receivedEvent webhookpub.Event
+	if !screenRes.Hold {
+		receivedEvent = buildLoopbackReceivedEvent(agent, inboundMsg, req, rawMessage, inboundTransitions)
+		if err := a.outbox.PublishTx(ctx, tx, receivedEvent); err != nil {
+			return webhookpub.Event{}, fmt.Errorf("self-send email.received event: %w", err)
+		}
+	}
+	for _, ev := range loopback.ScreeningEvents(agent, inboundMsg, gate, screenRes) {
+		if err := a.outbox.PublishTx(ctx, tx, ev); err != nil {
+			return webhookpub.Event{}, fmt.Errorf("self-send %s event: %w", ev.Type, err)
+		}
 	}
 	return receivedEvent, nil
 }
@@ -181,34 +231,49 @@ func (a *API) approveSelfSend(
 ) (*identity.Message, error) {
 	var req outbound.SendRequest
 	var receivedEvent webhookpub.Event
+	var gate inboundpolicy.Decision
+	var screenRes inboundscreen.Result
+	var inboundID string
 	sent, err := a.store.ApproveAndDeliverLocal(ctx, messageID, userID, edits,
-		func(locked *identity.Message) (identity.SendResult, error) {
+		func(locked *identity.Message) (identity.SendResult, identity.LocalInboundScreen, error) {
 			var buildErr error
 			req, buildErr = buildSendRequestFromMessage(locked)
 			if buildErr != nil {
-				return identity.SendResult{}, buildErr
+				return identity.SendResult{}, identity.LocalInboundScreen{}, buildErr
 			}
 			attachReferencesChain(ctx, a.store, agent.ID, &req)
 			if !isSelfSend(req, agent.EmailAddress()) {
-				return identity.SendResult{}, errors.New("external outbound approval must be queued")
+				return identity.SendResult{}, identity.LocalInboundScreen{}, errors.New("external outbound approval must be queued")
 			}
 			providerID := loopback.ProviderID(a.fromDomain)
 			raw, composeErr := loopback.ComposeMIME(agent, req, providerID, a.fromDomain)
 			if composeErr != nil {
-				return identity.SendResult{}, composeErr
+				return identity.SendResult{}, identity.LocalInboundScreen{}, composeErr
 			}
+			// Inbound-leg protection over the composed MIME — the outbound
+			// approval releases the Sent copy; the agent's INBOUND protection
+			// then judges the inbox copy exactly as the relay would (a
+			// review-configured agent can hold its own approved self-send a
+			// second time — intended double-review semantics).
+			inboundID = identity.NewMessageID()
+			screenRes, gate = inboundscreen.EvaluateLoopback(ctx, a.inboundScreen, agent, inboundID, raw)
 			return identity.SendResult{
-				ProviderMessageID: providerID,
-				Method:            "loopback",
-				To:                []string{agent.EmailAddress()},
-				Sender:            loopbackDisplayFrom(req, agent.EmailAddress()),
-				Raw:               raw,
-			}, nil
+					ProviderMessageID: providerID,
+					Method:            "loopback",
+					To:                []string{agent.EmailAddress()},
+					Sender:            loopbackDisplayFrom(req, agent.EmailAddress()),
+					Raw:               raw,
+				}, identity.LocalInboundScreen{
+					MessageID:  inboundID,
+					Flagged:    gate.Flagged,
+					FlagReason: gate.Reason,
+					Screening:  screenRes.Denorm,
+				}, nil
 		},
 		func(ctx context.Context, tx pgx.Tx, outboundMsg, inboundMsg *identity.Message, result identity.SendResult, outboundTransitions, inboundTransitions []messagelifecycle.MessageLifecycleTransition) error {
 			if a.outbox != nil {
 				var hookErr error
-				receivedEvent, hookErr = a.publishLoopbackEventsTx(ctx, tx, agent, outboundMsg, inboundMsg, req, outboundMsg.Type, result.Raw, outboundTransitions, inboundTransitions)
+				receivedEvent, hookErr = a.publishLoopbackEventsTx(ctx, tx, agent, outboundMsg, inboundMsg, req, outboundMsg.Type, result.Raw, outboundTransitions, inboundTransitions, gate, screenRes)
 				if hookErr != nil {
 					return hookErr
 				}
@@ -224,10 +289,30 @@ func (a *API) approveSelfSend(
 	}
 	if a.outbox != nil {
 		a.emit().OutboxEventsPublished(webhookpub.EventEmailSent)
-		a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
+		if !screenRes.Hold {
+			a.emit().OutboxEventsPublished(webhookpub.EventEmailReceived)
+		}
+		a.emitLoopbackScreeningMetrics(gate, screenRes)
 	}
+	a.writeProtectionEvents(ctx, inboundID, screenRes.Events)
 	a.pushLoopbackReceived(ctx, agent.ID, receivedEvent.MessageID)
 	return sent, nil
+}
+
+// emitLoopbackScreeningMetrics counts the screening-outcome events published
+// for a loopback inbound leg (mirrors loopback.ScreeningEvents' conditions),
+// so email.flagged/email.blocked/email.review_requested are counted the same
+// way as the sent/received pair.
+func (a *API) emitLoopbackScreeningMetrics(gate inboundpolicy.Decision, res inboundscreen.Result) {
+	if gate.Flagged && !res.Hold {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailFlagged)
+	}
+	if res.Blocked() {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailBlocked)
+	}
+	if res.Review() {
+		a.emit().OutboxEventsPublished(webhookpub.EventEmailReviewRequested)
+	}
 }
 
 func (a *API) recordLoopbackUsage(ctx context.Context, userID string, agent *identity.AgentIdentity) {
