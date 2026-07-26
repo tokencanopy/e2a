@@ -226,10 +226,12 @@ trash:
 # default bind is loopback-only; point your Prometheus scraper (or the
 # e2a-prober host) at it over a private network of your choosing. Metric
 # catalog, aggregation guidance, and SLO targets: docs/observability.md.
-# Override with E2A_METRICS_ENABLED / E2A_METRICS_LISTEN_ADDR.
+# Override with E2A_METRICS_ENABLED / E2A_METRICS_LISTEN_ADDR /
+# E2A_METRICS_BUILD.
 metrics:
   enabled: false
   listen_addr: "127.0.0.1:9091"
+  build: "unknown"               # release/image tag; attached to every sample
 
 
 

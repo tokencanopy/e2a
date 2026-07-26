@@ -111,6 +111,9 @@ type MetricsConfig struct {
 	// ListenAddr is the bind address for the metrics listener.
 	// Override with E2A_METRICS_LISTEN_ADDR.
 	ListenAddr string `yaml:"listen_addr"`
+	// Build is the bounded release/image identifier attached to every sample.
+	// Override with E2A_METRICS_BUILD. Empty is exposed as "unknown".
+	Build string `yaml:"build"`
 }
 
 type DatabaseConfig struct {
@@ -452,6 +455,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_METRICS_LISTEN_ADDR"); v != "" {
 		cfg.Metrics.ListenAddr = v
+	}
+	if v := os.Getenv("E2A_METRICS_BUILD"); v != "" {
+		cfg.Metrics.Build = v
 	}
 	// An explicit empty listen_addr would otherwise bind ":80" (Go's
 	// default) — silently public and usually fatal. Empty means default.

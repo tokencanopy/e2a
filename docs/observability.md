@@ -22,6 +22,7 @@ cheap `river_job` GROUP BY reads). Enable Prometheus exposition with:
 metrics:
   enabled: true                  # or E2A_METRICS_ENABLED=true
   listen_addr: "127.0.0.1:9091"  # or E2A_METRICS_LISTEN_ADDR
+  build: "1.3.0"                 # or E2A_METRICS_BUILD; labels every sample
 ```
 
 `GET /metrics` is served on a **separate listener**, never on the public API
@@ -40,6 +41,13 @@ patterns, webhook event types) are additionally bounded by hard series caps
 `route` label is always the chi route *pattern* (`/v1/agents/{email}`), never
 a raw path. These boundaries are pinned by unit tests in
 `internal/telemetry`.
+
+Every server and prober sample also carries one bounded `build` label. Hosted
+deploys set it to the real release/image tag even though blue/green containers
+run from temporary local aliases; self-hosted processes that do not set
+`metrics.build` / `E2A_METRICS_BUILD` expose `build="unknown"`. Aggregations
+that should span a cutover should continue to use `sum(...)`; group by
+`build` when correlating an SLO change with a release.
 
 ## Health endpoints (probes)
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/selftest"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 )
 
 // run is one full battery execution with a timestamp.
@@ -238,20 +239,21 @@ func (p *prober) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	p.mu.Unlock()
+	build := telemetry.NormalizeBuildLabel(p.cfg.MetricsBuild)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintln(w, "# HELP e2a_selftest_success Whether the last probe run fully passed (1) or not (0).")
 	fmt.Fprintln(w, "# TYPE e2a_selftest_success gauge")
 	if last == nil {
-		fmt.Fprintln(w, "e2a_selftest_success 0")
+		fmt.Fprintf(w, "e2a_selftest_success{build=%q} 0\n", build)
 		return
 	}
-	fmt.Fprintf(w, "e2a_selftest_success %d\n", b2i(last.OK))
+	fmt.Fprintf(w, "e2a_selftest_success{build=%q} %d\n", build, b2i(last.OK))
 	fmt.Fprintln(w, "# HELP e2a_selftest_scenario_success Per-scenario result of the last run (1 pass, 0 otherwise).")
 	fmt.Fprintln(w, "# TYPE e2a_selftest_scenario_success gauge")
 	var total time.Duration
 	for _, res := range last.Results {
-		fmt.Fprintf(w, "e2a_selftest_scenario_success{scenario=%q} %d\n", res.Name, b2i(res.Status == selftest.StatusPass))
+		fmt.Fprintf(w, "e2a_selftest_scenario_success{build=%q,scenario=%q} %d\n", build, res.Name, b2i(res.Status == selftest.StatusPass))
 		total += time.Duration(res.DurationMS) * time.Millisecond
 	}
 	fmt.Fprintln(w, "# HELP e2a_selftest_scenario_runs_total Completed prober scenario runs by outcome.")
@@ -261,7 +263,7 @@ func (p *prober) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	for _, sc := range selftest.All {
 		for _, outcome := range []selftest.Status{selftest.StatusPass, selftest.StatusWarn, selftest.StatusFail} {
 			if count := scenarioRuns[sc.Name][outcome]; count > 0 {
-				fmt.Fprintf(w, "e2a_selftest_scenario_runs_total{scenario=%q,outcome=%q} %d\n", sc.Name, outcome, count)
+				fmt.Fprintf(w, "e2a_selftest_scenario_runs_total{build=%q,scenario=%q,outcome=%q} %d\n", build, sc.Name, outcome, count)
 			}
 		}
 	}
@@ -271,11 +273,11 @@ func (p *prober) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# HELP e2a_selftest_scenario_duration_seconds Per-scenario duration of the last run.")
 	fmt.Fprintln(w, "# TYPE e2a_selftest_scenario_duration_seconds gauge")
 	for _, res := range last.Results {
-		fmt.Fprintf(w, "e2a_selftest_scenario_duration_seconds{scenario=%q} %.3f\n", res.Name, float64(res.DurationMS)/1000)
+		fmt.Fprintf(w, "e2a_selftest_scenario_duration_seconds{build=%q,scenario=%q} %.3f\n", build, res.Name, float64(res.DurationMS)/1000)
 	}
 	fmt.Fprintln(w, "# HELP e2a_selftest_duration_seconds Total duration of the last probe run.")
 	fmt.Fprintln(w, "# TYPE e2a_selftest_duration_seconds gauge")
-	fmt.Fprintf(w, "e2a_selftest_duration_seconds %.3f\n", total.Seconds())
+	fmt.Fprintf(w, "e2a_selftest_duration_seconds{build=%q} %.3f\n", build, total.Seconds())
 }
 
 func firstFailure(results []selftest.Result) string {

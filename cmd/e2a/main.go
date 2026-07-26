@@ -224,7 +224,7 @@ func main() {
 	var metrics telemetry.Metrics = telemetry.NewLog()
 	var promBackend *telemetry.Prom
 	if cfg.Metrics.Enabled {
-		promBackend = telemetry.NewProm()
+		promBackend = telemetry.NewProm(cfg.Metrics.Build)
 		metrics = promBackend
 	}
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -127,8 +128,42 @@ var (
 	longBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400, 259200}
 )
 
-func NewProm() *Prom {
+// NormalizeBuildLabel keeps operator-provided release identifiers safe and
+// bounded for use as a Prometheus label.
+func NormalizeBuildLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	const maxLen = 128
+	var b strings.Builder
+	b.Grow(min(len(value), maxLen))
+	for _, r := range value {
+		if b.Len() >= maxLen {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			strings.ContainsRune("._:+@/-", r):
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
+func NewProm(build string) *Prom {
 	reg := prometheus.NewRegistry()
+	registerer := prometheus.WrapRegistererWith(
+		prometheus.Labels{"build": NormalizeBuildLabel(build)},
+		reg,
+	)
 	p := &Prom{
 		reg:        reg,
 		routesSeen: make(map[string]struct{}),
@@ -285,7 +320,7 @@ func NewProm() *Prom {
 		}),
 	}
 
-	reg.MustRegister(
+	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
 		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur,

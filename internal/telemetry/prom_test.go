@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +11,22 @@ import (
 // scrape renders the Prom backend's exposition output as text so tests can
 // assert on emitted series without depending on client_golang internals.
 func scrape(t *testing.T, p *Prom) string {
+	t.Helper()
+	body := scrapeRaw(t, p)
+	for _, line := range strings.Split(body, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Count(line, `build="unknown"`) != 1 {
+			t.Errorf("sample missing exactly one default build label: %s", line)
+		}
+	}
+	body = strings.ReplaceAll(body, `{build="unknown",`, "{")
+	body = strings.ReplaceAll(body, `{build="unknown"}`, "")
+	return body
+}
+
+func scrapeRaw(t *testing.T, p *Prom) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -21,12 +38,70 @@ func scrape(t *testing.T, p *Prom) string {
 	return string(body)
 }
 
+func TestPromAddsBuildLabelToEverySample(t *testing.T) {
+	p := NewProm("1.3.0")
+	p.HTTPRequest("GET", "/v1/agents", "2xx", 0.01)
+	p.SMTPInbound("accepted", 0.02)
+	p.SetPublisherLag(0)
+
+	for _, line := range strings.Split(scrapeRaw(t, p), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Count(line, `build="1.3.0"`) != 1 {
+			t.Errorf("sample missing exactly one build label: %s", line)
+		}
+	}
+}
+
+func TestPromHandlerOverHTTPIncludesBuildLabel(t *testing.T) {
+	p := NewProm("v1.3.0")
+	p.SetPublisherLag(0)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics: %v", err)
+	}
+	if !strings.Contains(string(body), `e2a_webhook_publisher_lag_seconds{build="v1.3.0"} 0`) {
+		t.Fatalf("wire exposition missing build label:\n%s", body)
+	}
+}
+
+func TestNormalizeBuildLabel(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"", "unknown"},
+		{"  ", "unknown"},
+		{"v1.3.0", "v1.3.0"},
+		{"sha-abc123", "sha-abc123"},
+		{"release\nsecret", "release_secret"},
+	} {
+		if got := NormalizeBuildLabel(tc.in); got != tc.want {
+			t.Errorf("NormalizeBuildLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestPromSatisfiesInterface(t *testing.T) {
-	var _ Metrics = NewProm()
+	var _ Metrics = NewProm("")
 }
 
 func TestPromEmitsHTTPSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.HTTPRequest("GET", "/v1/agents/{email}", "2xx", 0.042)
 	p.HTTPRequest("GET", "/v1/agents/{email}", "2xx", 0.010)
 	p.HTTPRequest("POST", "/v1/agents/{email}/messages", "5xx", 1.5)
@@ -44,7 +119,7 @@ func TestPromEmitsHTTPSeries(t *testing.T) {
 }
 
 func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.SMTPInbound("accepted", 0.2)
 	p.SMTPInbound("tempfail", 0.1)
 	p.SMTPInbound("rejected_unknown_recipient", 0)
@@ -109,7 +184,7 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 }
 
 func TestPromLatencyHistogramsExposeExactSLOThresholdBuckets(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.HTTPRequest("GET", "/v1/agents", "2xx", 3)
 	p.SMTPInbound("accepted", 3)
 
@@ -128,7 +203,7 @@ func TestPromLatencyHistogramsExposeExactSLOThresholdBuckets(t *testing.T) {
 }
 
 func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.OutboxEventsPublished("email.received")
 	p.OutboxEventsFanOut("email.received", 3)
 	p.OutboxEventsNoMatch("email.sent")
@@ -163,7 +238,7 @@ func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
 // a bug (or attacker-influenced string) can never mint unbounded series or
 // leak message content / addresses / secrets into the metrics surface.
 func TestPromNormalizesUnknownLabelValues(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	secret := "hunter2-api-key"
 	addr := "victim@example.com"
 	p.SMTPInbound(addr, 0.1)                // raw address must not become a label
@@ -205,7 +280,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 // can't blow up series count. Past the cap, new route values collapse to
 // "other".
 func TestPromRouteCardinalityCap(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	for i := 0; i < maxRouteSeries+50; i++ {
 		p.HTTPRequest("GET", "/v1/synthetic/"+strings.Repeat("x", 1+i%7)+string(rune('a'+i%26))+itoa(i), "2xx", 0.01)
 	}
@@ -222,7 +297,7 @@ func TestPromRouteCardinalityCap(t *testing.T) {
 // Type-label cardinality cap for legacy outbox metrics: event types are a
 // server-defined catalog, but enforce the same overflow guard.
 func TestPromEventTypeCardinalityCap(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	for i := 0; i < maxTypeSeries+20; i++ {
 		p.OutboxEventsPublished("synthetic.event." + itoa(i))
 	}
