@@ -677,10 +677,11 @@ export class PromiseContactsApi {
      * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Create a contact (beta)
      * @param createContactRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
      */
-    public createContactWithHttpInfo(createContactRequest: CreateContactRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
+    public createContactWithHttpInfo(createContactRequest: CreateContactRequest, idempotencyKey?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.createContactWithHttpInfo(createContactRequest, observableOptions);
+        const result = this.api.createContactWithHttpInfo(createContactRequest, idempotencyKey, observableOptions);
         return result.toPromise();
     }
 
@@ -688,10 +689,11 @@ export class PromiseContactsApi {
      * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Create a contact (beta)
      * @param createContactRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
      */
-    public createContact(createContactRequest: CreateContactRequest, _options?: PromiseConfigurationOptions): Promise<ContactView> {
+    public createContact(createContactRequest: CreateContactRequest, idempotencyKey?: string, _options?: PromiseConfigurationOptions): Promise<ContactView> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.createContact(createContactRequest, observableOptions);
+        const result = this.api.createContact(createContactRequest, idempotencyKey, observableOptions);
         return result.toPromise();
     }
 
@@ -819,10 +821,11 @@ export class PromiseContactsApi {
      * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Import contacts in bulk (beta)
      * @param importContactsRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
      */
-    public importContactsWithHttpInfo(importContactsRequest: ImportContactsRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactImportResult>> {
+    public importContactsWithHttpInfo(importContactsRequest: ImportContactsRequest, idempotencyKey?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactImportResult>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.importContactsWithHttpInfo(importContactsRequest, observableOptions);
+        const result = this.api.importContactsWithHttpInfo(importContactsRequest, idempotencyKey, observableOptions);
         return result.toPromise();
     }
 
@@ -830,10 +833,11 @@ export class PromiseContactsApi {
      * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Import contacts in bulk (beta)
      * @param importContactsRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
      */
-    public importContacts(importContactsRequest: ImportContactsRequest, _options?: PromiseConfigurationOptions): Promise<ContactImportResult> {
+    public importContacts(importContactsRequest: ImportContactsRequest, idempotencyKey?: string, _options?: PromiseConfigurationOptions): Promise<ContactImportResult> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.importContacts(importContactsRequest, observableOptions);
+        const result = this.api.importContacts(importContactsRequest, idempotencyKey, observableOptions);
         return result.toPromise();
     }
 

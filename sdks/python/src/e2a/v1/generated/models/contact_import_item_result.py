@@ -27,7 +27,7 @@ class ContactImportItemResult(BaseModel):
     ContactImportItemResult
     """ # noqa: E501
     address: Optional[StrictStr] = Field(default=None, description="Canonicalized address. Absent when the row could not be parsed.")
-    code: Optional[StrictStr] = Field(default=None, description="Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request.")
+    code: Optional[StrictStr] = Field(default=None, description="Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached.")
     index: StrictInt = Field(description="Zero-based position of this row in the submitted contacts array.")
     message: Optional[StrictStr] = Field(default=None, description="Human-readable explanation for a skipped or failed row.")
     status: StrictStr = Field(description="Outcome for this row. Known values: created, updated, skipped, failed.")

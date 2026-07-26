@@ -460,3 +460,118 @@ func TestImportMergeOmittedMetadataIsPreserved(t *testing.T) {
 		t.Errorf("metadata = %#v — an explicit object must REPLACE, not merge key-by-key", got.Metadata)
 	}
 }
+
+// TestDeleteImportBatchRetainsContactsWithHistory pins the safety rule that
+// makes an import reversal an undo rather than a destructive operation.
+//
+// The reversal is addressed by batch id, so the caller cannot see which rows
+// it would remove. If it deleted indiscriminately, undoing a months-old import
+// would silently destroy contacts the account has since corresponded with —
+// and the receipt would report success. The design named this rule and the
+// response has always carried contacts_retained; the condition itself was
+// missing, so retained was always zero.
+func TestDeleteImportBatchRetainsContactsWithHistory(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "retain")
+
+	if _, err := store.ClaimOrCreateDomain(ctx, "retain.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@retain.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "retain.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	const contacted = "contacted@retain.vc"
+	const untouched = "untouched@retain.vc"
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_retain", []identity.ContactImportRow{
+		{Address: contacted}, {Address: untouched},
+	}, true); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	// Correspond with exactly one of them.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{contacted}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-retain", []byte("raw")); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	deleted, retained, err := store.DeleteImportBatch(ctx, user.ID, "imp_retain")
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if deleted != 1 || retained != 1 {
+		t.Errorf("reversal deleted=%d retained=%d, want 1 and 1 — a contact with "+
+			"message history was destroyed by an undo", deleted, retained)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, contacted); err != nil {
+		t.Errorf("a contact this account has corresponded with was deleted by the reversal: %v", err)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, untouched); !errors.Is(err, identity.ErrContactNotFound) {
+		t.Errorf("an untouched imported contact survived the reversal: %v", err)
+	}
+}
+
+// TestContactCapIsEnforcedAndImportStaysPartial pins both halves of the cap.
+//
+// The number itself is a safety ceiling, so the interesting behaviour is not
+// that a limit exists but HOW it is reached: import must fill the remaining
+// headroom and fail only the overflow, per row. Rejecting the whole batch
+// would contradict the per-row model the endpoint commits to and leave the
+// caller unable to see which lines they could have kept.
+func TestContactCapIsEnforcedAndImportStaysPartial(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "cap")
+
+	// Tighten this account's cap so the test does not need 10k rows.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO account_limits (user_id, max_agents, max_domains, max_messages_month, max_storage_bytes, max_contacts)
+		      VALUES ($1, 10, 10, 1000, 1073741824, 2)
+		 ON CONFLICT (user_id) DO UPDATE SET max_contacts = 2`, user.ID); err != nil {
+		t.Fatalf("set cap: %v", err)
+	}
+
+	// Import three against a cap of two: two land, the third fails alone.
+	out, err := store.ImportContacts(ctx, user.ID, "imp_cap", []identity.ContactImportRow{
+		{Address: "a@cap.vc"}, {Address: "b@cap.vc"}, {Address: "c@cap.vc"},
+	}, true)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusCreated || out[1].Status != identity.ImportStatusCreated {
+		t.Errorf("rows within headroom did not land: %+v %+v", out[0], out[1])
+	}
+	if out[2].Status != identity.ImportStatusFailed || out[2].Code != "contact_limit_reached" {
+		t.Errorf("overflow row = %+v, want failed/contact_limit_reached — the batch "+
+			"must fill the cap and fail only the excess", out[2])
+	}
+
+	// A single create at the cap is refused, and distinguishably so: "at the
+	// cap" and "already exists" both produce no row from the insert.
+	if _, err := store.CreateContact(ctx, user.ID, "d@cap.vc", "", nil,
+		identity.ContactSourceManual, ""); !errors.Is(err, identity.ErrContactLimitReached) {
+		t.Errorf("create at cap err = %v, want ErrContactLimitReached", err)
+	}
+	if _, err := store.CreateContact(ctx, user.ID, "a@cap.vc", "", nil,
+		identity.ContactSourceManual, ""); !errors.Is(err, identity.ErrContactExists) {
+		t.Errorf("duplicate at cap err = %v, want ErrContactExists — a full account "+
+			"must still report a duplicate as a duplicate", err)
+	}
+
+	// Re-importing an EXISTING contact must still work at the cap: an update
+	// consumes no headroom, and correcting a full account is the common case.
+	out, err = store.ImportContacts(ctx, user.ID, "imp_cap2", []identity.ContactImportRow{
+		{Address: "a@cap.vc", DisplayName: strPtr("Corrected")},
+	}, true)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusUpdated {
+		t.Errorf("re-import of an existing contact at the cap = %+v, want updated", out[0])
+	}
+}
