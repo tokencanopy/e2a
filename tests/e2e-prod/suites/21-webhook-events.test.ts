@@ -1,7 +1,10 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ApiClient } from "../harness/client.ts";
 import { isEventsLogDisabled } from "../harness/event-capability.ts";
+import { isProductionTarget } from "../harness/env.ts";
 import { uniqueSlug, uniqueSubject, holdAllOutbound } from "../harness/fixtures.ts";
 import { writeReport, info } from "../harness/report.ts";
 
@@ -44,25 +47,82 @@ import { writeReport, info } from "../harness/report.ts";
 //   email.blocked         — outbound gate policy=allowlist action=block + a
 //                           non-allowlisted recipient → the send is REFUSED
 //                           (403 blocked_by_policy) and email.blocked fires.
+//   email.received        — self-send loopback (agent mails itself). The inbound
+//                           leg of a loopback is evaluated through the SAME
+//                           agent-scoped inbound gate a real SMTP delivery would
+//                           use (internal/inboundscreen.EvaluateLoopback /
+//                           internal/loopback.LoopbackGate): sender = the
+//                           agent's own address, resolvable, DMARC "pass" — so a
+//                           default (open) inbound policy delivers straight
+//                           through and fires email.received exactly as an SMTP
+//                           roundtrip would (selfsend.go). No wire hop needed.
+//   email.flagged          — self-send loopback with an inbound gate the
+//                           self-sender itself doesn't satisfy: an allowlist
+//                           gate with an EMPTY allowlist always flags a
+//                           self-send (the agent's own address is never
+//                           trivially a member of its own empty allowlist).
+//                           action=flag means "deliver + annotate", so this is
+//                           NOT the review-hold path — email.received still
+//                           fires for the same inbound copy (screening_events.go).
+//   email.failed           — a real send the provider PERMANENTLY refuses.
+//                           Staging's e2a-staging-smtp IAM identity scopes
+//                           ses:SendRawEmail to a small recipient allowlist (the
+//                           mailbox simulator + a couple of test sinks); a send
+//                           outside that scope gets a synchronous SMTP 554
+//                           "Access denied ... not authorized to perform
+//                           ses:SendRawEmail" (curl/live-probed 2026-07-25).
+//                           internal/outbound.IsPermanentSMTPError treats any
+//                           5xx as permanent, so the outbound worker's single
+//                           attempt terminally fails the message and fires
+//                           email.failed — deterministically, no retry wait. The
+//                           recipient uses the RFC 2606 `.invalid` TLD so it
+//                           stays unroutable even if that IAM scope ever widens.
 //
-// Event types SKIPPED with reasons (not HTTP-triggerable by this suite):
-//   email.received  — needs a real inbound SMTP delivery; that is the prober's
-//                     dedicated round-trip, not an API-driven trigger.
-//   email.delivered/bounced/complained — async SES delivery-feedback, arrives via
-//                     SNS on an unbounded timeline (and the simulator's feedback
-//                     is not deterministic within a test window).
-//   email.failed/deferred — terminal/transient async-send outcomes; only the
-//                     primary signal for queue-first outbound delivery.
-//   domain.sending_verified/failed, domain.suppression_added — need real
-//                     sending-identity provisioning against a custom domain.
+// Event types ALLOWLISTED with reasons (structurally not producible on
+// staging — see event_coverage_gate.py's ALLOWLIST, which is the enforced
+// source of truth; the skip tests below exist only for human-readable
+// visibility inside this suite's own output):
+//   email.delivered/bounced/complained — async SES delivery-feedback (SNS);
+//                     staging's e2a-staging-smtp IAM policy denies
+//                     ses:SendRawEmail to the bounce/complaint simulator
+//                     addresses, so this feedback cannot be produced there.
+//   domain.suppression_added, agent.suppression_added — a suppression is
+//                     created only by a real SES bounce/complaint (no
+//                     createSuppression API), which inherits the same blocker.
+//   domain.sending_verified/failed — need real SES sending-identity (DKIM)
+//                     provisioning against a custom domain, verified async by
+//                     AWS over minutes-to-hours; a throwaway shared-domain
+//                     agent has no sending identity to provision.
+// All seven are deferred to the planned prod-only differential suite, where
+// the real infrastructure (a controlled custom domain, an unrestricted SES
+// identity) exists to produce them honestly instead of being faked here.
 //
 // Ops exercised: listEvents (envelope + filters), getEvent (+404), redeliverEvent
 // (re-queues a delivery; a new attempt appears). Every agent + webhook created is
 // deleted inline in a finally (agent delete cascades to held messages; we also
 // resolve holds explicitly). The shared cleanup harness is not used (it only
-// tracks agents), and per the task the harness/ is never edited.
+// tracks agents); this suite otherwise still avoids touching the shared harness/
+// directory (see the event-coverage recorder below), consistent with that.
 const SUITE = "21-webhook-events";
 const client = new ApiClient();
+
+// Event-type coverage recorder for event_coverage_gate.py. Mirrors the
+// per-pid shard pattern harness/coverage.ts and harness/mcp-coverage.ts use,
+// but is deliberately self-contained here (no harness/ edit) — there's no
+// generic "an event type was verified" concept those two recorders model
+// (one records exercised /v1 routes, the other advertised-vs-called MCP
+// tools), so bolting a THIRD concern onto shared infra for a single suite
+// isn't worth the coupling. A type is recorded ONLY after BOTH halves of the
+// dual assertion below (event-scoped fanout AND webhook-scoped delivery
+// attempt) pass — never on a bare "it showed up in listEvents", which would
+// under-prove emission exactly the way a bare matched_webhooks count would
+// (see the module doc above). Flushed once per suite-file process in
+// `after`, alongside the existing per-suite report write.
+const EVENT_COVERAGE_DIR = fileURLToPath(new URL("../reports/event-coverage/", import.meta.url));
+const verifiedEventTypes = new Set<string>();
+function recordVerified(type: string): void {
+  verifiedEventTypes.add(type);
+}
 
 // Capability probe: deployments may disable the event log and report
 // events_log_disabled. Skip only when both the 501 status and standard error code
@@ -307,6 +367,7 @@ test("emit: email.sent — real send emits the event and attempts a delivery", {
     assert.ok(del, `a delivery ATTEMPT for email.sent must appear on webhook ${hook.id}`);
     assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
     info(SUITE, "email.sent", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts} last_status=${del!.last_status_code}`);
+    recordVerified("email.sent");
   } finally {
     await delHook(hook.id);
     await delAgent(email);
@@ -342,6 +403,7 @@ test("emit: email.review_requested — held send emits the event and attempts a 
     assert.ok(del, `a delivery ATTEMPT for email.review_requested must appear on webhook ${hook.id}`);
     assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
     info(SUITE, "email.review_requested", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.review_requested");
   } finally {
     // Resolve the hold explicitly (reject), then delete (delete cascades anyway).
     if (heldId) await client.post(`/v1/reviews/${heldId}/reject`, { body: { reason: "e2e pending-emit cleanup" } });
@@ -385,6 +447,7 @@ test("emit: email.review_rejected — rejecting a hold emits the event and attem
     assert.ok(del, `a delivery ATTEMPT for email.review_rejected must appear on webhook ${hook.id}`);
     assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
     info(SUITE, "email.review_rejected", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.review_rejected");
   } finally {
     await delHook(hook.id);
     await delAgent(email);
@@ -425,6 +488,7 @@ test("emit: email.review_approved — approving a hold (to the simulator) emits 
     assert.ok(del, `a delivery ATTEMPT for email.review_approved must appear on webhook ${hook.id}`);
     assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
     info(SUITE, "email.review_approved", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.review_approved");
   } finally {
     // If approve didn't resolve the hold, reject it so nothing lingers.
     if (heldId && !resolved) {
@@ -483,6 +547,196 @@ test("emit: email.blocked — a gate-blocked send emits the event and attempts a
     assert.ok(del, `a delivery ATTEMPT for email.blocked must appear on webhook ${hook.id}`);
     assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
     info(SUITE, "email.blocked", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.blocked");
+  } finally {
+    await delHook(hook.id);
+    await delAgent(email);
+  }
+});
+
+// ---- email.received: self-send loopback (own address) ----
+// The inbound leg of a loopback self-send is evaluated through the SAME
+// agent-scoped inbound gate a real SMTP delivery would use
+// (internal/inboundscreen.EvaluateLoopback / internal/loopback.LoopbackGate):
+// sender = the agent's own address, resolvable, DMARC "pass" — the strongest
+// possible sender authentication. A fresh agent's default (open) inbound
+// policy never flags/holds, so the self-send delivers straight through and the
+// inbound copy fires email.received exactly as a real SMTP roundtrip would
+// (buildLoopbackReceivedEvent in selfsend.go). The event's own message_id is
+// the INBOUND copy's id — distinct from the send response's (outbound)
+// message_id — so correlation here is by the unique subject, same pattern as
+// email.blocked above.
+test("emit: email.received — self-send loopback emits the event and attempts a delivery", { skip }, async () => {
+  const email = await createAgent("received");
+  const hook = await createHook(["email.received"]);
+  const since = sinceNow();
+  try {
+    const subject = uniqueSubject("emit received");
+    const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
+      body: { to: [email], subject, text: "self-send loopback for email.received" },
+    });
+    // Loopback is LOCAL delivery — terminal synchronously: 200 sent (not the
+    // 202 accepted of an external/queued send).
+    assert.equal(send.status, 200, `self-send loopback expected 200 sent, got ${send.status}: ${send.raw.slice(0, 200)}`);
+    assert.equal(send.body?.status, "sent", "self-send loopback resolves synchronously to sent");
+
+    const ev = await pollEvent({ type: "email.received", agentId: email, since }, (e) => e.data.subject === subject);
+    assert.ok(ev, `email.received event for subject ${JSON.stringify(subject)} must appear in listEvents within 15s`);
+    assertEventShape(ev!, { type: "email.received", agentId: email });
+    assert.equal(ev!.data.direction, "inbound", "received payload carries direction=inbound");
+    assert.equal(ev!.data.delivered_to, email, "received payload's delivered_to is the receiving agent");
+
+    const fanout = await pollEventFanout(ev!.id);
+    assert.ok(fanout, `event ${ev!.id} must fan out (matched_webhooks>=1) within 15s`);
+    const del = await pollDelivery(hook.id, "email.received");
+    assert.ok(del, `a delivery ATTEMPT for email.received must appear on webhook ${hook.id}`);
+    assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
+    info(SUITE, "email.received", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.received");
+  } finally {
+    await delHook(hook.id);
+    await delAgent(email);
+  }
+});
+
+// ---- email.flagged: self-send loopback with an inbound gate the self-sender doesn't satisfy ----
+// LoopbackGate evaluates the agent's OWN inbound ingestion gate against its OWN
+// address (the loopback sender). An allowlist gate with an EMPTY allowlist
+// therefore always flags a self-send: the agent's own address is never
+// trivially a member of its own empty allowlist. action=flag means "deliver +
+// annotate" (screening_events.go: gate.Flagged && !res.Hold) — NOT the
+// review-hold path — so email.received still fires for the same inbound copy;
+// this test only asserts email.flagged.
+test("emit: email.flagged — an inbound gate the self-sender doesn't satisfy emits the event and attempts a delivery", { skip }, async () => {
+  const email = await createAgent("flagged");
+  // Full replace (PUT): an allowlist inbound gate with an empty allowlist,
+  // action=flag (deliver + annotate, never hold).
+  const prot = await client.put(`/v1/agents/${encodeURIComponent(email)}/protection`, {
+    body: {
+      inbound: { gate: { policy: "allowlist", action: "flag", allowlist: [] }, scan: {} },
+      outbound: { gate: {}, scan: {} },
+      holds: {},
+    },
+  });
+  if (prot.status !== 200) {
+    await delAgent(email);
+    throw new Error(`inbound flag-gate protection PUT failed: ${prot.status} ${prot.raw.slice(0, 200)}`);
+  }
+  const hook = await createHook(["email.flagged"]);
+  const since = sinceNow();
+  try {
+    const subject = uniqueSubject("emit flagged");
+    const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
+      body: { to: [email], subject, text: "self-send loopback for email.flagged" },
+    });
+    assert.equal(send.status, 200, `self-send loopback expected 200 sent, got ${send.status}: ${send.raw.slice(0, 200)}`);
+    assert.equal(send.body?.status, "sent", "a flag (not review) gate never holds — self-send loopback still resolves synchronously to sent");
+
+    const ev = await pollEvent({ type: "email.flagged", agentId: email, since }, (e) => e.data.subject === subject);
+    assert.ok(ev, `email.flagged event for subject ${JSON.stringify(subject)} must appear in listEvents within 15s`);
+    assertEventShape(ev!, { type: "email.flagged", agentId: email });
+    assert.equal(ev!.data.direction, "inbound", "flagged payload carries direction=inbound");
+    assert.equal(ev!.data.policy, "allowlist", "flagged payload echoes the triggering gate policy");
+    assert.equal(ev!.data.reason, "sender not on the agent's inbound allowlist", "flagged payload carries the gate's non-match reason");
+
+    const fanout = await pollEventFanout(ev!.id);
+    assert.ok(fanout, `event ${ev!.id} must fan out (matched_webhooks>=1) within 15s`);
+    const del = await pollDelivery(hook.id, "email.flagged");
+    assert.ok(del, `a delivery ATTEMPT for email.flagged must appear on webhook ${hook.id}`);
+    assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
+    info(SUITE, "email.flagged", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts}`);
+    recordVerified("email.flagged");
+  } finally {
+    await delHook(hook.id);
+    await delAgent(email);
+  }
+});
+
+// ---- email.failed: a real send the provider PERMANENTLY refuses ----
+// Staging's e2a-staging-smtp IAM identity scopes ses:SendRawEmail to a small
+// recipient allowlist (the mailbox simulator + a couple of test sinks) —
+// curl/live-probed 2026-07-25, a send outside that scope gets a SYNCHRONOUS
+// SMTP 554 "Access denied: ... not authorized to perform `ses:SendRawEmail`
+// ... identity/send-staging.e2a.dev". internal/outbound.IsPermanentSMTPError
+// treats any 5xx as permanent, so the outbound worker's SINGLE attempt
+// terminally fails the message (delivery.FailureSourceProvider,
+// reason_code=submission.provider_rejected) and fires email.failed —
+// deterministically, no retry wait needed. This is a REAL provider-classified
+// permanent failure, just one caused by staging's SES identity being
+// deliberately scoped for safety rather than by a bad mailbox. The recipient
+// uses the RFC 2606 `.invalid` TLD so it stays unroutable even if that IAM
+// scope ever widens.
+// ON PRODUCTION THIS TRIGGER DOES NOT APPLY, and that is the point.
+//
+// The refusal above is manufactured by staging's DELIBERATELY NARROW SES IAM
+// scope. Production's sending identity is not scoped that way — it may send to
+// any recipient — so the identical request is ACCEPTED, `email.sent` fires, and
+// the unroutable .invalid domain produces an asynchronous BOUNCE instead of a
+// synchronous submission rejection. Confirmed by live-probing production
+// 2026-07-26: the send returned accepted and only email.sent appeared.
+//
+// This inverts the usual tiering. Normally production can exercise what staging
+// cannot; here staging's *restrictive* IAM policy is itself the test fixture,
+// and production deliberately lacks it. There is no safe production equivalent:
+// a genuine SES Reject needs a virus payload (inappropriate to send from a real
+// sending identity, and it counts against reputation), and the other terminal
+// path — every recipient suppressed at send time — is unreachable because the
+// API pre-checks suppression and returns 422 before the message is ever queued.
+//
+// So each environment asserts the outcome that is REAL for it. Neither branch
+// skips: a skip here would let the suite report green while verifying nothing,
+// which is the exact failure mode this repo has already been bitten by.
+// email.failed is correspondingly allowlisted on production in
+// event_coverage_gate.py's PROD_ONLY_ALLOWLIST, and required on staging.
+const UNAUTHORIZED_RECIPIENT = "emit-failed-probe@nonexistent-e2e-events.invalid";
+const TARGET_IS_PROD = isProductionTarget(client.env.apiUrl);
+test("emit: email.failed — a provider-refused send emits the event and attempts a delivery", { skip }, async () => {
+  const email = await createAgent("failed");
+  const hook = await createHook(["email.failed"]);
+  const since = sinceNow();
+  try {
+    const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
+      body: { to: [UNAUTHORIZED_RECIPIENT], subject: uniqueSubject("emit failed"), text: "provider-refused send" },
+    });
+
+    if (TARGET_IS_PROD) {
+      // Production accepts the send — its identity is not recipient-scoped.
+      // Assert that real outcome rather than skipping: the request is accepted
+      // and the message is durably queued with an id.
+      assert.equal(send.status, 202, `send expected 202 accepted, got ${send.status}: ${send.raw.slice(0, 200)}`);
+      assert.equal(send.body?.status, "accepted", "production accepts the send — its sending identity is not recipient-scoped like staging's");
+      assert.ok(send.body?.message_id, "an accepted send carries a message id");
+      info(
+        SUITE,
+        "email.failed-not-triggerable-on-prod",
+        `production accepted the send to ${UNAUTHORIZED_RECIPIENT} (msg=${send.body!.message_id}) — staging's narrow ses:SendRawEmail scope is what manufactures the synchronous refusal, and prod deliberately lacks it. email.failed is allowlisted for prod in event_coverage_gate.py; it stays REQUIRED on staging.`,
+      );
+      return;
+    }
+
+    // The async pipeline always accepts first; the terminal failure arrives
+    // via the email.failed event (or GET .../messages/{id}), not the HTTP status.
+    assert.equal(send.status, 202, `send expected 202 accepted, got ${send.status}: ${send.raw.slice(0, 200)}`);
+    assert.equal(send.body?.status, "accepted", "the async pipeline accepts first regardless of the eventual outcome");
+    const messageId = send.body!.message_id!;
+
+    const ev = await pollEvent({ type: "email.failed", agentId: email, since }, (e) =>
+      e.message_id === messageId || e.data.message_id === messageId,
+    );
+    assert.ok(ev, `email.failed event for ${messageId} must appear in listEvents within 15s`);
+    assertEventShape(ev!, { type: "email.failed", agentId: email, messageId });
+    assert.equal(ev!.data.direction, "outbound", "failed payload carries direction=outbound");
+    assert.equal(ev!.data.reason_code, "submission.provider_rejected", "failed payload carries the provider-rejected reason code");
+    assert.ok(typeof ev!.data.reason === "string" && (ev!.data.reason as string).length > 0, "failed payload carries a non-empty reason diagnostic");
+    assert.deepEqual(ev!.data.to, [UNAUTHORIZED_RECIPIENT], "failed payload echoes the refused recipient");
+
+    const fanout = await pollEventFanout(ev!.id);
+    assert.ok(fanout, `event ${ev!.id} must fan out (matched_webhooks>=1) within 15s`);
+    const del = await pollDelivery(hook.id, "email.failed");
+    assert.ok(del, `a delivery ATTEMPT for email.failed must appear on webhook ${hook.id}`);
+    assert.ok(del!.attempts >= 1, `delivery attempted (attempts=${del!.attempts})`);
+    info(SUITE, "email.failed", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts} reason=${String(ev!.data.reason).slice(0, 80)}`);
+    recordVerified("email.failed");
   } finally {
     await delHook(hook.id);
     await delAgent(email);
@@ -632,31 +886,43 @@ test("events: unauthenticated listEvents / getEvent → 401", async () => {
 });
 
 // ---- Documented skips: events whose trigger is out of this suite's reach ----
-// These are NOT coverage gaps to be quietly ignored — each names WHY it can't be
-// driven from this API-only battery, and where the coverage actually
-// lives (or the concrete work that would unlock it), so a future reader doesn't
-// mistake a deliberate boundary for an oversight.
+// These are NOT coverage gaps to be quietly ignored — each names WHY it can't
+// be driven from this API-only battery on STAGING specifically, and where the
+// coverage actually lives (the planned prod-only differential suite, which
+// has the real infrastructure these need), so a future reader doesn't mistake
+// a deliberate boundary for an oversight. event_coverage_gate.py's ALLOWLIST
+// is the ENFORCED source of truth for these seven — these skip tests exist
+// only so the reason also shows up in this suite's own human-readable output.
 //
-// email.received — COVERED ELSEWHERE, deliberately not duplicated. It requires a
-//   real inbound SMTP delivery, which the prober's dedicated round-trip
-//   (inbound SMTP → webhook → HMAC) exercises every cycle. Re-triggering it here
-//   would need an MX-backed mailbox this
-//   API-only suite has no way to inject into; the prober is the right home.
-test("emit: email.received — covered by the prober's inbound SMTP round-trip (not duplicated here)", { skip: "email.received needs a real inbound SMTP delivery; it is covered by the dedicated prober round-trip, not re-triggered from this API-only suite" }, () => {});
-// email.delivered/bounced/complained — NOT DETERMINISTIC in a synchronous gate.
-//   These are SES delivery-feedback events that arrive asynchronously via
-//   SES→SNS→/webhooks/ses on an unbounded timeline; even the simulator's
-//   feedback can land seconds-to-minutes later, so polling for them inside a
-//   test window would trade the gate's determinism for flakiness. Belongs in
-//   the async SES delivery-feedback checks, not this emission battery.
-test("emit: email.delivered/bounced/complained — async SES delivery feedback (non-deterministic here)", { skip: "delivery-feedback events arrive async via SES→SNS→/webhooks/ses on an unbounded timeline; asserting them in a synchronous test window would make the gate flaky — out of scope for this emission battery" }, () => {});
-// domain.sending_verified/failed, domain.suppression_added — NEEDS REAL SES
-//   sending-identity (DKIM) provisioning against a custom domain, which SES
-//   verifies asynchronously over minutes-to-hours; a throwaway shared-domain
-//   agent has no sending identity to provision. Unlocking these means a
-//   dedicated custom-domain + sending-identity fixture, not an in-suite tweak.
-test("emit: domain.sending_verified/failed, domain.suppression_added — need real SES sending-identity provisioning", { skip: "domain.* events require real SES sending-identity (DKIM) provisioning on a custom domain, verified async over minutes-to-hours; a throwaway shared-domain agent has no sending identity — needs a dedicated custom-domain fixture, out of scope here" }, () => {});
+// email.delivered/bounced/complained — BLOCKED BY STAGING IAM SCOPE. These are
+//   SES delivery-feedback events that arrive asynchronously via
+//   SES→SNS→/webhooks/ses, normally triggerable via the SES mailbox
+//   simulator's dedicated bounce@/complaint@ addresses — but staging's
+//   e2a-staging-smtp IAM policy denies ses:SendRawEmail to exactly those
+//   addresses (the same IAM scoping that email.failed above exploits to fail
+//   an ordinary send), so this suite cannot even submit the message that
+//   would trigger the feedback. Even without that block, the feedback's
+//   unbounded async timeline would trade this gate's determinism for
+//   flakiness — a second, independent reason this belongs in the prod-only
+//   differential suite instead.
+test("emit: email.delivered/bounced/complained — async SES delivery feedback blocked by staging's IAM scope", { skip: "SES delivery-feedback events require the mailbox simulator's bounce@/complaint@ addresses, which staging's e2a-staging-smtp IAM policy denies ses:SendRawEmail to; even unblocked, the async SES→SNS timeline is non-deterministic in a synchronous gate — deferred to the prod-only differential suite" }, () => {});
+// domain.suppression_added, agent.suppression_added — INHERIT THE SAME BLOCKER.
+//   A suppression is created only by a real SES bounce/complaint (no
+//   createSuppression API — see coverage_gate.py's deleteSuppression
+//   allowlist entry for the account-wide analogue of this same gap), so both
+//   are unreachable for exactly the reason email.bounced/complained are above.
+test("emit: domain.suppression_added, agent.suppression_added — need a real bounce/complaint, blocked the same way", { skip: "a suppression is created only by a real SES bounce/complaint (no createSuppression API); staging's IAM policy blocks producing that bounce/complaint (see email.bounced/complained above) — deferred to the prod-only differential suite" }, () => {});
+// domain.sending_verified/failed — NEEDS REAL SES sending-identity (DKIM)
+//   provisioning against a custom domain, which SES verifies asynchronously
+//   over minutes-to-hours; a throwaway shared-domain e2e agent has no sending
+//   identity to provision. Unlocking these means a dedicated custom-domain +
+//   sending-identity fixture, not an in-suite tweak.
+test("emit: domain.sending_verified/failed — need real SES sending-identity provisioning", { skip: "domain.sending_* events require real SES sending-identity (DKIM) provisioning on a custom domain, verified async over minutes-to-hours; a throwaway shared-domain agent has no sending identity — needs a dedicated custom-domain fixture — deferred to the prod-only differential suite" }, () => {});
 
 after(async () => {
   await writeReport(`./reports/${SUITE}.json`);
+  if (verifiedEventTypes.size > 0) {
+    mkdirSync(EVENT_COVERAGE_DIR, { recursive: true });
+    writeFileSync(`${EVENT_COVERAGE_DIR}${process.pid}.json`, JSON.stringify([...verifiedEventTypes]));
+  }
 });
