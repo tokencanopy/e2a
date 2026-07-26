@@ -1930,7 +1930,12 @@ func FuzzParse(f *testing.F) {
 		}
 		n, err := parse(q)
 		if err != nil {
-			if fe, ok := err.(*Error); ok && fe.Pos >= len(q) && fe.Kind != ErrCap {
+			fe, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("error type %T, want *Error: %v", err, err)
+			}
+			// Positions are byte offsets and EOF (len(q)) is valid.
+			if fe.Pos < 0 || fe.Pos > len(q) {
 				t.Fatalf("error position %d out of range for %q", fe.Pos, q)
 			}
 			return
@@ -1972,13 +1977,15 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 package filterquery
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// TestInjectionInvariant: no user-supplied value text may appear in the
-// emitted SQL fragment — values travel exclusively as bound args. This is
-// the invariant that makes the emitter injection-proof by construction.
+// TestInjectionInvariant pins the complete SQL fragment independently of the
+// attack text and proves the exact original value travels only in a bound
+// argument. Substring checks are invalid here because attack strings such as
+// "'", "\", and "$1" also occur in the emitter's fixed SQL syntax.
 func TestInjectionInvariant(t *testing.T) {
 	attacks := []string{
 		`'`, `"`, `\`, `$1`, `'; DROP TABLE products; --`, `%`, `_`, `*`,
@@ -1990,34 +1997,15 @@ func TestInjectionInvariant(t *testing.T) {
 		q := `name:"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(a) + `"`
 		frag, args, err := Compile(q, toyRegistry(t), PostgresDialect{}, 1)
 		if err != nil {
-			continue // rejected input is also safe
+			t.Fatalf("Compile(%q): %v", q, err)
 		}
-		if strings.Contains(frag, a) && a != "*" {
-			t.Errorf("attack value %q appears in fragment: %s", a, frag)
+		if want := `(p.name ILIKE $1 ESCAPE '\')`; frag != want {
+			t.Errorf("attack value %q changed fragment:\ngot  %s\nwant %s", a, frag, want)
 		}
-		joined := ""
-		for _, arg := range args {
-			if s, ok := arg.(string); ok {
-				joined += s
-			}
-		}
-		if !strings.Contains(joined, a) && !strings.Contains(strings.Join(anyStrings(args), ""), a) {
-			t.Errorf("value %q vanished: frag=%s args=%v", a, frag, args)
+		if want := []any{"%" + a + "%"}; !reflect.DeepEqual(args, want) {
+			t.Errorf("attack value %q: args=%#v, want %#v", a, args, want)
 		}
 	}
-}
-
-func anyStrings(args []any) []string {
-	var out []string
-	for _, a := range args {
-		switch v := a.(type) {
-		case string:
-			out = append(out, v)
-		case []string:
-			out = append(out, v...)
-		}
-	}
-	return out
 }
 
 // TestIdentifierSafety: field names can never inject identifiers — unknown
@@ -2033,7 +2021,10 @@ func TestIdentifierSafety(t *testing.T) {
 }
 ```
 
-Note: the toy `name` Emit wraps values in `%…%` (substring), so attack text appears in *args*, which is correct and asserted; the fragment assertion (`!strings.Contains(frag, a)`) is the actual invariant. `*` is exempted from the fragment check because the toy field's wildcard-free ILIKE wrapper happens to be `%` — the check targets attacker bytes, not pattern syntax.
+Note: the toy `name` Emit wraps values in `%…%` (substring), so attack text
+appears in *args*, which is correct and asserted. The exact-fragment assertion
+is the SQL invariant; a substring assertion would produce false positives for
+attack values that happen to match fixed SQL syntax.
 
 - [ ] **Step 2: Run**
 
