@@ -5,6 +5,20 @@
 # Docker — no local Java needed.
 OAG_IMAGE := openapitools/openapi-generator-cli:v7.16.0
 
+# Base database URL for every DB-backed target. `?=` so an exported
+# E2A_TEST_DATABASE_URL WINS: these recipes used to pin it inline, which
+# overrides the caller's environment, so AGENTS.md's "give each runner its own
+# base database" could not actually be followed through make. Concurrent
+# sessions then shared one base and corrupted each other — an unmerged branch's
+# migration in a shared database produced ~40 spurious failures and deadlocks
+# that looked exactly like real regressions.
+#
+# The harness derives per-workspace + per-package names beneath this base
+# (internal/testutil.TestDBURL), so overriding is rarely needed now; it stays
+# available for pointing a run at an entirely separate server.
+E2A_TEST_DATABASE_URL ?= postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable
+export E2A_TEST_DATABASE_URL
+
 build:
 	go build -o bin/e2a ./cmd/e2a
 
@@ -17,18 +31,18 @@ run: build
 # not the core count — so N × pgxpool connections stay under Postgres's
 # default max_connections=100 on many-core dev machines.
 test:
-	E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable" go test -tags integration -p 4 ./...
+	go test -tags integration -p 4 ./...
 
 test-unit:
 	go test -short ./internal/outbound/ ./internal/relay/ ./internal/config/ ./internal/webhook/ ./internal/approvaltoken/ ./internal/unsubscribe/ ./internal/limits/ ./internal/httpapi/ ./internal/ratelimit/
 
 test-integration:
-	E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable" go test -p 4 ./internal/identity/ ./internal/agent/ ./internal/hitlworker/ ./internal/hitlnotify/ ./internal/limits/ ./internal/relay/ ./internal/sendramp/
+	go test -p 4 ./internal/identity/ ./internal/agent/ ./internal/hitlworker/ ./internal/hitlnotify/ ./internal/limits/ ./internal/relay/ ./internal/sendramp/
 
 test-e2e:
 	@packages="$$(find ./cmd ./internal ./tests -name '*_test.go' -exec grep -l '^//go:build integration$$' {} + | xargs -n 1 dirname | sort -u)"; \
 	test -n "$$packages"; \
-	E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable" go test -tags integration -p 4 $$packages
+	go test -tags integration -p 4 $$packages
 
 # cover writes a coverage profile across the internal packages (needs Postgres
 # on :5433, like `make test`; per-package DBs make the -p 4 parallel run safe).
@@ -36,7 +50,7 @@ test-e2e:
 # same gate via the vladopajic/go-test-coverage action.
 GO_TEST_COVERAGE_VERSION ?= v2.14.3
 cover:
-	E2A_TEST_DATABASE_URL="postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable" go test -p 4 -covermode=atomic -coverprofile=cover.out ./internal/...
+	go test -p 4 -covermode=atomic -coverprofile=cover.out ./internal/...
 
 cover-check: cover
 	go run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml

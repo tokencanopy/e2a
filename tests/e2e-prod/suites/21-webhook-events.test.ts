@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ApiClient } from "../harness/client.ts";
 import { isEventsLogDisabled } from "../harness/event-capability.ts";
+import { isProductionTarget } from "../harness/env.ts";
 import { uniqueSlug, uniqueSubject, holdAllOutbound } from "../harness/fixtures.ts";
 import { writeReport, info } from "../harness/report.ts";
 
@@ -665,7 +666,30 @@ test("emit: email.flagged — an inbound gate the self-sender doesn't satisfy em
 // deliberately scoped for safety rather than by a bad mailbox. The recipient
 // uses the RFC 2606 `.invalid` TLD so it stays unroutable even if that IAM
 // scope ever widens.
+// ON PRODUCTION THIS TRIGGER DOES NOT APPLY, and that is the point.
+//
+// The refusal above is manufactured by staging's DELIBERATELY NARROW SES IAM
+// scope. Production's sending identity is not scoped that way — it may send to
+// any recipient — so the identical request is ACCEPTED, `email.sent` fires, and
+// the unroutable .invalid domain produces an asynchronous BOUNCE instead of a
+// synchronous submission rejection. Confirmed by live-probing production
+// 2026-07-26: the send returned accepted and only email.sent appeared.
+//
+// This inverts the usual tiering. Normally production can exercise what staging
+// cannot; here staging's *restrictive* IAM policy is itself the test fixture,
+// and production deliberately lacks it. There is no safe production equivalent:
+// a genuine SES Reject needs a virus payload (inappropriate to send from a real
+// sending identity, and it counts against reputation), and the other terminal
+// path — every recipient suppressed at send time — is unreachable because the
+// API pre-checks suppression and returns 422 before the message is ever queued.
+//
+// So each environment asserts the outcome that is REAL for it. Neither branch
+// skips: a skip here would let the suite report green while verifying nothing,
+// which is the exact failure mode this repo has already been bitten by.
+// email.failed is correspondingly allowlisted on production in
+// event_coverage_gate.py's PROD_ONLY_ALLOWLIST, and required on staging.
 const UNAUTHORIZED_RECIPIENT = "emit-failed-probe@nonexistent-e2e-events.invalid";
+const TARGET_IS_PROD = isProductionTarget(client.env.apiUrl);
 test("emit: email.failed — a provider-refused send emits the event and attempts a delivery", { skip }, async () => {
   const email = await createAgent("failed");
   const hook = await createHook(["email.failed"]);
@@ -674,6 +698,22 @@ test("emit: email.failed — a provider-refused send emits the event and attempt
     const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
       body: { to: [UNAUTHORIZED_RECIPIENT], subject: uniqueSubject("emit failed"), text: "provider-refused send" },
     });
+
+    if (TARGET_IS_PROD) {
+      // Production accepts the send — its identity is not recipient-scoped.
+      // Assert that real outcome rather than skipping: the request is accepted
+      // and the message is durably queued with an id.
+      assert.equal(send.status, 202, `send expected 202 accepted, got ${send.status}: ${send.raw.slice(0, 200)}`);
+      assert.equal(send.body?.status, "accepted", "production accepts the send — its sending identity is not recipient-scoped like staging's");
+      assert.ok(send.body?.message_id, "an accepted send carries a message id");
+      info(
+        SUITE,
+        "email.failed-not-triggerable-on-prod",
+        `production accepted the send to ${UNAUTHORIZED_RECIPIENT} (msg=${send.body!.message_id}) — staging's narrow ses:SendRawEmail scope is what manufactures the synchronous refusal, and prod deliberately lacks it. email.failed is allowlisted for prod in event_coverage_gate.py; it stays REQUIRED on staging.`,
+      );
+      return;
+    }
+
     // The async pipeline always accepts first; the terminal failure arrives
     // via the email.failed event (or GET .../messages/{id}), not the HTTP status.
     assert.equal(send.status, 202, `send expected 202 accepted, got ${send.status}: ${send.raw.slice(0, 200)}`);
