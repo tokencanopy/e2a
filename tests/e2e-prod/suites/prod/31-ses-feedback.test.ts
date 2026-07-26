@@ -147,6 +147,31 @@ async function delHook(id: string): Promise<void> {
   await client.delete(`/v1/webhooks/${encodeURIComponent(id)}?confirm=DELETE`);
 }
 
+// Best-effort un-suppress. Unlike the ASSERTED deleteSuppression call inside
+// each test (which is real coverage of that operation's happy path), this
+// swallows every outcome — a 404 just means the address wasn't suppressed.
+//
+// It runs BOTH before the send and in the finally, and that pairing is the
+// point. These simulator addresses are shared, account-scoped state: once
+// suppressed, every later send to them is refused with 422
+// recipient_suppressed. A failure anywhere between the send and the asserted
+// delete used to leak the suppression, and because the very next run then
+// failed at its own send — before reaching any cleanup — the leak re-armed
+// itself. One red run permanently wedged the suite until someone deleted the
+// suppression by hand. Observed on the 2026-07-26 production run: bounce@ and
+// complaint@ were still suppressed from the previous night's failed run.
+//
+// The finally sweep stops a failure from leaking; the pre-send clear lets an
+// already-wedged account heal on its own next run. Neither alone is enough.
+async function clearSuppression(address: string): Promise<void> {
+  try {
+    await client.delete(`/v1/account/suppressions/${encodeURIComponent(address)}?confirm=DELETE`);
+  } catch {
+    // Network/transport failure during best-effort cleanup — never mask the
+    // real test failure this finally block is unwinding from.
+  }
+}
+
 // Generous async budget: SES → SNS → /webhooks/ses feedback has no
 // documented SLA and observably takes anywhere from a few seconds to over a
 // minute. A timeout returns null, which every caller turns into a hard
@@ -241,6 +266,9 @@ test("emit: email.bounced — a real permanent bounce emits the event, auto-supp
   const hook = await createHook(["email.bounced", "domain.suppression_added"]);
   const since = sinceNow();
   try {
+    // Heal a suppression leaked by an earlier failed run before it refuses
+    // this send with 422 recipient_suppressed. See clearSuppression's note.
+    await clearSuppression(BOUNCE_SIM);
     const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
       body: { to: [BOUNCE_SIM], subject: uniqueSubject("emit bounced"), text: "real send to trigger a hard bounce" },
     });
@@ -292,6 +320,7 @@ test("emit: email.bounced — a real permanent bounce emits the event, auto-supp
     );
     info(SUITE, "deleteSuppression", `real bounce suppression created and deleted cleanly for ${BOUNCE_SIM}`);
   } finally {
+    await clearSuppression(BOUNCE_SIM);
     await delHook(hook.id);
     await delAgent(email);
   }
@@ -303,6 +332,9 @@ test("emit: email.complained — a real complaint emits the event, auto-suppress
   const hook = await createHook(["email.complained", "domain.suppression_added"]);
   const since = sinceNow();
   try {
+    // Heal a suppression leaked by an earlier failed run before it refuses
+    // this send with 422 recipient_suppressed. See clearSuppression's note.
+    await clearSuppression(COMPLAINT_SIM);
     const send = await client.post<SendResult>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
       body: { to: [COMPLAINT_SIM], subject: uniqueSubject("emit complained"), text: "real send to trigger a complaint" },
     });
@@ -339,6 +371,7 @@ test("emit: email.complained — a real complaint emits the event, auto-suppress
     );
     info(SUITE, "deleteSuppression", `real complaint suppression created and deleted cleanly for ${COMPLAINT_SIM}`);
   } finally {
+    await clearSuppression(COMPLAINT_SIM);
     await delHook(hook.id);
     await delAgent(email);
   }
