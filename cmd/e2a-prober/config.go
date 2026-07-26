@@ -21,6 +21,7 @@ type config struct {
 	Listen        string        // serve/run-once bind addr for the sink + status server
 	Interval      time.Duration // serve loop period
 	Timeout       time.Duration // round-trip await timeout
+	MetricsBuild  string        // release/image identifier attached to every metric
 }
 
 func configFromEnv() config {
@@ -37,6 +38,7 @@ func configFromEnv() config {
 		Listen:        envOr("E2A_PROBE_LISTEN", ":8090"),
 		Interval:      envDuration("E2A_PROBE_INTERVAL", 30*time.Second),
 		Timeout:       envDuration("E2A_PROBE_TIMEOUT", 30*time.Second),
+		MetricsBuild:  os.Getenv("E2A_METRICS_BUILD"),
 	}
 }
 

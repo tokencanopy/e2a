@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,6 +31,7 @@ type Prom struct {
 	outAttemptDur     prometheus.Histogram
 	whAttempts        *prometheus.CounterVec
 	whAttemptDur      prometheus.Histogram
+	whTerminal        *prometheus.CounterVec
 	whExpiredPending  prometheus.Counter
 	whFanOutRescued   prometheus.Counter
 	whDeliveryRescued prometheus.Counter
@@ -83,9 +85,11 @@ var (
 	outAttemptSet = set("success", "temporary_failure", "permanent_failure")
 	whSet         = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
-	wsReasonSet = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
-	wsRejectSet = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
-	inboundSet  = set("processed", "noop", "failed_recipient_gone",
+	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
+	whScopeSet    = set("initial", "replay", "test", "unknown")
+	wsReasonSet   = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
+	wsRejectSet   = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
+	inboundSet    = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
 	stateSet = set("available", "running", "retryable", "scheduled")
@@ -115,7 +119,7 @@ func enum(allowed map[string]struct{}, v string) string {
 // queue wait can legitimately reach minutes under backlog, so it gets a
 // longer tail.
 var (
-	fastBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30}
+	fastBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, .75, 1, 2, 2.5, 5, 10, 30}
 	waitBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 15, 30, 60, 120, 300, 900, 3600}
 	// longBuckets spans seconds-to-days: outbound acceptance→terminal can
 	// legitimately reach the 72h retry horizon under a provider outage,
@@ -124,8 +128,42 @@ var (
 	longBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400, 259200}
 )
 
-func NewProm() *Prom {
+// NormalizeBuildLabel keeps operator-provided release identifiers safe and
+// bounded for use as a Prometheus label.
+func NormalizeBuildLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	const maxLen = 128
+	var b strings.Builder
+	b.Grow(min(len(value), maxLen))
+	for _, r := range value {
+		if b.Len() >= maxLen {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			strings.ContainsRune("._:+@/-", r):
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
+func NewProm(build string) *Prom {
 	reg := prometheus.NewRegistry()
+	registerer := prometheus.WrapRegistererWith(
+		prometheus.Labels{"build": NormalizeBuildLabel(build)},
+		reg,
+	)
 	p := &Prom{
 		reg:        reg,
 		routesSeen: make(map[string]struct{}),
@@ -181,6 +219,10 @@ func NewProm() *Prom {
 			Help:    "Webhook delivery attempt duration (HTTP POST to subscriber).",
 			Buckets: fastBuckets,
 		}),
+		whTerminal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_webhook_delivery_terminal_total",
+			Help: "Webhook deliveries reaching a terminal state, split by e2a- versus endpoint-attributable outcome and delivery scope.",
+		}, []string{"outcome", "scope"}),
 		whExpiredPending: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_webhook_deliveries_expired_pending_total",
 			Help: "Delivery rows that hit their retention TTL still pending and were marked failed by the janitor.",
@@ -278,11 +320,11 @@ func NewProm() *Prom {
 		}),
 	}
 
-	reg.MustRegister(
+	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
 		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur,
-		p.whAttempts, p.whAttemptDur, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
+		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
@@ -353,6 +395,12 @@ func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	// webhook_deleted / skipped_disabled — must not drag quantiles to 0).
 	if seconds >= 0 {
 		p.whAttemptDur.Observe(seconds)
+	}
+}
+
+func (p *Prom) WebhookTerminal(outcome, scope string, count int) {
+	if count > 0 {
+		p.whTerminal.WithLabelValues(enum(whTerminalSet, outcome), enum(whScopeSet, scope)).Add(float64(count))
 	}
 }
 

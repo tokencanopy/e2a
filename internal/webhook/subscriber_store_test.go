@@ -314,3 +314,41 @@ func TestMarkSubscriberFailedIfPending(t *testing.T) {
 		t.Errorf("MarkSubscriberFailedIfPending on missing row: %v, want nil", err)
 	}
 }
+
+func TestTerminalTransitionsReportOnlyTheFirstStateChange(t *testing.T) {
+	pool := testutil.TestDB(t)
+	istore := identity.NewStore(pool)
+	ss := webhook.NewSubscriberStore(pool)
+	ctx := context.Background()
+	user, err := istore.CreateOrGetUser(ctx, "wsd-transition@example.com", "Owner", "google-wsd-transition")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	wh, err := istore.CreateWebhook(ctx, user.ID, "https://example.com/hook", "", []string{"email.received"}, identity.WebhookFilters{})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	env := []byte(`{"type":"email.received"}`)
+
+	deliveredID, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+	if err != nil {
+		t.Fatalf("InsertPendingForTest delivered: %v", err)
+	}
+	if changed, err := ss.MarkDeliveredIfPending(ctx, deliveredID, 200); err != nil || !changed {
+		t.Fatalf("first MarkDeliveredIfPending = changed %v, err %v; want true/nil", changed, err)
+	}
+	if changed, err := ss.MarkDeliveredIfPending(ctx, deliveredID, 200); err != nil || changed {
+		t.Fatalf("duplicate MarkDeliveredIfPending = changed %v, err %v; want false/nil", changed, err)
+	}
+
+	failedID, err := ss.InsertPendingForTest(ctx, wh.ID, "email.received", env)
+	if err != nil {
+		t.Fatalf("InsertPendingForTest failed: %v", err)
+	}
+	if changed, err := ss.TransitionSubscriberFailedIfPending(ctx, failedID, 8, "exhausted", 0); err != nil || !changed {
+		t.Fatalf("first TransitionSubscriberFailedIfPending = changed %v, err %v; want true/nil", changed, err)
+	}
+	if changed, err := ss.TransitionSubscriberFailedIfPending(ctx, failedID, 8, "exhausted", 0); err != nil || changed {
+		t.Fatalf("duplicate TransitionSubscriberFailedIfPending = changed %v, err %v; want false/nil", changed, err)
+	}
+}

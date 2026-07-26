@@ -600,7 +600,7 @@ func TestLoadConfigMetricsDefaultsDisabled(t *testing.T) {
 func TestLoadConfigMetricsYAMLAndEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte("env: \"development\"\nmetrics:\n  enabled: true\n  listen_addr: \"127.0.0.1:9999\"\n"), 0644)
+	os.WriteFile(cfgPath, []byte("env: \"development\"\nmetrics:\n  enabled: true\n  listen_addr: \"127.0.0.1:9999\"\n  build: \"yaml-build\"\n"), 0644)
 
 	cfg, err := Load(cfgPath)
 	if err != nil {
@@ -609,10 +609,14 @@ func TestLoadConfigMetricsYAMLAndEnvOverrides(t *testing.T) {
 	if !cfg.Metrics.Enabled || cfg.Metrics.ListenAddr != "127.0.0.1:9999" {
 		t.Errorf("yaml metrics block not honored: %+v", cfg.Metrics)
 	}
+	if cfg.Metrics.Build != "yaml-build" {
+		t.Errorf("Metrics.Build = %q, want yaml-build", cfg.Metrics.Build)
+	}
 
 	// Env wins over yaml (repo convention).
 	t.Setenv("E2A_METRICS_ENABLED", "false")
 	t.Setenv("E2A_METRICS_LISTEN_ADDR", "127.0.0.1:9092")
+	t.Setenv("E2A_METRICS_BUILD", "v1.3.0")
 	cfg, err = Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
@@ -622,6 +626,9 @@ func TestLoadConfigMetricsYAMLAndEnvOverrides(t *testing.T) {
 	}
 	if cfg.Metrics.ListenAddr != "127.0.0.1:9092" {
 		t.Errorf("Metrics.ListenAddr = %q, want env override", cfg.Metrics.ListenAddr)
+	}
+	if cfg.Metrics.Build != "v1.3.0" {
+		t.Errorf("Metrics.Build = %q, want env override", cfg.Metrics.Build)
 	}
 }
 

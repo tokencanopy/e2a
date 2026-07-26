@@ -227,10 +227,21 @@ type attemptRec struct {
 type fakeMetrics struct {
 	attempts []attemptRec
 	firstTry []float64
+	terminal []terminalRec
+}
+
+type terminalRec struct {
+	outcome string
+	scope   string
+	count   int
 }
 
 func (f *fakeMetrics) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	f.attempts = append(f.attempts, attemptRec{outcome, statusClass, seconds})
+}
+
+func (f *fakeMetrics) WebhookTerminal(outcome, scope string, count int) {
+	f.terminal = append(f.terminal, terminalRec{outcome, scope, count})
 }
 
 func (f *fakeMetrics) WebhookDeliveryRescued(int) {} // not under test here
@@ -258,6 +269,17 @@ func TestDeliverWorker_Metrics_Delivered(t *testing.T) {
 	if got.outcome != "delivered" || got.statusClass != "2xx" {
 		t.Errorf("attempt = %+v, want delivered/2xx", got)
 	}
+	if len(fm.terminal) != 1 || fm.terminal[0] != (terminalRec{"delivered", "test", 1}) {
+		t.Errorf("terminal = %+v, want delivered/test exactly once", fm.terminal)
+	}
+	// A duplicate River execution sees the terminal row and must not count
+	// the same delivery a second time.
+	if err := w.Work(context.Background(), job(id, 2)); err != nil {
+		t.Fatalf("duplicate Work: %v", err)
+	}
+	if len(fm.terminal) != 1 {
+		t.Errorf("terminal emissions after duplicate = %+v, want exactly one", fm.terminal)
+	}
 }
 
 func TestDeliverWorker_Metrics_RetryableFailure(t *testing.T) {
@@ -271,6 +293,9 @@ func TestDeliverWorker_Metrics_RetryableFailure(t *testing.T) {
 	if got.outcome != "retryable_failure" || got.statusClass != "5xx" {
 		t.Errorf("attempt = %+v, want retryable_failure/5xx", got)
 	}
+	if len(fm.terminal) != 0 {
+		t.Errorf("terminal = %+v, want none before the delivery settles", fm.terminal)
+	}
 }
 
 func TestDeliverWorker_Metrics_Exhausted(t *testing.T) {
@@ -283,6 +308,9 @@ func TestDeliverWorker_Metrics_Exhausted(t *testing.T) {
 	got := fm.one(t)
 	if got.outcome != "exhausted" || got.statusClass != "5xx" {
 		t.Errorf("attempt = %+v, want exhausted/5xx", got)
+	}
+	if len(fm.terminal) != 1 || fm.terminal[0] != (terminalRec{"endpoint_failure", "test", 1}) {
+		t.Errorf("terminal = %+v, want endpoint_failure/test", fm.terminal)
 	}
 }
 
@@ -310,6 +338,9 @@ func TestDeliverWorker_Metrics_DeletedWebhook(t *testing.T) {
 	got := fm.one(t)
 	if got.outcome != "webhook_deleted" || got.statusClass != "none" || got.seconds >= 0 {
 		t.Errorf("attempt = %+v, want webhook_deleted/none/negative (no POST → no duration sample)", got)
+	}
+	if len(fm.terminal) != 1 || fm.terminal[0] != (terminalRec{"excluded", "test", 1}) {
+		t.Errorf("terminal = %+v, want excluded/test", fm.terminal)
 	}
 }
 
@@ -644,6 +675,9 @@ func TestDeliverWorker_TransientLookupErrorOnFinalAttemptTerminatesHonestly(t *t
 	if got.outcome != "exhausted" || got.statusClass != "none" || got.seconds >= 0 {
 		t.Errorf("attempt = %+v, want exhausted/none/negative — attempts exhausted with no POST, never webhook_deleted", got)
 	}
+	if len(fm.terminal) != 1 || fm.terminal[0] != (terminalRec{"e2a_failure", "test", 1}) {
+		t.Errorf("terminal = %+v, want e2a_failure/test", fm.terminal)
+	}
 }
 
 func TestDeliverWorker_WrappedWebhookNotFoundIsStillTerminal(t *testing.T) {
@@ -704,5 +738,31 @@ func TestDeliverWorker_RowLoadErrorOnFinalAttemptIsExhausted(t *testing.T) {
 	got := fm.one(t)
 	if got.outcome != "exhausted" || got.statusClass != "none" || got.seconds >= 0 {
 		t.Errorf("attempt = %+v, want exhausted/none/negative", got)
+	}
+	if len(fm.terminal) != 0 {
+		t.Errorf("terminal = %+v, want none because the terminal DB transition failed", fm.terminal)
+	}
+}
+
+func TestDeliverWorker_Metrics_TerminalScopeInitialAndReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		replay bool
+		scope  string
+	}{
+		{name: "initial", scope: "initial"},
+		{name: "replay", replay: true, scope: "replay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, sub, _, wh := seedEventLinked(t, "terminal-scope-"+tc.name, time.Second, tc.replay)
+			fm := &fakeMetrics{}
+			w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true, StatusCode: 200}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+			if err := w.Work(context.Background(), job(id, 1)); err != nil {
+				t.Fatalf("Work: %v", err)
+			}
+			if len(fm.terminal) != 1 || fm.terminal[0] != (terminalRec{"delivered", tc.scope, 1}) {
+				t.Errorf("terminal = %+v, want delivered/%s", fm.terminal, tc.scope)
+			}
+		})
 	}
 }

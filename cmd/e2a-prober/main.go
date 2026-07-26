@@ -74,6 +74,7 @@ env:
   E2A_PROBE_LISTEN          serve/run-once sink bind addr (default :8090)
   E2A_PROBE_INTERVAL        serve probe interval (default 30s)
   E2A_PROBE_TIMEOUT         round-trip await timeout (default 30s)
+  E2A_METRICS_BUILD         release/image identifier attached to every metric
 `)
 }
 
