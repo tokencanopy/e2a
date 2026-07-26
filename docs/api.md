@@ -139,7 +139,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | **Capacity — see the 402/429 split above** | | |
 | `limit_exceeded` | 402 | Plan **quota** (stock/flow cap); `details` is `LimitExceededDetails`. Not retryable. |
 | `rate_limited` | 429 | Request-**rate** limit; wait `details.retry_after_seconds` / `Retry-After`, then retry. |
-| `template_limit_reached`, `webhook_limit_reached` | 400 | Fixed per-account count caps (not plan quotas) — delete one first. |
+| `contact_limit_reached`, `template_limit_reached`, `webhook_limit_reached` | 400 | Fixed per-account count caps (not plan quotas) — delete one first. |
 | **Idempotency** | | |
 | `idempotency_in_flight` | 409 | Same key still executing — wait, then retry the byte-identical request to replay it. |
 | `idempotency_key_reuse` | 422 | Same key, different body — caller bug; never blind-retry. |
