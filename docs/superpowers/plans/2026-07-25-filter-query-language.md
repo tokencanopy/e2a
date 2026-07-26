@@ -1613,7 +1613,7 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
   {"name": "not or", "q": "NOT a:x OR b:y", "ast": "(or (not (a : x)) (b : y))", "error": "validate: unknown field"},
   {"name": "parens regroup", "q": "(name:a OR name:b) AND NOT tags:x", "ast": "(and (or (name : a) (name : b)) (not (tags : x)))", "sql": "(((p.name ILIKE $1 ESCAPE '\\') OR (p.name ILIKE $2 ESCAPE '\\')) AND (NOT (p.tags @> $3)))", "args": ["%a%", "%b%", ["x"]]},
   {"name": "ws around comparator", "q": "name : widget", "ast": "(name : widget)", "sql": "(p.name ILIKE $1 ESCAPE '\\')", "args": ["%widget%"]},
-  {"name": "quoted wildcard kept literal here", "q": "name:\"a*b\"", "ast": "(name = a*b)", "error": "none-marker-only"},
+  {"name": "wildcard per-field choice", "q": "name:\"a*b\"", "ast": "(name : a*b)", "sql": "(p.name ILIKE $1 ESCAPE '\\')", "args": ["%a*b%"]},
   {"name": "unknown field", "q": "color:red", "error": "validate: unknown field \"color\""},
   {"name": "bare term", "q": "hello", "error": "validate: bare term"},
   {"name": "op not allowed", "q": "tags=new", "error": "validate: operator \"=\" is not allowed"},
@@ -1629,17 +1629,10 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ]
 ```
 
-Note the `"quoted wildcard kept literal here"` vector: `name:"a*b"` parses as a Comparison but the toy `name` field treats `*` as an ordinary character (its Emit wraps in `%…%` without wildcard translation). Wildcard translation is a per-field choice — e2a's `from`/`subject` fields implement it (Task 10), the toy deliberately does not, so both behaviors are pinned. Remove the `"error": "none-marker-only"` key — that vector should instead carry `"ast"` only (no `sql` assertion needed... no — give it the full assertion: `"sql": "(p.name ILIKE $1 ESCAPE '\\')", "args": ["%a*b%"]`). Fix the vector to:
-
-```json
-  {"name": "wildcard per-field choice", "q": "name:\"a*b\"", "ast": "(name = a*b)", "error": "validate: operator \"=\" is not allowed... check toy name ops"},
-```
-
-Toy `name` allows `=`, so the correct vector is:
-
-```json
-  {"name": "wildcard per-field choice", "q": "name:\"a*b\"", "ast": "(name = a*b)", "sql": "(LOWER(p.name) = LOWER($1))", "args": ["a*b"]}
-```
+The wildcard vector deliberately proves wildcard interpretation belongs to
+the field adapter, not the parser: quotes do not change the `:` comparator,
+and the toy `name` field treats `*` literally inside its ILIKE pattern while
+e2a's later `from:`/`subject:` adapters translate it.
 
 - [ ] **Step 2: Write the failing runner**
 
@@ -1683,28 +1676,38 @@ func TestConformance(t *testing.T) {
 		t.Run(v.Name, func(t *testing.T) {
 			reg := toyRegistry(t)
 			n, perr := parse(v.Q)
-			if v.Error != "" {
-				kind, msg, _ := strings.Cut(v.Error, ": ")
-				_ = msg
-				if perr != nil {
-					requireErrorKind(t, perr, kind, v.Error)
-					return
+			kind, _ := splitVectorError(t, v.Error)
+			if perr != nil {
+				if v.Error == "" {
+					t.Fatalf("q=%q: unexpected parse error: %v", v.Q, perr)
 				}
-				verr := reg.Validate(n)
+				if kind != "parse" && kind != "cap" {
+					t.Fatalf("q=%q: failed during parse, want %s-stage error: %v", v.Q, kind, perr)
+				}
+				requireErrorKind(t, perr, kind, v.Error)
+				return
+			}
+			if v.AST != "" {
+				if got := sexpr(n); got != v.AST {
+					t.Fatalf("q=%q: AST = %s, want %s", v.Q, got, v.AST)
+				}
+			}
+			verr := reg.Validate(n)
+			if v.Error != "" {
+				if kind != "validate" {
+					t.Fatalf("q=%q: parsed successfully, want %s-stage error", v.Q, kind)
+				}
 				if verr == nil {
 					t.Fatalf("q=%q: want error matching %q, got none", v.Q, v.Error)
 				}
 				requireErrorKind(t, verr, kind, v.Error)
 				return
 			}
-			if perr != nil {
-				t.Fatalf("q=%q: parse: %v", v.Q, perr)
+			if v.AST == "" {
+				t.Fatalf("vector %q: successful vectors must assert AST", v.Name)
 			}
-			if got := sexpr(n); got != v.AST {
-				t.Fatalf("q=%q: AST = %s, want %s", v.Q, got, v.AST)
-			}
-			if err := reg.Validate(n); err != nil {
-				t.Fatalf("q=%q: validate: %v", v.Q, err)
+			if verr != nil {
+				t.Fatalf("q=%q: validate: %v", v.Q, verr)
 			}
 			if v.SQL == "" {
 				t.Fatalf("vector %q: successful vectors must assert SQL", v.Name)
@@ -1724,6 +1727,23 @@ func TestConformance(t *testing.T) {
 	}
 }
 
+func splitVectorError(t *testing.T, full string) (kind, msg string) {
+	t.Helper()
+	if full == "" {
+		return "", ""
+	}
+	kind, msg, _ = strings.Cut(full, ":")
+	kind = strings.TrimSpace(kind)
+	msg = strings.TrimSpace(msg)
+	switch kind {
+	case "parse", "validate", "cap":
+		return kind, msg
+	default:
+		t.Fatalf("unknown vector error kind %q in %q", kind, full)
+		return "", ""
+	}
+}
+
 // requireErrorKind asserts err is an *Error whose Kind matches the prefix
 // ("parse"/"validate"/"cap") and whose message contains the optional text
 // after ": ".
@@ -1733,14 +1753,29 @@ func requireErrorKind(t *testing.T, err error, kind, full string) {
 	if !ok {
 		t.Fatalf("err = %v (%T), want *Error", err, err)
 	}
-	wantKind := map[string]ErrKind{"parse": ErrParse, "validate": ErrValidate, "cap": ErrCap}[kind]
+	wantKind := vectorErrorKind(t, kind)
 	if fe.Kind != wantKind {
 		t.Fatalf("err kind = %v, want %v (%q)", fe.Kind, wantKind, full)
 	}
-	if _, msg, found := strings.Cut(full, ": "); found && msg != "" {
+	if _, msg := splitVectorError(t, full); msg != "" {
 		if !strings.Contains(fe.Msg, msg) {
 			t.Fatalf("err msg = %q, want substring %q", fe.Msg, msg)
 		}
+	}
+}
+
+func vectorErrorKind(t *testing.T, kind string) ErrKind {
+	t.Helper()
+	switch kind {
+	case "parse":
+		return ErrParse
+	case "validate":
+		return ErrValidate
+	case "cap":
+		return ErrCap
+	default:
+		t.Fatalf("unknown vector error kind %q", kind)
+		return ErrParse
 	}
 }
 
