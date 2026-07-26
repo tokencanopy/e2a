@@ -279,48 +279,6 @@ func TestDeleteEngagementLeavesContactAndConsent(t *testing.T) {
 	}
 }
 
-// TestPurgeEngagementsForAgentSpares Consent is the lifetime asymmetry that
-// makes engagements a separate table from suppressions, and the highest-value
-// test in this slice.
-//
-// agent_id IS the agent's email address, so anything left behind is inherited
-// by a recreated agent at the same address. For engagements that would mean a
-// resurrected campaign mailing touch 4 to investors it never contacted — so a
-// hard delete purges them. Suppressions must survive the same event, because
-// consent has to outlive deletion and recreation.
-func TestPurgeEngagementsForAgentSparesConsent(t *testing.T) {
-	pool := testutil.TestDB(t)
-	store := identity.NewStore(pool)
-	ctx := context.Background()
-	user := newContactOwner(t, store, "engpurge")
-	const agent = "raise@e.com"
-
-	enroll(t, store, user.ID, agent, "a@purge.vc", "touch3")
-	enroll(t, store, user.ID, agent, "b@purge.vc", "touch1")
-	if _, err := store.AddSuppression(ctx, user.ID, "a@purge.vc", "unsubscribed", "manual", ""); err != nil {
-		t.Fatalf("suppress: %v", err)
-	}
-
-	purged, err := store.PurgeEngagementsForAgent(ctx, user.ID, agent)
-	if err != nil || purged != 2 {
-		t.Fatalf("purge = %d err=%v, want 2", purged, err)
-	}
-
-	// A recreated agent at the SAME address inherits nothing operational...
-	got, err := store.ListEngagements(ctx, user.ID, agent, identity.EngagementFilter{}, 50, time.Time{}, "")
-	if err != nil {
-		t.Fatalf("list after purge: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("recreated agent inherited %d engagements — a dead campaign would resume", len(got))
-	}
-	// ...but every prior refusal still stands.
-	blocked, err := store.EffectiveSuppressions(ctx, user.ID, agent, []string{"a@purge.vc"})
-	if err != nil || len(blocked) != 1 {
-		t.Errorf("suppression lookup = %v err=%v — consent must survive agent deletion", blocked, err)
-	}
-}
-
 // TestRecordActivityNeverCreatesAnEngagement is the rule that keeps the
 // outreach list meaningful. An agent sends mail for all sorts of reasons —
 // replies, one-off notes, transactional messages — and if every recipient were
@@ -450,13 +408,13 @@ func TestRecordActivityIsScopedPerAgent(t *testing.T) {
 	}
 }
 
-// TestPurgeDeletedAgentsRemovesEngagements drives the REAL hard-delete path,
-// not the PurgeEngagementsForAgent helper.
+// TestPurgeDeletedAgentsRemovesEngagements drives the REAL hard-delete path
+// the janitor runs.
 //
-// That distinction is the point. The helper had a passing test and was never
-// called from anywhere, so the invariant it guarded — a recreated agent must
-// not inherit a dead campaign — was unenforced in production. This exercises
-// the path the janitor actually runs.
+// A helper that did this in isolation used to exist alongside it, green-tested
+// and called by nothing, while the production invariant went unenforced. The
+// helper is gone; this is the only test of the behaviour, and it reaches it the
+// way production does.
 //
 // It also pins the asymmetry: outreach state dies with the agent, consent
 // survives it.

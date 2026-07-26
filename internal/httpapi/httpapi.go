@@ -292,7 +292,6 @@ type Deps struct {
 	ListContacts  func(ctx context.Context, userID string, f identity.ContactFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.Contact, error)
 	UpdateContact func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
 	DeleteContact func(ctx context.Context, userID, address string) (bool, error)
-	CountContacts func(ctx context.Context, userID string) (int, error)
 	// Bulk import. ImportContacts applies one batch in a single transaction and
 	// returns a per-row outcome, so a malformed row fails alone rather than
 	// rejecting the upload. SuppressedAddresses lets the handler MARK rows the

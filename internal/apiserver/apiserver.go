@@ -212,7 +212,6 @@ func BuildDeps(p Params) httpapi.Deps {
 		ListContacts:  p.Store.ListContacts,
 		UpdateContact: p.Store.UpdateContact,
 		DeleteContact: p.Store.DeleteContact,
-		CountContacts: p.Store.CountContacts,
 
 		UpsertEngagement: p.Store.UpsertEngagement,
 		GetEngagement:    p.Store.GetEngagement,

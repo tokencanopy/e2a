@@ -289,23 +289,6 @@ func (s *Store) DeleteEngagement(ctx context.Context, userID, agentID, address s
 	return tag.RowsAffected() > 0, nil
 }
 
-// PurgeEngagementsForAgent removes every engagement belonging to an agent.
-//
-// Called from the janitor's agent hard-delete sweep, NOT on trash: a trashed
-// agent must get its outreach state back if it is restored. Suppressions are
-// deliberately left alone — consent survives agent deletion and recreation,
-// operational state does not. That asymmetry is the whole reason this function
-// exists rather than a cascade.
-func (s *Store) PurgeEngagementsForAgent(ctx context.Context, userID, agentID string) (int, error) {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM contact_engagements WHERE user_id = $1 AND agent_id = $2`,
-		userID, NormalizeEmail(agentID))
-	if err != nil {
-		return 0, err
-	}
-	return int(tag.RowsAffected()), nil
-}
-
 // RecordOutboundActivity updates an engagement's derived counters after a
 // message is accepted for delivery to that address.
 //

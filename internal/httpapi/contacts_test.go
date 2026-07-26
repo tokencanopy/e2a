@@ -153,11 +153,6 @@ func newContactsServer(t *testing.T, mutate func(*Deps, *contactFixture)) *httpt
 			delete(fixture.rows, k)
 			return ok, nil
 		},
-		CountContacts: func(_ context.Context, userID string) (int, error) {
-			fixture.mu.Lock()
-			defer fixture.mu.Unlock()
-			return len(fixture.rows), nil
-		},
 		ImportContacts: func(_ context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error) {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()

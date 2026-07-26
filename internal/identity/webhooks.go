@@ -48,26 +48,26 @@ type WebhookFilters struct {
 // secret during the 24h rotation grace window; slice 4 dual-signs
 // using both during that window so receivers can roll forward.
 type Webhook struct {
-	ID                          string          `json:"id"`
-	UserID                      string          `json:"user_id"`
-	URL                         string          `json:"url"`
-	Description                 string          `json:"description"`
-	Events                      []string        `json:"events"`
-	Filters                     WebhookFilters  `json:"filters"`
-	SigningSecret               string          `json:"signing_secret,omitempty"`
-	SigningSecretPrev           string          `json:"-"`
-	SigningSecretPrevExpiresAt  *time.Time      `json:"-"`
-	Enabled                     bool            `json:"enabled"`
-	AutoDisabledAt              *time.Time      `json:"auto_disabled_at,omitempty"`
-	CreatedAt                   time.Time       `json:"created_at"`
-	LastDeliveredAt             *time.Time      `json:"last_delivered_at,omitempty"`
+	ID                         string         `json:"id"`
+	UserID                     string         `json:"user_id"`
+	URL                        string         `json:"url"`
+	Description                string         `json:"description"`
+	Events                     []string       `json:"events"`
+	Filters                    WebhookFilters `json:"filters"`
+	SigningSecret              string         `json:"signing_secret,omitempty"`
+	SigningSecretPrev          string         `json:"-"`
+	SigningSecretPrevExpiresAt *time.Time     `json:"-"`
+	Enabled                    bool           `json:"enabled"`
+	AutoDisabledAt             *time.Time     `json:"auto_disabled_at,omitempty"`
+	CreatedAt                  time.Time      `json:"created_at"`
+	LastDeliveredAt            *time.Time     `json:"last_delivered_at,omitempty"`
 }
 
 // Sentinel errors so API handlers can map error → HTTP status with
 // errors.Is rather than string-matching.
 var (
-	ErrWebhookNotFound    = errors.New("webhook not found")
-	ErrWebhookCapReached  = errors.New("webhook count limit reached for this user")
+	ErrWebhookNotFound   = errors.New("webhook not found")
+	ErrWebhookCapReached = errors.New("webhook count limit reached for this user")
 )
 
 // generateWebhookID and generateWebhookSecret produce the prefixed IDs

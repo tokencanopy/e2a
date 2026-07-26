@@ -26,7 +26,6 @@ func TestContactDepsAreWired(t *testing.T) {
 		"ListContacts":        deps.ListContacts != nil,
 		"UpdateContact":       deps.UpdateContact != nil,
 		"DeleteContact":       deps.DeleteContact != nil,
-		"CountContacts":       deps.CountContacts != nil,
 		"ImportContacts":      deps.ImportContacts != nil,
 		"DeleteImportBatch":   deps.DeleteImportBatch != nil,
 		"SuppressedAddresses": deps.SuppressedAddresses != nil,

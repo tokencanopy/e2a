@@ -256,13 +256,6 @@ func (s *Store) MaxContactsForUser(ctx context.Context, userID string) (int, err
 	return *n, nil
 }
 
-// CountContacts returns the account's contact total, for entitlement checks.
-func (s *Store) CountContacts(ctx context.Context, userID string) (int, error) {
-	var n int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM contacts WHERE user_id = $1`, userID).Scan(&n)
-	return n, err
-}
-
 // nullableTime renders a zero time.Time as SQL NULL so a filter left unset is
 // skipped by the `IS NULL OR` guards above rather than matching year 1.
 func nullableTime(t time.Time) *time.Time {
