@@ -2197,7 +2197,7 @@ func createdQField() filterquery.FieldSpec {
 }
 ```
 
-Note: `from` emits on `m.sender` (not `COALESCE(header_from, sender)`) — deliberate, for exact parity with the flat `from` param (spec D2). The spec's worked example shows the COALESCE form; treat this as the corrected binding and amend the spec example when convenient (non-blocking).
+Note: `from` emits on `m.sender`, the settled binding because it exactly matches the flat `from` filter (spec D2).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
