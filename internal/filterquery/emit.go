@@ -2,6 +2,7 @@ package filterquery
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -17,7 +18,7 @@ func (r *Registry) Emit(n Node, d Dialect, start int) (string, []any, error) {
 	if r == nil {
 		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: registry is required"}
 	}
-	if d == nil {
+	if d == nil || isNilDialect(d) {
 		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: dialect is required"}
 	}
 	if start < 1 {
@@ -31,9 +32,28 @@ func (r *Registry) Emit(n Node, d Dialect, start int) (string, []any, error) {
 	return frag, ctx.args, nil
 }
 
+// isNilDialect catches typed nil values stored in a Dialect interface. A
+// simple d == nil check misses these and would let EmitCtx.PH panic when it
+// calls Placeholder.
+func isNilDialect(d Dialect) bool {
+	v := reflect.ValueOf(d)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 	switch t := n.(type) {
 	case *And:
+		if t == nil {
+			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *And"}
+		}
+		if len(t.Terms) == 0 {
+			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: cannot emit empty AND"}
+		}
 		parts := make([]string, len(t.Terms))
 		for i, x := range t.Terms {
 			s, err := r.emitNode(x, ctx)
@@ -44,6 +64,12 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 		}
 		return "(" + strings.Join(parts, " AND ") + ")", nil
 	case *Or:
+		if t == nil {
+			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Or"}
+		}
+		if len(t.Terms) == 0 {
+			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: cannot emit empty OR"}
+		}
 		parts := make([]string, len(t.Terms))
 		for i, x := range t.Terms {
 			s, err := r.emitNode(x, ctx)
@@ -54,20 +80,30 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 		}
 		return "(" + strings.Join(parts, " OR ") + ")", nil
 	case *Not:
+		if t == nil {
+			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Not"}
+		}
 		s, err := r.emitNode(t.X, ctx)
 		if err != nil {
 			return "", err
 		}
 		return "(NOT " + s + ")", nil
 	case *Comparison:
+		if t == nil {
+			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Comparison"}
+		}
 		if t.validatedBy != r {
 			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: comparison was not validated by this registry"}
 		}
-		spec, ok := r.fields[t.Field]
-		if !ok {
-			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: validated field is missing from registry"}
+		copy := *t
+		if err := r.Validate(&copy); err != nil {
+			return "", err
 		}
-		leaf, err := spec.Emit(t, ctx)
+		spec, ok := r.fields[copy.Field]
+		if !ok {
+			return "", &Error{Kind: ErrValidate, Pos: copy.At, Msg: "filterquery: validated field is missing from registry"}
+		}
+		leaf, err := spec.Emit(&copy, ctx)
 		if err != nil {
 			return "", err
 		}

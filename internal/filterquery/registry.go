@@ -13,7 +13,9 @@ type Dialect interface {
 }
 
 // FieldSpec describes one filterable field: which operators it accepts, how
-// raw values coerce, and how a validated comparison emits SQL.
+// raw values coerce, and how a validated comparison emits SQL. Coerce and
+// Emit must be deterministic and safe for concurrent calls: emission
+// re-coerces a private comparison copy on every call.
 type FieldSpec struct {
 	Name string
 	Ops  []string // allowed operators, e.g. []string{":"}
