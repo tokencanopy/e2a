@@ -568,7 +568,7 @@ func main() {
 	} else {
 		// Issuer = api_url (defaults to public_url). fosite stamps it into
 		// token `iss` and the RFC 9207 response, so it must match what
-		// discovery advertises and what agentAuthIssuer signs/verifies.
+		// discovery advertises and what oauthIssuer signs/verifies.
 		oauthProvider, err := oauth.NewProvider(oauthStorage, cfg.HTTP.APIURL, []byte(cfg.Signing.HMACSecret))
 		if err != nil {
 			log.Fatalf("[oauth] provider wiring failed: %v", err)

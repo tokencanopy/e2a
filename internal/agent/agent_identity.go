@@ -30,13 +30,6 @@ import (
 // falling through to fosite's authorization_code/refresh_token handling.
 const jwtBearerGrantType = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 
-// agentAuthIssuer is the iss/aud bound into every minted token — the API base
-// URL (apiURL, which defaults to publicURL), trailing slash trimmed so it's
-// byte-stable with the discovery doc's issuer. It signs AND verifies, so a
-// deployment that changes api_url re-keys its token audience: tokens minted
-// under the old issuer stop validating and clients must re-auth.
-func (a *API) agentAuthIssuer() string { return strings.TrimRight(a.apiURL, "/") }
-
 // agentAuthReady reports whether the agent-identity surface is usable: a signing
 // key AND a public URL (needed for iss/aud) must both be configured.
 func (a *API) agentAuthReady() bool {
@@ -83,7 +76,7 @@ func (a *API) handleAgentIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assertion, exp, err := a.signer.SignIdentityAssertion(ag.ID, identity.ScopeAgent, ag.AssertionVersion, a.agentAuthIssuer())
+	assertion, exp, err := a.signer.SignIdentityAssertion(ag.ID, identity.ScopeAgent, ag.AssertionVersion, a.oauthIssuer())
 	if err != nil {
 		writeOAuthError(w, r, http.StatusInternalServerError, "server_error", "failed to mint identity assertion")
 		return
@@ -120,7 +113,7 @@ func (a *API) handleJWTBearerGrant(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, r, http.StatusBadRequest, "invalid_request", "assertion is required")
 		return
 	}
-	claims, err := a.signer.VerifyToken(assertion, agentauth.TypIdentityAssertion, a.agentAuthIssuer())
+	claims, err := a.signer.VerifyToken(assertion, agentauth.TypIdentityAssertion, a.oauthIssuer())
 	if err != nil {
 		writeOAuthError(w, r, http.StatusBadRequest, "invalid_grant", "identity assertion is invalid or expired")
 		return
@@ -137,7 +130,7 @@ func (a *API) handleJWTBearerGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, exp, err := a.signer.SignAccessToken(ag.ID, identity.ScopeAgent, ag.AssertionVersion, a.agentAuthIssuer())
+	token, exp, err := a.signer.SignAccessToken(ag.ID, identity.ScopeAgent, ag.AssertionVersion, a.oauthIssuer())
 	if err != nil {
 		writeOAuthError(w, r, http.StatusInternalServerError, "server_error", "failed to mint access token")
 		return
@@ -160,7 +153,7 @@ func (a *API) resolveAgentAccessToken(r *http.Request, bearer string) (*identity
 	if !a.agentAuthReady() || !looksLikeJWT(bearer) {
 		return nil, false, nil
 	}
-	claims, err := a.signer.VerifyToken(bearer, agentauth.TypAccessToken, a.agentAuthIssuer())
+	claims, err := a.signer.VerifyToken(bearer, agentauth.TypAccessToken, a.oauthIssuer())
 	if err != nil {
 		// It parses as a JWT but isn't a valid e2a access token — reject
 		// rather than fall through (a tampered/expired token is a 401, not an

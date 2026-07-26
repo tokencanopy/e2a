@@ -539,6 +539,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: signing.hmac_secret is %d bytes; production requires at least %d (run `openssl rand -hex 32` to generate)", len(c.Signing.HMACSecret), minHMACSecretBytes)
 		}
 	}
+	if c.HTTP.APIURL != "" {
+		apiURL, err := absoluteHTTPURL(c.HTTP.APIURL)
+		if err != nil || apiURL.RawQuery != "" || apiURL.Fragment != "" {
+			return errors.New("config: http.api_url must be an absolute http(s) URL without userinfo, query, or fragment")
+		}
+	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)
 	}
