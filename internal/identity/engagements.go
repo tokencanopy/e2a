@@ -300,15 +300,21 @@ func (s *Store) PurgeEngagementsForAgent(ctx context.Context, userID, agentID st
 // (UpsertEngagement or an import); this only maintains the record of one that
 // already exists.
 //
-// first_outbound_at is set once and never moved, because `replied` is defined
-// against it: moving it would silently un-reply everyone who had answered.
+// first_outbound_at holds the EARLIEST send, not merely the first one recorded.
+// COALESCE alone would pin whichever event landed first, so an out-of-order
+// arrival — normal under at-least-once delivery and retries — could fix it to a
+// LATER time than the true first contact. That matters because `replied` is
+// last_inbound_at > first_outbound_at: pin it too late and a genuine reply is
+// judged as no reply at all, leaving a contact who already answered in the
+// follow-up queue to be chased again. LEAST makes the column converge on the
+// earliest send regardless of arrival order.
 //
 // Returns whether a row was updated, so callers can distinguish "no engagement"
 // from a failure.
 func (s *Store) RecordOutboundActivity(ctx context.Context, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE contact_engagements
-		    SET first_outbound_at    = COALESCE(first_outbound_at, $4),
+		    SET first_outbound_at    = LEAST(COALESCE(first_outbound_at, $4), $4),
 		        last_outbound_at     = GREATEST(COALESCE(last_outbound_at, $4), $4),
 		        outbound_count       = outbound_count + 1,
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
