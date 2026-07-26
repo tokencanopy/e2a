@@ -113,6 +113,7 @@ func (r *Registry) Validate(n Node) error {
 			return &Error{Kind: ErrValidate, Pos: t.At, Msg: fmt.Sprintf("invalid value for %q: %s", t.Field, err)}
 		}
 		t.Value = v
+		t.validatedBy = r
 	default:
 		return &Error{Kind: ErrValidate, Pos: -1, Msg: fmt.Sprintf("filterquery: unknown node type %T", n)}
 	}

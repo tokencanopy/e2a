@@ -1384,9 +1384,35 @@ func TestEmitWithoutValidateFails(t *testing.T) {
 		t.Error("want error emitting unvalidated comparison")
 	}
 }
+
+func TestEmitRejectsInvalidContextAndRegistryMismatch(t *testing.T) {
+	reg := toyRegistry(t)
+	expr, err := Parse(`name:a`, reg)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, _, err := expr.Emit(nil, 1); err == nil {
+		t.Error("nil dialect: want error")
+	}
+	if _, _, err := expr.Emit(PostgresDialect{}, 0); err == nil {
+		t.Error("start=0: want error")
+	}
+	other := toyRegistry(t)
+	if _, _, err := other.Emit(expr.root, PostgresDialect{}, 1); err == nil {
+		t.Error("different registry: want validation-provenance error")
+	}
+	if _, err := Parse(`name:a`, nil); err == nil {
+		t.Error("nil registry: want error")
+	}
+}
 ```
 
-For the last test to pass, `Registry.Emit` must reject a `Comparison` whose `Value` was never coerced. Enforce with a `validated bool` field on `Comparison` set by `Validate` and checked before `spec.Emit`. Add `validated bool` to `Comparison` in `ast.go`, set `t.validated = true` in `Validate`, and in `emitNode`'s `*Comparison` case: `if !t.validated { return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: comparison not validated — run Registry.Validate first"} }`.
+For the last tests to pass, `Registry.Emit` must reject a `Comparison` that
+was never coerced or was validated by a different registry. Enforce with an
+unexported `validatedBy *Registry` field on `Comparison`, set by `Validate`,
+and checked before the field emitter runs. This preserves `Expr`'s
+concurrent-Emit claim and prevents a mismatched registry/type assertion from
+panicking.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1398,8 +1424,8 @@ Expected: FAIL — undefined `Compile`, `Parse`, `Expr`, `PostgresDialect`.
 Add to `Comparison` in `ast.go`:
 
 ```go
-	Value     any  // coerced value, set by Validate
-	validated bool // set by Validate; Emit refuses unvalidated comparisons
+	Value       any       // coerced value, set by Validate
+	validatedBy *Registry // set by Validate; Emit requires the same registry
 ```
 
 (Adjust the existing `Value any` line and doc comment accordingly.)
@@ -1407,7 +1433,7 @@ Add to `Comparison` in `ast.go`:
 In `registry.go` `Validate`, `*Comparison` case, after `t.Value = v` add:
 
 ```go
-		t.validated = true
+		t.validatedBy = r
 ```
 
 `internal/filterquery/emit.go`:
@@ -1429,6 +1455,15 @@ func (PostgresDialect) Placeholder(n int) string { return fmt.Sprintf("$%d", n) 
 // its bound args. Placeholders are numbered from start (1-based index of the
 // next free parameter in the caller's query).
 func (r *Registry) Emit(n Node, d Dialect, start int) (string, []any, error) {
+	if r == nil {
+		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: registry is required"}
+	}
+	if d == nil {
+		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: dialect is required"}
+	}
+	if start < 1 {
+		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: placeholder start must be at least 1"}
+	}
 	ctx := &EmitCtx{dialect: d, next: start}
 	frag, err := r.emitNode(n, ctx)
 	if err != nil {
@@ -1466,11 +1501,18 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 		}
 		return "(NOT " + s + ")", nil
 	case *Comparison:
-		if !t.validated {
-			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: comparison not validated — run Registry.Validate first"}
+		if t.validatedBy != r {
+			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: comparison was not validated by this registry"}
 		}
-		spec := r.fields[t.Field] // presence guaranteed by Validate
-		return spec.Emit(t, ctx)
+		spec, ok := r.fields[t.Field]
+		if !ok {
+			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: validated field is missing from registry"}
+		}
+		leaf, err := spec.Emit(t, ctx)
+		if err != nil {
+			return "", err
+		}
+		return "(" + leaf + ")", nil
 	default:
 		return "", &Error{Kind: ErrValidate, Pos: -1, Msg: fmt.Sprintf("filterquery: cannot emit node type %T", n)}
 	}
@@ -1489,6 +1531,9 @@ type Expr struct {
 func Parse(q string, reg *Registry) (*Expr, error) {
 	if strings.TrimSpace(q) == "" {
 		return nil, nil
+	}
+	if reg == nil {
+		return nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: registry is required"}
 	}
 	n, err := parse(q)
 	if err != nil {

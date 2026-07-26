@@ -30,14 +30,16 @@ type Not struct {
 func (n *Not) Pos() int { return n.At }
 
 // Comparison is `field op value`. Value holds the coerced value and is set
-// by Registry.Validate; before validation only Raw is meaningful.
+// by Registry.Validate; before validation only Raw is meaningful. A
+// comparison may emit only through the registry that validated it.
 type Comparison struct {
-	Field  string // dotted path, e.g. "label" or "metrics.latency"
-	Op     string // one of ":", "=", "!=", "<", "<=", ">", ">="
-	Raw    string // value text (unescaped contents for quoted strings)
-	Quoted bool   // value was a quoted string
-	Value  any    // coerced value, set by Validate
-	At     int
+	Field       string // dotted path, e.g. "label" or "metrics.latency"
+	Op          string // one of ":", "=", "!=", "<", "<=", ">", ">="
+	Raw         string // value text (unescaped contents for quoted strings)
+	Quoted      bool   // value was a quoted string
+	Value       any    // coerced value, set by Validate
+	validatedBy *Registry
+	At          int
 }
 
 func (n *Comparison) Pos() int { return n.At }
