@@ -87,7 +87,8 @@ Five files, five stages:
 - **`Dialect`** — `Placeholder(n int) string` (`$n` Postgres built-in),
   identifier quoting, case-insensitive-match operator (ILIKE vs LOWER()).
 - e2a's registry lives in `internal/identity` (`messagesFieldRegistry()`):
-  maps `label` → `m.labels` ops, `from` → `COALESCE(m.header_from, m.sender)`,
+  maps `label` → `m.labels` ops, `from` → `m.sender` (matching the existing
+  flat `from` filter),
   `created` → `m.created_at`, `has:attachment` → attachment JSONB length.
 - CI guard: a tiny test asserting `go list -deps ./internal/filterquery`
   contains no `internal/identity` (or any non-stdlib) import.
@@ -100,7 +101,7 @@ Five files, five stages:
 | `from` | `:` `=` `!=` | `:` = case-insensitive substring (ILIKE) on `COALESCE(header_from, sender)` — identical to flat `from`. `=`/`!=` = case-insensitive exact. |
 | `subject` | `:` `=` `!=` | Same pattern on `subject`. NULL subjects never match `:`/`=` (SQL NULL semantics; document it). |
 | `has` | `:` | Value `attachment` only: `has:attachment`. |
-| `created` | `=` `!=` `<` `<=` `>` `>=` | On `created_at`. Values: RFC3339 or `YYYY-MM-DD`. A date-only value with `=`/`!=` coerces to that UTC day's range `[midnight, next-midnight)` (date equality must mean "that day", not "that exact midnight second"); with range operators it coerces to midnight UTC; full RFC3339 values are exact. |
+| `created` | `=` `!=` `<` `<=` `>` `>=` | On `created_at`. Values: RFC3339 or `YYYY-MM-DD`. A date-only value denotes that whole UTC day: `=`/`!=` test membership in that day's `[midnight, next-midnight)` range, `<=` includes the whole day, and `>` begins at the next midnight. Full RFC3339 values are exact. |
 
 Everything else (`to:`, `body:`, bare text, …) parses but fails validation:
 `unknown field 'to' — v1 supports: label, from, subject, has, created`.
@@ -110,9 +111,9 @@ user `%`, `_`, `\` are escaped and the predicate carries `ESCAPE '\'`.
 
 ## Emission pipeline (worked example)
 
-Input: `label:urgent OR (from:alerts AND NOT has:attachment) created:>=2026-07-01`
+Input: `label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`
 
-AST (precedence: implicit AND > OR):
+AST (precedence: NOT > OR > implicit AND > explicit AND):
 
 ```
 And(
@@ -125,7 +126,7 @@ Emitted (store already bound `$1`=agent_id, `$2..$3` flat filters):
 
 ```sql
 AND ( ( (m.labels @> $4)
-        OR ( (COALESCE(m.header_from, m.sender) ILIKE $5 ESCAPE '\')
+        OR ( (m.sender ILIKE $5 ESCAPE '\')
              AND NOT (COALESCE(jsonb_array_length(m.attachments_json),0) > 0) ) )
       AND (m.created_at >= $6) )
 -- args += []string{"urgent"}, "%alerts%", 2026-07-01T00:00:00Z
