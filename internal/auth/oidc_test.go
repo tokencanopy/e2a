@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -61,11 +62,16 @@ type oidcFixture struct {
 	tokenStatus       int
 	tokenCalls        int
 	expectedChallenge string
+	redirectURL       string
 }
 
 func setupOIDC(t *testing.T) *oidcFixture {
 	t.Helper()
+	return setupOIDCForApp(t, testOIDCRedirectURL, "http://app.example.com")
+}
 
+func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
+	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
@@ -81,13 +87,12 @@ func setupOIDC(t *testing.T) *oidcFixture {
 		includeIDToken:   true,
 		includeUserID:    true,
 		userIDClaimValue: "",
+		redirectURL:      redirectURL,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", fx.handleDiscovery)
-	mux.HandleFunc("/authorize", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "authorization is exercised as a redirect only", http.StatusNotImplemented)
-	})
+	mux.HandleFunc("/authorize", fx.handleAuthorize)
 	mux.HandleFunc("/token", fx.handleToken)
 	mux.HandleFunc("/jwks", fx.handleJWKS)
 	fx.server = httptest.NewServer(mux)
@@ -99,10 +104,10 @@ func setupOIDC(t *testing.T) *oidcFixture {
 		IssuerURL:    fx.server.URL,
 		ClientID:     testOIDCClientID,
 		ClientSecret: testOIDCClientSecret,
-		RedirectURL:  testOIDCRedirectURL,
+		RedirectURL:  redirectURL,
 		UserIDClaim:  testOIDCUserIDClaim,
 	}
-	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, "http://app.example.com",
+	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, baseURL,
 		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff))
 	if err != nil {
 		t.Fatalf("NewOIDCAuth: %v", err)
@@ -116,6 +121,29 @@ func setupOIDC(t *testing.T) *oidcFixture {
 	// synchronous completion.
 	waitOIDCReady(t, fx.oidc)
 	return fx
+}
+
+func (fx *oidcFixture) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("client_id") != testOIDCClientID ||
+		query.Get("response_type") != "code" ||
+		query.Get("redirect_uri") != fx.redirectURL {
+		http.Error(w, "invalid authorization request", http.StatusBadRequest)
+		return
+	}
+
+	callbackURL, err := url.Parse(query.Get("redirect_uri"))
+	if err != nil {
+		http.Error(w, "invalid redirect URI", http.StatusBadRequest)
+		return
+	}
+	fx.expectedChallenge = query.Get("code_challenge")
+	fx.tokenNonce = query.Get("nonce")
+	callbackQuery := callbackURL.Query()
+	callbackQuery.Set("code", "valid-code")
+	callbackQuery.Set("state", query.Get("state"))
+	callbackURL.RawQuery = callbackQuery.Encode()
+	http.Redirect(w, r, callbackURL.String(), http.StatusFound)
 }
 
 // waitOIDCReady bound-polls oa until background issuer discovery has
@@ -238,7 +266,12 @@ type loginTransaction struct {
 
 func beginOIDCLogin(t *testing.T, fx *oidcFixture) loginTransaction {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
+	return beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login")
+}
+
+func beginOIDCLoginRaw(t *testing.T, fx *oidcFixture, target string) loginTransaction {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
 	w := httptest.NewRecorder()
 	fx.oidc.HandleLogin(w, req)
 	if w.Code != http.StatusFound {
@@ -754,5 +787,403 @@ func TestOIDCLoginUsesSecureCookiesInProduction(t *testing.T) {
 		if strings.HasPrefix(cookie.Name, "e2a_oidc_") && !cookie.Secure {
 			t.Errorf("production transaction cookie %s is not Secure", cookie.Name)
 		}
+	}
+}
+
+// decodeResumeCookieValue decodes the e2a_oidc_resume transaction cookie the
+// way the callback does, so tests can assert what HandleLogin stashed.
+func decodeResumeCookieValue(t *testing.T, cookie *http.Cookie) struct {
+	TransactionState string `json:"s"`
+	ReturnTo         string `json:"rt"`
+	CLICallback      string `json:"cb"`
+	CLIState         string `json:"cs"`
+} {
+	t.Helper()
+	var resume struct {
+		TransactionState string `json:"s"`
+		ReturnTo         string `json:"rt"`
+		CLICallback      string `json:"cb"`
+		CLIState         string `json:"cs"`
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		t.Fatalf("resume cookie is not base64url: %v", err)
+	}
+	if err := json.Unmarshal(raw, &resume); err != nil {
+		t.Fatalf("resume cookie is not JSON: %v", err)
+	}
+	return resume
+}
+
+// TestOIDCLoginCarriesReturnToInResumeCookie mirrors the legacy door's
+// TestHandleLogin_EncodesReturnToInOAuthState: a valid return_to survives
+// the round trip for HandleCallback to honor, without leaking into the
+// provider-facing authorize URL (the OIDC state stays an opaque random
+// string; the value rides the HttpOnly resume cookie instead).
+func TestOIDCLoginCarriesReturnToInResumeCookie(t *testing.T) {
+	fx := setupOIDC(t)
+
+	returnTo := "/oauth2/authorize?client_id=mcp_abc&response_type=code&state=xyz"
+	tx := beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape(returnTo))
+
+	if strings.Contains(tx.state, "oauth2") {
+		t.Errorf("return_to leaked into the OIDC state parameter: %q", tx.state)
+	}
+	cookie := findCookie(tx.cookies, "e2a_oidc_resume")
+	if cookie == nil {
+		t.Fatal("resume cookie not set for return_to login")
+	}
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge <= 0 {
+		t.Errorf("unsafe resume cookie: %+v", cookie)
+	}
+	resume := decodeResumeCookieValue(t, cookie)
+	if resume.TransactionState != tx.state {
+		t.Errorf("resume transaction state = %q, want %q", resume.TransactionState, tx.state)
+	}
+	if resume.ReturnTo != returnTo {
+		t.Errorf("resume return_to = %q, want %q", resume.ReturnTo, returnTo)
+	}
+	if resume.CLICallback != "" || resume.CLIState != "" {
+		t.Errorf("web login resume should not contain CLI params, got cb=%q cs=%q", resume.CLICallback, resume.CLIState)
+	}
+}
+
+// TestOIDCLoginRejectsReturnToOutsideAllowList applies the legacy door's
+// exact reject list (TestHandleLogin_RejectsReturnToOutsideAllowList):
+// every value the allow-list refuses must 400 the login, before any
+// transaction state is created — never silently strip to /dashboard.
+func TestOIDCLoginRejectsReturnToOutsideAllowList(t *testing.T) {
+	fx := setupOIDC(t)
+
+	bad := []string{
+		"/dashboard",                         // wrong prefix
+		"/api/v1/agents",                     // wrong prefix
+		"https://evil.com/oauth2/authorize",  // absolute
+		"//evil.com/oauth2/authorize",        // protocol-relative
+		"/oauth2/authorize\nSet-Cookie: x=y", // header injection
+		"\\api\\oauth\\authorize",            // backslash bypass
+		"http://localhost/oauth2/authorize",  // scheme present
+		"/oauth2/../../dashboard",            // path traversal escaping the allow-list
+		"/oauth2/../v1/agents",               // path traversal into another API surface
+		"/oauth2//evil.com/path",             // empty segment after prefix
+	}
+	for _, rt := range bad {
+		t.Run(rt, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login?return_to="+url.QueryEscape(rt), nil)
+			w := httptest.NewRecorder()
+			fx.oidc.HandleLogin(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("return_to=%q: status=%d, want 400", rt, w.Code)
+			}
+			if findCookie(w.Result().Cookies(), "e2a_oidc_state") != nil {
+				t.Errorf("return_to=%q: transaction cookies were created for a rejected login", rt)
+			}
+		})
+	}
+}
+
+// TestOIDCLoginRequiresCLIParamsTogether mirrors the legacy door: the
+// cli_callback/cli_state pair is all-or-nothing, a lone value is a 400.
+func TestOIDCLoginRequiresCLIParamsTogether(t *testing.T) {
+	fx := setupOIDC(t)
+
+	for _, target := range []string{
+		"/api/auth/oidc/login?cli_callback=" + url.QueryEscape("http://127.0.0.1:43123/callback"),
+		"/api/auth/oidc/login?cli_state=cli_state_123",
+	} {
+		w := httptest.NewRecorder()
+		fx.oidc.HandleLogin(w, httptest.NewRequest(http.MethodGet, target, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", target, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "cli_callback and cli_state must be provided together") {
+			t.Fatalf("%s: unexpected error body: %q", target, w.Body.String())
+		}
+	}
+}
+
+// TestOIDCLoginRejectsNonLoopbackCLICallback mirrors the legacy door's
+// TestHandleLogin_RejectsInvalidCLICallback: anything but a loopback http
+// URL must 400 the login.
+func TestOIDCLoginRejectsNonLoopbackCLICallback(t *testing.T) {
+	fx := setupOIDC(t)
+
+	bad := []string{
+		"https://example.com/callback",   // non-loopback host
+		"http://example.com/callback",    // loopback scheme, remote host
+		"ftp://127.0.0.1/callback",       // non-http scheme
+		"http://user@127.0.0.1/callback", // user info present
+	}
+	for _, cb := range bad {
+		t.Run(cb, func(t *testing.T) {
+			target := "/api/auth/oidc/login?cli_callback=" + url.QueryEscape(cb) + "&cli_state=cli_state_123"
+			w := httptest.NewRecorder()
+			fx.oidc.HandleLogin(w, httptest.NewRequest(http.MethodGet, target, nil))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("cli_callback=%q: status=%d, want 400", cb, w.Code)
+			}
+		})
+	}
+}
+
+// TestOIDCCallbackHonorsReturnTo mirrors the legacy door's
+// TestHandleCallback_ReturnTo_BouncesUser: a successful callback whose
+// validated return_to is present redirects there instead of /dashboard.
+func TestOIDCCallbackHonorsReturnTo(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "returnto@example.com", "Return To", "google-sub-returnto")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	returnTo := "/oauth2/authorize?client_id=mcp_abc&state=xyz"
+	tx := beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape(returnTo))
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com"+returnTo; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+	if session := findCookie(w.Result().Cookies(), auth.SessionCookieName); session == nil || session.Value == "" {
+		t.Error("expected non-empty e2a session cookie")
+	}
+	if cookie := findCookie(w.Result().Cookies(), "e2a_oidc_resume"); cookie == nil || cookie.MaxAge >= 0 {
+		t.Error("resume cookie was not deleted after callback")
+	}
+}
+
+func TestOIDCLocalServerCompletesReturnToRoundTrip(t *testing.T) {
+	var oidcAuth *auth.OIDCAuth
+	appMux := http.NewServeMux()
+	appMux.HandleFunc("/api/auth/oidc/login", func(w http.ResponseWriter, r *http.Request) {
+		oidcAuth.HandleLogin(w, r)
+	})
+	appMux.HandleFunc("/api/auth/oidc/callback", func(w http.ResponseWriter, r *http.Request) {
+		oidcAuth.HandleCallback(w, r)
+	})
+	appMux.HandleFunc("/oauth2/authorize", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(r.URL.Query().Get("state")))
+	})
+	appServer := httptest.NewServer(appMux)
+	t.Cleanup(appServer.Close)
+
+	fx := setupOIDCForApp(
+		t,
+		appServer.URL+"/api/auth/oidc/callback",
+		appServer.URL,
+	)
+	oidcAuth = fx.oidc
+	user, err := fx.store.CreateOrGetUser(
+		context.Background(),
+		"local-roundtrip@example.com",
+		"Local Round Trip",
+		"google-sub-local-roundtrip",
+	)
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+	returnTo := "/oauth2/authorize?client_id=mcp_local&state=roundtrip-state"
+	response, err := client.Get(
+		appServer.URL +
+			"/api/auth/oidc/login?return_to=" +
+			url.QueryEscape(returnTo),
+	)
+	if err != nil {
+		t.Fatalf("complete OIDC redirect chain: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("final status = %d, want 200", response.StatusCode)
+	}
+	if got, want := response.Request.URL.String(), appServer.URL+returnTo; got != want {
+		t.Fatalf("final URL = %q, want %q", got, want)
+	}
+	if fx.tokenCalls != 1 {
+		t.Fatalf("token endpoint calls = %d, want 1", fx.tokenCalls)
+	}
+	var sessionFound bool
+	for _, cookie := range jar.Cookies(response.Request.URL) {
+		if cookie.Name == auth.SessionCookieName && cookie.Value != "" {
+			sessionFound = true
+			break
+		}
+	}
+	if !sessionFound {
+		t.Fatal("OIDC round trip did not leave an authenticated e2a session")
+	}
+}
+
+// TestOIDCCallbackCLILoginHandsOffToCLI mirrors the legacy door's
+// TestHandleCallback_CLILogin_HandsOffToCLI: a login initiated with a valid
+// loopback cli_callback/cli_state pair renders the auto-submitting handoff
+// page carrying the callback URL, the CLI state, and a fresh API key.
+func TestOIDCCallbackCLILoginHandsOffToCLI(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "cli@example.com", "CLI", "google-sub-cli")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	target := "/api/auth/oidc/login?cli_callback=" + url.QueryEscape("http://127.0.0.1:43123/callback") + "&cli_state=cli_state_abc"
+	tx := beginOIDCLoginRaw(t, fx, target)
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{"http://127.0.0.1:43123/callback", "cli_state_abc", "api_key"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("handoff page missing %q, body: %s", want, body)
+		}
+	}
+	if session := findCookie(w.Result().Cookies(), auth.SessionCookieName); session == nil || session.Value == "" {
+		t.Error("expected non-empty e2a session cookie")
+	}
+	if cookie := findCookie(w.Result().Cookies(), "e2a_oidc_resume"); cookie == nil || cookie.MaxAge >= 0 {
+		t.Error("resume cookie was not deleted after callback")
+	}
+}
+
+// TestOIDCLoginClearsStaleResumeParams: the resume cookie is refreshed on
+// every login, so instructions from an earlier, abandoned transaction
+// cannot leak into a fresh param-less one — the fresh login clears it.
+func TestOIDCLoginClearsStaleResumeParams(t *testing.T) {
+	fx := setupOIDC(t)
+
+	beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape("/oauth2/authorize"))
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleLogin(w, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	cookie := findCookie(w.Result().Cookies(), "e2a_oidc_resume")
+	if cookie == nil || cookie.MaxAge >= 0 {
+		t.Fatalf("param-less login must clear the resume cookie, got %+v", cookie)
+	}
+}
+
+// TestOIDCCallbackIgnoresCorruptResumeCookie: a resume cookie that does not
+// decode degrades to "no post-login instructions" — the login still
+// completes and lands on /dashboard (the cookie carries no security
+// material; the state/nonce cookies own the CSRF binding).
+func TestOIDCCallbackIgnoresCorruptResumeCookie(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "corrupt@example.com", "Corrupt", "google-sub-corrupt")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	tx := beginOIDCLogin(t, fx)
+	req := callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state))
+	req.AddCookie(&http.Cookie{Name: "e2a_oidc_resume", Value: "!!!not-a-resume!!!"})
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestOIDCCallbackIgnoresResumeCookieFromDifferentTransaction(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "mismatch@example.com", "Mismatch", "google-sub-mismatch")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	tx := beginOIDCLogin(t, fx)
+	raw, err := json.Marshal(map[string]string{
+		"s":  "state-from-another-login",
+		"cb": "http://127.0.0.1:43123/callback",
+		"cs": "cli_state_abc",
+	})
+	if err != nil {
+		t.Fatalf("marshal resume cookie: %v", err)
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/oidc/callback?code=valid-code&state="+url.QueryEscape(tx.state),
+		nil,
+	)
+	for _, cookie := range tx.cookies {
+		if cookie.Name != "e2a_oidc_resume" {
+			req.AddCookie(cookie)
+		}
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  "e2a_oidc_resume",
+		Value: base64.RawURLEncoding.EncodeToString(raw),
+	})
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestOIDCCallbackIgnoresResumeCookieWithIncompleteCLIPair(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "incomplete@example.com", "Incomplete", "google-sub-incomplete")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	tx := beginOIDCLogin(t, fx)
+	raw, err := json.Marshal(map[string]string{
+		"s":  tx.state,
+		"cb": "http://127.0.0.1:43123/callback",
+	})
+	if err != nil {
+		t.Fatalf("marshal resume cookie: %v", err)
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/oidc/callback?code=valid-code&state="+url.QueryEscape(tx.state),
+		nil,
+	)
+	for _, cookie := range tx.cookies {
+		if cookie.Name != "e2a_oidc_resume" {
+			req.AddCookie(cookie)
+		}
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  "e2a_oidc_resume",
+		Value: base64.RawURLEncoding.EncodeToString(raw),
+	})
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
 	}
 }

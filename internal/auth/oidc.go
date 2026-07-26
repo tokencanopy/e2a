@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ const (
 	oidcStateCookieName    = "e2a_oidc_state"
 	oidcNonceCookieName    = "e2a_oidc_nonce"
 	oidcVerifierCookieName = "e2a_oidc_verifier"
+	oidcResumeCookieName   = "e2a_oidc_resume"
 	oidcCookiePath         = "/api/auth/oidc"
 	oidcTransactionMaxAge  = 10 * time.Minute
 
@@ -221,15 +223,112 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 	}
 }
 
+// oidcResume carries the optional post-login instructions HandleLogin
+// accepts from the query string through the provider round trip. It mirrors
+// the legacy Google door's OAuthState fields: ReturnTo is a same-origin
+// server path the user is bounced to after callback success, and the
+// CLICallback/CLIState pair drives the loopback CLI handoff. All values are
+// validated at HandleLogin time with the same validators the legacy door
+// uses (validateReturnToPath / validateCLICallbackURL).
+//
+// Unlike the legacy door, which folds these into the OAuth state parameter,
+// the OIDC door keeps its provider-facing state parameter opaque and carries
+// the instructions in a fourth transaction cookie instead. TransactionState
+// binds that cookie to the same unpredictable state value as the other OIDC
+// transaction cookies. HandleCallback ignores instructions whose binding or
+// CLI callback/state pairing does not validate.
+type oidcResume struct {
+	TransactionState string `json:"s,omitempty"`
+	ReturnTo         string `json:"rt,omitempty"`
+	CLICallback      string `json:"cb,omitempty"`
+	CLIState         string `json:"cs,omitempty"`
+}
+
+func (r *oidcResume) empty() bool {
+	return r.ReturnTo == "" && r.CLICallback == "" && r.CLIState == ""
+}
+
+func (r *oidcResume) encode() string {
+	b, _ := json.Marshal(r)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// decodeOIDCResume returns nil for corrupt instructions, instructions from a
+// different OIDC transaction, or an incomplete CLI callback/state pair. Those
+// cases degrade to "no post-login instructions" rather than failing an
+// otherwise valid login.
+func decodeOIDCResume(raw, expectedState string) *oidcResume {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil
+	}
+	var r oidcResume
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil
+	}
+	if r.TransactionState == "" ||
+		subtle.ConstantTimeCompare([]byte(r.TransactionState), []byte(expectedState)) != 1 {
+		return nil
+	}
+	if (r.CLICallback == "") != (r.CLIState == "") {
+		return nil
+	}
+	return &r
+}
+
+// oidcResumeFromQuery validates the optional post-login instructions on a
+// login request, applying the exact rules and error semantics of the legacy
+// Google door: cli_callback and cli_state must be provided together,
+// cli_callback must be a loopback http URL, and return_to must survive the
+// /oauth2/ allow-list. Any violation fails the login with 400 before any
+// transaction state is created.
+func oidcResumeFromQuery(r *http.Request) (*oidcResume, error) {
+	cliCallback := r.URL.Query().Get("cli_callback")
+	cliState := r.URL.Query().Get("cli_state")
+	if (cliCallback == "") != (cliState == "") {
+		return nil, errors.New("cli_callback and cli_state must be provided together")
+	}
+
+	resume := &oidcResume{}
+	if cliCallback != "" {
+		callbackURL, err := validateCLICallbackURL(cliCallback)
+		if err != nil {
+			return nil, err
+		}
+		resume.CLICallback = callbackURL.String()
+		resume.CLIState = cliState
+	}
+
+	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" {
+		if err := validateReturnToPath(returnTo); err != nil {
+			return nil, err
+		}
+		resume.ReturnTo = returnTo
+	}
+	return resume, nil
+}
+
 // HandleLogin creates a browser-bound OIDC transaction and redirects to the
 // provider's authorization endpoint. The PKCE verifier and OIDC nonce never
 // appear in application logs or identity-bearing cookies. Until background
 // issuer discovery has completed at least once, this fails closed with 503
 // rather than attempting a partial or misconfigured flow.
+//
+// Like the legacy Google door, it accepts the optional query parameters
+// return_to (a /oauth2/-prefixed server path to resume after login) and the
+// cli_callback/cli_state pair (a loopback handoff for terminal login).
+// Invalid values are rejected with 400 before any cookie is set; valid ones
+// ride the round trip in the resume transaction cookie.
 func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	rs := oa.ready.Load()
 	if rs == nil {
 		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	resume, err := oidcResumeFromQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -250,6 +349,15 @@ func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	oa.setTransactionCookie(w, oidcStateCookieName, state, int(oidcTransactionMaxAge.Seconds()))
 	oa.setTransactionCookie(w, oidcNonceCookieName, nonce, int(oidcTransactionMaxAge.Seconds()))
 	oa.setTransactionCookie(w, oidcVerifierCookieName, verifier, int(oidcTransactionMaxAge.Seconds()))
+	// The resume cookie is refreshed on every login — set when the caller
+	// asked for a post-login action, cleared otherwise — so instructions
+	// from an earlier, abandoned transaction can't leak into this one.
+	if resume.empty() {
+		oa.setTransactionCookie(w, oidcResumeCookieName, "", -1)
+	} else {
+		resume.TransactionState = state
+		oa.setTransactionCookie(w, oidcResumeCookieName, resume.encode(), int(oidcTransactionMaxAge.Seconds()))
+	}
 
 	location := rs.oauthConfig.AuthCodeURL(
 		state,
@@ -263,6 +371,10 @@ func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // authorization code over the back channel, verifies the ID token, and creates
 // the same e2a session used by the legacy Google flow. Until background
 // issuer discovery has completed at least once, this fails closed with 503.
+//
+// Post-login behavior mirrors the legacy door: a CLI-initiated login renders
+// the loopback handoff page, a validated return_to bounces the user to that
+// path, and anything else lands on /dashboard.
 func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	rs := oa.ready.Load()
 	if rs == nil {
@@ -277,6 +389,16 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		oa.clearTransactionCookies(w)
 		http.Error(w, "invalid login transaction", http.StatusBadRequest)
 		return
+	}
+
+	// The resume cookie is optional and read before the transaction cookies
+	// are consumed below; an undecodable value is treated as absent (see
+	// decodeOIDCResume).
+	resume := &oidcResume{}
+	if cookie, err := r.Cookie(oidcResumeCookieName); err == nil {
+		if decoded := decodeOIDCResume(cookie.Value, stateCookie.Value); decoded != nil {
+			resume = decoded
+		}
 	}
 
 	requestState := r.URL.Query().Get("state")
@@ -376,6 +498,37 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(SessionMaxAge.Seconds()),
 	})
+
+	// CLI-initiated login: mint a key and hand it back to the waiting
+	// terminal, exactly as the legacy Google door does. The callback URL is
+	// re-validated even though HandleLogin already validated it — cheap
+	// defense in depth against a tampered resume cookie.
+	if resume.CLICallback != "" {
+		callbackURL, err := validateCLICallbackURL(resume.CLICallback)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		handoff := &cliLoginHandoff{
+			CallbackURL: callbackURL.String(),
+			State:       resume.CLIState,
+		}
+		if err := writeCLIHandoffPage(oa.store, w, r, user, handoff); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// return_to bounce: validated at HandleLogin time; re-validate
+	// defensively here and fall through to /dashboard when it no longer
+	// passes — the legacy door's exact fallback.
+	if resume.ReturnTo != "" {
+		if err := validateReturnToPath(resume.ReturnTo); err == nil {
+			http.Redirect(w, r, oa.baseURL+resume.ReturnTo, http.StatusFound)
+			return
+		}
+	}
+
 	http.Redirect(w, r, oa.baseURL+"/dashboard", http.StatusFound)
 }
 
@@ -409,4 +562,5 @@ func (oa *OIDCAuth) clearTransactionCookies(w http.ResponseWriter) {
 	oa.setTransactionCookie(w, oidcStateCookieName, "", -1)
 	oa.setTransactionCookie(w, oidcNonceCookieName, "", -1)
 	oa.setTransactionCookie(w, oidcVerifierCookieName, "", -1)
+	oa.setTransactionCookie(w, oidcResumeCookieName, "", -1)
 }
