@@ -130,3 +130,59 @@ func TestMarkSentDoesNotEnrolUnknownRecipients(t *testing.T) {
 		t.Errorf("a send to an un-enrolled address created %d engagement(s)", count)
 	}
 }
+
+// TestMarkSentIsNotDoubleCountedOnRedrive checks a claim from review: that
+// at-least-once delivery lets a re-driven send increment the outreach counters
+// twice, which would inflate every touch count and, worse, is invisible.
+func TestMarkSentIsNotDoubleCountedOnRedrive(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+
+	user, err := store.CreateOrGetUser(ctx, "redrive@example.com", "Owner", "google-redrive")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, "redrive.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agentAddr = "raise@redrive.example.com"
+	if _, err := store.CreateAgent(ctx, agentAddr, "redrive.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	const recipient = "partner@redrive.vc"
+	stage := "touch1"
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, agentAddr, recipient, &stage, nil, nil); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	msg, err := store.CreateOutboundMessage(ctx, agentAddr, []string{recipient}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-redrive", []byte("raw"))
+	if err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET delivery_status = 'sending' WHERE id = $1`, msg.ID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	sendStore := agent.NewOutboundSendStore(store, webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)),
+		usage.NewNoopUsageTracker())
+	now := time.Now().UTC()
+
+	// Settle it, then settle it AGAIN — exactly what an at-least-once re-drive
+	// of the same River job does.
+	for i := 0; i < 3; i++ {
+		if err := sendStore.MarkSent(ctx, msg.ID, 0, 0, now, "provider-1", ""); err != nil {
+			t.Fatalf("MarkSent attempt %d: %v", i+1, err)
+		}
+	}
+
+	e, err := store.GetEngagement(ctx, user.ID, agentAddr, recipient)
+	if err != nil {
+		t.Fatalf("get engagement: %v", err)
+	}
+	if e.OutboundCount != 1 {
+		t.Errorf("outbound_count = %d after 3 settles of ONE message, want 1 — "+
+			"an at-least-once re-drive is inflating touch counts", e.OutboundCount)
+	}
+}

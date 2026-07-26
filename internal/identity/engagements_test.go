@@ -785,3 +785,51 @@ func armDue(t *testing.T, store *identity.Store, userID, agent, address string) 
 		t.Fatalf("arm %s: %v", address, err)
 	}
 }
+
+// TestRecordOutboundConvergesOnEarliestSend pins that first_outbound_at holds
+// the EARLIEST send rather than whichever event happened to land first.
+//
+// Under at-least-once delivery a retried or re-driven job can settle out of
+// order. With set-once semantics that pins first_outbound_at to the LATER
+// time, and because replied is last_inbound_at > first_outbound_at, a genuine
+// reply then reads as no reply — leaving a contact who already answered in the
+// follow-up queue to be chased again.
+func TestRecordOutboundConvergesOnEarliestSend(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "earliest")
+	enroll(t, store, user.ID, "raise@e.com", "partner@earliest.vc", "touch1")
+
+	early := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
+	late := early.Add(48 * time.Hour)
+	reply := early.Add(time.Hour) // answered the FIRST send
+
+	// The later send is recorded first — the out-of-order case.
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", late); err != nil {
+		t.Fatalf("late send: %v", err)
+	}
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", early); err != nil {
+		t.Fatalf("early send: %v", err)
+	}
+	if _, err := store.RecordInboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", reply); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+
+	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@earliest.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if e.FirstOutboundAt == nil || !e.FirstOutboundAt.Equal(early) {
+		t.Errorf("first_outbound_at = %v, want %v — it must converge on the earliest "+
+			"send regardless of the order events arrive", e.FirstOutboundAt, early)
+	}
+	if !e.Replied() {
+		t.Error("a contact who answered the first send reads as unreplied — they would " +
+			"be chased again after already replying")
+	}
+	// last_outbound_at still tracks the most recent send.
+	if e.LastOutboundAt == nil || !e.LastOutboundAt.Equal(late) {
+		t.Errorf("last_outbound_at = %v, want %v", e.LastOutboundAt, late)
+	}
+}
