@@ -320,3 +320,73 @@ func TestPurgeEngagementsForAgentSparesConsent(t *testing.T) {
 		t.Errorf("suppression lookup = %v err=%v — consent must survive agent deletion", blocked, err)
 	}
 }
+
+// TestEngagementCountsAreComputedFromMessages pins that the counts reported on
+// an engagement come from real message rows rather than a stored counter
+// (design §10).
+//
+// The multi-recipient case is the one that matters: a single outbound message
+// addressed to two enrolled contacts must count once for EACH, which a scalar
+// recipient column cannot express. Because the counts are derived here, there
+// is no counter to drift and nothing to reconcile — the property this test
+// really guards is that removing the stored columns did not silently start
+// reporting zeros.
+func TestEngagementCountsAreComputedFromMessages(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "computed")
+	if _, err := store.ClaimOrCreateDomain(ctx, "computed.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@computed.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "computed.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	const first = "first@computed.vc"
+	const second = "second@computed.vc"
+	enroll(t, store, user.ID, agent, first, "touch1")
+	enroll(t, store, user.ID, agent, second, "touch1")
+
+	// One message to BOTH — must count once for each.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first, second}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-c", []byte("raw")); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// A second message to only the first.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first}, nil, nil,
+		"Follow up", "send", "smtp", "", "conv-c", []byte("raw")); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	e, err := store.GetEngagement(ctx, user.ID, agent, first)
+	if err != nil {
+		t.Fatalf("get first: %v", err)
+	}
+	if e.OutboundCount != 2 {
+		t.Errorf("%s outbound_count = %d, want 2", first, e.OutboundCount)
+	}
+	e, err = store.GetEngagement(ctx, user.ID, agent, second)
+	if err != nil {
+		t.Fatalf("get second: %v", err)
+	}
+	if e.OutboundCount != 1 {
+		t.Errorf("%s outbound_count = %d, want 1 — a message addressed to two "+
+			"contacts must count for both", second, e.OutboundCount)
+	}
+
+	// The list path must agree with the single-record path.
+	rows, err := store.ListEngagements(ctx, user.ID, agent, identity.EngagementFilter{}, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.Address] = r.OutboundCount
+	}
+	if got[first] != 2 || got[second] != 1 {
+		t.Errorf("list counts = %v, want first:2 second:1 — the list and get paths disagree", got)
+	}
+}

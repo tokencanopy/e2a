@@ -24,12 +24,18 @@
 --     agent must get its outreach state back) but are PURGED with the agent on
 --     hard delete, in the same janitor sweep.
 --
--- Derived columns are materialized rather than computed on read: the whole
--- point of the resource is the "who is due and has not replied" query, and a
--- correlated aggregate over the prod-sized messages table for every row of
--- every request would defeat it. A janitor reconciliation sweep recomputes them
--- and emits a metric on any correction, so drift is a bug signal rather than
--- routine.
+-- Only the TIMESTAMPS are materialized, and only because the outreach query
+-- filters on them: `replied` is last_inbound_at > first_outbound_at and sits in
+-- the WHERE clause, so evaluating it per-request would aggregate over every
+-- candidate row rather than a page.
+--
+-- Message COUNTS are deliberately absent (design §10). They are projected and
+-- never filtered, so they are computed at read time over the returned page —
+-- the same thing the neighbouring conversation-summary query already does with
+-- COUNT(*) FILTER. That also removes the only non-idempotent writes in the
+-- feature: the timestamps use LEAST/GREATEST and converge regardless of arrival
+-- order, while a `+ 1` counter cannot, which is what made a reconciliation
+-- sweep necessary at all.
 --
 -- New table only — no ALTER on a prod-sized table. Idempotent.
 
@@ -57,8 +63,6 @@ CREATE TABLE IF NOT EXISTS contact_engagements (
     first_outbound_at    TIMESTAMPTZ,
     last_outbound_at     TIMESTAMPTZ,
     last_inbound_at      TIMESTAMPTZ,
-    outbound_count       INTEGER NOT NULL DEFAULT 0,
-    inbound_count        INTEGER NOT NULL DEFAULT 0,
     last_conversation_id TEXT NOT NULL DEFAULT '',
 
     -- The next_action_at value a contact.due was already emitted for. Fire only

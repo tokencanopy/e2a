@@ -86,7 +86,23 @@ const engagementColumns = `
 	ce.id, ce.agent_id, ce.address, ce.contact_id,
 	ce.stage, ce.next_action_at, ce.metadata,
 	ce.first_outbound_at, ce.last_outbound_at, ce.last_inbound_at,
-	ce.outbound_count, ce.inbound_count, ce.last_conversation_id,
+	-- Counts are computed here rather than stored (design §10): they are
+	-- projected, never filtered, so this runs over the page the query already
+	-- narrowed to. Storing them would reintroduce the only non-idempotent
+	-- writes in the feature, and with them the drift a reconciliation sweep
+	-- existed to chase. Mirrors the conversation-summary query.
+	(SELECT count(*) FROM messages m
+	  WHERE m.agent_id = ce.agent_id
+	    AND m.direction = 'outbound'
+	    AND m.deleted_at IS NULL
+	    AND EXISTS (SELECT 1 FROM unnest(m.to_recipients) AS r
+	                 WHERE lower(r) = ce.address)) AS outbound_count,
+	(SELECT count(*) FROM messages m
+	  WHERE m.agent_id = ce.agent_id
+	    AND m.direction = 'inbound'
+	    AND m.deleted_at IS NULL
+	    AND lower(m.sender) = ce.address) AS inbound_count,
+	ce.last_conversation_id,
 	(asup.address IS NOT NULL OR sup.address IS NOT NULL) AS suppressed,
 	COALESCE(asup.source, CASE WHEN sup.address IS NOT NULL THEN sup.source ELSE '' END) AS suppression_source,
 	COALESCE(asup.reason, CASE WHEN sup.address IS NOT NULL THEN sup.reason ELSE '' END) AS suppression_reason,
