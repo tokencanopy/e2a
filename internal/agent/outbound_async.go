@@ -176,11 +176,13 @@ func (a *outboundSendStore) MarkSent(ctx context.Context, messageID string, jobI
 //
 // DELIBERATELY OUTSIDE THE TERMINAL TRANSACTION AND NON-FATAL. Unlike metering
 // — which is accounting and must roll the transaction back rather than
-// undercount — these counters are derived convenience data with a
-// reconciliation sweep behind them. Failing a real, already-submitted send
-// because a bookkeeping row would not update is strictly worse than letting the
-// sweep converge it later, and doing it inside the transaction would mean a
-// failed statement aborts the whole terminal commit.
+// undercount — these are convenience timestamps. Failing a real,
+// already-submitted send because a bookkeeping row would not update is strictly
+// worse than letting the next send correct it, and doing it inside the
+// transaction would mean a failed statement aborts the whole terminal commit.
+//
+// The timestamps are idempotent (LEAST/GREATEST), so a repeated or
+// out-of-order update converges rather than compounding.
 //
 // It updates only an engagement that already exists: an agent sends mail for
 // many reasons, and auto-enrolling every recipient would fill the outreach list
@@ -199,8 +201,9 @@ func (a *outboundSendStore) recordOutreachSend(ctx context.Context, info *identi
 		}
 		if _, err := a.store.RecordOutboundActivity(ctx, info.UserID, info.Message.AgentID,
 			rcpt, info.Message.ConversationID, occurredAt); err != nil {
-			// Best-effort by design; ReconcileEngagementCounts corrects drift and
-			// reports it, so a missed update surfaces there rather than silently.
+			// Best-effort by design. The counters this used to guard are now
+			// computed from messages at read time (design §10), so a failure
+			// here costs at most a stale timestamp, not a wrong count.
 			log.Printf("[contacts] outreach send counters not updated for %s -> %s: %v",
 				info.Message.ID, rcpt, err)
 		}

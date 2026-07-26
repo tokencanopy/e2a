@@ -5334,7 +5334,7 @@ paths:
         - contacts
       x-stability-level: beta
     put:
-      description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
+      description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
       operationId: upsertEngagement
       parameters:
         - in: path
@@ -5366,12 +5366,21 @@ paths:
                 type: string
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: Created — the contact was newly enrolled in this agent's outreach.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
         default:
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Error
+          description: Error — the standard envelope; branch on error.code.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"

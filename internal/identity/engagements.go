@@ -86,7 +86,23 @@ const engagementColumns = `
 	ce.id, ce.agent_id, ce.address, ce.contact_id,
 	ce.stage, ce.next_action_at, ce.metadata,
 	ce.first_outbound_at, ce.last_outbound_at, ce.last_inbound_at,
-	ce.outbound_count, ce.inbound_count, ce.last_conversation_id,
+	-- Counts are computed here rather than stored (design §10): they are
+	-- projected, never filtered, so this runs over the page the query already
+	-- narrowed to. Storing them would reintroduce the only non-idempotent
+	-- writes in the feature, and with them the drift a reconciliation sweep
+	-- existed to chase. Mirrors the conversation-summary query.
+	(SELECT count(*) FROM messages m
+	  WHERE m.agent_id = ce.agent_id
+	    AND m.direction = 'outbound'
+	    AND m.deleted_at IS NULL
+	    AND EXISTS (SELECT 1 FROM unnest(m.to_recipients) AS r
+	                 WHERE lower(r) = ce.address)) AS outbound_count,
+	(SELECT count(*) FROM messages m
+	  WHERE m.agent_id = ce.agent_id
+	    AND m.direction = 'inbound'
+	    AND m.deleted_at IS NULL
+	    AND lower(m.sender) = ce.address) AS inbound_count,
+	ce.last_conversation_id,
 	(asup.address IS NOT NULL OR sup.address IS NOT NULL) AS suppressed,
 	COALESCE(asup.source, CASE WHEN sup.address IS NOT NULL THEN sup.source ELSE '' END) AS suppression_source,
 	COALESCE(asup.reason, CASE WHEN sup.address IS NOT NULL THEN sup.reason ELSE '' END) AS suppression_reason,
@@ -316,7 +332,6 @@ func (s *Store) RecordOutboundActivity(ctx context.Context, userID, agentID, add
 		`UPDATE contact_engagements
 		    SET first_outbound_at    = LEAST(COALESCE(first_outbound_at, $4), $4),
 		        last_outbound_at     = GREATEST(COALESCE(last_outbound_at, $4), $4),
-		        outbound_count       = outbound_count + 1,
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
 		        updated_at           = now()
 		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
@@ -339,7 +354,6 @@ func (s *Store) RecordInboundActivity(ctx context.Context, userID, agentID, addr
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE contact_engagements
 		    SET last_inbound_at      = GREATEST(COALESCE(last_inbound_at, $4), $4),
-		        inbound_count        = inbound_count + 1,
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
 		        updated_at           = now()
 		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
@@ -348,96 +362,6 @@ func (s *Store) RecordInboundActivity(ctx context.Context, userID, agentID, addr
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
-}
-
-// EngagementCountDrift is one engagement whose materialized counters disagree
-// with the messages table.
-type EngagementCountDrift struct {
-	AgentID string
-	Address string
-	Field   string
-	Stored  int
-	Actual  int
-}
-
-// ReconcileEngagementCounts recomputes the materialized counters from messages
-// and corrects any that have drifted, returning what it fixed.
-//
-// Materialized counters are the price of making the outreach query cheap, and
-// drift is the known risk of that trade (the schema-change rule in AGENTS.md
-// warns about exactly this class). Rather than hope, the janitor recomputes
-// periodically and reports corrections — a non-empty result is a bug signal
-// that a hook was missed, not routine maintenance.
-// An empty userID reconciles across every account, which is how the janitor
-// calls it; a specific userID scopes it to one tenant for targeted use.
-func (s *Store) ReconcileEngagementCounts(ctx context.Context, userID string, limit int) ([]EngagementCountDrift, error) {
-	rows, err := s.pool.Query(ctx,
-		`WITH actual AS (
-		     SELECT ce.id,
-		            ce.agent_id,
-		            ce.address,
-		            ce.outbound_count AS stored_out,
-		            ce.inbound_count  AS stored_in,
-		            (SELECT count(*) FROM messages m
-		              WHERE m.agent_id = ce.agent_id
-		                AND m.direction = 'outbound'
-		                AND m.deleted_at IS NULL
-		                AND EXISTS (
-		                  SELECT 1 FROM unnest(m.to_recipients) AS recipient
-		                  WHERE lower(recipient) = lower(ce.address)
-		                )) AS actual_out,
-		            (SELECT count(*) FROM messages m
-		              WHERE m.agent_id = ce.agent_id
-		                AND m.direction = 'inbound'
-		                AND m.deleted_at IS NULL
-		                AND lower(m.sender) = lower(ce.address)) AS actual_in
-		       FROM contact_engagements ce
-		      WHERE ($1 = '' OR ce.user_id = $1)
-		 )
-		 SELECT agent_id, address, stored_out, actual_out, stored_in, actual_in
-		   FROM actual
-		  WHERE stored_out <> actual_out OR stored_in <> actual_in
-		  LIMIT $2`,
-		userID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	type correction struct {
-		agentID, address  string
-		outbound, inbound int
-	}
-	var corrections []correction
-	var drift []EngagementCountDrift
-	for rows.Next() {
-		var agentID, address string
-		var storedOut, actualOut, storedIn, actualIn int
-		if err := rows.Scan(&agentID, &address, &storedOut, &actualOut, &storedIn, &actualIn); err != nil {
-			return nil, err
-		}
-		if storedOut != actualOut {
-			drift = append(drift, EngagementCountDrift{agentID, address, "outbound_count", storedOut, actualOut})
-		}
-		if storedIn != actualIn {
-			drift = append(drift, EngagementCountDrift{agentID, address, "inbound_count", storedIn, actualIn})
-		}
-		corrections = append(corrections, correction{agentID, address, actualOut, actualIn})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	for _, c := range corrections {
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE contact_engagements
-			    SET outbound_count = $3, inbound_count = $4, updated_at = now()
-			  WHERE ($1 = '' OR user_id = $1) AND agent_id = $2 AND address = $5`,
-			userID, c.agentID, c.outbound, c.inbound, c.address); err != nil {
-			return drift, err
-		}
-	}
-	return drift, nil
 }
 
 // DueEngagement is one engagement whose next_action_at has passed and which has
@@ -493,7 +417,18 @@ func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit in
 		         FOR UPDATE SKIP LOCKED
 		  )
 		  RETURNING ce.user_id, ce.agent_id, ce.address, ce.stage, ce.next_action_at,
-		            ce.last_outbound_at, ce.outbound_count, ce.last_conversation_id,
+		            ce.last_outbound_at,
+		            -- Computed, not stored (design §10). contact.due publishes
+		            -- outbound_count and a webhook payload is a harder contract
+		            -- to change than a response body, so the field stays; only
+		            -- its source moved.
+		            (SELECT count(*) FROM messages m
+		              WHERE m.agent_id = ce.agent_id
+		                AND m.direction = 'outbound'
+		                AND m.deleted_at IS NULL
+		                AND EXISTS (SELECT 1 FROM unnest(m.to_recipients) AS r
+		                             WHERE lower(r) = ce.address)),
+		            ce.last_conversation_id,
 		            (ce.last_inbound_at IS NOT NULL AND ce.first_outbound_at IS NOT NULL
 		             AND ce.last_inbound_at > ce.first_outbound_at) AS replied,
 		            (SELECT display_name FROM contacts WHERE id = ce.contact_id),

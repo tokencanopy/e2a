@@ -170,11 +170,17 @@ func TestInboundActivityRecording_UnauthenticatedMailDoesNotUpdateCounters(t *te
 		t.Fatalf("get engagement: %v", err)
 	}
 
-	if eng.InboundCount != 0 {
-		t.Errorf("inbound_count = %d, want 0 (unauthenticated mail must not update)", eng.InboundCount)
-	}
+	// inbound_count is deliberately NOT asserted here. Since design §10 the
+	// counts are computed from the messages table, and a spoofed message is
+	// genuinely received and persisted — counting it is accurate. What must not
+	// happen is for it to read as a REPLY.
 	if eng.LastInboundAt != nil {
-		t.Errorf("last_inbound_at = %v, want nil (unauthenticated mail must not update)", eng.LastInboundAt)
+		t.Errorf("last_inbound_at = %v, want nil — unauthenticated mail must not "+
+			"register as correspondence", eng.LastInboundAt)
+	}
+	if eng.Replied() {
+		t.Error("a spoofed sender marked the contact as replied — they would drop " +
+			"out of the follow-up queue without ever answering")
 	}
 }
 
@@ -261,9 +267,8 @@ func TestInboundActivityRecording_HeldMailDoesNotUpdateCounters(t *testing.T) {
 		t.Fatalf("get engagement: %v", err)
 	}
 
-	if eng.InboundCount != 0 {
-		t.Errorf("inbound_count = %d, want 0 (held mail must not update)", eng.InboundCount)
-	}
+	// As above: the count reflects messages received, which held mail is. The
+	// property under test is that mail the agent never saw cannot read as a reply.
 	if eng.LastInboundAt != nil {
 		t.Errorf("last_inbound_at = %v, want nil (held mail must not update)", eng.LastInboundAt)
 	}
