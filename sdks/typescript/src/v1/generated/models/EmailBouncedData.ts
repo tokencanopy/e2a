@@ -15,6 +15,7 @@ import { HttpFile } from '../http/http.js';
 
 export class EmailBouncedData {
     'agentEmail': string;
+    'batchId'?: string;
     'bounceSubType'?: string;
     'bounceType': EmailBouncedDataBounceTypeEnum;
     /**
@@ -38,6 +39,12 @@ export class EmailBouncedData {
         {
             "name": "agentEmail",
             "baseName": "agent_email",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "batchId",
+            "baseName": "batch_id",
             "type": "string",
             "format": ""
         },

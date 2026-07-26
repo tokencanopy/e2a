@@ -17,7 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
 from e2a.v1.generated.models.batch_suppressed_result import BatchSuppressedResult
 from typing import Optional, Set
@@ -27,10 +27,11 @@ class BatchResult(BaseModel):
     """
     BatchResult
     """ # noqa: E501
-    message_id: Optional[StrictStr] = Field(default=None, description="Minted message id when the item was accepted (delivery_status='accepted' persisted and River outbound_send job enqueued). Absent when Suppressed is present.")
-    suppressed: Optional[BatchSuppressedResult] = Field(default=None, description="Present when the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit.")
+    message_id: Optional[StrictStr] = Field(default=None, description="Minted message id when the item was accepted (delivery_status='accepted' persisted and River outbound_send job enqueued). Present iff status is \"accepted\".")
+    status: StrictStr = Field(description="Slot discriminator, always present: \"accepted\" (message_id is set) or \"suppressed\" (suppressed is set). Branch on this rather than inferring the slot shape from which optional field is populated.")
+    suppressed: Optional[BatchSuppressedResult] = Field(default=None, description="Present iff status is \"suppressed\": the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["message_id", "suppressed"]
+    __properties: ClassVar[List[str]] = ["message_id", "status", "suppressed"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -94,6 +95,7 @@ class BatchResult(BaseModel):
 
         _obj = cls.model_validate({
             "message_id": obj.get("message_id"),
+            "status": obj.get("status"),
             "suppressed": BatchSuppressedResult.from_dict(obj["suppressed"]) if obj.get("suppressed") is not None else None
         })
         # store additional fields in additional_properties

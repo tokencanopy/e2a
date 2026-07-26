@@ -28,6 +28,7 @@ class EmailSentData(BaseModel):
     EmailSentData
     """ # noqa: E501
     agent_email: StrictStr
+    batch_id: Optional[StrictStr] = None
     bcc: Optional[List[StrictStr]] = None
     cc: Optional[List[StrictStr]] = None
     conversation_id: Optional[StrictStr] = None
@@ -41,7 +42,7 @@ class EmailSentData(BaseModel):
     subject: StrictStr
     to: List[StrictStr]
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "bcc", "cc", "conversation_id", "direction", "from", "lifecycle_transitions", "message_id", "message_type", "method", "provider_message_id", "subject", "to"]
+    __properties: ClassVar[List[str]] = ["agent_email", "batch_id", "bcc", "cc", "conversation_id", "direction", "from", "lifecycle_transitions", "message_id", "message_type", "method", "provider_message_id", "subject", "to"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -109,6 +110,7 @@ class EmailSentData(BaseModel):
 
         _obj = cls.model_validate({
             "agent_email": obj.get("agent_email"),
+            "batch_id": obj.get("batch_id"),
             "bcc": obj.get("bcc"),
             "cc": obj.get("cc"),
             "conversation_id": obj.get("conversation_id"),

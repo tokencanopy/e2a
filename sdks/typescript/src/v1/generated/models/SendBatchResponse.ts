@@ -23,7 +23,7 @@ export class SendBatchResponse {
     */
     'batchId': string;
     /**
-    * One slot per request item, positionally aligned. Each slot is either {message_id} (accepted) or {suppressed:{address,reason}} (dropped by the suppression filter).
+    * One slot per request item, positionally aligned. Each slot carries a status discriminator: status=\"accepted\" → {message_id}; status=\"suppressed\" → {suppressed:{address,reason}} (dropped by the suppression filter).
     */
     'results': Array<BatchResult>;
     /**

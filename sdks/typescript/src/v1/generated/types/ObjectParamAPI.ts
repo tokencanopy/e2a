@@ -4,12 +4,9 @@ import type { Middleware } from '../middleware.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
-import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
-import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
-import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -17,6 +14,12 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { BatchMessage } from '../models/BatchMessage.js';
+import { BatchResult } from '../models/BatchResult.js';
+import { BatchStatusRollupView } from '../models/BatchStatusRollupView.js';
+import { BatchSuppressedItem } from '../models/BatchSuppressedItem.js';
+import { BatchSuppressedResult } from '../models/BatchSuppressedResult.js';
+import { BatchView } from '../models/BatchView.js';
 import { ContactDueContact } from '../models/ContactDueContact.js';
 import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
@@ -54,6 +57,7 @@ import { DomainSendingFailedData } from '../models/DomainSendingFailedData.js';
 import { DomainSendingVerifiedData } from '../models/DomainSendingVerifiedData.js';
 import { DomainSuppressionAddedData } from '../models/DomainSuppressionAddedData.js';
 import { DomainView } from '../models/DomainView.js';
+import { DuplicateRecipientDetails } from '../models/DuplicateRecipientDetails.js';
 import { EmailBouncedData } from '../models/EmailBouncedData.js';
 import { EmailComplainedData } from '../models/EmailComplainedData.js';
 import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
@@ -67,7 +71,6 @@ import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
-import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
 import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
@@ -81,9 +84,6 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
-import { MetricsCounterView } from '../models/MetricsCounterView.js';
-import { MetricsRatesView } from '../models/MetricsRatesView.js';
-import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -129,6 +129,8 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { SendBatchRequest } from '../models/SendBatchRequest.js';
+import { SendBatchResponse } from '../models/SendBatchResponse.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -142,6 +144,7 @@ import { TemplateView } from '../models/TemplateView.js';
 import { TestWebhookRequest } from '../models/TestWebhookRequest.js';
 import { TestWebhookResponse } from '../models/TestWebhookResponse.js';
 import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
+import { TooManyMessagesDetails } from '../models/TooManyMessagesDetails.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
@@ -159,10 +162,8 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
-import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
-import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 
 import { ObservableAccountApi } from "./ObservableAPI.js";
@@ -232,30 +233,6 @@ export interface AccountApiExportAccountRequest {
 }
 
 export interface AccountApiGetAccountRequest {
-}
-
-export interface AccountApiGetAccountMetricsRequest {
-    /**
-     * Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
-     * Defaults to: undefined
-     * @type Date
-     * @memberof AccountApigetAccountMetrics
-     */
-    start?: Date
-    /**
-     * Exclusive end of the cohort window (RFC 3339). Defaults to now.
-     * Defaults to: undefined
-     * @type Date
-     * @memberof AccountApigetAccountMetrics
-     */
-    end?: Date
-    /**
-     * Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
-     * Defaults to: undefined
-     * @type &#39;agent&#39;
-     * @memberof AccountApigetAccountMetrics
-     */
-    groupBy?: 'agent'
 }
 
 export interface AccountApiListApiKeysRequest {
@@ -409,24 +386,6 @@ export class ObjectAccountApi {
      */
     public getAccount(param: AccountApiGetAccountRequest = {}, options?: ConfigurationOptions): Promise<AccountView> {
         return this.api.getAccount( options).toPromise();
-    }
-
-    /**
-     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
-     * Get account-wide delivery metrics (beta)
-     * @param param the request object
-     */
-    public getAccountMetricsWithHttpInfo(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
-        return this.api.getAccountMetricsWithHttpInfo(param.start, param.end, param.groupBy,  options).toPromise();
-    }
-
-    /**
-     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
-     * Get account-wide delivery metrics (beta)
-     * @param param the request object
-     */
-    public getAccountMetrics(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<AccountMetricsView> {
-        return this.api.getAccountMetrics(param.start, param.end, param.groupBy,  options).toPromise();
     }
 
     /**
@@ -1870,30 +1829,6 @@ export interface MessagesApiForwardMessageRequest {
     wait?: string
 }
 
-export interface MessagesApiGetAgentMetricsRequest {
-    /**
-     *
-     * Defaults to: undefined
-     * @type string
-     * @memberof MessagesApigetAgentMetrics
-     */
-    email: string
-    /**
-     * Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
-     * Defaults to: undefined
-     * @type Date
-     * @memberof MessagesApigetAgentMetrics
-     */
-    start?: Date
-    /**
-     * Exclusive end of the cohort window (RFC 3339). Defaults to now.
-     * Defaults to: undefined
-     * @type Date
-     * @memberof MessagesApigetAgentMetrics
-     */
-    end?: Date
-}
-
 export interface MessagesApiGetAttachmentRequest {
     /**
      *
@@ -1924,6 +1859,16 @@ export interface MessagesApiGetAttachmentRequest {
      * @memberof MessagesApigetAttachment
      */
     inline?: boolean
+}
+
+export interface MessagesApiGetBatchRequest {
+    /**
+     * The batch id, e.g. bat_abc123.
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApigetBatch
+     */
+    batchId: string
 }
 
 export interface MessagesApiGetMessageRequest {
@@ -2027,6 +1972,13 @@ export interface MessagesApiListMessagesRequest {
      */
     conversationId?: string
     /**
+     * Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction&#x3D;outbound. Exact match on the batch id, e.g. bat_abc123.
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApilistMessages
+     */
+    batchId?: string
+    /**
      * Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
      * Defaults to: undefined
      * @type Array&lt;string&gt;
@@ -2070,13 +2022,6 @@ export interface MessagesApiListMessagesRequest {
      * @memberof MessagesApilistMessages
      */
     deleted?: boolean
-    /**
-     * Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
-     * Defaults to: undefined
-     * @type string
-     * @memberof MessagesApilistMessages
-     */
-    filter?: string
 }
 
 export interface MessagesApiReplyToMessageRequest {
@@ -2131,6 +2076,29 @@ export interface MessagesApiRestoreMessageRequest {
      * @memberof MessagesApirestoreMessage
      */
     id: string
+}
+
+export interface MessagesApiSendBatchRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApisendBatch
+     */
+    email: string
+    /**
+     *
+     * @type SendBatchRequest
+     * @memberof MessagesApisendBatch
+     */
+    sendBatchRequest: SendBatchRequest
+    /**
+     * Optional idempotency key for safe retries. Same semantics as single-send: 24h TTL, path+body hash, replay returns the cached 202 verbatim (409 in-flight, 422 mismatch).
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApisendBatch
+     */
+    idempotencyKey?: string
 }
 
 export interface MessagesApiSendMessageRequest {
@@ -2230,24 +2198,6 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
-     * Get an agent\'s delivery metrics (beta)
-     * @param param the request object
-     */
-    public getAgentMetricsWithHttpInfo(param: MessagesApiGetAgentMetricsRequest, options?: ConfigurationOptions): Promise<HttpInfo<AgentMetricsView>> {
-        return this.api.getAgentMetricsWithHttpInfo(param.email, param.start, param.end,  options).toPromise();
-    }
-
-    /**
-     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
-     * Get an agent\'s delivery metrics (beta)
-     * @param param the request object
-     */
-    public getAgentMetrics(param: MessagesApiGetAgentMetricsRequest, options?: ConfigurationOptions): Promise<AgentMetricsView> {
-        return this.api.getAgentMetrics(param.email, param.start, param.end,  options).toPromise();
-    }
-
-    /**
      * Returns one attachment\'s metadata plus a short-lived `download_url` (+ `expires_at`) to fetch the bytes out of band — so binary content never streams through an agent\'s context. Pass `?inline=true` to also receive base64 `data` for small attachments (<= 256 KB); larger inline requests are rejected with 413 attachment_too_large. `index` is the 0-based attachment index from the message\'s `attachments[]`.
      * Get an attachment (metadata + short-lived download URL)
      * @param param the request object
@@ -2263,6 +2213,24 @@ export class ObjectMessagesApi {
      */
     public getAttachment(param: MessagesApiGetAttachmentRequest, options?: ConfigurationOptions): Promise<AttachmentView> {
         return this.api.getAttachment(param.email, param.id, param.index, param.inline,  options).toPromise();
+    }
+
+    /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param param the request object
+     */
+    public getBatchWithHttpInfo(param: MessagesApiGetBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<BatchView>> {
+        return this.api.getBatchWithHttpInfo(param.batchId,  options).toPromise();
+    }
+
+    /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param param the request object
+     */
+    public getBatch(param: MessagesApiGetBatchRequest, options?: ConfigurationOptions): Promise<BatchView> {
+        return this.api.getBatch(param.batchId,  options).toPromise();
     }
 
     /**
@@ -2307,7 +2275,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessagesWithHttpInfo(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<HttpInfo<PageMessageSummaryView>> {
-        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
+        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.batchId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
     }
 
     /**
@@ -2316,7 +2284,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessages(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<PageMessageSummaryView> {
-        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
+        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.batchId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
     }
 
     /**
@@ -2353,6 +2321,24 @@ export class ObjectMessagesApi {
      */
     public restoreMessage(param: MessagesApiRestoreMessageRequest, options?: ConfigurationOptions): Promise<MessageView> {
         return this.api.restoreMessage(param.email, param.id,  options).toPromise();
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param param the request object
+     */
+    public sendBatchWithHttpInfo(param: MessagesApiSendBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<SendBatchResponse>> {
+        return this.api.sendBatchWithHttpInfo(param.email, param.sendBatchRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param param the request object
+     */
+    public sendBatch(param: MessagesApiSendBatchRequest, options?: ConfigurationOptions): Promise<SendBatchResponse> {
+        return this.api.sendBatch(param.email, param.sendBatchRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**

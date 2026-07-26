@@ -54,6 +54,12 @@ __all__ = [
     "AttachmentMetaView",
     "AttachmentView",
     "Authentication",
+    "BatchMessage",
+    "BatchResult",
+    "BatchStatusRollupView",
+    "BatchSuppressedItem",
+    "BatchSuppressedResult",
+    "BatchView",
     "ContactDueContact",
     "ContactDueData",
     "ContactEngagementView",
@@ -93,6 +99,7 @@ __all__ = [
     "DomainSendingVerifiedData",
     "DomainSuppressionAddedData",
     "DomainView",
+    "DuplicateRecipientDetails",
     "EmailBouncedData",
     "EmailComplainedData",
     "EmailDeliveredData",
@@ -168,6 +175,8 @@ __all__ = [
     "ReviewView",
     "RotateSecretResponse",
     "SPFResult",
+    "SendBatchRequest",
+    "SendBatchResponse",
     "SendEmailRequest",
     "SendResultView",
     "SendingRampView",
@@ -182,6 +191,7 @@ __all__ = [
     "TestWebhookRequest",
     "TestWebhookResponse",
     "ThreatCategoryView",
+    "TooManyMessagesDetails",
     "TooManyRecipientsDetails",
     "UnsubscribeOptions",
     "UpdateAgentRequest",
@@ -247,6 +257,12 @@ from e2a.v1.generated.models.attachment import Attachment as Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView as AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView as AttachmentView
 from e2a.v1.generated.models.authentication import Authentication as Authentication
+from e2a.v1.generated.models.batch_message import BatchMessage as BatchMessage
+from e2a.v1.generated.models.batch_result import BatchResult as BatchResult
+from e2a.v1.generated.models.batch_status_rollup_view import BatchStatusRollupView as BatchStatusRollupView
+from e2a.v1.generated.models.batch_suppressed_item import BatchSuppressedItem as BatchSuppressedItem
+from e2a.v1.generated.models.batch_suppressed_result import BatchSuppressedResult as BatchSuppressedResult
+from e2a.v1.generated.models.batch_view import BatchView as BatchView
 from e2a.v1.generated.models.contact_due_contact import ContactDueContact as ContactDueContact
 from e2a.v1.generated.models.contact_due_data import ContactDueData as ContactDueData
 from e2a.v1.generated.models.contact_engagement_view import ContactEngagementView as ContactEngagementView
@@ -286,6 +302,7 @@ from e2a.v1.generated.models.domain_sending_failed_data import DomainSendingFail
 from e2a.v1.generated.models.domain_sending_verified_data import DomainSendingVerifiedData as DomainSendingVerifiedData
 from e2a.v1.generated.models.domain_suppression_added_data import DomainSuppressionAddedData as DomainSuppressionAddedData
 from e2a.v1.generated.models.domain_view import DomainView as DomainView
+from e2a.v1.generated.models.duplicate_recipient_details import DuplicateRecipientDetails as DuplicateRecipientDetails
 from e2a.v1.generated.models.email_bounced_data import EmailBouncedData as EmailBouncedData
 from e2a.v1.generated.models.email_complained_data import EmailComplainedData as EmailComplainedData
 from e2a.v1.generated.models.email_delivered_data import EmailDeliveredData as EmailDeliveredData
@@ -361,6 +378,8 @@ from e2a.v1.generated.models.retry_after_details import RetryAfterDetails as Ret
 from e2a.v1.generated.models.review_view import ReviewView as ReviewView
 from e2a.v1.generated.models.rotate_secret_response import RotateSecretResponse as RotateSecretResponse
 from e2a.v1.generated.models.spf_result import SPFResult as SPFResult
+from e2a.v1.generated.models.send_batch_request import SendBatchRequest as SendBatchRequest
+from e2a.v1.generated.models.send_batch_response import SendBatchResponse as SendBatchResponse
 from e2a.v1.generated.models.send_email_request import SendEmailRequest as SendEmailRequest
 from e2a.v1.generated.models.send_result_view import SendResultView as SendResultView
 from e2a.v1.generated.models.sending_ramp_view import SendingRampView as SendingRampView
@@ -375,6 +394,7 @@ from e2a.v1.generated.models.template_view import TemplateView as TemplateView
 from e2a.v1.generated.models.test_webhook_request import TestWebhookRequest as TestWebhookRequest
 from e2a.v1.generated.models.test_webhook_response import TestWebhookResponse as TestWebhookResponse
 from e2a.v1.generated.models.threat_category_view import ThreatCategoryView as ThreatCategoryView
+from e2a.v1.generated.models.too_many_messages_details import TooManyMessagesDetails as TooManyMessagesDetails
 from e2a.v1.generated.models.too_many_recipients_details import TooManyRecipientsDetails as TooManyRecipientsDetails
 from e2a.v1.generated.models.unsubscribe_options import UnsubscribeOptions as UnsubscribeOptions
 from e2a.v1.generated.models.update_agent_request import UpdateAgentRequest as UpdateAgentRequest

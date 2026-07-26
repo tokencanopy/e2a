@@ -14,6 +14,12 @@ export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
 export * from '../models/AttachmentView.js';
 export * from '../models/Authentication.js';
+export * from '../models/BatchMessage.js';
+export * from '../models/BatchResult.js';
+export * from '../models/BatchStatusRollupView.js';
+export * from '../models/BatchSuppressedItem.js';
+export * from '../models/BatchSuppressedResult.js';
+export * from '../models/BatchView.js';
 export * from '../models/ContactDueContact.js';
 export * from '../models/ContactDueData.js';
 export * from '../models/ContactEngagementView.js';
@@ -53,6 +59,7 @@ export * from '../models/DomainSendingFailedData.js';
 export * from '../models/DomainSendingVerifiedData.js';
 export * from '../models/DomainSuppressionAddedData.js';
 export * from '../models/DomainView.js';
+export * from '../models/DuplicateRecipientDetails.js';
 export * from '../models/EmailBouncedData.js';
 export * from '../models/EmailComplainedData.js';
 export * from '../models/EmailDeliveredData.js';
@@ -128,6 +135,8 @@ export * from '../models/RetryAfterDetails.js';
 export * from '../models/ReviewView.js';
 export * from '../models/RotateSecretResponse.js';
 export * from '../models/SPFResult.js';
+export * from '../models/SendBatchRequest.js';
+export * from '../models/SendBatchResponse.js';
 export * from '../models/SendEmailRequest.js';
 export * from '../models/SendResultView.js';
 export * from '../models/SendingRampView.js';
@@ -142,6 +151,7 @@ export * from '../models/TemplateView.js';
 export * from '../models/TestWebhookRequest.js';
 export * from '../models/TestWebhookResponse.js';
 export * from '../models/ThreatCategoryView.js';
+export * from '../models/TooManyMessagesDetails.js';
 export * from '../models/TooManyRecipientsDetails.js';
 export * from '../models/UnsubscribeOptions.js';
 export * from '../models/UpdateAgentRequest.js';
@@ -181,6 +191,12 @@ import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { Authentication } from '../models/Authentication.js';
+import { BatchMessage } from '../models/BatchMessage.js';
+import { BatchResult , BatchResultStatusEnum    } from '../models/BatchResult.js';
+import { BatchStatusRollupView } from '../models/BatchStatusRollupView.js';
+import { BatchSuppressedItem } from '../models/BatchSuppressedItem.js';
+import { BatchSuppressedResult } from '../models/BatchSuppressedResult.js';
+import { BatchView } from '../models/BatchView.js';
 import { ContactDueContact } from '../models/ContactDueContact.js';
 import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
@@ -220,7 +236,8 @@ import { DomainSendingFailedData } from '../models/DomainSendingFailedData.js';
 import { DomainSendingVerifiedData } from '../models/DomainSendingVerifiedData.js';
 import { DomainSuppressionAddedData } from '../models/DomainSuppressionAddedData.js';
 import { DomainView } from '../models/DomainView.js';
-import { EmailBouncedData  , EmailBouncedDataBounceTypeEnum         } from '../models/EmailBouncedData.js';
+import { DuplicateRecipientDetails } from '../models/DuplicateRecipientDetails.js';
+import { EmailBouncedData   , EmailBouncedDataBounceTypeEnum         } from '../models/EmailBouncedData.js';
 import { EmailComplainedData } from '../models/EmailComplainedData.js';
 import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
 import { EmailFailedData } from '../models/EmailFailedData.js';
@@ -294,6 +311,8 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { SendBatchRequest } from '../models/SendBatchRequest.js';
+import { SendBatchResponse } from '../models/SendBatchResponse.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { SendingRampView } from '../models/SendingRampView.js';
@@ -308,6 +327,7 @@ import { TemplateView } from '../models/TemplateView.js';
 import { TestWebhookRequest , TestWebhookRequestTypeEnum   } from '../models/TestWebhookRequest.js';
 import { TestWebhookResponse } from '../models/TestWebhookResponse.js';
 import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
+import { TooManyMessagesDetails } from '../models/TooManyMessagesDetails.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions, UnsubscribeOptionsModeEnum   } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
@@ -344,6 +364,7 @@ let primitives = [
                  ];
 
 let enumsMap: Set<string> = new Set<string>([
+    "BatchResultStatusEnum",
     "CreateAPIKeyRequestScopeEnum",
     "CreateWebhookRequestEventsEnum",
     "DKIMResultStatusEnum",
@@ -388,6 +409,12 @@ let typeMap: {[index: string]: any} = {
     "AttachmentMetaView": AttachmentMetaView,
     "AttachmentView": AttachmentView,
     "Authentication": Authentication,
+    "BatchMessage": BatchMessage,
+    "BatchResult": BatchResult,
+    "BatchStatusRollupView": BatchStatusRollupView,
+    "BatchSuppressedItem": BatchSuppressedItem,
+    "BatchSuppressedResult": BatchSuppressedResult,
+    "BatchView": BatchView,
     "ContactDueContact": ContactDueContact,
     "ContactDueData": ContactDueData,
     "ContactEngagementView": ContactEngagementView,
@@ -427,6 +454,7 @@ let typeMap: {[index: string]: any} = {
     "DomainSendingVerifiedData": DomainSendingVerifiedData,
     "DomainSuppressionAddedData": DomainSuppressionAddedData,
     "DomainView": DomainView,
+    "DuplicateRecipientDetails": DuplicateRecipientDetails,
     "EmailBouncedData": EmailBouncedData,
     "EmailComplainedData": EmailComplainedData,
     "EmailDeliveredData": EmailDeliveredData,
@@ -501,6 +529,8 @@ let typeMap: {[index: string]: any} = {
     "ReviewView": ReviewView,
     "RotateSecretResponse": RotateSecretResponse,
     "SPFResult": SPFResult,
+    "SendBatchRequest": SendBatchRequest,
+    "SendBatchResponse": SendBatchResponse,
     "SendEmailRequest": SendEmailRequest,
     "SendResultView": SendResultView,
     "SendingRampView": SendingRampView,
@@ -515,6 +545,7 @@ let typeMap: {[index: string]: any} = {
     "TestWebhookRequest": TestWebhookRequest,
     "TestWebhookResponse": TestWebhookResponse,
     "ThreatCategoryView": ThreatCategoryView,
+    "TooManyMessagesDetails": TooManyMessagesDetails,
     "TooManyRecipientsDetails": TooManyRecipientsDetails,
     "UnsubscribeOptions": UnsubscribeOptions,
     "UpdateAgentRequest": UpdateAgentRequest,

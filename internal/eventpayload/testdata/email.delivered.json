@@ -9,6 +9,7 @@
     "direction": "outbound",
     "delivered_to": "alice@customer.example.com",
     "subject": "Re: Order #1234 delayed",
+    "batch_id": "bat_9c8b7a6d5e4f3a2b1c0d9e8f",
     "lifecycle_transitions": [
       {
         "id": "mlt_delivered",

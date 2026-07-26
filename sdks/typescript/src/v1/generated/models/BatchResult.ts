@@ -15,11 +15,15 @@ import { HttpFile } from '../http/http.js';
 
 export class BatchResult {
     /**
-    * Minted message id when the item was accepted (delivery_status=\'accepted\' persisted and River outbound_send job enqueued). Absent when Suppressed is present.
+    * Minted message id when the item was accepted (delivery_status=\'accepted\' persisted and River outbound_send job enqueued). Present iff status is \"accepted\".
     */
     'messageId'?: string;
     /**
-    * Present when the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit.
+    * Slot discriminator, always present: \"accepted\" (message_id is set) or \"suppressed\" (suppressed is set). Branch on this rather than inferring the slot shape from which optional field is populated.
+    */
+    'status': BatchResultStatusEnum;
+    /**
+    * Present iff status is \"suppressed\": the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit.
     */
     'suppressed'?: BatchSuppressedResult;
 
@@ -32,6 +36,12 @@ export class BatchResult {
             "name": "messageId",
             "baseName": "message_id",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "status",
+            "baseName": "status",
+            "type": "BatchResultStatusEnum",
             "format": ""
         },
         {
@@ -48,3 +58,9 @@ export class BatchResult {
     public constructor() {
     }
 }
+
+export enum BatchResultStatusEnum {
+    Accepted = 'accepted',
+    Suppressed = 'suppressed'
+}
+

@@ -33,6 +33,12 @@ models/Attachment.ts
 models/AttachmentMetaView.ts
 models/AttachmentView.ts
 models/Authentication.ts
+models/BatchMessage.ts
+models/BatchResult.ts
+models/BatchStatusRollupView.ts
+models/BatchSuppressedItem.ts
+models/BatchSuppressedResult.ts
+models/BatchView.ts
 models/ContactDueContact.ts
 models/ContactDueData.ts
 models/ContactEngagementView.ts
@@ -72,6 +78,7 @@ models/DomainSendingFailedData.ts
 models/DomainSendingVerifiedData.ts
 models/DomainSuppressionAddedData.ts
 models/DomainView.ts
+models/DuplicateRecipientDetails.ts
 models/EmailBouncedData.ts
 models/EmailComplainedData.ts
 models/EmailDeliveredData.ts
@@ -148,6 +155,8 @@ models/RetryAfterDetails.ts
 models/ReviewView.ts
 models/RotateSecretResponse.ts
 models/SPFResult.ts
+models/SendBatchRequest.ts
+models/SendBatchResponse.ts
 models/SendEmailRequest.ts
 models/SendResultView.ts
 models/SendingRampView.ts
@@ -162,6 +171,7 @@ models/TemplateView.ts
 models/TestWebhookRequest.ts
 models/TestWebhookResponse.ts
 models/ThreatCategoryView.ts
+models/TooManyMessagesDetails.ts
 models/TooManyRecipientsDetails.ts
 models/UnsubscribeOptions.ts
 models/UpdateAgentRequest.ts

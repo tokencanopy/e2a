@@ -29,7 +29,7 @@ class SendBatchResponse(BaseModel):
     """ # noqa: E501
     accepted: StrictInt = Field(description="Count of results[] slots that are {message_id}. Redundant with results[] but convenient for logging + zero-check.")
     batch_id: StrictStr = Field(description="Durable id for this batch (bat_<base32>). Use GET /v1/batches/{batch_id} to retrieve the header + status rollup.")
-    results: List[BatchResult] = Field(description="One slot per request item, positionally aligned. Each slot is either {message_id} (accepted) or {suppressed:{address,reason}} (dropped by the suppression filter).")
+    results: List[BatchResult] = Field(description="One slot per request item, positionally aligned. Each slot carries a status discriminator: status=\"accepted\" → {message_id}; status=\"suppressed\" → {suppressed:{address,reason}} (dropped by the suppression filter).")
     suppressed_count: StrictInt = Field(description="Count of results[] slots that are {suppressed}. Zero when no per-item drops occurred.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["accepted", "batch_id", "results", "suppressed_count"]

@@ -10,6 +10,7 @@
     "delivered_to": "carol@customer.example.com",
     "subject": "Re: Order #1234 delayed",
     "smtp_detail": "abuse",
+    "batch_id": "bat_9c8b7a6d5e4f3a2b1c0d9e8f",
     "lifecycle_transitions": [
       {
         "id": "mlt_complained",

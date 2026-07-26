@@ -14,11 +14,11 @@ import { HttpFile } from '../http/http.js';
 
 export class BatchSuppressedResult {
     /**
-    * The recipient address in this item\'s to list that triggered the drop. If multiple addresses in the same item are suppressed, only the first is surfaced (dropping the whole item is enough signal).
+    * The recipient address in this item\'s to/cc/bcc envelope that triggered the drop. If multiple addresses in the same item are suppressed, only the first is surfaced (dropping the whole item is enough signal).
     */
     'address': string;
     /**
-    * The suppression-list category from suppressions.source. Known values: bounce, complaint, manual. Open set — treat as string and tolerate unknown values.
+    * The suppression category. Known values: bounce, complaint, manual (account-level, from suppressions.source), unsubscribe (agent-level, from agent_suppressions.source). Open set — treat as string and tolerate unknown values.
     */
     'reason': string;
 

@@ -22,6 +22,7 @@ from typing import List, Optional
 from typing_extensions import Annotated
 from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView
 from e2a.v1.generated.models.attachment_view import AttachmentView
+from e2a.v1.generated.models.batch_view import BatchView
 from e2a.v1.generated.models.delete_message_result import DeleteMessageResult
 from e2a.v1.generated.models.forward_request import ForwardRequest
 from e2a.v1.generated.models.message_view import MessageView
@@ -1345,6 +1346,270 @@ class MessagesApi:
 
 
     @validate_call
+    async def get_batch(
+        self,
+        batch_id: Annotated[StrictStr, Field(description="The batch id, e.g. bat_abc123.")],
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> BatchView:
+        """Get a batch's header and delivery-status rollup (beta)
+
+        Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+
+        :param batch_id: The batch id, e.g. bat_abc123. (required)
+        :type batch_id: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_batch_serialize(
+            batch_id=batch_id,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "BatchView",
+            '404': "ErrorEnvelope",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        ).data
+
+
+    @validate_call
+    async def get_batch_with_http_info(
+        self,
+        batch_id: Annotated[StrictStr, Field(description="The batch id, e.g. bat_abc123.")],
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> ApiResponse[BatchView]:
+        """Get a batch's header and delivery-status rollup (beta)
+
+        Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+
+        :param batch_id: The batch id, e.g. bat_abc123. (required)
+        :type batch_id: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_batch_serialize(
+            batch_id=batch_id,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "BatchView",
+            '404': "ErrorEnvelope",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        )
+
+
+    @validate_call
+    async def get_batch_without_preload_content(
+        self,
+        batch_id: Annotated[StrictStr, Field(description="The batch id, e.g. bat_abc123.")],
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> RESTResponseType:
+        """Get a batch's header and delivery-status rollup (beta)
+
+        Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+
+        :param batch_id: The batch id, e.g. bat_abc123. (required)
+        :type batch_id: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_batch_serialize(
+            batch_id=batch_id,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "BatchView",
+            '404': "ErrorEnvelope",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        return response_data.response
+
+
+    def _get_batch_serialize(
+        self,
+        batch_id,
+        _request_auth,
+        _content_type,
+        _headers,
+        _host_index,
+    ) -> RequestSerialized:
+
+        _host = None
+
+        _collection_formats: Dict[str, str] = {
+        }
+
+        _path_params: Dict[str, str] = {}
+        _query_params: List[Tuple[str, str]] = []
+        _header_params: Dict[str, Optional[str]] = _headers or {}
+        _form_params: List[Tuple[str, str]] = []
+        _files: Dict[
+            str, Union[str, bytes, List[str], List[bytes], List[Tuple[str, bytes]]]
+        ] = {}
+        _body_params: Optional[bytes] = None
+
+        # process the path parameters
+        if batch_id is not None:
+            _path_params['batch_id'] = batch_id
+        # process the query parameters
+        # process the header parameters
+        # process the form parameters
+        # process the body parameter
+
+
+        # set the HTTP header `Accept`
+        if 'Accept' not in _header_params:
+            _header_params['Accept'] = self.api_client.select_header_accept(
+                [
+                    'application/json'
+                ]
+            )
+
+
+        # authentication setting
+        _auth_settings: List[str] = [
+            'bearer'
+        ]
+
+        return self.api_client.param_serialize(
+            method='GET',
+            resource_path='/v1/batches/{batch_id}',
+            path_params=_path_params,
+            query_params=_query_params,
+            header_params=_header_params,
+            body=_body_params,
+            post_params=_form_params,
+            files=_files,
+            auth_settings=_auth_settings,
+            collection_formats=_collection_formats,
+            _host=_host,
+            _request_auth=_request_auth
+        )
+
+
+
+
+    @validate_call
     async def get_message(
         self,
         email: Annotated[StrictStr, Field(description="The agent's full email address.")],
@@ -1940,6 +2205,7 @@ class MessagesApi:
         from_: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on sender.")] = None,
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
+        batch_id: Annotated[Optional[StrictStr], Field(description="Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.")] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
@@ -1978,6 +2244,8 @@ class MessagesApi:
         :type subject_contains: str
         :param conversation_id:
         :type conversation_id: str
+        :param batch_id: Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.
+        :type batch_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
         :param since: RFC3339; created_at >= since.
@@ -2022,6 +2290,7 @@ class MessagesApi:
             from_=from_,
             subject_contains=subject_contains,
             conversation_id=conversation_id,
+            batch_id=batch_id,
             labels=labels,
             since=since,
             until=until,
@@ -2059,6 +2328,7 @@ class MessagesApi:
         from_: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on sender.")] = None,
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
+        batch_id: Annotated[Optional[StrictStr], Field(description="Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.")] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
@@ -2097,6 +2367,8 @@ class MessagesApi:
         :type subject_contains: str
         :param conversation_id:
         :type conversation_id: str
+        :param batch_id: Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.
+        :type batch_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
         :param since: RFC3339; created_at >= since.
@@ -2141,6 +2413,7 @@ class MessagesApi:
             from_=from_,
             subject_contains=subject_contains,
             conversation_id=conversation_id,
+            batch_id=batch_id,
             labels=labels,
             since=since,
             until=until,
@@ -2178,6 +2451,7 @@ class MessagesApi:
         from_: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on sender.")] = None,
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
+        batch_id: Annotated[Optional[StrictStr], Field(description="Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.")] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
@@ -2216,6 +2490,8 @@ class MessagesApi:
         :type subject_contains: str
         :param conversation_id:
         :type conversation_id: str
+        :param batch_id: Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction=outbound. Exact match on the batch id, e.g. bat_abc123.
+        :type batch_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
         :param since: RFC3339; created_at >= since.
@@ -2260,6 +2536,7 @@ class MessagesApi:
             from_=from_,
             subject_contains=subject_contains,
             conversation_id=conversation_id,
+            batch_id=batch_id,
             labels=labels,
             since=since,
             until=until,
@@ -2292,6 +2569,7 @@ class MessagesApi:
         from_,
         subject_contains,
         conversation_id,
+        batch_id,
         labels,
         since,
         until,
@@ -2347,6 +2625,10 @@ class MessagesApi:
         if conversation_id is not None:
             
             _query_params.append(('conversation_id', conversation_id))
+            
+        if batch_id is not None:
+            
+            _query_params.append(('batch_id', batch_id))
             
         if labels is not None:
             
@@ -3065,9 +3347,9 @@ class MessagesApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> SendBatchResponse:
-        """Send a batch of up to 100 emails
+        """Send a batch of up to 100 emails (beta)
 
-        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.
+        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item's content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3148,9 +3430,9 @@ class MessagesApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> ApiResponse[SendBatchResponse]:
-        """Send a batch of up to 100 emails
+        """Send a batch of up to 100 emails (beta)
 
-        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.
+        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item's content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3231,9 +3513,9 @@ class MessagesApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> RESTResponseType:
-        """Send a batch of up to 100 emails
+        """Send a batch of up to 100 emails (beta)
 
-        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.
+        Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item's content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
 
         :param email: (required)
         :type email: str
