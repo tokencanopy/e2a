@@ -26,6 +26,9 @@ describe("site config — sign-in door", () => {
     const site = loadSite();
     expect(site.SIGN_IN_URL).toBe("/api/auth/login");
     expect(site.SIGN_IN_LABEL).toBe("Sign in with Google");
+    expect(site.signInURLWithReturnTo("/oauth2/authorize")).toBe(
+      "/api/auth/login?return_to=%2Foauth2%2Fauthorize",
+    );
   });
 
   it("points at the configured door with provider-neutral copy when set", () => {
@@ -33,5 +36,12 @@ describe("site config — sign-in door", () => {
     const site = loadSite();
     expect(site.SIGN_IN_URL).toBe("/api/auth/oidc/login");
     expect(site.SIGN_IN_LABEL).toBe("Sign in");
+    expect(
+      site.signInURLWithReturnTo(
+        "/oauth2/authorize?client_id=mcp_abc&state=opaque",
+      ),
+    ).toBe(
+      "/api/auth/oidc/login?return_to=%2Foauth2%2Fauthorize%3Fclient_id%3Dmcp_abc%26state%3Dopaque",
+    );
   });
 });

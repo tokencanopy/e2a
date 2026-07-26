@@ -17,18 +17,20 @@ export function SignInLink({
   className,
   style,
   children,
+  href = SIGN_IN_URL,
 }: {
   className?: string;
   style?: React.CSSProperties;
   children: React.ReactNode;
+  href?: string;
 }) {
   const handleClick = (e: React.MouseEvent) => {
     if (isInAppBrowser()) {
       e.preventDefault();
       // Try to open in system browser on iOS/Android. Build via the URL
-      // constructor so an operator-supplied absolute SIGN_IN_URL (or one
-      // missing its leading slash) can't produce a concatenated dead link.
-      const url = new URL(SIGN_IN_URL, window.location.origin).href;
+      // constructor so an absolute href (or one missing its leading slash)
+      // can't produce a concatenated dead link.
+      const url = new URL(href, window.location.origin).href;
       // iOS: window.open in in-app browsers sometimes opens Safari
       window.open(url, "_blank");
       // Also show a message in case the open didn't work. The WebView block
@@ -43,7 +45,7 @@ export function SignInLink({
 
   return (
     <a
-      href={SIGN_IN_URL}
+      href={href}
       className={className}
       style={style}
       onClick={handleClick}

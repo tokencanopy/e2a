@@ -41,8 +41,16 @@ function __setAuth(v: typeof authValue) {
 // SignInLink is a thin wrapper around an <a>; render a stub so the
 // test doesn't pull in the in-app-browser detection branch.
 jest.mock("../../components/SignInLink", () => ({
-  SignInLink: ({ children, className }: { children: React.ReactNode; className?: string }) => (
-    <a href="/api/auth/login" className={className}>
+  SignInLink: ({
+    children,
+    className,
+    href,
+  }: {
+    children: React.ReactNode;
+    className?: string;
+    href?: string;
+  }) => (
+    <a href={href ?? "/api/auth/login"} className={className}>
       {children}
     </a>
   ),
@@ -144,7 +152,7 @@ describe("ConsentPage", () => {
     render(<ConsentPage />);
     expect(screen.getByText(/Sign in to continue/i)).toBeInTheDocument();
     const linkWithReturnTo = screen.getByRole("link", {
-      name: /Sign in with Google and return to this authorization/i,
+      name: /^Sign in with Google$/i,
     }) as HTMLAnchorElement;
     expect(linkWithReturnTo.getAttribute("href")).toMatch(
       /^\/api\/auth\/login\?return_to=/,
