@@ -47,10 +47,10 @@ func (p *parser) skipWS() bool {
 	return seen
 }
 
-func (p *parser) addNode() error {
+func (p *parser) addNode(pos int) error {
 	p.nodes++
 	if p.nodes > maxNodes {
-		return &Error{Kind: ErrCap, Pos: -1, Msg: fmt.Sprintf("expression too large (limit %d nodes)", maxNodes)}
+		return &Error{Kind: ErrCap, Pos: pos, Msg: fmt.Sprintf("expression too large (limit %d nodes)", maxNodes)}
 	}
 	return nil
 }
@@ -79,7 +79,7 @@ func (p *parser) parseExpression(depth int) (Node, error) {
 	if len(terms) == 1 {
 		return first, nil
 	}
-	if err := p.addNode(); err != nil {
+	if err := p.addNode(first.Pos()); err != nil {
 		return nil, err
 	}
 	return &And{Terms: terms, At: first.Pos()}, nil
@@ -109,7 +109,7 @@ func (p *parser) parseSequence(depth int) (Node, error) {
 	if len(terms) == 1 {
 		return first, nil
 	}
-	if err := p.addNode(); err != nil {
+	if err := p.addNode(first.Pos()); err != nil {
 		return nil, err
 	}
 	return &And{Terms: terms, At: first.Pos()}, nil
@@ -143,7 +143,7 @@ func (p *parser) parseFactor(depth int) (Node, error) {
 	if len(terms) == 1 {
 		return first, nil
 	}
-	if err := p.addNode(); err != nil {
+	if err := p.addNode(first.Pos()); err != nil {
 		return nil, err
 	}
 	return &Or{Terms: terms, At: first.Pos()}, nil
@@ -171,7 +171,7 @@ func (p *parser) parseTerm(depth int) (Node, error) {
 	if !negated {
 		return x, nil
 	}
-	if err := p.addNode(); err != nil {
+	if err := p.addNode(t.pos); err != nil {
 		return nil, err
 	}
 	return &Not{X: x, At: t.pos}, nil
@@ -230,7 +230,7 @@ func (p *parser) parseRestriction() (Node, error) {
 		op = ">="
 	default:
 		p.i = save
-		if err := p.addNode(); err != nil {
+		if err := p.addNode(pos); err != nil {
 			return nil, err
 		}
 		return &Bare{Text: field, At: pos}, nil
@@ -241,7 +241,7 @@ func (p *parser) parseRestriction() (Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.addNode(); err != nil {
+	if err := p.addNode(pos); err != nil {
 		return nil, err
 	}
 	return &Comparison{Field: field, Op: op, Raw: val, Quoted: quoted, At: pos}, nil

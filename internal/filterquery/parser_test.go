@@ -99,22 +99,32 @@ func TestParsePunctuationInsideUnquotedValues(t *testing.T) {
 }
 
 func TestParseErrors(t *testing.T) {
-	for _, q := range []string{
-		`(a:x`,     // unclosed paren
-		`a:x)`,     // stray close
-		`a:x AND`,  // dangling AND
-		`OR a:x`,   // leading OR
-		`:x`,       // missing field
-		`label:`,   // missing value
-		`a.x:y`,    // a.x is fine — but `a.:y` and `a..b:y` are not
-		`NOT(a:x)`, // NOT must be followed by whitespace
-	} {
-		if q == `a.x:y` {
-			continue // valid dotted member, covered elsewhere
-		}
-		if _, err := parse(q); err == nil {
-			t.Errorf("parse(%q) = nil error, want error", q)
-		}
+	cases := []struct {
+		name string
+		q    string
+		pos  int
+	}{
+		{name: "unclosed paren", q: `(a:x`, pos: 4},
+		{name: "stray close", q: `a:x)`, pos: 3},
+		{name: "dangling AND", q: `a:x AND`, pos: 7},
+		{name: "leading OR", q: `OR a:x`, pos: 0},
+		{name: "missing field", q: `:x`, pos: 0},
+		{name: "missing value", q: `label:`, pos: 6},
+		{name: "malformed dotted member missing segment", q: `a.:y`, pos: 2},
+		{name: "malformed dotted member duplicate dot", q: `a..b:y`, pos: 2},
+		{name: "NOT missing whitespace", q: `NOT(a:x)`, pos: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parse(tc.q)
+			fe, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("parse(%q) error type %T, want *Error", tc.q, err)
+			}
+			if fe.Kind != ErrParse || fe.Pos != tc.pos {
+				t.Errorf("parse(%q) error = %+v, want {Kind: ErrParse, Pos: %d}", tc.q, fe, tc.pos)
+			}
+		})
 	}
 }
 
@@ -129,7 +139,12 @@ func TestParseCaps(t *testing.T) {
 	for i := 0; i < 600; i++ {
 		b.WriteString("a:x ")
 	}
-	if _, err := parse(b.String()); err == nil {
-		t.Error("600 nodes: want error")
+	_, err := parse(b.String())
+	fe, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("600 nodes error type %T, want *Error", err)
+	}
+	if fe.Kind != ErrCap || fe.Pos != 2048 {
+		t.Errorf("600 nodes error = %+v, want {Kind: ErrCap, Pos: 2048}", fe)
 	}
 }
