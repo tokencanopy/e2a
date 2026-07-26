@@ -907,3 +907,100 @@ These are the behavioral contract. Each maps to a test in §6.
 - **Server-side CSV parsing** — column mapping and encoding detection don't belong in a mail gateway.
 - **e2a-driven sequences** — the product line in §3.5; makes e2a a cold-outreach sequencer.
 - **A single global `unsubscribed` boolean on the contact** — the common industry shape; would flatten per-agent consent that e2a currently models correctly.
+
+---
+
+## 10. Amendment (2026-07-26): stop materializing the message counters
+
+Status: **proposed** — reverses part of §3.2. Not implemented.
+
+### What §3.2 decided, and what it got wrong
+
+§3.2 said derived fields are materialized because "computing counters on read
+means a correlated aggregate over `messages` — a prod-sized table — for every
+row of every list request", and accepted counter drift as the price, mitigated
+by `ReconcileEngagementCounts`.
+
+The reasoning was sound for **one** field and was over-applied to all of them.
+The cost argument is about the `replied` **filter**: `replied` appears in the
+`WHERE` clause, so evaluating it per-request means aggregating over every
+candidate row rather than a page. That genuinely requires materialized
+timestamps.
+
+`outbound_count` and `inbound_count` are different in kind. They are
+**projected, never filtered** — `EngagementFilter` offers stage, replied,
+suppressed, next_action_before and last_outbound_before, and nothing selects on
+a count. Filtering therefore happens first, on indexed materialized columns, and
+any aggregate runs over at most one page. That is a completely different cost
+profile from the one §3.2 rejected, and the two cases were collapsed together.
+
+### Only the counters can drift
+
+Split the derived columns by whether their update is idempotent:
+
+| Field | Update | Can drift? |
+|---|---|---|
+| `first_outbound_at` | `LEAST(…)` | No — converges on the earliest value regardless of arrival order or repetition |
+| `last_outbound_at`, `last_inbound_at` | `GREATEST(…)` | No — converges upward |
+| `replied` | derived from the above | No — inherits their convergence |
+| `outbound_count`, `inbound_count` | `+ 1` | **Yes** — the only non-idempotent writes in the feature |
+
+Every drift-prone field is a counter, and every counter is display-only. The
+fields the outreach query filters on are precisely the ones that cannot drift.
+
+### The codebase already answered this
+
+`ConversationSummaryView` — a pre-existing, neighbouring resource — exposes the
+same `inbound_count` / `outbound_count` pair and computes them at query time
+(`internal/identity/store.go`, the conversation-summary query):
+
+```sql
+COUNT(*)                                     AS message_count,
+COUNT(*) FILTER (WHERE direction='inbound')  AS inbound_count,
+COUNT(*) FILTER (WHERE direction='outbound') AS outbound_count,
+```
+
+One grouped scan, no materialized column, no counter, no reconciliation, no
+drift. Contacts is the outlier here, not the precedent — which also means this
+amendment is an alignment rather than a novel trade-off.
+
+### Proposal
+
+Drop `outbound_count` and `inbound_count` from `contact_engagements` and compute
+them in the engagement read paths, after filtering, over the returned page.
+Keep the timestamps materialized: they are what the filter needs and they cannot
+drift.
+
+Deletes, rather than fixes: `ReconcileEngagementCounts`, `EngagementCountDrift`,
+its janitor wiring and batch bound, the drift-report log vocabulary, and the
+read-then-write race documented in §10.1 below. It is less code than repairing
+the sweep.
+
+### 10.1 The race this removes
+
+`ReconcileEngagementCounts` reads stored and recomputed values in one snapshot,
+collects the rows that disagree, then writes absolute values in a loop — none of
+it in a transaction. An increment landing between the read and that row's write
+is overwritten. The window is not milliseconds: the read happens once per batch
+and writes are sequential, so for the last row of a 500-row pass it spans the
+whole loop.
+
+The counter inaccuracy self-corrects next sweep. The **reporting** damage does
+not: drift reports are deliberately loud because they mean "an activity hook was
+missed — go find the bug". A sweep that manufactures drift on the very rows it
+just repaired trains the reader to ignore the alarm, at which point a real
+missed hook goes unnoticed. That is the stronger reason to remove the mechanism
+rather than tune it.
+
+### What would reverse this
+
+A filter that selects on volume (`outbound_count > 3`). The outreach query is
+about time and reply state, not volume, so this is judged unlikely — but it is
+the condition under which materializing becomes correct again.
+
+### Cost of the change
+
+`contact.due` carries `outbound_count` in its payload, and a webhook payload is
+a harder contract to change than a response body. The field stays; only its
+source changes. Migration is additive-by-deletion: a new migration drops the two
+columns (forward-only, per AGENTS.md), and nothing reads them in between.
