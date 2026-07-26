@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+type dollarDialect struct{}
+
+func (dollarDialect) Placeholder(n int) string { return fmt.Sprintf("$%d", n) }
+
 // toyRegistry backs the package's conformance and unit tests: a fake
 // "products" table with text/int/bool/text[] columns. It proves the package
 // is schema-agnostic — no e2a concepts involved.
@@ -26,7 +30,7 @@ func toyRegistry(t *testing.T) *Registry {
 				v := c.Value.(string)
 				switch c.Op {
 				case ":":
-					return `p.name ILIKE ` + e.PH("%"+v+"%") + ` ESCAPE '\\'`, nil
+					return `p.name ILIKE ` + e.PH("%"+v+"%") + ` ESCAPE '\'`, nil
 				case "=":
 					return "LOWER(p.name) = LOWER(" + e.PH(v) + ")", nil
 				default:
@@ -108,8 +112,8 @@ func TestValidateUnknownField(t *testing.T) {
 func TestValidateBareTermRejected(t *testing.T) {
 	reg := toyRegistry(t)
 	err := validateToErr(t, reg, `hello`)
-	fe, _ := err.(*Error)
-	if fe == nil || !strings.Contains(fe.Msg, "bare term") {
+	fe, ok := err.(*Error)
+	if !ok || fe.Kind != ErrValidate || fe.Pos != 0 || !strings.Contains(fe.Msg, "bare term") {
 		t.Errorf("err = %v, want bare-term rejection", err)
 	}
 }
@@ -117,8 +121,8 @@ func TestValidateBareTermRejected(t *testing.T) {
 func TestValidateOperatorNotAllowed(t *testing.T) {
 	reg := toyRegistry(t)
 	err := validateToErr(t, reg, `tags=new`)
-	fe, _ := err.(*Error)
-	if fe == nil || !strings.Contains(fe.Msg, `operator "=" is not allowed on field "tags"`) {
+	fe, ok := err.(*Error)
+	if !ok || fe.Kind != ErrValidate || fe.Pos != 0 || !strings.Contains(fe.Msg, `operator "=" is not allowed on field "tags"`) {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -130,9 +134,13 @@ func TestValidateCoercion(t *testing.T) {
 	}
 	if err := validateToErr(t, reg, `price=abc`); err == nil {
 		t.Error("want integer coercion error")
+	} else if fe, ok := err.(*Error); !ok || fe.Kind != ErrValidate || fe.Pos != 0 {
+		t.Errorf("err = %v, want validation error at 0", err)
 	}
 	if err := validateToErr(t, reg, `active=maybe`); err == nil {
 		t.Error("want bool coercion error")
+	} else if fe, ok := err.(*Error); !ok || fe.Kind != ErrValidate || fe.Pos != 0 {
+		t.Errorf("err = %v, want validation error at 0", err)
 	}
 	n, err := parse(`price>=42`)
 	if err != nil {
@@ -151,9 +159,45 @@ func TestValidateRecurses(t *testing.T) {
 	reg := toyRegistry(t)
 	if err := validateToErr(t, reg, `name:ok AND (price>1 OR bogus:field)`); err == nil {
 		t.Error("want unknown-field error from inside the tree")
+	} else if fe, ok := err.(*Error); !ok || fe.Kind != ErrValidate || fe.Pos != 24 {
+		t.Errorf("err = %v, want validation error at 24", err)
 	}
 	if err := validateToErr(t, reg, `name:ok AND (price>1 OR NOT tags:sale)`); err != nil {
 		t.Errorf("valid expression rejected: %v", err)
+	}
+}
+
+func TestRegistryNamesSortedFresh(t *testing.T) {
+	reg := toyRegistry(t)
+	names := reg.Names()
+	if got, want := strings.Join(names, ","), "active,name,price,tags"; got != want {
+		t.Errorf("Names() = %q, want %q", got, want)
+	}
+	names[0] = "changed"
+	if got, want := strings.Join(reg.Names(), ","), "active,name,price,tags"; got != want {
+		t.Errorf("Names() returned aliased output: got %q, want %q", got, want)
+	}
+}
+
+func TestNameEmitEscapesWithOneBackslash(t *testing.T) {
+	reg := toyRegistry(t)
+	n, err := parse(`name:x`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := reg.Validate(n); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	ctx := &EmitCtx{dialect: dollarDialect{}, next: 1}
+	sql, err := reg.fields["name"].Emit(n.(*Comparison), ctx)
+	if err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if want := `p.name ILIKE $1 ESCAPE '\'`; sql != want {
+		t.Errorf("SQL = %q, want %q", sql, want)
+	}
+	if got, want := fmt.Sprint(ctx.args), "[%x%]"; got != want {
+		t.Errorf("args = %s, want %s", got, want)
 	}
 }
 
