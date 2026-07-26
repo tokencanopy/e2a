@@ -232,17 +232,16 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 // uses (validateReturnToPath / validateCLICallbackURL).
 //
 // Unlike the legacy door, which folds these into the OAuth state parameter,
-// the OIDC door keeps its state parameter an opaque random string (constant-
-// time-compared against a cookie) and carries the instructions in a fourth
-// transaction cookie instead. That is at least as safe as the legacy
-// encoding: the cookie is HttpOnly, SameSite=Lax, scoped to the OIDC
-// routes, and an off-origin attacker cannot plant one in the victim's
-// browser; HandleCallback additionally re-validates every value before
-// acting on it.
+// the OIDC door keeps its provider-facing state parameter opaque and carries
+// the instructions in a fourth transaction cookie instead. TransactionState
+// binds that cookie to the same unpredictable state value as the other OIDC
+// transaction cookies. HandleCallback ignores instructions whose binding or
+// CLI callback/state pairing does not validate.
 type oidcResume struct {
-	ReturnTo    string `json:"rt,omitempty"`
-	CLICallback string `json:"cb,omitempty"`
-	CLIState    string `json:"cs,omitempty"`
+	TransactionState string `json:"s,omitempty"`
+	ReturnTo         string `json:"rt,omitempty"`
+	CLICallback      string `json:"cb,omitempty"`
+	CLIState         string `json:"cs,omitempty"`
 }
 
 func (r *oidcResume) empty() bool {
@@ -254,19 +253,24 @@ func (r *oidcResume) encode() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeOIDCResume returns nil for any value that does not decode to a
-// well-formed oidcResume. The cookie carries no security material — the
-// CSRF binding lives in the state/nonce cookies — so a corrupt or tampered
-// value degrades to "no post-login instructions" rather than failing an
-// otherwise valid login, the same fallback the legacy door applies to an
-// invalid return_to at callback time.
-func decodeOIDCResume(raw string) *oidcResume {
+// decodeOIDCResume returns nil for corrupt instructions, instructions from a
+// different OIDC transaction, or an incomplete CLI callback/state pair. Those
+// cases degrade to "no post-login instructions" rather than failing an
+// otherwise valid login.
+func decodeOIDCResume(raw, expectedState string) *oidcResume {
 	b, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
 		return nil
 	}
 	var r oidcResume
 	if err := json.Unmarshal(b, &r); err != nil {
+		return nil
+	}
+	if r.TransactionState == "" ||
+		subtle.ConstantTimeCompare([]byte(r.TransactionState), []byte(expectedState)) != 1 {
+		return nil
+	}
+	if (r.CLICallback == "") != (r.CLIState == "") {
 		return nil
 	}
 	return &r
@@ -351,6 +355,7 @@ func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if resume.empty() {
 		oa.setTransactionCookie(w, oidcResumeCookieName, "", -1)
 	} else {
+		resume.TransactionState = state
 		oa.setTransactionCookie(w, oidcResumeCookieName, resume.encode(), int(oidcTransactionMaxAge.Seconds()))
 	}
 
@@ -391,7 +396,7 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// decodeOIDCResume).
 	resume := &oidcResume{}
 	if cookie, err := r.Cookie(oidcResumeCookieName); err == nil {
-		if decoded := decodeOIDCResume(cookie.Value); decoded != nil {
+		if decoded := decodeOIDCResume(cookie.Value, stateCookie.Value); decoded != nil {
 			resume = decoded
 		}
 	}

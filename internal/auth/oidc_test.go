@@ -765,15 +765,17 @@ func TestOIDCLoginUsesSecureCookiesInProduction(t *testing.T) {
 // decodeResumeCookieValue decodes the e2a_oidc_resume transaction cookie the
 // way the callback does, so tests can assert what HandleLogin stashed.
 func decodeResumeCookieValue(t *testing.T, cookie *http.Cookie) struct {
-	ReturnTo    string `json:"rt"`
-	CLICallback string `json:"cb"`
-	CLIState    string `json:"cs"`
+	TransactionState string `json:"s"`
+	ReturnTo         string `json:"rt"`
+	CLICallback      string `json:"cb"`
+	CLIState         string `json:"cs"`
 } {
 	t.Helper()
 	var resume struct {
-		ReturnTo    string `json:"rt"`
-		CLICallback string `json:"cb"`
-		CLIState    string `json:"cs"`
+		TransactionState string `json:"s"`
+		ReturnTo         string `json:"rt"`
+		CLICallback      string `json:"cb"`
+		CLIState         string `json:"cs"`
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
 	if err != nil {
@@ -807,6 +809,9 @@ func TestOIDCLoginCarriesReturnToInResumeCookie(t *testing.T) {
 		t.Errorf("unsafe resume cookie: %+v", cookie)
 	}
 	resume := decodeResumeCookieValue(t, cookie)
+	if resume.TransactionState != tx.state {
+		t.Errorf("resume transaction state = %q, want %q", resume.TransactionState, tx.state)
+	}
 	if resume.ReturnTo != returnTo {
 		t.Errorf("resume return_to = %q, want %q", resume.ReturnTo, returnTo)
 	}
@@ -991,6 +996,89 @@ func TestOIDCCallbackIgnoresCorruptResumeCookie(t *testing.T) {
 	tx := beginOIDCLogin(t, fx)
 	req := callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state))
 	req.AddCookie(&http.Cookie{Name: "e2a_oidc_resume", Value: "!!!not-a-resume!!!"})
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestOIDCCallbackIgnoresResumeCookieFromDifferentTransaction(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "mismatch@example.com", "Mismatch", "google-sub-mismatch")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	tx := beginOIDCLogin(t, fx)
+	raw, err := json.Marshal(map[string]string{
+		"s":  "state-from-another-login",
+		"cb": "http://127.0.0.1:43123/callback",
+		"cs": "cli_state_abc",
+	})
+	if err != nil {
+		t.Fatalf("marshal resume cookie: %v", err)
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/oidc/callback?code=valid-code&state="+url.QueryEscape(tx.state),
+		nil,
+	)
+	for _, cookie := range tx.cookies {
+		if cookie.Name != "e2a_oidc_resume" {
+			req.AddCookie(cookie)
+		}
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  "e2a_oidc_resume",
+		Value: base64.RawURLEncoding.EncodeToString(raw),
+	})
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestOIDCCallbackIgnoresResumeCookieWithIncompleteCLIPair(t *testing.T) {
+	fx := setupOIDC(t)
+	user, err := fx.store.CreateOrGetUser(context.Background(), "incomplete@example.com", "Incomplete", "google-sub-incomplete")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	tx := beginOIDCLogin(t, fx)
+	raw, err := json.Marshal(map[string]string{
+		"s":  tx.state,
+		"cb": "http://127.0.0.1:43123/callback",
+	})
+	if err != nil {
+		t.Fatalf("marshal resume cookie: %v", err)
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/oidc/callback?code=valid-code&state="+url.QueryEscape(tx.state),
+		nil,
+	)
+	for _, cookie := range tx.cookies {
+		if cookie.Name != "e2a_oidc_resume" {
+			req.AddCookie(cookie)
+		}
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  "e2a_oidc_resume",
+		Value: base64.RawURLEncoding.EncodeToString(raw),
+	})
 
 	w := httptest.NewRecorder()
 	fx.oidc.HandleCallback(w, req)
