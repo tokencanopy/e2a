@@ -41,6 +41,7 @@ type Config struct {
 	Database         DatabaseConfig         `yaml:"database"`
 	OAuth            OAuthConfig            `yaml:"oauth"`
 	OIDC             OIDCConfig             `yaml:"oidc"`
+	Provisioning     ProvisioningConfig     `yaml:"provisioning"`
 	Signing          SigningConfig          `yaml:"signing"`
 	OutboundSMTP     OutboundSMTPConfig     `yaml:"outbound_smtp"`
 	Inbound          InboundConfig          `yaml:"inbound"`
@@ -152,6 +153,24 @@ type OIDCConfig struct {
 
 type SigningConfig struct {
 	HMACSecret string `yaml:"hmac_secret"`
+}
+
+// ProvisioningConfig gates the internal user-provisioning endpoint
+// (POST /api/internal/users/provision). It is off by default; when disabled
+// the endpoint 503s. An external control plane calls it to create an e2a
+// user idempotently — keyed by the caller's external_ref — ahead of that
+// user's first sign-in. The endpoint is deliberately generic: every
+// deployment-specific value (who the control plane is, which secret it
+// signs with) lives here, not in source.
+type ProvisioningConfig struct {
+	// Enabled turns the endpoint on. Override with E2A_PROVISIONING_ENABLED.
+	Enabled bool `yaml:"enabled"`
+	// Secret is the shared HMAC key the control plane signs each request
+	// body with (hex digest in X-E2A-Internal-Signature). Env-only via
+	// E2A_PROVISIONING_SECRET — secrets never go in the yaml file. Must be
+	// set to the same value on both ends; empty with enabled=true fails
+	// Validate.
+	Secret string `yaml:"-"`
 }
 
 type OutboundSMTPConfig struct {
@@ -398,6 +417,14 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OIDC_USER_ID_CLAIM"); v != "" {
 		cfg.OIDC.UserIDClaim = v
 	}
+	if v := os.Getenv("E2A_PROVISIONING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Provisioning.Enabled = b
+		}
+	}
+	if v := os.Getenv("E2A_PROVISIONING_SECRET"); v != "" {
+		cfg.Provisioning.Secret = v
+	}
 	if v := os.Getenv("E2A_OUTBOUND_SMTP_HOST"); v != "" {
 		cfg.OutboundSMTP.Host = v
 	}
@@ -512,6 +539,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: signing.hmac_secret is %d bytes; production requires at least %d (run `openssl rand -hex 32` to generate)", len(c.Signing.HMACSecret), minHMACSecretBytes)
 		}
 	}
+	if c.HTTP.APIURL != "" {
+		apiURL, err := absoluteHTTPURL(c.HTTP.APIURL)
+		if err != nil || apiURL.RawQuery != "" || apiURL.Fragment != "" {
+			return errors.New("config: http.api_url must be an absolute http(s) URL without userinfo, query, or fragment")
+		}
+	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)
 	}
@@ -551,6 +584,14 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if c.Provisioning.Enabled {
+		if c.Provisioning.Secret == "" {
+			return errors.New("config: provisioning.enabled requires the provisioning secret (E2A_PROVISIONING_SECRET) to be set")
+		}
+		if c.IsProduction() && len(c.Provisioning.Secret) < minHMACSecretBytes {
+			return fmt.Errorf("config: provisioning secret is %d bytes; production requires at least %d (run `openssl rand -hex 32` to generate)", len(c.Provisioning.Secret), minHMACSecretBytes)
 		}
 	}
 	if c.SendingRamp.Enabled {

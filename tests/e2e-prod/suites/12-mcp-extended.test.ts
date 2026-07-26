@@ -23,6 +23,9 @@ afterEach(async () => {
 
 after(async () => {
   await mcp.stop();
+  // The loopback fixture must survive the afterEach cleanup between the two
+  // tests that share it, so register it for deletion only at suite teardown.
+  if (messageFixtureAgentEmail) track("agent", messageFixtureAgentEmail);
   const r = await cleanup(apiClient);
   if (r.failed.length) warn(SUITE, "cleanup", `failed ${r.failed.length}`, r.failed);
   writeReport(`./reports/12-mcp-extended.json`);
@@ -30,6 +33,66 @@ after(async () => {
 
 function extractText(r: { content?: Array<{ type: string; text?: string }> }): string {
   return r.content?.find((c) => c.type === "text")?.text ?? "";
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A single self-send loopback message, shared by the get_message and
+// reply_to_message happy-path tests below. Self-send (an agent emailing
+// itself) is the reliable way to produce a real inbound message on the
+// shared domain without needing an external MX — the same mechanism the
+// staging loopback path relies on. Sharing one fixture between both tests
+// keeps mail volume down against the free-plan monthly cap instead of
+// self-sending twice.
+interface MessageFixture {
+  id: string;
+  subject: string;
+}
+let messageFixtureAgentEmail: string | undefined;
+let messageFixturePromise: Promise<MessageFixture> | undefined;
+function messageFixture(): Promise<MessageFixture> {
+  messageFixturePromise ??= (async () => {
+    // Do not depend on the persistent conformance agent's mutable protection
+    // posture. A previous or interrupted test run may legitimately leave it
+    // review-gated, which would turn this send into a pending draft and make
+    // the loopback poll time out. A fresh agent starts with the open defaults.
+    const slug = uniqueSlug("mcpe-loopback");
+    const created = await apiClient.post<{ email: string }>("/v1/agents", {
+      body: {
+        email: `${slug}@${apiClient.env.sharedDomain}`,
+        name: "mcp extended loopback fixture",
+      },
+      expect: 201,
+    });
+    const fixtureAgent = created.body?.email;
+    if (!fixtureAgent) {
+      throw new Error(`loopback fixture agent did not return an email: ${created.raw.slice(0, 200)}`);
+    }
+    messageFixtureAgentEmail = fixtureAgent;
+
+    const subject = uniqueSubject("mcp-ext get-msg fixture");
+    const send = await apiClient.post<{ message_id: string; status: string }>(
+      `/v1/agents/${encodeURIComponent(fixtureAgent)}/messages`,
+      { body: { to: [fixtureAgent], subject, text: "12-mcp-extended self-send fixture" }, expect: [200, 202] },
+    );
+    if (!send.body?.message_id) {
+      throw new Error(`self-send fixture did not return a message_id: ${send.raw.slice(0, 200)}`);
+    }
+    if (send.body.status === "pending_review") {
+      throw new Error(`fresh loopback fixture agent unexpectedly held message ${send.body.message_id} for review`);
+    }
+    for (let i = 0; i < 12; i++) {
+      const poll = await apiClient.get<{ items: Array<{ id: string; subject: string }> }>(
+        `/v1/agents/${encodeURIComponent(fixtureAgent)}/messages`,
+        { query: { direction: "inbound", read_status: "all", limit: 20 } },
+      );
+      const m = poll.body?.items?.find((x) => x.subject === subject);
+      if (m) return { id: m.id, subject };
+      await sleep(1500);
+    }
+    throw new Error(`self-send fixture "${subject}" never appeared for ${fixtureAgent}`);
+  })();
+  return messageFixturePromise;
 }
 
 async function ensureHitlAgent(): Promise<string> {
@@ -100,10 +163,8 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
   const s = await apiClient.post<{ message_id: string }>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
     body: { to: [SINK_EMAIL], subject: uniqueSubject("mcp pending"), text: "x" },
   });
-  if (s.status !== 202 || !s.body?.message_id) {
-    info(SUITE, "pending-setup-failed", `send returned ${s.status}, can't probe pending tools`);
-    return;
-  }
+  assert.equal(s.status, 202, `pending setup send expected 202: ${s.raw.slice(0, 200)}`);
+  assert.ok(s.body?.message_id, "pending setup send must return a message_id — a missing fixture is a broken test, not a skip");
   const id = s.body.message_id;
 
   // list_reviews — should include our queued msg. The MCP
@@ -115,9 +176,10 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
     fail(SUITE, "list-pending-error", `list_reviews isError: ${extractText(lp).slice(0, 200)}`);
   } else {
     const text = extractText(lp);
-    if (!text.includes(id)) {
-      info(SUITE, "list-pending-missing-msg", `queued ${id} not in list_reviews response (may be paginated or filtered)`);
-    }
+    assert.ok(
+      text.includes(id),
+      `queued ${id} must appear in list_reviews (the MCP tool exposes no pagination or filter that could hide it)`,
+    );
   }
 
   // get_review.
@@ -127,9 +189,7 @@ test("mcp-ext: list_reviews and get_review round-trip", async () => {
   } else {
     const parsed = JSON.parse(extractText(gp)) as { id?: string; message_id?: string; status?: string };
     const returnedId = parsed.id ?? parsed.message_id;
-    if (returnedId !== id) {
-      info(SUITE, "get-pending-id-mismatch", `get_review returned id=${returnedId}, expected ${id}`);
-    }
+    assert.equal(returnedId, id, `get_review returned id=${returnedId}, expected ${id}`);
   }
 
   // Cleanup
@@ -187,20 +247,16 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   }
   // The MCP get_message tool fetches via the AGENT-scoped endpoint
   // GET /v1/agents/{agent_email}/messages/{id} — anti-enumeration
-  // 404s on any message that doesn't belong to the pinned agent. We
-  // pull candidate IDs from the same scope so the test exercises the
-  // happy path instead of accidentally tripping the cross-agent guard.
-  const pinnedAgent = apiClient.env.primaryAgentEmail;
-  const listMsgs = await apiClient.get<{ items: Array<{ id: string }> }>(
-    `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
-    { query: { limit: 1 } },
-  );
-  const id = listMsgs.body?.items?.[0]?.id;
-  if (!id) {
-    info(SUITE, "get-msg-no-fixture", `no messages in agent ${pinnedAgent}'s inbox — cannot probe get_message happy path`);
-    return;
-  }
-  const r = await callTool(mcp, "get_message", { message_id: id });
+  // 404s on any message that doesn't belong to the pinned agent. Rather
+  // than hoping the pinned agent's inbox already has something in it
+  // (a prior version of this test silently `return`ed when it was empty,
+  // which let the suite report all-green while never actually exercising
+  // get_message's happy path), we produce a real fixture via self-send.
+  const { id } = await messageFixture();
+  // The conformance credential here is account-scoped (no agent_email to
+  // pin — see the 08-mcp "whoami" test), so get_message needs an explicit
+  // `email` to resolve which agent's mailbox to read from.
+  const r = await callTool(mcp, "get_message", { message_id: id, email: apiClient.env.primaryAgentEmail });
   if (r.isError) {
     fail(SUITE, "get-msg-error", `get_message isError for our own ${id}: ${extractText(r).slice(0, 200)}`);
     return;
@@ -210,9 +266,35 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   assert.equal(returnedId, id, `expected id ${id}, got ${returnedId}`);
 
   // Bogus id — should isError.
-  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}` });
-  if (!r2.isError) {
-    info(SUITE, "get-msg-bogus-not-error", "get_message with bogus id did not surface as error");
+  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}`, email: apiClient.env.primaryAgentEmail });
+  assert.equal(r2.isError, true, "get_message with a bogus id must surface as an error");
+});
+
+test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
+  const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
+  if (!list.tools.find((t) => t.name === "reply_to_message")) {
+    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
+    return;
+  }
+  const { id } = await messageFixture();
+  // Same account-scoped-credential caveat as get_message above.
+  const r = await callTool(mcp, "reply_to_message", {
+    message_id: id,
+    text: "reply from 12-mcp-extended happy path",
+    email: apiClient.env.primaryAgentEmail,
+  });
+  assert.equal(r.isError, undefined, `reply_to_message isError: ${extractText(r).slice(0, 200)}`);
+  const parsed = JSON.parse(extractText(r)) as { message_id?: string; status?: string };
+  assert.ok(parsed.message_id?.startsWith("msg_"), `expected msg_ prefix, got "${parsed.message_id}"`);
+  assert.ok(
+    parsed.status === "accepted" || parsed.status === "sent" || parsed.status === "pending_review",
+    `reply_to_message must report accepted/sent/pending_review, got "${parsed.status}"`,
+  );
+  if (parsed.status === "pending_review") {
+    const cleanupReview = await apiClient.post(`/v1/reviews/${parsed.message_id}/reject`, {
+      body: { reason: "e2e mcp reply cleanup" },
+    });
+    assert.equal(cleanupReview.status, 200, `cleanup rejection failed: ${cleanupReview.status}`);
   }
 });
 
@@ -235,15 +317,15 @@ test("mcp-ext: cross-tool consistency — list_agents matches API surface", asyn
   const r = await callTool(mcp, "list_agents");
   const text = extractText(r);
   const mcpAgents = (JSON.parse(text) as { agents: Array<{ email: string }> }).agents.map((a) => a.email).sort();
-  const apiResp = await apiClient.get<{ agents: Array<{ email: string }> }>("/v1/agents");
-  const apiAgents = (apiResp.body?.agents ?? []).map((a) => a.email).sort();
-  if (mcpAgents.length !== apiAgents.length || JSON.stringify(mcpAgents) !== JSON.stringify(apiAgents)) {
-    info(
-      SUITE,
-      "list-agents-divergence",
-      `MCP list_agents (${mcpAgents.length}) differs from API /agents (${apiAgents.length})`,
-    );
-  } else {
-    info(SUITE, "list-agents-aligned", `MCP and API agent lists match: ${apiAgents.length} agents`);
-  }
+  // REST list envelope is Page[T] = {items, next_cursor}; the MCP envelope is
+  // {agents, next_cursor?} — deliberately different shapes (frozen MCP
+  // contract, see paginationInput in mcp/src/tools/util.ts). Compare contents.
+  const apiResp = await apiClient.get<{ items: Array<{ email: string }> }>("/v1/agents");
+  const apiAgents = (apiResp.body?.items ?? []).map((a) => a.email).sort();
+  assert.deepEqual(
+    mcpAgents,
+    apiAgents,
+    `MCP list_agents (${mcpAgents.length}) must match API /agents (${apiAgents.length})`,
+  );
+  info(SUITE, "list-agents-aligned", `MCP and API agent lists match: ${apiAgents.length} agents`);
 });

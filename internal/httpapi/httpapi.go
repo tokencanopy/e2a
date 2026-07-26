@@ -179,7 +179,7 @@ type Deps struct {
 	ClaimDomain         func(ctx context.Context, domain, userID string) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
 	DeleteDomain        func(ctx context.Context, domain, userID string) error
-	HasAgentsOnDomain   func(ctx context.Context, domain, userID string) (bool, error)
+	CountAgentsOnDomain func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a
 	// domain must publish (config smtp.domain).

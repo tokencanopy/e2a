@@ -37,6 +37,38 @@ export function resolveSiteUrl(apiUrl: string, explicitSiteUrl?: string): string
   return normalizedApiUrl;
 }
 
+// The hosted PRODUCTION origins. This suite is destructive by construction — it
+// creates and deletes agents, domains, webhooks and templates, and defaults to
+// `E2E_CLEANUP=always` — so running it against these hosts must be a deliberate,
+// explicit act, never something an unconfigured `npm test` can stumble into.
+// Self-hosted deployments are deliberately NOT listed: their operators are the
+// intended audience for an unguarded run against their own instance.
+const PRODUCTION_HOSTS = new Set(["e2a.dev", "www.e2a.dev", "api.e2a.dev"]);
+
+export function isProductionTarget(apiUrl: string): boolean {
+  try {
+    return PRODUCTION_HOSTS.has(new URL(normalizeBaseUrl(apiUrl)).hostname.toLowerCase());
+  } catch {
+    // An unparseable URL is not a production URL; loadEnv surfaces the real
+    // error when it tries to use it.
+    return false;
+  }
+}
+
+// assertProductionOptIn fails closed when the resolved target is a hosted
+// production origin and the operator has not explicitly opted in. Named and
+// exported so the check is unit-testable without mutating process.env.
+export function assertProductionOptIn(apiUrl: string, allowProd = process.env.E2E_ALLOW_PROD): void {
+  if (!isProductionTarget(apiUrl)) return;
+  if (allowProd === "1") return;
+  throw new Error(
+    `Refusing to run the destructive e2e-prod suite against production (${apiUrl}).\n` +
+      `This suite creates and deletes agents, domains, webhooks and templates, and cleans up with E2E_CLEANUP=always.\n` +
+      `If you really mean to target production, set E2E_ALLOW_PROD=1 — and use a dedicated conformance account, never a real one.\n` +
+      `To target staging instead: E2A_URL=https://api-staging.e2a.dev`,
+  );
+}
+
 export function resolveSinkEmail(explicitSinkEmail?: string): string {
   const sinkEmail = explicitSinkEmail?.trim();
   if (!sinkEmail) {
@@ -79,7 +111,17 @@ function pickEnv(canonical: string, ...legacy: string[]): string | undefined {
 
 export function loadEnv(): ProdEnv {
   const local = readLocalConfig();
-  const apiUrl = pickEnv("E2A_URL", "E2A_API_URL") ?? local.api_url ?? "https://e2a.dev";
+  // No default target. This used to fall back to https://e2a.dev, which — combined
+  // with the ~/.e2a/config.json api_key fallback below — meant an unconfigured
+  // `npm test` ran the destructive suite against PRODUCTION using the operator's
+  // own CLI credentials. The target is now always explicit.
+  const apiUrl = pickEnv("E2A_URL", "E2A_API_URL") ?? local.api_url;
+  if (!apiUrl) {
+    throw new Error(
+      "No target deployment. Set E2A_URL (e.g. https://api-staging.e2a.dev) or configure api_url in ~/.e2a/config.json.",
+    );
+  }
+  assertProductionOptIn(apiUrl);
   const primaryAgentEmail = pickEnv("E2A_AGENT_EMAIL", "E2A_PRIMARY_AGENT") ?? local.agent_email ?? "";
   const env: ProdEnv = {
     apiUrl,

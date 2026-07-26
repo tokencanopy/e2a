@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/mail"
 	"strings"
@@ -102,7 +101,9 @@ func checkWithEvaluatorForAuthor(ctx context.Context, evaluator *dmarcEvaluator,
 		DKIM: checkDKIM(rawMessage),
 	}
 	evaluator.evaluateAuthentication(ctx, author.Domain, authentication)
-	log.Printf("Email auth for %s from %s: SPF=%s DKIM=%d DMARC=%s", envelopeFrom, remoteIP, authentication.SPF.Status, len(authentication.DKIM), authentication.DMARC.Status)
+	// No log line here: the relay (the only production caller, via
+	// srv.authenticate) logs the same evidence with the message trace ID and
+	// redacted sender/IP — a second copy here would just duplicate PII handling.
 	return authentication
 
 }

@@ -18,8 +18,9 @@
  *   E2A_SHARED_DOMAIN   shared domain for throwaway agents (e.g. agents-staging.e2a.dev)
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { parseHelpCommands, recordAdvertised, recordCovered, flushCliCoverage } from "./harness/cli-coverage.js";
 
 const CLI = fileURLToPath(new URL("../dist/bin/e2a.js", import.meta.url));
 
@@ -54,6 +55,32 @@ function run(args: string[], extra: Record<string, string> = {}): Run {
   return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
+// Async counterpart to run(), for commands that must be started and left
+// running WHILE another `run()` call happens concurrently (only `listen`
+// needs this — every other command is a single synchronous request/response
+// round-trip). Same VITEST_* stripping as run(); see its comment above for
+// why that stripping is load-bearing.
+function runAsync(args: string[], extra: Record<string, string> = {}): Promise<Run> {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    E2A_URL: URL_,
+    E2A_API_KEY: KEY,
+    HOME: "/tmp/e2a-cli-e2e-home",
+    ...extra,
+  };
+  delete env.VITEST_WORKER_ID;
+  delete env.VITEST;
+  delete env.VITEST_POOL_ID;
+  return new Promise((resolve) => {
+    const child = spawn("node", [CLI, ...args], { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+  });
+}
+
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 // The CLI can't delete agents; clean up created inboxes over the API.
@@ -67,15 +94,51 @@ async function apiDeleteAgent(email: string): Promise<void> {
 const createdAgents: string[] = [];
 afterAll(async () => {
   for (const a of createdAgents) await apiDeleteAgent(a);
+  // Explicit flush: this suite runs inside a vitest worker, whose 'exit'
+  // lifecycle (the recorder's best-effort fallback) is not guaranteed to
+  // line up with the outer vitest process — see cli-coverage.ts. Calling
+  // this here, unconditionally, is what actually gets the shard written for
+  // `npm run coverage:gate:cli` to read.
+  flushCliCoverage();
 });
 
 describe.skipIf(!live)("cli live parity", () => {
+  // Coverage-gate denominator. Parses the command catalog from the REAL
+  // built binary's `--help` stdout — not from grepping cli/src/bin/e2a.ts's
+  // switch statement or USAGE string as source text — so the gate measures
+  // what a user invoking `e2a --help` actually sees they can run. See
+  // test/harness/cli-coverage.ts and test/cli-coverage-gate.ts for the full
+  // rationale (mirrors the MCP tools/list coverage gate's reasoning).
+  it("--help advertises the full command catalog (denominator for the coverage gate)", () => {
+    const r = run(["--help"]);
+    expect(r.code, r.stderr).toBe(0);
+    const commands = parseHelpCommands(r.stdout);
+    // Pinned so a CLI surface change (command added/removed/renamed) fails
+    // loudly and specifically HERE, not just as a silent shift in the gate's
+    // total — a human reviewing this diff should see exactly what changed.
+    expect(commands).toEqual([
+      "agents",
+      "config",
+      "doctor",
+      "keys",
+      "listen",
+      "login",
+      "messages",
+      "protection",
+      "reply",
+      "send",
+      "whoami",
+    ]);
+    recordAdvertised(commands);
+  });
+
   it("whoami --json → identity (exit 0)", () => {
     const r = run(["whoami", "--json"]);
     expect(r.code, r.stderr).toBe(0);
     const j = JSON.parse(r.stdout);
     expect(j.user?.email).toBeTruthy();
     expect(j.scope).toBe("account");
+    recordCovered("whoami");
   });
 
   it("agents create → get → list, then send → messages list (self loopback)", async () => {
@@ -93,12 +156,15 @@ describe.skipIf(!live)("cli live parity", () => {
     const list = run(["agents", "list", "--json"]);
     expect(list.code, list.stderr).toBe(0);
     expect(list.stdout).toContain(bot);
+    recordCovered("agents");
 
     // Send self→self on the fresh (unprotected) inbox: delivers + loops back.
     const subject = `cli-live ${Date.now()}`;
     const sent = run(["send", "--agent", bot, "--to", bot, "--subject", subject, "--body", "hi from cli e2e", "--json"]);
     expect(sent.code, sent.stderr).toBe(0); // 3 would mean HELD; a fresh inbox is unprotected
-    expect(JSON.parse(sent.stdout).messageId).toBeTruthy();
+    const sentId = JSON.parse(sent.stdout).messageId;
+    expect(sentId).toBeTruthy();
+    recordCovered("send");
 
     // Poll messages list until the loopback lands (NDJSON, one row per line).
     let rows: string[] = [];
@@ -116,6 +182,47 @@ describe.skipIf(!live)("cli live parity", () => {
     const gotMsg = run(["messages", "get", firstId, "--agent", bot, "--json"]);
     expect(gotMsg.code, gotMsg.stderr).toBe(0);
     expect(JSON.parse(gotMsg.stdout).subject).toBe(subject);
+
+    // `messages lifecycle` real depth check (bonus — the coverage gate only
+    // requires the top-level `messages` command, already satisfied by
+    // list/get above, but this exercises the third subcommand for real).
+    const lifecycle = run(["messages", "lifecycle", sentId, "--agent", bot, "--json"]);
+    expect(lifecycle.code, lifecycle.stderr).toBe(0);
+    const lifecycleJson = JSON.parse(lifecycle.stdout);
+    expect(Array.isArray(lifecycleJson.items)).toBe(true);
+    expect(lifecycleJson.items.length).toBeGreaterThan(0);
+    recordCovered("messages");
+  }, 40_000);
+
+  it("reply threads a reply onto an inbound message (exit 0)", async () => {
+    const bot = `cli-live-reply-${Date.now().toString(36)}@${DOMAIN}`;
+    const created = run(["agents", "create", bot, "--name", "cli live reply e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    const subject = `cli-live-reply ${Date.now()}`;
+    const sent = run(["send", "--agent", bot, "--to", bot, "--subject", subject, "--body", "hi from cli e2e reply setup", "--json"]);
+    expect(sent.code, sent.stderr).toBe(0);
+
+    // Poll for the inbound loopback copy to reply to (need a real received
+    // message id — replying to our own outbound send id is not the same
+    // in-thread operation `e2a reply` is documented to perform).
+    let inboundId = "";
+    for (let i = 0; i < 12 && !inboundId; i++) {
+      const ml = run(["messages", "list", "--agent", bot, "--limit", "20", "--json"]);
+      expect(ml.code, ml.stderr).toBe(0);
+      const rows = ml.stdout.split("\n").filter((l) => l.trim().length > 0);
+      if (rows.length > 0) inboundId = JSON.parse(rows[0]).id ?? JSON.parse(rows[0]).messageId;
+      else await sleep(1500);
+    }
+    expect(inboundId, "the loopback message must appear before replying to it").toBeTruthy();
+
+    const replied = run(["reply", inboundId, "--agent", bot, "--body", "hi from cli e2e reply", "--json"]);
+    expect(replied.code, replied.stderr).toBe(0);
+    const replyResult = JSON.parse(replied.stdout);
+    expect(replyResult.messageId).toBeTruthy();
+    expect(replyResult.status).not.toBe("pending_review");
+    recordCovered("reply");
   }, 40_000);
 
   it("keys create → list → delete (exit 0 each)", () => {
@@ -131,10 +238,150 @@ describe.skipIf(!live)("cli live parity", () => {
 
       const del = run(["keys", "delete", keyId]);
       expect(del.code, del.stderr).toBe(0);
+      recordCovered("keys");
     } finally {
       // Guarantee the key never lingers on staging even if an assertion threw.
       run(["keys", "delete", keyId]);
     }
+  });
+
+  it("protection get → set → get reflects the change (throwaway agent)", () => {
+    const bot = `cli-live-protection-${Date.now().toString(36)}@${DOMAIN}`;
+    const created = run(["agents", "create", bot, "--name", "cli live protection e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    const before = run(["protection", "get", bot, "--json"]);
+    expect(before.code, before.stderr).toBe(0);
+    const beforeCfg = JSON.parse(before.stdout);
+    // A fresh agent starts with outbound review off (gate action "flag").
+    expect(beforeCfg.outbound.gate.action).toBe("flag");
+
+    const setOn = run(["protection", "set", bot, "--outbound-review", "on", "--json"]);
+    expect(setOn.code, setOn.stderr).toBe(0);
+    const setOnCfg = JSON.parse(setOn.stdout);
+    expect(setOnCfg.outbound.gate.action).toBe("review");
+
+    const after = run(["protection", "get", bot, "--json"]);
+    expect(after.code, after.stderr).toBe(0);
+    expect(JSON.parse(after.stdout).outbound.gate.action).toBe("review");
+
+    // Restore, so a later probe against this (soon-deleted) agent doesn't
+    // trip on a held send.
+    const setOff = run(["protection", "set", bot, "--outbound-review", "off", "--json"]);
+    expect(setOff.code, setOff.stderr).toBe(0);
+    recordCovered("protection");
+  });
+
+  it("doctor: healthy (0), warnings-only (8), and config failure (9) exit codes", () => {
+    // Healthy: valid creds, a real agent, no custom domains/webhooks
+    // registered on this dedicated account → every check is pass or a
+    // benign skip, no warn/fail anywhere.
+    const healthy = run(["doctor", "--json"]);
+    const healthyReport = JSON.parse(healthy.stdout);
+    expect(healthy.code, healthy.stderr).toBe(healthyReport.exit_code);
+    expect(healthy.code, JSON.stringify(healthyReport, null, 2)).toBe(0);
+    expect(healthyReport.schema).toBe("e2a.doctor/v1");
+    expect(healthyReport.status).toBe("healthy");
+    const agentCheck = healthyReport.checks.find((c: { id: string }) => c.id === "agent.access");
+    expect(agentCheck?.status).toBe("pass");
+
+    // Warnings-only (8): force the ONE warn-producing, side-effect-free
+    // client-side condition doctor has — a partially-configured
+    // E2A_OUTBOUND_SMTP_* environment (host without from_domain) — with
+    // nothing else in a fail/auth/config state, so the exit-code priority
+    // (auth > config > transient > warn) lands on WARN.
+    const warn = run(["doctor", "--json"], { E2A_OUTBOUND_SMTP_HOST: "smtp.example.com" });
+    const warnReport = JSON.parse(warn.stdout);
+    expect(warn.code, warn.stderr).toBe(8);
+    expect(warnReport.exit_code).toBe(8);
+    expect(warnReport.status).toBe("warnings");
+    const smtpCheck = warnReport.checks.find((c: { id: string }) => c.id === "smtp.config");
+    expect(smtpCheck?.status).toBe("warn");
+    expect(smtpCheck?.reason_code).toBe("smtp_partial");
+
+    // Definite configuration failure (9): a nonexistent agent is a config
+    // problem, not a network one — read-only (GET only), no fixture needed.
+    const bogusAgent = `cli-live-doctor-missing-${Date.now().toString(36)}@${DOMAIN}`;
+    const fail = run(["doctor", "--agent", bogusAgent, "--json"]);
+    const failReport = JSON.parse(fail.stdout);
+    expect(fail.code, fail.stderr).toBe(9);
+    expect(failReport.exit_code).toBe(9);
+    expect(failReport.status).toBe("failed");
+    const failedCheck = failReport.checks.find((c: { id: string }) => c.id === "agent.access");
+    expect(failedCheck?.status).toBe("fail");
+    expect(failedCheck?.reason_code).toBe("agent_not_found");
+
+    recordCovered("doctor");
+  });
+
+  it("config: list/get/set round-trip against an isolated HOME", () => {
+    // A HOME distinct from every other test's shared /tmp/e2a-cli-e2e-home,
+    // so a written config.json can't leak into (or be clobbered by) any
+    // other test in this file.
+    const configHome = `/tmp/e2a-cli-e2e-config-home-${Date.now()}`;
+    // E2A_AGENT_EMAIL overrides the file on read (cli/src/config.ts) — unset
+    // it (empty string beats the shell-inherited value) so `config get`
+    // proves the FILE round-trip, not the environment shadowing it.
+    const noAgentEnvOverride = { HOME: configHome, E2A_AGENT_EMAIL: "" };
+
+    const list = run(["config", "list"], noAgentEnvOverride);
+    expect(list.code, list.stderr).toBe(0);
+    for (const key of ["api_key=", "api_url=", "agent_email=", "shared_domain=", "key_scope="]) {
+      expect(list.stdout).toContain(key);
+    }
+
+    const value = `cli-live-config-${Date.now().toString(36)}@example.com`;
+    const set = run(["config", "set", "agent_email", value], noAgentEnvOverride);
+    expect(set.code, set.stderr).toBe(0);
+    expect(set.stdout.trim()).toBe(`agent_email=${value}`);
+
+    const get = run(["config", "get", "agent_email"], noAgentEnvOverride);
+    expect(get.code, get.stderr).toBe(0);
+    expect(get.stdout.trim()).toBe(value);
+
+    recordCovered("config");
+  });
+
+  it("listen --once streams a real inbound loopback message, then exits 0", async () => {
+    const bot = `cli-live-listen-${Date.now().toString(36)}@${DOMAIN}`;
+    const created = run(["agents", "create", bot, "--name", "cli live listen e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    const until = new Date(Date.now() + 20_000).toISOString();
+    const listening = runAsync(["listen", "--once", "--agent", bot, "--until", until, "--json"]);
+
+    // Give the WebSocket a moment to connect before the message is sent —
+    // listen must be observing BEFORE the send, or it would only prove
+    // --once's own poll-on-connect fallback rather than the live stream.
+    await sleep(2000);
+    const subject = `cli-live-listen ${Date.now()}`;
+    const sent = run(["send", "--agent", bot, "--to", bot, "--subject", subject, "--body", "hi from cli e2e listen", "--json"]);
+    expect(sent.code, sent.stderr).toBe(0);
+
+    const result = await listening;
+    expect(result.code, result.stderr).toBe(0); // 6 would mean TIMEOUT — no message observed
+    const notification = JSON.parse(result.stdout);
+    expect(notification.subject).toBe(subject);
+    // Documented side effect: --once with --json fetches the message over
+    // the API GET, which marks it read.
+    expect(notification.readStatus).toBe("read");
+
+    recordCovered("listen");
+  }, 30_000);
+
+  it("login fails fast against an unreachable API, before opening a browser (exit 1)", () => {
+    // `login`'s interactive browser-OAuth success path cannot be driven
+    // headlessly (see cli-coverage-gate.ts's ALLOWLIST entry for the full
+    // justification) — this asserts the real preflight failure mode instead:
+    // an unreachable E2A_URL must abort BEFORE the local callback server
+    // opens or any browser launches, not hang for the 2-minute login timeout.
+    const r = run(["login"], { E2A_URL: "https://nonexistent-host-e2a-cli-e2e-test.invalid" });
+    expect(r.code, r.stdout).toBe(1);
+    expect(r.stderr).toContain("could not reach");
+    // Deliberately NOT recordCovered("login") — this proves the failure
+    // mode, not a successful login. `login` stays allowlisted.
   });
 
   it("honors the frozen exit-code contract (usage=2, auth=4)", () => {

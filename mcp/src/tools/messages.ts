@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpClient, SendOpts } from "../client.js";
 import type { MessageView } from "@e2a/sdk/v1";
 import { z } from "zod";
-import { runTool, strictInputSchema, paginationInput } from "./util.js";
+import { runTool, strictInputSchema, paginationInput, emailSelector } from "./util.js";
 import { attachmentsArraySchema, type AttachmentInput } from "./attachments.js";
 
 // Map the snake_case attachment wire shape (filename, content_type, data)
@@ -116,12 +116,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe sends. Set to deduplicate when the caller has its own retry loop (e.g. a stable triggering event id). When omitted the SDK mints a fresh UUIDv4 per call — protects against network-layer retries only, not user-driven retries.",
           ),
-        email: z
-          .string()
-          .optional()
-          .describe(
-            "Sending agent's inbox. Omit to use the credential's bound agent (agent-scoped credentials).",
-          ),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -194,7 +189,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe replies. A natural choice is the inbound `message_id` you're replying to — the same triggering event yields the same key, so a retry replays the original response instead of double-sending. Omit to let the SDK mint a fresh UUIDv4 per call.",
           ),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -263,7 +258,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe forwards. The inbound `message_id` plus target list is a natural choice.",
           ),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -313,7 +308,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .array(z.string())
           .optional()
           .describe("Labels to remove. Entries not on the message are no-ops."),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -350,7 +345,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "RFC3339 timestamp. Only conversations whose latest message is < until.",
           ),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -377,7 +372,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         "Returns the full thread — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full thread.",
       inputSchema: strictInputSchema({
         conversation_id: z.string(),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -447,7 +442,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .boolean()
           .optional()
           .describe("List the message trash instead of live messages."),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -484,7 +479,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         "Restore a soft-deleted message before its trash-retention window expires. Time spent in trash does not consume the message's normal retention. Returns the restored message; a live message returns `not_in_trash`.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the trashed message to restore."),
-        email: z.string().optional().describe("Owning agent; defaults to the bound agent."),
+        email: emailSelector,
       }),
     },
     async (args) => runTool(() => client.restoreMessage(args.message_id, args.email)),
@@ -499,7 +494,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         "Move a message to the trash. It disappears from lists, threads, and reply targets, but stays restorable with `restore_message` until the trash-retention window expires (30 days by default). Permanent deletion (\"delete forever\") is deliberately NOT exposed here — use the REST API/SDK for that. A message held for review cannot be deleted (`message_held`) — resolve it in the review queue first. Requires `confirm: true` — set it explicitly to acknowledge the destructive action.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the message to move to trash."),
-        email: z.string().optional().describe("Owning agent; defaults to the bound agent."),
+        email: emailSelector,
         confirm: z
           .literal(true)
           .describe(
@@ -528,7 +523,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         "Use after `list_messages` to read one inbound or outbound message in full; for outbound messages, this is also how you poll a send's terminal outcome. Returns text + HTML, direction, labels, delivery/review lifecycle, suspicious-message flags and protection findings, header_from, envelope_from, verified_domain, SPF/DKIM/DMARC evidence, conversation id, and attachment metadata. `truncated:true` means the inbound parser clipped the decoded body. A non-null verified_domain means DMARC passed for the RFC 5322 From domain; it does not authenticate the mailbox local part, a person, or message content. Pass the message's `id` from the list response. **Side effect:** fetching an unread inbound message marks it read — there is no peek-without-consuming and no mark-unread, so only open a message when you mean to consume it. Attachment bytes and raw MIME are intentionally omitted to protect context; the response lists each attachment's filename, content_type, 0-based `index`, and size_bytes. Call `get_attachment` with that index to fetch one file by reference.",
       inputSchema: strictInputSchema({
         message_id: z.string(),
-        email: z.string().optional(),
+        email: emailSelector,
       }),
     },
     async (args) =>
@@ -550,7 +545,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         "Beta: returns the ordered transitions e2a observed for one persisted inbound or outbound message; the lifecycle contract may change before it is declared stable. SMTP acceptance, upstream submission, provider delivery feedback, and complaint feedback remain distinct; this does not claim inbox placement. **Cursor-paginated:** returns one page in `transitions` plus `next_cursor` only when more pages remain; pass it back as `cursor` to continue, and stop when it is absent.",
       inputSchema: strictInputSchema({
         message_id: z.string(),
-        email: z.string().optional(),
+        email: emailSelector,
         cursor: z.string().optional(),
         limit: z.number().int().min(1).max(100).optional(),
       }),
@@ -597,12 +592,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "When true, also include the bytes as base64 `data` — ONLY for attachments ≤256 KB (larger requests error). Default false: use `download_url`.",
           ),
-        email: z
-          .string()
-          .optional()
-          .describe(
-            "Agent inbox holding the message. Omit to use the credential's bound agent (agent-scoped credentials).",
-          ),
+        email: emailSelector,
       }),
     },
     async (args) =>
