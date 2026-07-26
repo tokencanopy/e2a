@@ -274,45 +274,80 @@ describe.skipIf(!live)("cli live parity", () => {
   });
 
   it("doctor: healthy (0), warnings-only (8), and config failure (9) exit codes", () => {
-    // Healthy: valid creds, a real agent, no custom domains/webhooks
-    // registered on this dedicated account → every check is pass or a
-    // benign skip, no warn/fail anywhere.
-    const healthy = run(["doctor", "--json"]);
-    const healthyReport = JSON.parse(healthy.stdout);
-    expect(healthy.code, healthy.stderr).toBe(healthyReport.exit_code);
-    expect(healthy.code, JSON.stringify(healthyReport, null, 2)).toBe(0);
-    expect(healthyReport.schema).toBe("e2a.doctor/v1");
-    expect(healthyReport.status).toBe("healthy");
-    const agentCheck = healthyReport.checks.find((c: { id: string }) => c.id === "agent.access");
-    expect(agentCheck?.status).toBe("pass");
+    // The account-scoped conformance credential is deliberately shared with
+    // suites that create custom-domain fixtures. Doctor correctly diagnoses
+    // their missing DNS, so that mutable account can never be a deterministic
+    // "healthy" fixture. Mint a short-lived agent-scoped key instead: domain
+    // and webhook checks then skip by contract, while the real API, auth,
+    // agent-access, SMTP, report, and exit-code paths still run live.
+    const doctorAgent = `cli-live-doctor-${Date.now().toString(36)}@${DOMAIN}`;
+    const createdAgent = run(["agents", "create", doctorAgent, "--name", "cli live doctor e2e", "--json"]);
+    expect(createdAgent.code, createdAgent.stderr).toBe(0);
+    createdAgents.push(doctorAgent);
 
-    // Warnings-only (8): force the ONE warn-producing, side-effect-free
-    // client-side condition doctor has — a partially-configured
-    // E2A_OUTBOUND_SMTP_* environment (host without from_domain) — with
-    // nothing else in a fail/auth/config state, so the exit-code priority
-    // (auth > config > transient > warn) lands on WARN.
-    const warn = run(["doctor", "--json"], { E2A_OUTBOUND_SMTP_HOST: "smtp.example.com" });
-    const warnReport = JSON.parse(warn.stdout);
-    expect(warn.code, warn.stderr).toBe(8);
-    expect(warnReport.exit_code).toBe(8);
-    expect(warnReport.status).toBe("warnings");
-    const smtpCheck = warnReport.checks.find((c: { id: string }) => c.id === "smtp.config");
-    expect(smtpCheck?.status).toBe("warn");
-    expect(smtpCheck?.reason_code).toBe("smtp_partial");
+    let keyId = "";
+    try {
+      const createdKey = run([
+        "keys",
+        "create",
+        "--agent",
+        doctorAgent,
+        "--name",
+        "cli-live-doctor-isolated",
+        "--json",
+      ]);
+      expect(createdKey.code, createdKey.stderr).toBe(0);
+      const key = JSON.parse(createdKey.stdout);
+      keyId = key.id ?? key.keyId;
+      expect(keyId).toBeTruthy();
+      expect(key.key).toMatch(/^e2a_agt_/);
+      const isolated = {
+        E2A_API_KEY: key.key,
+        E2A_AGENT_EMAIL: doctorAgent,
+      };
 
-    // Definite configuration failure (9): a nonexistent agent is a config
-    // problem, not a network one — read-only (GET only), no fixture needed.
-    const bogusAgent = `cli-live-doctor-missing-${Date.now().toString(36)}@${DOMAIN}`;
-    const fail = run(["doctor", "--agent", bogusAgent, "--json"]);
-    const failReport = JSON.parse(fail.stdout);
-    expect(fail.code, fail.stderr).toBe(9);
-    expect(failReport.exit_code).toBe(9);
-    expect(failReport.status).toBe("failed");
-    const failedCheck = failReport.checks.find((c: { id: string }) => c.id === "agent.access");
-    expect(failedCheck?.status).toBe("fail");
-    expect(failedCheck?.reason_code).toBe("agent_not_found");
+      const healthy = run(["doctor", "--json"], isolated);
+      const healthyReport = JSON.parse(healthy.stdout);
+      expect(healthy.code, healthy.stderr).toBe(healthyReport.exit_code);
+      expect(healthy.code, JSON.stringify(healthyReport, null, 2)).toBe(0);
+      expect(healthyReport.schema).toBe("e2a.doctor/v1");
+      expect(healthyReport.status).toBe("healthy");
+      const agentCheck = healthyReport.checks.find((c: { id: string }) => c.id === "agent.access");
+      expect(agentCheck?.status).toBe("pass");
 
-    recordCovered("doctor");
+      // Warnings-only (8): force the ONE warn-producing, side-effect-free
+      // client-side condition doctor has — a partially-configured
+      // E2A_OUTBOUND_SMTP_* environment (host without from_domain) — with
+      // nothing else in a fail/auth/config state, so the exit-code priority
+      // (auth > config > transient > warn) lands on WARN.
+      const warn = run(["doctor", "--json"], {
+        ...isolated,
+        E2A_OUTBOUND_SMTP_HOST: "smtp.example.com",
+      });
+      const warnReport = JSON.parse(warn.stdout);
+      expect(warn.code, warn.stderr).toBe(8);
+      expect(warnReport.exit_code).toBe(8);
+      expect(warnReport.status).toBe("warnings");
+      const smtpCheck = warnReport.checks.find((c: { id: string }) => c.id === "smtp.config");
+      expect(smtpCheck?.status).toBe("warn");
+      expect(smtpCheck?.reason_code).toBe("smtp_partial");
+
+      // Definite configuration failure (9): a nonexistent agent is a config
+      // problem, not a network one — read-only (GET only), no fixture needed.
+      const bogusAgent = `cli-live-doctor-missing-${Date.now().toString(36)}@${DOMAIN}`;
+      const fail = run(["doctor", "--agent", bogusAgent, "--json"], isolated);
+      const failReport = JSON.parse(fail.stdout);
+      expect(fail.code, fail.stderr).toBe(9);
+      expect(failReport.exit_code).toBe(9);
+      expect(failReport.status).toBe("failed");
+      const failedCheck = failReport.checks.find((c: { id: string }) => c.id === "agent.access");
+      expect(failedCheck?.status).toBe("fail");
+      expect(failedCheck?.reason_code).toBe("agent_not_found");
+
+      recordCovered("doctor");
+    } finally {
+      if (keyId) run(["keys", "delete", keyId]);
+    }
   });
 
   it("config: list/get/set round-trip against an isolated HOME", () => {
