@@ -13,6 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
+	"github.com/tokencanopy/e2a/internal/filterquery"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/mailparse"
 )
@@ -366,6 +367,7 @@ type ListMessagesInput struct {
 	SubjectContains string   `query:"subject_contains" doc:"Case-insensitive substring match on subject."`
 	ConversationID  string   `query:"conversation_id"`
 	Labels          []string `query:"labels" doc:"Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label."`
+	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
 	Since           string   `query:"since" doc:"RFC3339; created_at >= since."`
 	Until           string   `query:"until" doc:"RFC3339; created_at < until."`
 	Cursor          string   `query:"cursor"`
@@ -393,6 +395,7 @@ type messagesCursor struct {
 	Since           string    `json:"sn,omitempty"`
 	Until           string    `json:"un,omitempty"`
 	Labels          []string  `json:"lb,omitempty"`
+	Q               string    `json:"q,omitempty"`
 	Deleted         bool      `json:"dl,omitempty"`
 }
 
@@ -688,6 +691,21 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 		return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
 	}
 
+	var qExpr *filterquery.Expr
+	if in.Q != "" {
+		if !utf8.ValidString(in.Q) || strings.IndexByte(in.Q, 0) >= 0 {
+			return nil, NewError(http.StatusBadRequest, "invalid_filter", "q filter must be valid UTF-8 and must not contain NUL")
+		}
+		if utf8.RuneCountInString(in.Q) > 500 {
+			return nil, NewError(http.StatusBadRequest, "invalid_filter", "q filter too long (max 500 chars)")
+		}
+		expr, err := filterquery.Parse(in.Q, identity.MessagesQRegistry())
+		if err != nil {
+			return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
+		}
+		qExpr = expr
+	}
+
 	// Time range.
 	since, err := parseRFC3339Filter(in.Since, "since")
 	if err != nil {
@@ -719,6 +737,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 			cur.From != in.From || cur.SubjectContains != in.SubjectContains ||
 			cur.ConversationID != in.ConversationID ||
 			cur.Since != rfc3339OrEmpty(since) || cur.Until != rfc3339OrEmpty(until) ||
+			cur.Q != in.Q ||
 			cur.Deleted != in.Deleted ||
 			!stringSlicesEqual(cur.Labels, labelsFilter) {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -748,6 +767,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 		Since:           since,
 		Until:           until,
 		Labels:          labelsFilter,
+		Q:               qExpr,
 		Deleted:         in.Deleted,
 	})
 	if err != nil {
@@ -771,6 +791,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 			Status: status, Direction: direction, AgentID: ag.ID, Sort: sort,
 			From: in.From, SubjectContains: in.SubjectContains, ConversationID: in.ConversationID,
 			Since: rfc3339OrEmpty(since), Until: rfc3339OrEmpty(until), Labels: labelsFilter,
+			Q:       in.Q,
 			Deleted: in.Deleted,
 		})
 		if err != nil {

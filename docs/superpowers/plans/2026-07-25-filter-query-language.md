@@ -2749,8 +2749,26 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 - Test: `internal/httpapi/messages_q_test.go`
 
 **Interfaces:**
-- Consumes: `identity.MessagesQRegistry()` (Task 9), `filterquery.Parse/Expr`, `MessageListFilter.QEmit` (Task 10).
+- Consumes: `identity.MessagesQRegistry()` (Task 9), `filterquery.Parse/Expr`, `MessageListFilter.Q` (Task 10).
 - Produces: public `q` query param on `GET /v1/agents/{email}/messages`; 400 `invalid_filter` contract.
+
+**Binding corrections and coverage requirements:**
+
+- Count the 500-character `q` cap with `utf8.RuneCountInString`, consistent
+  with JSON Schema/OpenAPI character semantics. Test 500 Unicode code points
+  accepted and 501 rejected, in addition to ASCII oversize.
+- Parse once in the handler and pass the resulting `*filterquery.Expr`
+  directly as `MessageListFilter.Q`. Do not preflight emission and do not
+  recreate an errorless callback; Task 10 made the store responsible for
+  dialect emission and error propagation.
+- Pin the exact raw `q` string into pagination cursors and compare it on every
+  continuation. Tests must cover identical replay success, changed `q`
+  rejection as `invalid_cursor`, and adding/removing `q` across pages.
+- Exercise the real HTTP/Huma stack. Invalid syntax, unknown fields, forbidden
+  operators, and length caps return 400 `invalid_filter`; positioned parser
+  errors retain their `(at column N)` text. Captured store filters must prove
+  `Q` is non-nil and emits the expected SQL/args, while flat filters remain set
+  for AND composition.
 
 - [ ] **Step 1: Write the failing handler tests**
 
@@ -2773,12 +2791,13 @@ func TestQParamCursorPinning(t *testing.T) {
 
 func TestQParamReachesStore(t *testing.T) {
 	// q=label:urgent → stubbed ListMessages receives MessageListFilter with
-	// non-nil QEmit; invoking QEmit(1) yields "(m.labels @> $1)" and
+	// non-nil Q; invoking Q.Emit(PostgresDialect{}, 1) yields
+	// "(m.labels @> $1)" and
 	// []interface{}{[]string{"urgent"}}
 }
 
 func TestQComposesWithFlatParams(t *testing.T) {
-	// q=label:urgent&from=alice → both From="alice" and QEmit set (AND
+	// q=label:urgent&from=alice → both From="alice" and Q set (AND
 	// composition happens in the store, Task 10 covered the SQL)
 }
 ```
@@ -2807,28 +2826,22 @@ In `messagesCursor` (~395):
 In `handleListMessages`, after the existing filter validation (~line 686, near `normalizeLabelFilter`):
 
 ```go
-	var qEmit func(int) (string, []interface{})
+	var qExpr *filterquery.Expr
 	if in.Q != "" {
-		if len(in.Q) > 500 {
+		if utf8.RuneCountInString(in.Q) > 500 {
 			return nil, NewError(http.StatusBadRequest, "invalid_filter", "q filter too long (max 500 chars)")
 		}
 		expr, err := filterquery.Parse(in.Q, identity.MessagesQRegistry())
 		if err != nil {
 			return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
 		}
-		// Preflight: prove the expression emits (defensive — Validate already
-		// guarantees it) so the store closure can ignore the error.
-		if _, _, err := expr.Emit(filterquery.PostgresDialect{}, 1); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
-		}
-		qEmit = func(start int) (string, []interface{}) {
-			frag, args, _ := expr.Emit(filterquery.PostgresDialect{}, start)
-			return frag, args
-		}
+		qExpr = expr
 	}
 ```
 
-Pass `QEmit: qEmit` in the `identity.MessageListFilter{…}` literal (~737), include `Q: in.Q` when encoding the cursor, and add to the cursor-mismatch check (~723) alongside the existing comparisons:
+Pass `Q: qExpr` in the `identity.MessageListFilter{…}` literal (~737), include
+the raw query as `Q: in.Q` when encoding the cursor, and add it to the
+cursor-mismatch check (~723) alongside the existing comparisons:
 
 ```go
 			cur.Q != in.Q ||
