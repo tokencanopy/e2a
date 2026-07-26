@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 // Contract tests for POST /v1/contacts/import and the batch reversal, from
@@ -327,4 +329,56 @@ func TestImportBatchDeleteIsTenantScoped(t *testing.T) {
 	if code != http.StatusOK {
 		t.Errorf("owner's contact was removed by a stranger's batch delete: %d", code)
 	}
+}
+
+// TestImportIsIdempotentUnderRetry pins the guarantee the endpoint's own
+// description promises and did not implement.
+//
+// An import that times out AFTER the rows landed is indistinguishable from one
+// that failed, and the natural reaction is to upload the file again. Without
+// the guard that silently doubles the work; with it the first response is
+// replayed — including the original batch_id, so a later reversal still
+// addresses the rows that were actually created.
+func TestImportIsIdempotentUnderRetry(t *testing.T) {
+	var imports int
+	srv := newContactsServer(t, func(d *Deps, f *contactFixture) {
+		// The guard degrades to a no-op without a store, so wire the same
+		// body-aware fake the api-keys idempotency tests use.
+		d.Idempotency = newBodyAwareIdem()
+		base := d.ImportContacts
+		d.ImportContacts = func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error) {
+			imports++
+			return base(ctx, userID, batchID, rows, merge)
+		}
+	})
+
+	body := map[string]any{"contacts": []any{map[string]any{"address": "retry@imp.vc"}}}
+	code, first := sendJSONFull2(t, srv, "idem-key-1", body)
+	if code != http.StatusOK {
+		t.Fatalf("first import = %d %v", code, first)
+	}
+	code, second := sendJSONFull2(t, srv, "idem-key-1", body)
+	if code != http.StatusOK {
+		t.Fatalf("retry = %d %v", code, second)
+	}
+
+	if imports != 1 {
+		t.Errorf("the store executed %d imports for one keyed request; a retried "+
+			"upload duplicated the work", imports)
+	}
+	if first["batch_id"] != second["batch_id"] {
+		t.Errorf("retry returned a different batch_id (%v vs %v) — a reversal would "+
+			"address rows that were never created", second["batch_id"], first["batch_id"])
+	}
+	if second["created"] != first["created"] {
+		t.Errorf("retry reported different counts: %v vs %v", second["created"], first["created"])
+	}
+}
+
+// sendJSONFull2 posts an import with an Idempotency-Key header.
+func sendJSONFull2(t *testing.T, srv *httptest.Server, key string, body any) (int, map[string]any) {
+	t.Helper()
+	code, out, _ := sendJSONFull(t, http.MethodPost, srv.URL+"/v1/contacts/import", "account", body,
+		map[string]string{"Idempotency-Key": key})
+	return code, out
 }

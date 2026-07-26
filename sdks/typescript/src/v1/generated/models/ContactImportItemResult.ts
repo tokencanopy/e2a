@@ -18,7 +18,7 @@ export class ContactImportItemResult {
     */
     'address'?: string;
     /**
-    * Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request.
+    * Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached.
     */
     'code'?: string;
     /**
