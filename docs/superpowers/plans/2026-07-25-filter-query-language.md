@@ -16,7 +16,7 @@
 - Zero new Go module dependencies in PR 1 (`internal/filterquery` is stdlib-only).
 - Grammar precedence is AIP-160's: `NOT` > `OR` > implicit AND > explicit AND. `AND`/`OR`/`NOT` are case-sensitive keywords.
 - Comparator syntax follows AIP-160 directly: use `created>=2026-07-01`, not
-  the invalid hybrid `created:>=2026-07-01`.
+  an invalid colon-prefixed comparator form.
 - Date-only values denote a whole UTC calendar day: `<=` includes that entire
   day and `>` begins at the following midnight (Josh decision, 2026-07-26).
 - Dotted unquoted values such as `from:alice@x.com` must parse as one value;
@@ -443,7 +443,7 @@ func TestParsePrecedence(t *testing.T) {
 		`-a:x`:                       `(not (a : x))`,
 		`a:x AND (b:y OR c:z)`:       `(and (a : x) (or (b : y) (c : z)))`,
 		`(a:x OR b:y) AND NOT c:z`:   `(and (or (a : x) (b : y)) (not (c : z)))`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created:>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
+		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
 	}
 	for q, want := range cases {
 		if got := parseToString(t, q); got != want {
@@ -1769,7 +1769,7 @@ import "testing"
 func FuzzParse(f *testing.F) {
 	seeds := []string{
 		"tags:sale", "name:a price>1", "NOT (a:x OR b:y)", `name:"quoted"`,
-		"created:>=2026-07-01", "label : urgent", "a b c OR d AND e",
+		"created>=2026-07-01", "label : urgent", "a b c OR d AND e",
 		"(", ")", ":", "\"", "\\", "NOT", "-", "a..b:c", "日本語:値",
 	}
 	for _, s := range seeds {
@@ -2614,7 +2614,7 @@ Expected: FAIL — `q` not a known query param / QEmit never set.
 In `ListMessagesInput` (messages.go ~368, after `Labels`):
 
 ```go
-	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created:>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
+	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
 ```
 
 In `messagesCursor` (~395):
@@ -2718,7 +2718,7 @@ In the `list_messages` `inputSchema` (after `labels`, ~line 435):
           .max(500)
           .optional()
           .describe(
-            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT has:attachment) created:>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
+            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
           ),
 ```
 

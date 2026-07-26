@@ -63,14 +63,29 @@ func TestLexStringEscapes(t *testing.T) {
 }
 
 func TestLexErrors(t *testing.T) {
-	for _, q := range []string{
-		`subject:"unterminated`,
-		`subject:"bad \q escape"`,
-		`label!urgent`,
+	for _, tc := range []struct {
+		name  string
+		query string
+		pos   int
+	}{
+		{name: "unterminated quote", query: `subject:"unterminated`, pos: 8},
+		{name: "invalid escape", query: `subject:"bad \q escape"`, pos: 13},
+		{name: "trailing backslash", query: `subject:"trailing\`, pos: 17},
 	} {
-		if _, err := lex(q); err == nil {
-			t.Errorf("lex(%q) = nil error, want error", q)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := lex(tc.query)
+			fe, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("lex(%q) error type %T, want *Error", tc.query, err)
+			}
+			if fe.Kind != ErrParse || fe.Pos != tc.pos {
+				t.Errorf("lex(%q) error = %+v, want {Kind: ErrParse, Pos: %d}", tc.query, fe, tc.pos)
+			}
+		})
+	}
+
+	if _, err := lex(`label!urgent`); err == nil {
+		t.Error("lex(label!urgent) = nil error, want error")
 	}
 }
 

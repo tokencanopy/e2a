@@ -98,7 +98,7 @@ Five files, five stages:
 | Field | Operators | Semantics |
 |---|---|---|
 | `label` | `:` | `label:urgent` = message carries label. Exclusion via `NOT label:x`. Value must pass the existing label charset rule (`[a-z0-9:_-]+`, ≤64). |
-| `from` | `:` `=` `!=` | `:` = case-insensitive substring (ILIKE) on `COALESCE(header_from, sender)` — identical to flat `from`. `=`/`!=` = case-insensitive exact. |
+| `from` | `:` `=` `!=` | `:` = case-insensitive substring (ILIKE) on `m.sender` — identical to the flat `from` filter. `=`/`!=` = case-insensitive exact. |
 | `subject` | `:` `=` `!=` | Same pattern on `subject`. NULL subjects never match `:`/`=` (SQL NULL semantics; document it). |
 | `has` | `:` | Value `attachment` only: `has:attachment`. |
 | `created` | `=` `!=` `<` `<=` `>` `>=` | On `created_at`. Values: RFC3339 or `YYYY-MM-DD`. A date-only value denotes that whole UTC day: `=`/`!=` test membership in that day's `[midnight, next-midnight)` range, `<=` includes the whole day, and `>` begins at the next midnight. Full RFC3339 values are exact. |
