@@ -51,6 +51,7 @@ class ContactsApi:
     async def create_contact(
         self,
         create_contact_request: CreateContactRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -70,6 +71,8 @@ class ContactsApi:
 
         :param create_contact_request: (required)
         :type create_contact_request: CreateContactRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -94,6 +97,7 @@ class ContactsApi:
 
         _param = self._create_contact_serialize(
             create_contact_request=create_contact_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -118,6 +122,7 @@ class ContactsApi:
     async def create_contact_with_http_info(
         self,
         create_contact_request: CreateContactRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -137,6 +142,8 @@ class ContactsApi:
 
         :param create_contact_request: (required)
         :type create_contact_request: CreateContactRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -161,6 +168,7 @@ class ContactsApi:
 
         _param = self._create_contact_serialize(
             create_contact_request=create_contact_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -185,6 +193,7 @@ class ContactsApi:
     async def create_contact_without_preload_content(
         self,
         create_contact_request: CreateContactRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -204,6 +213,8 @@ class ContactsApi:
 
         :param create_contact_request: (required)
         :type create_contact_request: CreateContactRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -228,6 +239,7 @@ class ContactsApi:
 
         _param = self._create_contact_serialize(
             create_contact_request=create_contact_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -247,6 +259,7 @@ class ContactsApi:
     def _create_contact_serialize(
         self,
         create_contact_request,
+        idempotency_key,
         _request_auth,
         _content_type,
         _headers,
@@ -270,6 +283,8 @@ class ContactsApi:
         # process the path parameters
         # process the query parameters
         # process the header parameters
+        if idempotency_key is not None:
+            _header_params['Idempotency-Key'] = idempotency_key
         # process the form parameters
         # process the body parameter
         if create_contact_request is not None:
@@ -1142,6 +1157,7 @@ class ContactsApi:
     async def import_contacts(
         self,
         import_contacts_request: ImportContactsRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1161,6 +1177,8 @@ class ContactsApi:
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1185,6 +1203,7 @@ class ContactsApi:
 
         _param = self._import_contacts_serialize(
             import_contacts_request=import_contacts_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1209,6 +1228,7 @@ class ContactsApi:
     async def import_contacts_with_http_info(
         self,
         import_contacts_request: ImportContactsRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1228,6 +1248,8 @@ class ContactsApi:
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1252,6 +1274,7 @@ class ContactsApi:
 
         _param = self._import_contacts_serialize(
             import_contacts_request=import_contacts_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1276,6 +1299,7 @@ class ContactsApi:
     async def import_contacts_without_preload_content(
         self,
         import_contacts_request: ImportContactsRequest,
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1295,6 +1319,8 @@ class ContactsApi:
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1319,6 +1345,7 @@ class ContactsApi:
 
         _param = self._import_contacts_serialize(
             import_contacts_request=import_contacts_request,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1338,6 +1365,7 @@ class ContactsApi:
     def _import_contacts_serialize(
         self,
         import_contacts_request,
+        idempotency_key,
         _request_auth,
         _content_type,
         _headers,
@@ -1361,6 +1389,8 @@ class ContactsApi:
         # process the path parameters
         # process the query parameters
         # process the header parameters
+        if idempotency_key is not None:
+            _header_params['Idempotency-Key'] = idempotency_key
         # process the form parameters
         # process the body parameter
         if import_contacts_request is not None:

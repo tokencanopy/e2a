@@ -27,8 +27,9 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
      * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
      * Create a contact (beta)
      * @param createContactRequest 
+     * @param idempotencyKey Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
      */
-    public async createContact(createContactRequest: CreateContactRequest, _options?: Configuration): Promise<RequestContext> {
+    public async createContact(createContactRequest: CreateContactRequest, idempotencyKey?: string, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'createContactRequest' is not null or undefined
@@ -37,12 +38,16 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
         }
 
 
+
         // Path Params
         const localVarPath = '/v1/contacts';
 
         // Make Request Context
         const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Header Params
+        requestContext.setHeaderParam("Idempotency-Key", ObjectSerializer.serialize(idempotencyKey, "string", ""));
 
 
         // Body Params
@@ -213,8 +218,9 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
      * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Import contacts in bulk (beta)
      * @param importContactsRequest 
+     * @param idempotencyKey Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
      */
-    public async importContacts(importContactsRequest: ImportContactsRequest, _options?: Configuration): Promise<RequestContext> {
+    public async importContacts(importContactsRequest: ImportContactsRequest, idempotencyKey?: string, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'importContactsRequest' is not null or undefined
@@ -223,12 +229,16 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
         }
 
 
+
         // Path Params
         const localVarPath = '/v1/contacts/import';
 
         // Make Request Context
         const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Header Params
+        requestContext.setHeaderParam("Idempotency-Key", ObjectSerializer.serialize(idempotencyKey, "string", ""));
 
 
         // Body Params

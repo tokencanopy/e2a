@@ -112,7 +112,9 @@ type CreateContactRequest struct {
 }
 
 type createContactInput struct {
-	Body CreateContactRequest
+	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight."`
+	Body           CreateContactRequest
+	RawBody        []byte
 }
 
 type createContactOutput struct {
@@ -369,17 +371,29 @@ func (s *Server) handleCreateContact(ctx context.Context, in *createContactInput
 		return nil, err
 	}
 
-	c, err := s.deps.CreateContact(ctx, user.ID, address, in.Body.DisplayName,
-		in.Body.Metadata, identity.ContactSourceManual, "")
-	if errors.Is(err, identity.ErrContactExists) {
-		return nil, NewError(http.StatusConflict, "conflict", "a contact with this address already exists")
-	}
+	// Keyed-idempotency guard, same machinery as api-keys and send: a
+	// network-retried create with the same key and byte-identical body replays
+	// the first response instead of racing the unique constraint and surfacing
+	// a spurious 409 for a request the caller believes never landed.
+	_, view, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
+		"/v1/contacts", in.RawBody,
+		func() (int, ContactView, error) {
+			c, cerr := s.deps.CreateContact(ctx, user.ID, address, in.Body.DisplayName,
+				in.Body.Metadata, identity.ContactSourceManual, "")
+			if errors.Is(cerr, identity.ErrContactExists) {
+				return 0, ContactView{}, NewError(http.StatusConflict, "conflict", "a contact with this address already exists")
+			}
+			if cerr != nil {
+				return 0, ContactView{}, NewError(http.StatusInternalServerError, "internal_error", "failed to create contact")
+			}
+			return http.StatusCreated, contactView(c), nil
+		})
 	if err != nil {
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to create contact")
+		return nil, err
 	}
 	return &createContactOutput{
-		Location: "/v1/contacts/" + url.PathEscape(c.Address),
-		Body:     contactView(c),
+		Location: "/v1/contacts/" + url.PathEscape(view.Address),
+		Body:     view,
 	}, nil
 }
 

@@ -37,7 +37,9 @@ type ImportContactsRequest struct {
 }
 
 type importContactsInput struct {
-	Body ImportContactsRequest
+	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."`
+	Body           ImportContactsRequest
+	RawBody        []byte
 }
 
 // ContactImportItemResult is the outcome of one submitted row. Every row gets
@@ -102,6 +104,14 @@ func (s *Server) registerContactImport() {
 	}, s.handleDeleteImportBatch)
 }
 
+// importAttempt is what the idempotency guard stores and replays: the batch id
+// must survive a replay alongside the outcomes, or a retried caller would be
+// handed a batch id that addresses nothing when they try to reverse it.
+type importAttempt struct {
+	BatchID  string                          `json:"batch_id"`
+	Outcomes []identity.ContactImportOutcome `json:"outcomes"`
+}
+
 func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInput) (*importContactsOutput, error) {
 	user, err := s.requireContactStore(ctx)
 	if err != nil {
@@ -154,15 +164,28 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 		}
 	}
 
-	batchID := identity.NewImportBatchID()
 	merge := in.Body.OnConflict != "skip"
-	outcomes, err := s.deps.ImportContacts(ctx, user.ID, batchID, accepted, merge)
+
+	// Keyed-idempotency guard. This matters more here than on any other contact
+	// operation: an import that times out AFTER the rows landed is
+	// indistinguishable from one that failed, and the natural reaction is to
+	// upload the file again. Replaying the first response — including its
+	// original batch_id, so the reversal still addresses the right rows —
+	// is what makes that retry safe.
+	_, imported, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
+		"/v1/contacts/import", in.RawBody,
+		func() (int, importAttempt, error) {
+			batchID := identity.NewImportBatchID()
+			outcomes, ierr := s.deps.ImportContacts(ctx, user.ID, batchID, accepted, merge)
+			if ierr != nil || len(outcomes) != len(accepted) {
+				return 0, importAttempt{}, NewError(http.StatusInternalServerError, "internal_error", "failed to import contacts")
+			}
+			return http.StatusOK, importAttempt{BatchID: batchID, Outcomes: outcomes}, nil
+		})
 	if err != nil {
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to import contacts")
+		return nil, err
 	}
-	if len(outcomes) != len(accepted) {
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to import contacts")
-	}
+	batchID, outcomes := imported.BatchID, imported.Outcomes
 
 	items := make([]ContactImportItemResult, len(in.Body.Contacts))
 	for i, pre := range prevalidated {

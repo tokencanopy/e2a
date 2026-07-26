@@ -844,6 +844,13 @@ export interface ContactsApiCreateContactRequest {
      * @memberof ContactsApicreateContact
      */
     createContactRequest: CreateContactRequest
+    /**
+     * Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApicreateContact
+     */
+    idempotencyKey?: string
 }
 
 export interface ContactsApiDeleteContactRequest {
@@ -897,6 +904,13 @@ export interface ContactsApiImportContactsRequest {
      * @memberof ContactsApiimportContacts
      */
     importContactsRequest: ImportContactsRequest
+    /**
+     * Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiimportContacts
+     */
+    idempotencyKey?: string
 }
 
 export interface ContactsApiListContactsRequest {
@@ -982,7 +996,7 @@ export class ObjectContactsApi {
      * @param param the request object
      */
     public createContactWithHttpInfo(param: ContactsApiCreateContactRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactView>> {
-        return this.api.createContactWithHttpInfo(param.createContactRequest,  options).toPromise();
+        return this.api.createContactWithHttpInfo(param.createContactRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**
@@ -991,7 +1005,7 @@ export class ObjectContactsApi {
      * @param param the request object
      */
     public createContact(param: ContactsApiCreateContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
-        return this.api.createContact(param.createContactRequest,  options).toPromise();
+        return this.api.createContact(param.createContactRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**
@@ -1054,7 +1068,7 @@ export class ObjectContactsApi {
      * @param param the request object
      */
     public importContactsWithHttpInfo(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactImportResult>> {
-        return this.api.importContactsWithHttpInfo(param.importContactsRequest,  options).toPromise();
+        return this.api.importContactsWithHttpInfo(param.importContactsRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**
@@ -1063,7 +1077,7 @@ export class ObjectContactsApi {
      * @param param the request object
      */
     public importContacts(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<ContactImportResult> {
-        return this.api.importContacts(param.importContactsRequest,  options).toPromise();
+        return this.api.importContacts(param.importContactsRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**
