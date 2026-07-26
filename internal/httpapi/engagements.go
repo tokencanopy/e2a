@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"reflect"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -176,9 +177,19 @@ func (s *Server) registerEngagements() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "upsertEngagement", Method: http.MethodPut, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Enrol or update outreach state (beta)", Tags: []string{"contacts"},
-		Description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
+		Description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
-		Extensions:  beta(),
+		// The handler emits 201 on create and 200 on update, which Huma cannot
+		// infer from a single DefaultStatus. Undeclared, a spec-generated client
+		// has no case for 201 and hands the caller nothing back on the FIRST
+		// enrolment — the most common call. Re-adds `default`, which a custom
+		// Responses map otherwise suppresses.
+		Responses: map[string]*huma.Response{
+			"201": s.jsonResponse(reflect.TypeOf(ContactEngagementView{}), "ContactEngagementView",
+				"Created — the contact was newly enrolled in this agent's outreach."),
+			"default": s.errorEnvelopeResponse(),
+		},
+		Extensions: beta(),
 	}, s.handleUpsertEngagement)
 
 	huma.Register(s.API, huma.Operation{

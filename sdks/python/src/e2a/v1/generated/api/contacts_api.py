@@ -3074,7 +3074,7 @@ class ContactsApi:
     ) -> ContactEngagementView:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3116,6 +3116,7 @@ class ContactsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "ContactEngagementView",
+            '201': "ContactEngagementView",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -3149,7 +3150,7 @@ class ContactsApi:
     ) -> ApiResponse[ContactEngagementView]:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3191,6 +3192,7 @@ class ContactsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "ContactEngagementView",
+            '201': "ContactEngagementView",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -3224,7 +3226,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3266,6 +3268,7 @@ class ContactsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "ContactEngagementView",
+            '201': "ContactEngagementView",
         }
         response_data = await self.api_client.call_api(
             *_param,
