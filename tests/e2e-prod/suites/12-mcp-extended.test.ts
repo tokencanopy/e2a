@@ -242,10 +242,7 @@ test("mcp-ext: approve_review via MCP sends the message", async () => {
 
 test("mcp-ext: get_message returns shape and only own messages", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "get_message")) {
-    info(SUITE, "get-msg-absent", "no get_message tool — skipping");
-    return;
-  }
+  assert.ok(list.tools.some((t) => t.name === "get_message"), "canonical get_message tool is required");
   // The MCP get_message tool fetches via the AGENT-scoped endpoint
   // GET /v1/agents/{agent_email}/messages/{id} — anti-enumeration
   // 404s on any message that doesn't belong to the pinned agent. Rather
@@ -277,10 +274,7 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
 
 test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "reply_to_message")) {
-    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
-    return;
-  }
+  assert.ok(list.tools.some((t) => t.name === "reply_to_message"), "canonical reply_to_message tool is required");
   const { agentEmail, id } = await messageFixture();
   // Same account-scoped-credential caveat as get_message above.
   const r = await callTool(mcp, "reply_to_message", {
@@ -305,10 +299,7 @@ test("mcp-ext: reply_to_message happy path replies to a real message", async () 
 
 test("mcp-ext: reply_to_message via MCP — to bogus id surfaces error", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "reply_to_message")) {
-    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
-    return;
-  }
+  assert.ok(list.tools.some((t) => t.name === "reply_to_message"), "canonical reply_to_message tool is required");
   const r = await callTool(mcp, "reply_to_message", {
     message_id: `msg_bogus_${Date.now()}`,
     text: "should never go out",
