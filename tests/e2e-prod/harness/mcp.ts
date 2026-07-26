@@ -1,8 +1,34 @@
+import { recordToolCall, recordToolList } from "./mcp-coverage.ts";
+
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: number;
   method: string;
   params?: unknown;
+}
+
+// Feed the MCP tool-coverage recorder from the single JSON-RPC choke point, so
+// coverage is recorded whether a suite goes through callTool() or calls
+// `mcp.call("tools/call", …)` directly. Never throws: coverage is advisory and
+// must not be able to fail a suite.
+function recordMcpResult(method: string, params: unknown, result: unknown): void {
+  try {
+    if (method === "tools/list") {
+      const tools = (result as { tools?: Array<{ name?: string }> })?.tools;
+      if (Array.isArray(tools)) {
+        recordToolList(tools.map((t) => t?.name).filter((n): n is string => typeof n === "string"));
+      }
+      return;
+    }
+    if (method === "tools/call") {
+      const name = (params as { name?: string })?.name;
+      if (typeof name === "string") {
+        recordToolCall(name, (result as { isError?: boolean })?.isError);
+      }
+    }
+  } catch {
+    /* advisory only */
+  }
 }
 
 interface JsonRpcResponse<T = unknown> {
@@ -82,6 +108,7 @@ export class HttpMcpClient implements McpRpcClient {
     if (env.error) {
       throw new Error(`MCP ${method} error ${env.error.code}: ${env.error.message}`);
     }
+    recordMcpResult(method, params, env.result);
     return env.result as T;
   }
 

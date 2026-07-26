@@ -28,6 +28,8 @@ import pytest
 from e2a import AsyncE2AClient, E2ANotFoundError
 from e2a.v1 import ReplyRequest, SendEmailRequest
 
+from .resource_coverage_lib.tracker import mark_covered
+
 BASE_URL = os.environ.get("E2A_TEST_BASE_URL", "")
 API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
 AGENT = os.environ.get("E2A_TEST_AGENT_EMAIL", "")
@@ -51,6 +53,7 @@ async def test_info_reports_deployment() -> None:
     async with AsyncE2AClient(api_key=API_KEY, base_url=BASE_URL) as client:
         info = await client.info()
         assert isinstance(info.version, str) and info.version
+        mark_covered("info")
 
 
 async def test_send_find_get_reply_self_loopback() -> None:
@@ -62,6 +65,7 @@ async def test_send_find_get_reply_self_loopback() -> None:
     async with AsyncE2AClient(api_key=API_KEY, base_url=BASE_URL) as client:
         created = await client.agents.create({"email": bot, "name": "py-sdk live e2e"})
         assert created.email == bot
+        mark_covered("agents.create")
         try:
             subject = f"py-sdk-live {int(time.time() * 1000)}"
             sent = await client.messages.send(
@@ -74,6 +78,7 @@ async def test_send_find_get_reply_self_loopback() -> None:
             )
             assert sent.message_id
             assert sent.status in ("sent", "accepted")
+            mark_covered("messages.send")
 
             # Self-send loopback lands an INBOUND copy; filter to inbound so the
             # just-sent outbound copy (same subject) can't match.
@@ -85,6 +90,7 @@ async def test_send_find_get_reply_self_loopback() -> None:
                     break
                 await asyncio.sleep(1.5)
             assert found is not None, f"an inbound message with subject {subject!r} must appear within ~18s"
+            mark_covered("messages.list")
 
             full = await client.messages.get(bot, found.id)
             assert full.id == found.id
@@ -92,6 +98,7 @@ async def test_send_find_get_reply_self_loopback() -> None:
             # The delivered body is under `parsed` (inbound-extracted MIME), not
             # `body` (the held-outbound draft field, null for inbound by design).
             assert full.parsed is not None and "Hello from the Python SDK live e2e" in full.parsed.text
+            mark_covered("messages.get")
 
             reply = await client.messages.reply(
                 bot,
@@ -101,8 +108,11 @@ async def test_send_find_get_reply_self_loopback() -> None:
             assert reply.message_id
             # Fresh unprotected inbox → the reply sends immediately (same as send).
             assert reply.status in ("sent", "accepted")
+            mark_covered("messages.reply")
         finally:
-            await client.agents.delete(bot)
+            deleted = await client.agents.delete(bot)
+            assert deleted.deleted is True
+            mark_covered("agents.delete")
 
 
 async def test_list_bounded_page() -> None:

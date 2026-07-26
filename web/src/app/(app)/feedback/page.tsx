@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { FEEDBACK_EMAIL } from "../../../lib/site";
 import { PageShell } from "../../components/loft/PageShell";
+import { useAuth } from "../../components/AuthProvider";
 
 // Restyled to match the rest of the app — PageShell wrapping, accent
 // selected category, canopy submit CTA, the Loft input + button rhythm
@@ -12,7 +13,7 @@ import { PageShell } from "../../components/loft/PageShell";
 // passing across visual tweaks.
 
 export default function FeedbackPage() {
-  const [email, setEmail] = useState("");
+  const { user } = useAuth();
   const [category, setCategory] = useState<"bug" | "feature" | "general">("general");
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error" | "rate-limited">("idle");
@@ -27,12 +28,11 @@ export default function FeedbackPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email: email || undefined, category, message }),
+        body: JSON.stringify({ email: user?.email || undefined, category, message }),
       });
       if (res.ok) {
         setStatus("sent");
         setMessage("");
-        setEmail("");
       } else if (res.status === 429) {
         setStatus("rate-limited");
       } else {
@@ -125,36 +125,6 @@ export default function FeedbackPage() {
       maxWidth={640}
     >
       <form onSubmit={handleSubmit} className="space-y-5">
-        <div>
-          <label
-            htmlFor="feedback-email"
-            className="block text-[13px] font-medium mb-1.5"
-            style={{ color: "var(--fg)" }}
-          >
-            Email{" "}
-            <span
-              className="font-normal"
-              style={{ color: "var(--fg-muted)" }}
-            >
-              (optional, if you want a reply)
-            </span>
-          </label>
-          <input
-            id="feedback-email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            className="w-full text-[13px] px-3 py-2"
-            style={{
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--r-md)",
-              color: "var(--fg)",
-            }}
-          />
-        </div>
-
         <div>
           <label
             className="block text-[13px] font-medium mb-1.5"

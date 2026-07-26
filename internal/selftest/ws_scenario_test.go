@@ -25,9 +25,41 @@ import (
 // and DELETE …/messages/{id} (recorded into deleted, so tests can pin the
 // scenario's residue cleanup against the actual response shape).
 type wsStubState struct {
-	mu      sync.Mutex
-	conn    *websocket.Conn
-	deleted []string
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	deleted   []string
+	closeSeen chan struct{} // closed once the stub reads a normal-closure frame
+	closeOnce sync.Once
+}
+
+// noteCloseFrame records that the stub read the client's normal-closure frame.
+// Safe to call more than once.
+func (st *wsStubState) noteCloseFrame() {
+	st.closeOnce.Do(func() { close(st.closeSeen) })
+}
+
+// awaitCloseFrame reports whether the stub read a normal-closure frame from the
+// client, waiting up to d for the stub's read goroutine to record it.
+//
+// The wait is NOT a wall-clock budget on the handshake — it is the missing
+// happens-before edge. The library echoes the close frame from inside
+// handleControl BEFORE the error propagates out of the stub's c.Read, so
+// conn.Close can return (and the scenario with it) while the stub goroutine
+// has not yet been scheduled to record what it saw. Measured margin on an idle
+// machine is ~6µs, so any deschedule longer than that flipped this assertion —
+// which is exactly what a loaded, coverage-instrumented CI runner does.
+//
+// The contract this pins is unchanged: if the handshake genuinely does not
+// complete, the frame is never read, closeSeen is never closed, and this
+// returns false. A non-reading stub also makes conn.Close burn its full 5s
+// timeout first, so d is only ever paid on an already-failing test.
+func (st *wsStubState) awaitCloseFrame(d time.Duration) bool {
+	select {
+	case <-st.closeSeen:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 func (st *wsStubState) deletedIDs() []string {
@@ -38,7 +70,7 @@ func (st *wsStubState) deletedIDs() []string {
 
 func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 	t.Helper()
-	st := &wsStubState{}
+	st := &wsStubState{closeSeen: make(chan struct{})}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +87,30 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 			st.mu.Lock()
 			st.conn = c
 			st.mu.Unlock()
+			// Read loop mirroring the real handler (internal/ws/handler.go:377).
+			// Control frames are only processed while something reads, so a stub
+			// that never reads never answers the client's close frame — and the
+			// scenario's deferred conn.Close then blocks for the library's full
+			// 5s close-handshake timeout, making every WS scenario invocation
+			// cost 5s of pure waiting.
+			//
+			// An explicit loop rather than CloseRead so the close frame is both
+			// ANSWERED and OBSERVABLE — sawCloseFrame is what pins this fix.
+			//
+			// NOT r.Context(): Accept hijacks the connection so it outlives this
+			// handler, and the request context is cancelled the moment the
+			// handler returns, which tore the socket down before the push could
+			// be written ("failed to read frame header: EOF").
+			go func() {
+				for {
+					if _, _, err := c.Read(context.Background()); err != nil {
+						if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+							st.noteCloseFrame()
+						}
+						return
+					}
+				}
+			}()
 		case r.Method == http.MethodDelete:
 			parts := strings.Split(r.URL.Path, "/")
 			st.mu.Lock()
@@ -110,6 +166,16 @@ func TestScenarioWebSocketRoundTrip(t *testing.T) {
 			t.Errorf("message %q was not trashed (deleted: %v)", id, deleted)
 		}
 	}
+	// Close-handshake contract. conn.Close waits for the peer's close frame and
+	// gives up after 5s, so a stub that does not read makes EVERY invocation of
+	// this scenario cost 5s of pure waiting. Asserting the stub observed the
+	// frame pins that — without a wall-clock budget, which is the flake pattern
+	// this suite already got bitten by. See awaitCloseFrame for why the wait is
+	// a happens-before edge rather than a timing budget.
+	if !st.awaitCloseFrame(2 * time.Second) {
+		t.Error("stub never observed the client's close frame: the close handshake " +
+			"did not complete, so conn.Close burned the library's full 5s timeout")
+	}
 }
 
 func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
@@ -127,7 +193,11 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
 			c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err == nil {
-				_ = c // hold open, push nothing
+				// Hold open and push nothing — but still read, so the deferred
+				// conn.Close is answered instead of burning the library's 5s
+				// close-handshake timeout. The scenario must fail on its own
+				// round-trip timeout, which is what this case asserts.
+				c.CloseRead(context.Background())
 			}
 			return
 		}
@@ -146,7 +216,9 @@ func TestScenarioWebSocketRoundTrip_Fail(t *testing.T) {
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/ws") {
-			_, _ = websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true}); err == nil {
+				c.CloseRead(context.Background())
+			}
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)
