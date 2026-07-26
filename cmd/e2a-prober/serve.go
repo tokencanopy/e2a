@@ -26,14 +26,19 @@ type prober struct {
 	cfg  config
 	sink *selftest.HTTPSink
 
-	mu   sync.Mutex
-	ring []run // most-recent-last, capped
+	mu           sync.Mutex
+	ring         []run // most-recent-last, capped
+	scenarioRuns map[string]map[selftest.Status]uint64
 }
 
 const ringCap = 50
 
 func newProber(cfg config) *prober {
-	return &prober{cfg: cfg, sink: selftest.NewHTTPSink()}
+	return &prober{
+		cfg:          cfg,
+		sink:         selftest.NewHTTPSink(),
+		scenarioRuns: make(map[string]map[selftest.Status]uint64),
+	}
 }
 
 func (p *prober) probe() *selftest.Probe {
@@ -53,13 +58,23 @@ func (p *prober) probe() *selftest.Probe {
 func (p *prober) runOnce(ctx context.Context) run {
 	results := selftest.Run(ctx, p.probe(), selftest.All, true /* smokeOnly */)
 	r := run{At: time.Now(), OK: selftest.Worst(results) == selftest.StatusPass, Results: results}
+	p.recordRun(r)
+	return r
+}
+
+func (p *prober) recordRun(r run) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.ring = append(p.ring, r)
 	if len(p.ring) > ringCap {
 		p.ring = p.ring[len(p.ring)-ringCap:]
 	}
-	p.mu.Unlock()
-	return r
+	for _, res := range r.Results {
+		if p.scenarioRuns[res.Name] == nil {
+			p.scenarioRuns[res.Name] = make(map[selftest.Status]uint64)
+		}
+		p.scenarioRuns[res.Name][res.Status]++
+	}
 }
 
 // requireRunConfig validates the env needed to talk to a live instance.
@@ -212,7 +227,15 @@ func (p *prober) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	p.mu.Lock()
 	var last *run
 	if len(p.ring) > 0 {
-		last = &p.ring[len(p.ring)-1]
+		lastRun := p.ring[len(p.ring)-1]
+		last = &lastRun
+	}
+	scenarioRuns := make(map[string]map[selftest.Status]uint64, len(p.scenarioRuns))
+	for scenario, counts := range p.scenarioRuns {
+		scenarioRuns[scenario] = make(map[selftest.Status]uint64, len(counts))
+		for outcome, count := range counts {
+			scenarioRuns[scenario][outcome] = count
+		}
 	}
 	p.mu.Unlock()
 
@@ -230,6 +253,17 @@ func (p *prober) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	for _, res := range last.Results {
 		fmt.Fprintf(w, "e2a_selftest_scenario_success{scenario=%q} %d\n", res.Name, b2i(res.Status == selftest.StatusPass))
 		total += time.Duration(res.DurationMS) * time.Millisecond
+	}
+	fmt.Fprintln(w, "# HELP e2a_selftest_scenario_runs_total Completed prober scenario runs by outcome.")
+	fmt.Fprintln(w, "# TYPE e2a_selftest_scenario_runs_total counter")
+	// Iterate in the stable scenario catalog order. Warn/fail/pass are all
+	// explicit outcomes; omit zero-value series until they occur.
+	for _, sc := range selftest.All {
+		for _, outcome := range []selftest.Status{selftest.StatusPass, selftest.StatusWarn, selftest.StatusFail} {
+			if count := scenarioRuns[sc.Name][outcome]; count > 0 {
+				fmt.Fprintf(w, "e2a_selftest_scenario_runs_total{scenario=%q,outcome=%q} %d\n", sc.Name, outcome, count)
+			}
+		}
 	}
 	// Per-scenario latency: the raw material for the black-box MCP/WS/inbound
 	// SLI aggregations (docs/observability.md) — a scenario can pass while its

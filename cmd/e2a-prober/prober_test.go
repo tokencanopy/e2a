@@ -184,26 +184,37 @@ func TestHandleStatus_ConsecutiveGreen(t *testing.T) {
 
 func TestHandleMetrics(t *testing.T) {
 	p := newProber(config{})
-	p.ring = []run{{
+	p.recordRun(run{
 		At: time.Unix(1_700_000_000, 0),
 		OK: true,
 		Results: []selftest.Result{
 			{Name: "liveness", Status: selftest.StatusPass, DurationMS: 10},
 			{Name: "inbound_round_trip", Status: selftest.StatusPass, DurationMS: 200},
 		},
-	}}
+	})
+	p.recordRun(run{
+		At: time.Unix(1_700_000_060, 0),
+		OK: false,
+		Results: []selftest.Result{
+			{Name: "liveness", Status: selftest.StatusPass, DurationMS: 12},
+			{Name: "inbound_round_trip", Status: selftest.StatusFail, DurationMS: 250},
+		},
+	})
 	rec := httptest.NewRecorder()
 	p.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 	for _, want := range []string{
-		"e2a_selftest_success 1",
+		"e2a_selftest_success 0",
 		`e2a_selftest_scenario_success{scenario="liveness"} 1`,
-		`e2a_selftest_scenario_success{scenario="inbound_round_trip"} 1`,
-		"e2a_selftest_duration_seconds 0.210",
+		`e2a_selftest_scenario_success{scenario="inbound_round_trip"} 0`,
+		`e2a_selftest_scenario_runs_total{scenario="liveness",outcome="pass"} 2`,
+		`e2a_selftest_scenario_runs_total{scenario="inbound_round_trip",outcome="pass"} 1`,
+		`e2a_selftest_scenario_runs_total{scenario="inbound_round_trip",outcome="fail"} 1`,
+		"e2a_selftest_duration_seconds 0.262",
 		// Per-scenario latency is the raw material for the MCP/WS/inbound
 		// SLI aggregations in docs/observability.md.
-		`e2a_selftest_scenario_duration_seconds{scenario="liveness"} 0.010`,
-		`e2a_selftest_scenario_duration_seconds{scenario="inbound_round_trip"} 0.200`,
+		`e2a_selftest_scenario_duration_seconds{scenario="liveness"} 0.012`,
+		`e2a_selftest_scenario_duration_seconds{scenario="inbound_round_trip"} 0.250`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n---\n%s", want, body)
@@ -234,6 +245,28 @@ func TestHandleMetrics_NoRuns(t *testing.T) {
 	p.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(rec.Body.String(), "e2a_selftest_success 0") {
 		t.Errorf("expected success 0 with no runs, got:\n%s", rec.Body.String())
+	}
+}
+
+func TestScenarioCountersRemainMonotonicWhenRunRingEvicts(t *testing.T) {
+	p := newProber(config{})
+	for i := 0; i < ringCap+3; i++ {
+		p.recordRun(run{
+			At: time.Unix(int64(i+1), 0),
+			OK: true,
+			Results: []selftest.Result{
+				{Name: "liveness", Status: selftest.StatusPass},
+			},
+		})
+	}
+	if len(p.ring) != ringCap {
+		t.Fatalf("ring length = %d, want cap %d", len(p.ring), ringCap)
+	}
+	rec := httptest.NewRecorder()
+	p.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	want := `e2a_selftest_scenario_runs_total{scenario="liveness",outcome="pass"} 53`
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("metrics missing monotonic count %q:\n%s", want, rec.Body.String())
 	}
 }
 

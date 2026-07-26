@@ -89,6 +89,13 @@ type metricCall struct {
 type fakeMetrics struct {
 	calls          []metricCall
 	expiredPending []int
+	terminals      []terminalMetricCall
+}
+
+type terminalMetricCall struct {
+	outcome string
+	scope   string
+	count   int
 }
 
 func (m *fakeMetrics) JanitorRowsDeleted(table string, count int) {
@@ -97,6 +104,10 @@ func (m *fakeMetrics) JanitorRowsDeleted(table string, count int) {
 
 func (m *fakeMetrics) WebhookExpiredPending(count int) {
 	m.expiredPending = append(m.expiredPending, count)
+}
+
+func (m *fakeMetrics) WebhookTerminal(outcome, scope string, count int) {
+	m.terminals = append(m.terminals, terminalMetricCall{outcome, scope, count})
 }
 
 func newJanitor(f *fakePruner, oauth janitor.OAuthPruner) *janitor.Janitor {
@@ -169,6 +180,9 @@ func TestSweep_EmitsMetricsForCorrectTables(t *testing.T) {
 	// the marked count it returned.
 	if len(m.expiredPending) != 1 || m.expiredPending[0] != 4 {
 		t.Errorf("WebhookExpiredPending emissions = %v, want [4]", m.expiredPending)
+	}
+	if len(m.terminals) != 1 || m.terminals[0] != (terminalMetricCall{"e2a_failure", "unknown", 4}) {
+		t.Errorf("WebhookTerminal emissions = %v, want e2a_failure/unknown count 4", m.terminals)
 	}
 }
 

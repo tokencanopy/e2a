@@ -79,6 +79,10 @@ type Metrics interface {
 	// WebhookExpiredPending counts delivery rows the subscriber prune marked
 	// failed at their TTL instead of deleting while pending.
 	WebhookExpiredPending(count int)
+	// WebhookTerminal feeds the eventual-delivery SLO. TTL-expired pending
+	// rows are e2a-attributable failures; the batched prune does not retain
+	// per-row scope, so they use the conservative "unknown" scope.
+	WebhookTerminal(outcome, scope string, count int)
 }
 
 // Janitor holds the prune dependencies and runs the cleanup sweep. All fields
@@ -167,6 +171,7 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 		if marked > 0 {
 			log.Printf("Marked %d expired pending webhook subscriber delivery record(s) failed (expired before delivery)", marked)
 			j.metrics.WebhookExpiredPending(marked)
+			j.metrics.WebhookTerminal("e2a_failure", "unknown", marked)
 		}
 	}
 

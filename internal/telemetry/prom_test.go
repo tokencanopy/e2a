@@ -56,6 +56,8 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.OutboundAttempt("success", 0.8)
 	p.WebhookAttempt("delivered", "2xx", 0.3)
 	p.WebhookAttempt("retryable_failure", "5xx", 0.2)
+	p.WebhookTerminal("delivered", "initial", 1)
+	p.WebhookTerminal("e2a_failure", "unknown", 2)
 	p.WebhookFirstAttemptLatency(12.5)
 	p.WSConnected()
 	p.WSHandshakeRejected("unauthorized")
@@ -81,6 +83,8 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_attempts_total{outcome="success"} 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="e2a_failure",scope="unknown"} 2`,
 		`e2a_webhook_first_attempt_latency_seconds_count 1`,
 		`e2a_ws_connects_total 1`,
 		`e2a_ws_handshake_rejected_total{reason="unauthorized"} 1`,
@@ -97,6 +101,25 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing series %q in exposition", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
+func TestPromLatencyHistogramsExposeExactSLOThresholdBuckets(t *testing.T) {
+	p := NewProm()
+	p.HTTPRequest("GET", "/v1/agents", "2xx", 3)
+	p.SMTPInbound("accepted", 3)
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_http_request_duration_seconds_bucket{method="GET",route="/v1/agents",le="0.75"}`,
+		`e2a_smtp_inbound_duration_seconds_bucket{le="2"}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing exact SLO threshold bucket %q", want)
 		}
 	}
 	if t.Failed() {
@@ -146,6 +169,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.SMTPInbound(addr, 0.1)                // raw address must not become a label
 	p.OutboundTerminal("weird_new_outcome") // unknown enum
 	p.WebhookAttempt(secret, "banana", 0.1) // junk outcome + junk status class
+	p.WebhookTerminal(secret, addr, 1)      // junk outcome + scope
 	p.WSDisconnected("some very long free text reason with details")
 	p.WSHandshakeRejected(addr) // raw address must not become a rejection-reason label
 	p.InboundProcess(secret, 0)
@@ -160,6 +184,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_smtp_inbound_total{outcome="other"} 1`,
 		`e2a_outbound_terminal_total{outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="other",status_class="other"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="other",scope="other"} 1`,
 		`e2a_ws_disconnects_total{reason="other"} 1`,
 		`e2a_ws_handshake_rejected_total{reason="other"} 1`,
 		`e2a_inbound_process_total{outcome="other"} 1`,

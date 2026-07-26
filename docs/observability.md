@@ -60,14 +60,14 @@ SES outage must not knock every instance out of rotation).
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `e2a_http_requests_total` | counter | `method`, `route`, `status_class` | Requests served. `route` is the chi pattern; requests that fall through to the legacy (non-`/v1`) mux appear as `route="/legacy"`; `status_class` ∈ `1xx..5xx` (WebSocket upgrades count as `1xx`). |
-| `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
+| `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Includes an exact `0.75` second SLO bucket. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
 
 ### SMTP intake (relay edge)
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients. A DATA phase aborted mid-read (client dropped, size limit) records no outcome. |
-| `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). |
+| `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). Includes an exact `2` second SLO bucket. |
 
 Policy rejections (550/552) are *correct* behavior, not failures — the
 acceptance SLI below deliberately excludes them.
@@ -88,6 +88,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts — including a delivery that exhausted its retries on a pre-POST infrastructure error, e.g. a sustained webhook-lookup outage), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received — connect/DNS/SSRF-blocked, or no POST was ever made. |
 | `e2a_webhook_attempt_duration_seconds` | histogram | — | HTTP POST duration per attempt. |
+| `e2a_webhook_delivery_terminal_total` | counter | `outcome`, `scope` | Delivery rows reaching a terminal state, emitted only after the terminal DB transition succeeds. `outcome` is `delivered`, `e2a_failure` (internal lookup/retry exhaustion or TTL expiry), `endpoint_failure` (the customer endpoint never accepted within eight attempts), or `excluded` (for example, a deleted webhook). `scope` is `initial`, `replay`, `test`, or `unknown`; `unknown` is the conservative classification when a pre-load failure or batched TTL transition cannot inspect the row. The hosted eventual-delivery SLO uses initial + unknown deliveries and excludes endpoint failures, so customer behavior cannot burn e2a's budget. |
 | `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (no recorded prior attempt — regardless of River attempt number, so a first POST delayed by pre-POST failures still observes). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), eventless `/test` deliveries, and jobs that sat through a customer-disabled window (River snooze) never observe. |
 | `e2a_outbox_events_published_total` | counter | `type` | Events written to the outbox (fan-out input). |
 | `e2a_outbox_events_fanout_total` / `e2a_outbox_fanout_matched_total` | counter | `type` | Fan-out completions / subscriber delivery rows written. |
@@ -142,6 +143,7 @@ endpoint (`E2A_PROBE_LISTEN`, default `:8090`) exposes:
 |---|---|---|
 | `e2a_selftest_success` | gauge | Last full battery run passed (1) or not (0). |
 | `e2a_selftest_scenario_success{scenario}` | gauge | Per-scenario pass/fail of the last run. |
+| `e2a_selftest_scenario_runs_total{scenario,outcome}` | counter | Monotonic completed scenario runs by `pass`, `warn`, or `fail`. Use this counter—not the last-result gauge—for rolling-window SLO ratios and burn alerts. It resets normally on prober restart. |
 | `e2a_selftest_scenario_duration_seconds{scenario}` | gauge | Per-scenario latency of the last run — a scenario can pass while degrading; this is where it shows first. |
 | `e2a_selftest_duration_seconds` | gauge | Total battery duration. |
 
@@ -177,11 +179,12 @@ unmatched paths — LB health probes and internet scanner noise — which would
 dilute the denominator. Panicking handlers DO count (recorded as 5xx by the
 middleware's deferred sample), so a crash loop cannot hide from this SLI.
 
-**HTTP latency** — p99 across `/v1`:
+**HTTP latency** — fraction of `/v1` requests within the 750 ms p99
+objective (the exact threshold bucket makes this suitable for burn alerts):
 
 ```promql
-histogram_quantile(0.99,
-  sum by (le) (rate(e2a_http_request_duration_seconds_bucket{route=~"/v1/.*"}[5m])))
+sum(rate(e2a_http_request_duration_seconds_bucket{route=~"/v1/.*",le="0.75"}[5m]))
+/ sum(rate(e2a_http_request_duration_seconds_count{route=~"/v1/.*"}[5m]))
 ```
 
 WebSocket upgrades never enter this histogram (see the catalog), so no
@@ -193,6 +196,14 @@ route exclusion is needed.
 ```promql
 sum(rate(e2a_smtp_inbound_total{outcome=~"accepted|accepted_dedup"}[5m]))
 / sum(rate(e2a_smtp_inbound_total{outcome=~"accepted|accepted_dedup|tempfail"}[5m]))
+```
+
+**SMTP DATA latency** — fraction completing within the 2 second p95
+objective:
+
+```promql
+sum(rate(e2a_smtp_inbound_duration_seconds_bucket{le="2"}[5m]))
+/ sum(rate(e2a_smtp_inbound_duration_seconds_count[5m]))
 ```
 
 **Outbound submission success** — terminal outcomes that reached the
@@ -209,7 +220,8 @@ policy cancellation are e2a protecting the sender, not delivery failures.
 **Outbound queue wait** — p95 pickup latency and backlog age:
 
 ```promql
-histogram_quantile(0.95, sum by (le) (rate(e2a_outbound_queue_wait_seconds_bucket[5m])))
+sum(rate(e2a_outbound_queue_wait_seconds_bucket{le="30"}[5m]))
+/ sum(rate(e2a_outbound_queue_wait_seconds_count[5m]))
 max(e2a_queue_oldest_age_seconds{queue="outbound"})
 ```
 
@@ -227,30 +239,32 @@ with `e2a_outbound_terminal_total`) is what makes this ratio a per-message
 fraction; an outage-tail message can legitimately land in the day-scale
 buckets, so alert on the ratio, not the tail.
 
-**Webhook attempt health** — per-attempt success to responsive endpoints,
-across all attempt indexes (there is no attempt-number label; an unhealthy
-customer endpoint is not an e2a failure, but a rising `none` / `5xx` share
-across *all* tenants is). `skipped_disabled` is deliberately outside both
-numerator and denominator — a disabled webhook re-emits it on every hourly
-snooze, and no POST happens:
+**Webhook eventual delivery** — initial deliveries that reached a terminal
+state without an e2a-attributable failure. `endpoint_failure` is deliberately
+outside the denominator: an unhealthy customer endpoint is not an e2a
+failure. `unknown` is included conservatively so an internal failure cannot
+hide merely because the worker could not load the row:
 
 ```promql
-sum(rate(e2a_webhook_attempts_total{outcome="delivered"}[5m]))
-/ sum(rate(e2a_webhook_attempts_total{outcome=~"delivered|retryable_failure|exhausted"}[5m]))
+sum(rate(e2a_webhook_delivery_terminal_total{
+  outcome="delivered",scope=~"initial|unknown"}[1h]))
+/ sum(rate(e2a_webhook_delivery_terminal_total{
+  outcome=~"delivered|e2a_failure",scope=~"initial|unknown"}[1h]))
 ```
 
-One deliberate gap: a delivery retrying a *pre-POST* infrastructure error
-(e.g. a webhook-lookup DB outage) emits nothing until it exhausts — up to
-the 29h21m retry envelope — because no attempt happens to count. River's
-job-error logs and `e2a_queue_oldest_age_seconds{queue="webhook"}` cover
-the window; the first `exhausted` sample lands the SLI impact when the
-envelope runs out.
+The attempt counter remains useful diagnostic data, but it is not the
+eventual-delivery SLI: it mixes attempts with deliveries and would
+overweight endpoints that consume the full retry envelope. A delivery
+retrying a pre-POST infrastructure error cannot become terminal until it
+exhausts (up to 29h21m), so queue age and job-error alerts cover that window;
+the terminal counter records the e2a failure when the row settles.
 
-**Webhook event→first attempt** — p95 latency from event creation to the
-first HTTP attempt (covers fan-out, queue wait, and worker pickup):
+**Webhook event→first attempt** — fraction within the 60 second p95
+objective (covers fan-out, queue wait, and worker pickup):
 
 ```promql
-histogram_quantile(0.95, sum by (le) (rate(e2a_webhook_first_attempt_latency_seconds_bucket[5m])))
+sum(rate(e2a_webhook_first_attempt_latency_seconds_bucket{le="60"}[5m]))
+/ sum(rate(e2a_webhook_first_attempt_latency_seconds_count[5m]))
 ```
 
 **WebSocket handshake success (valid credentials)** — accepted handshakes
@@ -277,19 +291,25 @@ miss by `pgx.ErrNoRows`) is the only e2a-attributable reason and the only
 one in the denominator — a Postgres outage burns this SLI rather than
 reading 0/0 behind the client-fault labels.
 
-**WebSocket health** — active connections, abnormal disconnect rate, and the
-black-box push path:
+**WebSocket health** — active connections, abnormal disconnect rate, and
+the black-box push-path success ratio:
 
 ```promql
 sum(rate(e2a_ws_disconnects_total{reason=~"ping_timeout|error"}[15m]))
-e2a_selftest_scenario_success{scenario="websocket_round_trip"}
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="websocket_round_trip",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="websocket_round_trip"}[6h]))
 ```
 
 **MCP availability** — measured *independently* by the prober (strategy
 target: "measured independently"), not self-reported by the MCP process:
 
 ```promql
-avg_over_time(e2a_selftest_scenario_success{scenario="mcp_http_round_trip"}[30d])
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="mcp_http_round_trip",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="mcp_http_round_trip"}[6h]))
 ```
 
 ## Initial SLO targets
@@ -308,7 +328,7 @@ after M ≥ 2 consecutive failed probes).
 | Outbound | terminal outcome within 5 min of acceptance | ≥ 99% |
 | Outbound | queue wait p95 | < 30 s |
 | Webhooks | event → first delivery attempt | < 60 s (p95) |
-| Webhooks | eventual delivery to responsive endpoints (≤ 8 attempts) | ≥ 99% |
+| Webhooks | e2a-attributable eventual delivery execution (initial deliveries; customer endpoint failures excluded; ≤ 8 attempts) | ≥ 99% |
 | WebSocket | handshake success (valid credentials) | ≥ 99.9% |
 | WebSocket | prober round-trip (connect → live push) | ≥ 99.9% of probes |
 | MCP | prober connection + tool-call success | ≥ 99.9% of probes |

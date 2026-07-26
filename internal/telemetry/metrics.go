@@ -123,6 +123,13 @@ type Metrics interface {
 	// (connect/DNS/SSRF-blocked).
 	WebhookAttempt(outcome, statusClass string, seconds float64)
 
+	// WebhookTerminal records terminal delivery outcomes after the terminal
+	// database transition succeeds. outcome ∈ {delivered, e2a_failure,
+	// endpoint_failure, excluded}; scope ∈ {initial, replay, test, unknown}.
+	// The hosted SLO uses initial + unknown and excludes endpoint_failure:
+	// customer endpoint behavior must not burn e2a's error budget.
+	WebhookTerminal(outcome, scope string, count int)
+
 	// WebhookExpiredPending counts delivery rows that reached their
 	// retention TTL while still 'pending' and were marked terminally
 	// failed ("expired before delivery") by the janitor instead of being
@@ -203,6 +210,7 @@ func (NoOp) OutboundTerminal(string)                     {}
 func (NoOp) OutboundTerminalLatency(float64)             {}
 func (NoOp) OutboundAttempt(string, float64)             {}
 func (NoOp) WebhookAttempt(string, string, float64)      {}
+func (NoOp) WebhookTerminal(string, string, int)         {}
 func (NoOp) WebhookExpiredPending(int)                   {}
 func (NoOp) WebhookFanOutRescued(int)                    {}
 func (NoOp) WebhookDeliveryRescued(int)                  {}
@@ -303,6 +311,12 @@ func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	log.Printf("[metrics] event=webhook.attempt outcome=%s status_class=%s duration=%.3f", outcome, statusClass, seconds)
+}
+
+func (l *Log) WebhookTerminal(outcome, scope string, count int) {
+	if count > 0 {
+		log.Printf("[metrics] event=webhook.terminal outcome=%s scope=%s count=%d", outcome, scope, count)
+	}
 }
 
 func (l *Log) WebhookExpiredPending(count int) {

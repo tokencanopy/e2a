@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,9 +55,24 @@ func NewSubscriberStore(pool *pgxpool.Pool) *SubscriberStore {
 // last_attempt_at + last_status_code. Also bumps webhooks.last_delivered_at
 // in the same transaction so list views show the freshest activity.
 func (s *SubscriberStore) MarkDelivered(ctx context.Context, deliveryID string, statusCode int) error {
-	tx, err := s.pool.Begin(ctx)
+	changed, err := s.MarkDeliveredIfPending(ctx, deliveryID, statusCode)
 	if err != nil {
 		return err
+	}
+	if !changed {
+		return fmt.Errorf("mark delivered: %w", pgx.ErrNoRows)
+	}
+	return nil
+}
+
+// MarkDeliveredIfPending is the transition-aware form used by the delivery
+// worker's terminal SLI. It returns true only when this call changed a pending
+// row to delivered, so a duplicate River execution cannot count the same
+// delivery twice.
+func (s *SubscriberStore) MarkDeliveredIfPending(ctx context.Context, deliveryID string, statusCode int) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -67,19 +83,25 @@ func (s *SubscriberStore) MarkDelivered(ctx context.Context, deliveryID string, 
 		     last_attempt_at = now(),
 		     last_status_code = $2,
 		     attempts = attempts + 1
-		 WHERE id = $1
+		 WHERE id = $1 AND status = 'pending'
 		 RETURNING webhook_id`,
 		deliveryID, statusCode,
 	).Scan(&webhookID); err != nil {
-		return fmt.Errorf("mark delivered: %w", err)
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("mark delivered: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE webhooks SET last_delivered_at = now() WHERE id = $1`,
 		webhookID,
 	); err != nil {
-		return fmt.Errorf("bump last_delivered_at: %w", err)
+		return false, fmt.Errorf("bump last_delivered_at: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetSubscriberDeliveryByID loads a single delivery row by id — the River
@@ -154,14 +176,25 @@ func (s *SubscriberStore) MarkSubscriberFailed(ctx context.Context, deliveryID s
 // (e.g. delivered by a path the failed read couldn't see). A missing row is
 // a no-op, not an error.
 func (s *SubscriberStore) MarkSubscriberFailedIfPending(ctx context.Context, deliveryID string, attemptN int, errMsg string, statusCode int) error {
-	_, err := s.pool.Exec(ctx,
+	_, err := s.TransitionSubscriberFailedIfPending(ctx, deliveryID, attemptN, errMsg, statusCode)
+	return err
+}
+
+// TransitionSubscriberFailedIfPending is the transition-aware form used by
+// terminal SLI emission. A false result means the row was already terminal or
+// gone, so callers must not increment the per-delivery terminal counter.
+func (s *SubscriberStore) TransitionSubscriberFailedIfPending(ctx context.Context, deliveryID string, attemptN int, errMsg string, statusCode int) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE webhook_subscriber_deliveries
 		    SET status = 'failed', attempts = $2, last_attempt_at = now(),
 		        last_error = $3, last_status_code = $4
 		  WHERE id = $1 AND status = 'pending'`,
 		deliveryID, attemptN, errMsg, statusCode,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // generateDeliveryID returns a prefixed id of the form whd_<32-hex>.
