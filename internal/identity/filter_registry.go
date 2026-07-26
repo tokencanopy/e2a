@@ -24,7 +24,6 @@ func MessagesQRegistry() *filterquery.Registry {
 			labelQField(),
 			fromQField(),
 			subjectQField(),
-			hasQField(),
 			createdQField(),
 		)
 		if err != nil {
@@ -88,22 +87,6 @@ func textQField(name, column string, maxLen int) filterquery.FieldSpec {
 
 func fromQField() filterquery.FieldSpec    { return textQField("from", "m.sender", 200) }
 func subjectQField() filterquery.FieldSpec { return textQField("subject", "m.subject", 200) }
-
-func hasQField() filterquery.FieldSpec {
-	return filterquery.FieldSpec{
-		Name: "has",
-		Ops:  []string{":"},
-		Coerce: func(raw string, quoted bool) (any, error) {
-			if raw != "attachment" {
-				return nil, fmt.Errorf("unsupported has: value %q — v1 supports has:attachment", raw)
-			}
-			return raw, nil
-		},
-		Emit: func(c *filterquery.Comparison, e *filterquery.EmitCtx) (string, error) {
-			return "COALESCE(jsonb_array_length(m.attachments_json), 0) > 0", nil
-		},
-	}
-}
 
 // createdValue carries date-coercion semantics: a date-only input (dayRange)
 // makes comparisons cover the entire UTC calendar day.

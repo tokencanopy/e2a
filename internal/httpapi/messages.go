@@ -367,7 +367,7 @@ type ListMessagesInput struct {
 	SubjectContains string   `query:"subject_contains" doc:"Case-insensitive substring match on subject."`
 	ConversationID  string   `query:"conversation_id"`
 	Labels          []string `query:"labels" doc:"Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label."`
-	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
+	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
 	Since           string   `query:"since" doc:"RFC3339; created_at >= since."`
 	Until           string   `query:"until" doc:"RFC3339; created_at < until."`
 	Cursor          string   `query:"cursor"`

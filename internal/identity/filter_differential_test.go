@@ -2,7 +2,6 @@ package identity_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -23,7 +22,6 @@ type qFixture struct {
 	subject      string
 	labels       []string
 	created      time.Time
-	attachments  int
 	conversation string
 	id           string
 }
@@ -56,7 +54,7 @@ func seedQFixtures(t *testing.T, pool *pgxpool.Pool, store *identity.Store, agen
 		{key: "before", sender: "before@example.com", subject: "xnowy", labels: []string{"archive"}, created: day.Add(-time.Nanosecond)},
 		{key: "start", sender: "start@example.com", subject: "100 percent", labels: []string{"start"}, created: day},
 		{key: "alice", sender: "alice@corp.com", subject: "Quarterly report", labels: []string{"urgent", "q3"}, created: day.Add(time.Hour), conversation: "qdiff-conversation"},
-		{key: "alert", sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour), attachments: 2},
+		{key: "alert", sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour)},
 		{key: "newsletter", sender: "carol@news.net", subject: "Weekly digest", labels: []string{"newsletter"}, created: day.Add(3 * time.Hour)},
 		{key: "follow", sender: "ALICE@corp.com", subject: "Follow-up", labels: []string{"follow-up"}, created: day.Add(4 * time.Hour)},
 		{key: "empty", sender: "dave@x.com", subject: "", labels: []string{}, created: day.Add(5 * time.Hour)},
@@ -77,20 +75,7 @@ func seedQFixtures(t *testing.T, pool *pgxpool.Pool, store *identity.Store, agen
 		}
 		fx.id = message.ID
 
-		attachmentsValue := make([]map[string]any, fx.attachments)
-		for attachment := range attachmentsValue {
-			attachmentsValue[attachment] = map[string]any{
-				"filename":     fmt.Sprintf("attachment-%d.pdf", attachment),
-				"content_type": "application/pdf",
-				"index":        attachment,
-				"size_bytes":   10,
-			}
-		}
-		attachments, err := json.Marshal(attachmentsValue)
-		if err != nil {
-			t.Fatalf("marshal attachments for %s: %v", fx.key, err)
-		}
-		if _, err := pool.Exec(ctx, `UPDATE messages SET labels = $1, attachments_json = $2::jsonb, created_at = $3 WHERE id = $4`, fx.labels, attachments, fx.created, fx.id); err != nil {
+		if _, err := pool.Exec(ctx, `UPDATE messages SET labels = $1, created_at = $2 WHERE id = $3`, fx.labels, fx.created, fx.id); err != nil {
 			t.Fatalf("set fixture %s: %v", fx.key, err)
 		}
 	}
@@ -143,8 +128,6 @@ func TestQFilterDifferential(t *testing.T) {
 	}{
 		{q: `label:urgent`, keys: []string{"alice", "literal", "unicode"}},
 		{q: `label:urgent OR label:alerts`, keys: []string{"alice", "alert", "literal", "unicode"}},
-		{q: `label:urgent OR label:alerts AND has:attachment`, keys: []string{"alert"}},
-		{q: `(label:urgent OR label:follow-up) AND NOT has:attachment`, keys: []string{"alice", "follow", "literal", "unicode"}},
 		{q: `NOT label:urgent`, keys: allButUrgent},
 		{q: `from:alice`, keys: []string{"alice", "follow"}},
 		{q: `from:*@corp.com`, keys: []string{"alice", "follow"}},
@@ -155,7 +138,6 @@ func TestQFilterDifferential(t *testing.T) {
 		{q: `subject:"\\path"`, keys: []string{"literal"}},
 		{q: `subject:"a*b literal"`, keys: []string{"wildcard"}},
 		{q: `subject:こんにちは`, keys: []string{"unicode"}},
-		{q: `has:attachment`, keys: []string{"alert"}},
 		{q: `created<2026-07-01`, keys: []string{"before"}},
 		{q: `created<=2026-07-01`, keys: append([]string{"before"}, allDay...)},
 		{q: `created=2026-07-01`, keys: allDay},

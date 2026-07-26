@@ -132,15 +132,15 @@ func TestSubjectField(t *testing.T) {
 	}
 }
 
-func TestHasAttachment(t *testing.T) {
+func TestHasAttachmentIsDeferred(t *testing.T) {
 	t.Parallel()
 
-	frag, args := compileQ(t, `has:attachment`, 1)
-	if frag != `(COALESCE(jsonb_array_length(m.attachments_json), 0) > 0)` || len(args) != 0 {
-		t.Errorf("frag=%s args=%v", frag, args)
+	_, _, err := filterquery.Compile(`has:attachment`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1)
+	if err == nil {
+		t.Fatal("has:attachment: want unknown-field rejection")
 	}
-	if _, _, err := filterquery.Compile(`has:body`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1); err == nil {
-		t.Error("has:body: want rejection")
+	if got, want := err.Error(), `unknown field "has" — supported fields: created, from, label, subject`; !strings.Contains(got, want) {
+		t.Errorf("error = %q, want substring %q", got, want)
 	}
 }
 

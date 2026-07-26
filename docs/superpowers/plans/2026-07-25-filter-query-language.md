@@ -25,6 +25,7 @@
 - Hard caps: input ≤ 500 chars (handler), nesting depth ≤ 64, nodes ≤ 512. Violations return positioned errors, never panics.
 - Placeholders are always 1-based `$n`, numbered from a caller-supplied start index; identifiers come only from registry constants; user values are always bound args.
 - DSL semantics MUST match flat params: `from:` = `m.sender ILIKE … ESCAPE '\'` (same as flat `from`), `subject:` = `m.subject ILIKE … ESCAPE '\'` (same as flat `subject_contains`), both via the existing `escapeLikePattern` helper; `*` in values maps to `%` (after escaping literals).
+- Attachment filtering is deferred from v1. Inbound attachments are canonical in raw MIME while outbound attachments use `attachments_json`; an exact `has:attachment` needs a normalized count introduced by a blue/green-safe expand/backfill/contract rollout (nullable field + all writers, exact resumable Go backfill, then query exposure after old writers are gone).
 - `label:` values must match `^[a-z0-9:_-]{1,64}$`; `e2a:` system labels are filterable (read-only on writes, unchanged).
 - DB-backed tests need Postgres: `make docker-up` (pg at localhost:5433), then `go test ./internal/identity/ -run <Test>`.
 - Commit style: `feat(filterquery): …` / `feat(api): …` with trailer `Co-Authored-By: Kimi <noreply@moonshot.ai>`. Commit at every task boundary.
@@ -53,7 +54,7 @@ package filterquery
 import "testing"
 
 func TestLexBasics(t *testing.T) {
-	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT has:attachment)`)
+	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT subject:newsletter)`)
 	if err != nil {
 		t.Fatalf("lex: %v", err)
 	}
@@ -443,7 +444,7 @@ func TestParsePrecedence(t *testing.T) {
 		`-a:x`:                       `(not (a : x))`,
 		`a:x AND (b:y OR c:z)`:       `(and (a : x) (or (b : y) (c : z)))`,
 		`(a:x OR b:y) AND NOT c:z`:   `(and (or (a : x) (b : y)) (not (c : z)))`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
+		`label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (subject : newsletter)))) (created >= 2026-07-01))`,
 	}
 	for q, want := range cases {
 		if got := parseToString(t, q); got != want {
@@ -2146,13 +2147,13 @@ func TestSubjectField(t *testing.T) {
 	}
 }
 
-func TestHasAttachment(t *testing.T) {
-	frag, args := compileQ(t, `has:attachment`, 1)
-	if frag != `(COALESCE(jsonb_array_length(m.attachments_json), 0) > 0)` || len(args) != 0 {
-		t.Errorf("frag=%s args=%v", frag, args)
+func TestHasAttachmentIsDeferred(t *testing.T) {
+	_, _, err := filterquery.Compile(`has:attachment`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1)
+	if err == nil {
+		t.Fatal("has:attachment: want unknown-field rejection")
 	}
-	if _, _, err := filterquery.Compile(`has:body`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1); err == nil {
-		t.Error("has:body: want rejection")
+	if got, want := err.Error(), `unknown field "has" — supported fields: created, from, label, subject`; !strings.Contains(got, want) {
+		t.Errorf("error = %q, want substring %q", got, want)
 	}
 }
 
@@ -2227,7 +2228,6 @@ func MessagesQRegistry() *filterquery.Registry {
 			labelQField(),
 			fromQField(),
 			subjectQField(),
-			hasQField(),
 			createdQField(),
 		)
 		if err != nil {
@@ -2292,22 +2292,6 @@ func textQField(name, column string, maxLen int) filterquery.FieldSpec {
 
 func fromQField() filterquery.FieldSpec    { return textQField("from", "m.sender", 200) }
 func subjectQField() filterquery.FieldSpec { return textQField("subject", "m.subject", 200) }
-
-func hasQField() filterquery.FieldSpec {
-	return filterquery.FieldSpec{
-		Name: "has",
-		Ops:  []string{":"},
-		Coerce: func(raw string, quoted bool) (any, error) {
-			if raw != "attachment" {
-				return nil, fmt.Errorf("unsupported has: value %q — v1 supports has:attachment", raw)
-			}
-			return raw, nil
-		},
-		Emit: func(c *filterquery.Comparison, e *filterquery.EmitCtx) (string, error) {
-			return "COALESCE(jsonb_array_length(m.attachments_json), 0) > 0", nil
-		},
-	}
-}
 
 // createdValue carries date-coercion semantics: a date-only input (dayRange)
 // makes "=" mean "that UTC day", not "that exact midnight second".
@@ -2396,12 +2380,10 @@ sections below):**
 - Replace the AST-sharing "naive evaluator" below with an independent fixture
   oracle: each query declares expected fixture keys/IDs explicitly. Cover
   precedence, NOT, labels, case-insensitive exact/substring text matching,
-  escaped `%`/`_`/`\`, `*` wildcard behavior, attachments, Unicode, and all
+  escaped `%`/`_`/`\`, `*` wildcard behavior, Unicode, and all
   date-only boundaries. Include fixtures immediately before the day, exactly
   at its first midnight, exactly at the following midnight, and after it so
   `<`, `<=`, `=`, `!=`, `>`, and `>=` cannot share a mistaken boundary.
-- Build attachment fixtures with `encoding/json` (or a valid fixed JSON
-  array); never use the invalid `fmt.Sprintf(...[:{}])` example below.
 - The old Step 2 evaluator and Step 3 `Expr.Root()` snippets are retained only
   as historical illustration and must not be implemented.
 
@@ -2461,7 +2443,6 @@ type fixtureMsg struct {
 	subject     string
 	labels      []string // nil = NULL labels column
 	created     time.Time
-	attachments int
 }
 
 func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
@@ -2470,7 +2451,7 @@ func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
 	day := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	fixtures := []fixtureMsg{
 		{sender: "alice@corp.com", subject: "Quarterly report", labels: []string{"urgent", "q3"}, created: day.Add(1 * time.Hour)},
-		{sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour), attachments: 2},
+		{sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour)},
 		{sender: "carol@news.net", subject: "Weekly digest", labels: []string{"newsletter"}, created: day.Add(3 * time.Hour)},
 		{sender: "ALICE@corp.com", subject: "Follow-up", labels: []string{"follow-up"}, created: day.Add(4 * time.Hour)},
 		{sender: "dave@x.com", subject: "", labels: nil, created: day.Add(5 * time.Hour)},
@@ -2489,12 +2470,6 @@ func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
 		if fx.labels != nil {
 			if _, err := store.pool.Exec(ctx, `UPDATE messages SET labels = $1 WHERE id = $2`, fx.labels, m.ID); err != nil {
 				t.Fatalf("labels %d: %v", i, err)
-			}
-		}
-		if fx.attachments > 0 {
-			att := fmt.Sprintf(`[{"filename":"a.pdf","content_type":"application/pdf","index":0,"size_bytes":10},{"filename":"b.pdf","content_type":"application/pdf","index":1,"size_bytes":10}][:{}]`, fx.attachments)
-			if _, err := store.pool.Exec(ctx, `UPDATE messages SET attachments_json = $1::jsonb WHERE id = $2`, att, m.ID); err != nil {
-				t.Fatalf("attachments %d: %v", i, err)
 			}
 		}
 		if _, err := store.pool.Exec(ctx, `UPDATE messages SET created_at = $1 WHERE id = $2`, fx.created, m.ID); err != nil {
@@ -2598,8 +2573,6 @@ func evalComparison(c *filterquery.Comparison, r fixtureMsg) bool {
 		default:
 			return !strings.EqualFold(r.subject, v)
 		}
-	case "has":
-		return r.attachments > 0
 	case "created":
 		cv := c.Value.(createdValue)
 		at := cv.at
@@ -2647,7 +2620,6 @@ func TestQDifferential(t *testing.T) {
 		`label:urgent OR label:alerts`,
 		`label:urgent AND NOT label:newsletter`,
 		`NOT label:urgent`,
-		`(label:urgent OR label:follow-up) AND NOT has:attachment`,
 		`from:alice`,
 		`from:ALICE`,
 		`from:*@corp.com`,
@@ -2658,11 +2630,10 @@ func TestQDifferential(t *testing.T) {
 		`subject:_now_`,                     // literal underscores
 		`subject:"a*b literal"`,
 		`subject:こんにちは`,
-		`has:attachment`,
 		`created = "2026-07-01"`,            // day range: all but the next-day row
 		`created>=2026-07-02`,
 		`created<2026-07-01T05:00:00Z`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`,
+		`label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`,
 	}
 	for _, q := range queries {
 		expr, err := filterquery.Parse(q, MessagesQRegistry())
@@ -2766,9 +2737,10 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
   rejection as `invalid_cursor`, and adding/removing `q` across pages.
 - Exercise the real HTTP/Huma stack. Invalid syntax, unknown fields, forbidden
   operators, and length caps return 400 `invalid_filter`; positioned parser
-  errors retain their `(at column N)` text. Captured store filters must prove
-  `Q` is non-nil and emits the expected SQL/args, while flat filters remain set
-  for AND composition.
+  errors retain their `(at column N)` text. `has:attachment` must be covered as
+  an unknown field whose diagnostic lists only `created, from, label, subject`.
+  Captured store filters must prove `Q` is non-nil and emits the expected
+  SQL/args, while flat filters remain set for AND composition.
 
 - [ ] **Step 1: Write the failing handler tests**
 
@@ -2780,6 +2752,7 @@ package httpapi
 
 func TestQParamInvalid(t *testing.T) {
 	// q with an unknown field → 400 invalid_filter naming the field
+	// q=has:attachment → 400 and supported fields are exactly created/from/label/subject
 	// q longer than 500 chars → 400 invalid_filter
 	// q with a parse error → 400 with "(at column N)"
 }
@@ -2814,7 +2787,7 @@ Expected: FAIL — `q` not a known query param / QEmit never set.
 In `ListMessagesInput` (messages.go ~368, after `Labels`):
 
 ```go
-	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
+	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
 ```
 
 In `messagesCursor` (~395):
@@ -2912,7 +2885,7 @@ In the `list_messages` `inputSchema` (after `labels`, ~line 435):
           .max(500)
           .optional()
           .describe(
-            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
+            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
           ),
 ```
 

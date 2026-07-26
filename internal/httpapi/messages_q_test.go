@@ -50,6 +50,7 @@ func TestQParamInvalid(t *testing.T) {
 		wantOK      bool
 	}{
 		{name: "unknown field", q: "unknown:thing", wantInError: `unknown field "unknown"`},
+		{name: "attachment filtering deferred", q: "has:attachment", wantInError: `unknown field "has" — supported fields: created, from, label, subject`},
 		{name: "forbidden operator", q: "label=urgent", wantInError: `operator "=" is not allowed on field "label"`},
 		{name: "syntax retains column", q: "label:", wantInError: "(at column 7)"},
 		{name: "ASCII over code point limit", q: "label:" + strings.Repeat("a", 501), wantInError: "q filter too long (max 500 chars)"},
