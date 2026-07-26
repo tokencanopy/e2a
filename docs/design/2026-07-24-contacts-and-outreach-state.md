@@ -131,7 +131,7 @@ architectural pattern.
 
 ### 3.2 Data model
 
-Two tables. Migrations `079_contacts.sql`, `080_contact_engagements.sql`.
+Two tables. Migrations `079_contacts.sql`, `081_contact_engagements.sql` (081 because 080 was taken on main while this was in flight).
 
 ```sql
 -- 079_contacts.sql
@@ -153,7 +153,7 @@ CREATE INDEX IF NOT EXISTS contacts_batch_idx  ON contacts (user_id, import_batc
 ```
 
 ```sql
--- 080_contact_engagements.sql
+-- 081_contact_engagements.sql
 CREATE TABLE IF NOT EXISTS contact_engagements (
     id              TEXT PRIMARY KEY,              -- eng_<random>
     user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
