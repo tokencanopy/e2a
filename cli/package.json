@@ -14,6 +14,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "coverage:gate:cli": "node test/cli-coverage-gate.ts",
+    "test:e2e:coverage": "rm -rf test/reports/cli-coverage && npm run test:e2e && npm run coverage:gate:cli",
     "prepublishOnly": "npm run build"
   },
   "engines": {

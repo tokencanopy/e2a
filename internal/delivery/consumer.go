@@ -65,7 +65,10 @@ type Store interface {
 	// a duplicate/older event is a no-op.
 	RecordDeliveryOutcomeTx(ctx context.Context, tx pgx.Tx, messageID, address string, status Status, detail string) (applied bool, err error)
 	// AddSuppression idempotently inserts a (user, address) suppression.
-	// added=false when it already existed (so the event fires at most once).
+	// added=false when it already existed, so an upsert no-op fires no event.
+	// This is per-INSERT, not once-per-address-forever: if the caller deletes a
+	// suppression and the address is suppressed again later, that is a genuine
+	// new insert and does fire.
 	AddSuppressionTx(ctx context.Context, tx pgx.Tx, userID, address, reason, source, sourceMessageID string) (suppressionID string, added bool, err error)
 	AppendLifecycleTx(ctx context.Context, tx pgx.Tx, input messagelifecycle.AppendInput) (messagelifecycle.MessageLifecycleTransition, error)
 }
@@ -275,7 +278,31 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 						return err
 					}
 					if c.fire != nil {
-						event := FiredEvent{UserID: m.UserID, Type: EventSuppressionAdded, Data: eventpayload.DomainSuppressionAddedData{Address: r.Address, Source: source, Reason: r.Detail, MessageID: m.MessageID, LifecycleTransitions: []messagelifecycle.MessageLifecycleTransition{suppressionTransition}}, DedupKey: EventSuppressionAdded + "|" + m.UserID + "|" + r.Address, OccurredAt: ev.OccurredAt}
+						// Dedup on the PROVIDER NOTIFICATION, not on (user, address).
+						//
+						// The old key was EventSuppressionAdded|userID|address, which
+						// fired the event at most once per address for the lifetime of
+						// the account. That guarded against nothing: once an address is
+						// suppressed, a send to it is refused with 422
+						// recipient_suppressed BEFORE it reaches the provider (see
+						// internal/agent/api.go), so no second bounce can occur and
+						// there is no repeat-event stream to protect anyone from.
+						//
+						// The only route to a second suppression is the remediation the
+						// docs prescribe — DELETE /v1/account/suppressions/{address},
+						// then send again. That is a deliberate act on the belief that
+						// the address is fixed, and if it bounces again that belief was
+						// wrong. Staying silent there left the caller's webhook-driven
+						// state saying "deliverable" while e2a said "suppressed", with
+						// every later send failing for a reason they could not see.
+						//
+						// Keying on ProviderEventID matches the sibling delivery events
+						// (feedbackDedupeKey below): a REDELIVERED SNS notification —
+						// the duplicate that actually happens — still dedups, while a
+						// genuinely new suppression notifies. AddSuppressionTx's `added`
+						// flag remains the guard that this is a real insert, not an
+						// upsert no-op.
+						event := FiredEvent{UserID: m.UserID, Type: EventSuppressionAdded, Data: eventpayload.DomainSuppressionAddedData{Address: r.Address, Source: source, Reason: r.Detail, MessageID: m.MessageID, LifecycleTransitions: []messagelifecycle.MessageLifecycleTransition{suppressionTransition}}, DedupKey: "provider-feedback:" + ev.ProviderEventID + ":" + r.Address + ":" + EventSuppressionAdded, OccurredAt: ev.OccurredAt}
 						suppressionEvent = &event
 					}
 				}

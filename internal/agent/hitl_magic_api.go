@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
 
@@ -270,8 +271,8 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 		return
 	}
 	if handled {
-		log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to=%v approved=magic-link:user:%s delivery=async",
-			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), sent.ToRecipients, userID)
+		log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s delivery=async",
+			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 		writeMagicMessage(w, http.StatusOK, "Approved",
 			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))))
 		return
@@ -304,8 +305,8 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	}
 
 	a.recordLoopbackUsage(r.Context(), userID, agent)
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to=%v approved=magic-link:user:%s",
-		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), sent.ToRecipients, userID)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s",
+		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 
 	writeMagicMessage(w, http.StatusOK,
 		"Approved",
@@ -353,8 +354,8 @@ func (a *API) magicReject(w http.ResponseWriter, r *http.Request, messageID, use
 		}
 		return
 	}
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s rejected_by=magic-link:user:%s reason=%q",
-		rejected.ID, rejected.Type, rejected.Status, userID, reason)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s rejected_by=magic-link:user:%s reason_len=%d",
+		rejected.ID, rejected.Type, rejected.Status, userID, utf8.RuneCountInString(reason))
 
 	writeMagicMessage(w, http.StatusOK, "Rejected",
 		"The message has been discarded and will not be sent.")

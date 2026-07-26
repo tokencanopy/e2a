@@ -30,6 +30,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/inboundscreen"
 	"github.com/tokencanopy/e2a/internal/limits"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/piguard"
@@ -196,25 +197,27 @@ type API struct {
 	// it when the deployment serves the API on a different host than the web
 	// app (e.g. api.e2a.dev vs e2a.dev). The OAuth authorization_endpoint
 	// and login/consent pages stay on publicURL (the browser-facing web app).
-	apiURL            string
-	production        bool
-	sendLimit         *ratelimit.Limiter
-	regLimit          *ratelimit.Limiter
-	pollLimit         *ratelimit.Limiter
-	feedbackLimit     *ratelimit.Limiter
-	dcrLimit          *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
-	downloadLimit     *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
-	unsubscribeLimit  *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
-	approvalSigner    *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
-	notifyEnq         NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
-	oauthProvider     fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
-	oauthStorage      *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
-	signer            *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
-	idempotency       *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
-	enforcer          limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
-	usageStore        *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
-	internalAPISecret string                // optional; when empty, /api/internal/* endpoints return 503
-	billingHookURL    string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	apiURL              string
+	production          bool
+	sendLimit           *ratelimit.Limiter
+	regLimit            *ratelimit.Limiter
+	pollLimit           *ratelimit.Limiter
+	feedbackLimit       *ratelimit.Limiter
+	dcrLimit            *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
+	downloadLimit       *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
+	unsubscribeLimit    *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
+	approvalSigner      *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
+	notifyEnq           NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
+	oauthProvider       fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
+	oauthStorage        *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
+	signer              *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
+	idempotency         *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
+	enforcer            limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
+	usageStore          *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
+	internalAPISecret   string                // optional; when empty, /api/internal/* endpoints return 503
+	provisioningEnabled bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
+	provisioningSecret  string                // required with provisioningEnabled; signs /api/internal/users/provision
+	billingHookURL      string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -500,6 +503,15 @@ func (a *API) SetUsageStore(s *usage.Store) { a.usageStore = s }
 // who don't run a billing provisioner never need to configure it.
 func (a *API) SetInternalAPISecret(s string) { a.internalAPISecret = s }
 
+// ConfigureProvisioning wires the explicit feature gate and shared HMAC
+// secret used to authenticate /api/internal/users/provision. The gate and
+// secret are deliberately separate: merely injecting a secret must not turn
+// account creation on. Disabled or missing-secret configurations return 503.
+func (a *API) ConfigureProvisioning(enabled bool, secret string) {
+	a.provisioningEnabled = enabled
+	a.provisioningSecret = secret
+}
+
 // SetBillingHookURL wires in the URL of an external billing service's
 // user-event endpoint. When the user deletes their account, the API
 // HMAC-signs a JSON payload and POSTs it there so the billing service
@@ -602,6 +614,14 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	// writes account_limits. Authenticated by shared HMAC over the
 	// request body; deliberately not advertised in OpenAPI.
 	r.HandleFunc("/api/internal/limits/invalidate", a.handleInvalidateLimits).Methods("POST")
+
+	// Internal machine-to-machine endpoint: an external control plane
+	// calls this to provision an e2a user idempotently (keyed by the
+	// caller's external_ref) ahead of that user's first sign-in.
+	// Authenticated by a dedicated shared HMAC over the request body;
+	// deliberately not advertised in OpenAPI. Off by default — 503s
+	// unless provisioning.enabled + the provisioning secret are set.
+	r.HandleFunc("/api/internal/users/provision", a.handleProvisionUser).Methods("POST")
 
 	// HITL magic-link pages (/v1/approve, /v1/reject) are NOT registered on
 	// this mux: the chi root (internal/httpapi) owns every /v1/* path and
@@ -1120,8 +1140,8 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 	}
 
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to=%v slug=%s conv_id=%s subject=%q approval_expires_at=%s",
-		msg.ID, msgType, msg.Status, agent.EmailAddress(), req.To, slug, req.ConversationID, req.Subject, msg.ApprovalExpiresAt.Format(time.RFC3339))
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d approval_expires_at=%s",
+		msg.ID, msgType, msg.Status, agent.EmailAddress(), len(req.To), logredact.AddressDomains(req.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject), msg.ApprovalExpiresAt.Format(time.RFC3339))
 
 	a.publishPendingApproval(ctx, a.buildPendingApprovalEvent(agent, msg, req, msgType), msg.ID)
 	return msg, nil
@@ -1310,7 +1330,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		// on metering; the pre-check remains the quota gate.
 		a.recordLoopbackUsage(ctx, user.ID, agent)
 		slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-		log.Printf("[mail:%s] dir=outbound type=%s method=loopback status=sent from=%s to=%s slug=%s conv_id=%s subject=%q", outMsg.ID, msgType, agent.EmailAddress(), agent.EmailAddress(), slug, req.ConversationID, req.Subject)
+		log.Printf("[mail:%s] dir=outbound type=%s method=loopback status=sent from=%s to=%s slug=%s conv_id=%s subject_len=%d", outMsg.ID, msgType, agent.EmailAddress(), agent.EmailAddress(), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 		return &OutboundResult{MessageID: outMsg.ID, SentAs: "own_address", Method: "loopback"}, nil
 	}
 
@@ -1324,7 +1344,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// (email.sent / email.failed + metering). Missing queue wiring is a startup bug;
 	// fail closed here as defense in depth and never submit inline.
 	if a.outboundEnq == nil {
-		log.Printf("[api] outbound queue unavailable: agent=%s to=%v", agent.Domain, req.To)
+		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To))
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
 	comp, cerr := a.sender.ComposeForAccept(agent, req)
@@ -1335,7 +1355,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if outbound.IsValidationError(cerr) {
 			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: cerr.Error()}
 		}
-		log.Printf("[api] async compose failed: agent=%s to=%v error=%v", agent.Domain, req.To, cerr)
+		log.Printf("[api] async compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
 	var accepted *identity.Message
@@ -1367,14 +1387,14 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		accepted = msg
 		return nil
 	}); txErr != nil {
-		log.Printf("[api] async accept tx failed: agent=%s to=%v error=%v", agent.Domain, req.To, txErr)
+		log.Printf("[api] async accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
 	if verdict.Annotate() {
 		a.annotateAndAudit(ctx, agent, accepted.ID, req, verdict)
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to=%v slug=%s conv_id=%s subject=%q", accepted.ID, msgType, agent.EmailAddress(), comp.To, slug, req.ConversationID, req.Subject)
+	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
@@ -1454,7 +1474,7 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 	// Missing queue wiring is a startup bug; fail closed before provider I/O
 	// and never submit inline (same contract as DeliverOutbound).
 	if a.outboundEnq == nil {
-		log.Printf("[api] outbound queue unavailable: agent=%s to=%v (platform %s)", agent.Domain, req.To, msgType)
+		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v (platform %s)", agent.Domain, len(req.To), logredact.AddressDomains(req.To), msgType)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
 	comp, cerr := a.sender.ComposePlatformForAccept(req)
@@ -1465,7 +1485,7 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		if outbound.IsValidationError(cerr) {
 			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: cerr.Error()}
 		}
-		log.Printf("[api] platform compose failed: agent=%s to=%v error=%v", agent.Domain, req.To, cerr)
+		log.Printf("[api] platform compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
 	var accepted *identity.Message
@@ -1484,12 +1504,12 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		accepted = msg
 		return nil
 	}); txErr != nil {
-		log.Printf("[api] platform accept tx failed: agent=%s to=%v error=%v", agent.Domain, req.To, txErr)
+		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to=%v slug=%s conv_id=%s subject=%q platform_originated=true",
-		accepted.ID, msgType, comp.EnvelopeFrom, comp.To, slug, req.ConversationID, req.Subject)
+	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d platform_originated=true",
+		accepted.ID, msgType, comp.EnvelopeFrom, len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
 	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
@@ -1646,11 +1666,8 @@ func (a *API) handleFeedback(w http.ResponseWriter, r *http.Request) {
 
 	if attempted == 0 {
 		// No delivery channel configured — log-only graceful fallback.
-		safeMsg := strings.ReplaceAll(req.Message, "\n", " ")
-		if len([]rune(safeMsg)) > 200 {
-			safeMsg = string([]rune(safeMsg)[:200])
-		}
-		log.Printf("feedback: no delivery channel configured, logging only: [%s] %s", req.Category, safeMsg)
+		safeMsg := logredact.Truncate(strings.ReplaceAll(req.Message, "\n", " "), 60)
+		log.Printf("feedback: no delivery channel configured, logging only: [%s] message_len=%d preview=%q", req.Category, utf8.RuneCountInString(req.Message), safeMsg)
 	} else if delivered == 0 {
 		http.Error(w, "failed to submit feedback", http.StatusInternalServerError)
 		return
