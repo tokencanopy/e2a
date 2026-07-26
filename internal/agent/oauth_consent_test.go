@@ -41,10 +41,12 @@ type consentFixture struct {
 	sessionToken string
 	userID       string
 	clientID     string
+	issuer       string
 }
 
 func newConsentFixture(t *testing.T) *consentFixture {
 	t.Helper()
+	const issuer = "https://test.e2a.dev"
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	smtpRelay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{})
@@ -60,11 +62,11 @@ func newConsentFixture(t *testing.T) *consentFixture {
 	}, store, false)
 
 	api := agent.NewAPI(store, sender, smtpRelay, userAuth, usage.NewNoopUsageTracker(),
-		"e2a.dev", "test.e2a.dev", "agents.e2a.dev", "https://test.e2a.dev", false)
+		"e2a.dev", "test.e2a.dev", "agents.e2a.dev", issuer, false)
 
 	secret := []byte("test-secret-test-secret-test-sec")
 	storage := oauth.NewStorage(pool)
-	provider, err := oauth.NewProvider(storage, "https://test.e2a.dev", secret)
+	provider, err := oauth.NewProvider(storage, issuer, secret)
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
@@ -97,7 +99,7 @@ func newConsentFixture(t *testing.T) *consentFixture {
 		API: api, Store: store, Enforcer: enforcer, UsageStore: usageStore,
 		SubscriberStore: subscriberStore, Idempotency: idempotencyStore, Pool: pool,
 		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.e2a.dev",
-		PublicURL: "https://test.e2a.dev", Production: false,
+		PublicURL: issuer, Production: false,
 		Legacy: router, WSHandle: wsHandler.ServeWithEmail,
 	})
 	server := httptest.NewServer(v1)
@@ -145,6 +147,7 @@ func newConsentFixture(t *testing.T) *consentFixture {
 		sessionToken: sessionToken,
 		userID:       user.ID,
 		clientID:     clientID,
+		issuer:       issuer,
 	}
 }
 
@@ -299,15 +302,8 @@ func TestHTTP_Authorize_InvalidClient(t *testing.T) {
 	q := authorizeParams(challenge, "mcp_unknown_client", "s1s1s1s1s1s1s1s1")
 	resp := f.authorizeRequest(t, q, true)
 	defer resp.Body.Close()
-	// fosite emits a non-2xx, non-302 response for invalid_client at
-	// /authorize (since the redirect_uri isn't trusted). Status code
-	// can be 400 or 401 depending on fosite version; we just want it
-	// to NOT be a successful redirect to our consent UI.
-	if resp.StatusCode == http.StatusFound {
-		loc := resp.Header.Get("Location")
-		if strings.Contains(loc, "/oauth/consent") {
-			t.Errorf("unknown client should NOT redirect to consent; Location=%q", loc)
-		}
+	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
+		t.Errorf("status = %d, want direct 4xx", resp.StatusCode)
 	}
 	if loc := resp.Header.Get("Location"); loc != "" {
 		t.Errorf("unknown client must not redirect to an untrusted redirect_uri; Location=%q", loc)
@@ -339,8 +335,44 @@ func TestHTTP_Authorize_InvalidScope_RedirectIncludesIssuer(t *testing.T) {
 	if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
 		t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
 	}
-	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
-		t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
+	if got := loc.Query().Get("iss"); got != f.issuer {
+		t.Errorf("RFC 9207 iss = %q, want %q", got, f.issuer)
+	}
+}
+
+// TestHTTP_Authorize_DangerousStoredRedirectDoesNotRedirect covers the
+// defense-in-depth boundary for client rows inserted outside DCR validation.
+// Even when fosite exact-matches the stored redirect_uri, the server must not
+// emit an executable Location header on an authorization error.
+func TestHTTP_Authorize_DangerousStoredRedirectDoesNotRedirect(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	clientID := "mcp_dangerous_" + randHex8(t)
+	const redirectURI = "javascript:alert(1)"
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO oauth_clients
+		    (client_id, client_name, redirect_uris, grant_types,
+		     response_types, scopes, audiences, token_endpoint_auth_method,
+		     public, created_via)
+		VALUES ($1, 'dangerous redirect fixture', ARRAY[$2],
+		        ARRAY['authorization_code','refresh_token'], ARRAY['code'],
+		        ARRAY['agent'], ARRAY[]::TEXT[], 'none', TRUE, 'admin')
+	`, clientID, redirectURI); err != nil {
+		t.Fatalf("seed dangerous client: %v", err)
+	}
+
+	_, challenge := newPKCE(t)
+	q := authorizeParams(challenge, clientID, "s1s1s1s1s1s1s1s1")
+	q.Set("redirect_uri", redirectURI)
+	q.Set("scope", "agent unknown")
+	resp := f.authorizeRequest(t, q, true)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("dangerous redirect must not emit Location; got %q", loc)
 	}
 }
 
@@ -376,8 +408,8 @@ func TestHTTP_Authorize_ErrorUsesAdvertisedQueryMode(t *testing.T) {
 			if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
 				t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
 			}
-			if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
-				t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
+			if got := loc.Query().Get("iss"); got != f.issuer {
+				t.Errorf("RFC 9207 iss = %q, want %q", got, f.issuer)
 			}
 		})
 	}
@@ -418,8 +450,8 @@ func TestHTTP_Consent_Allow_CreateNew(t *testing.T) {
 	if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
 		t.Errorf("state round-trip: got %q, want s1s1s1s1s1s1s1s1", got)
 	}
-	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
-		t.Errorf("RFC 9207 iss missing/wrong: got %q, want https://test.e2a.dev", got)
+	if got := loc.Query().Get("iss"); got != f.issuer {
+		t.Errorf("RFC 9207 iss missing/wrong: got %q, want %q", got, f.issuer)
 	}
 
 	// Verify the agent was actually created on the shared domain.
@@ -516,8 +548,8 @@ func TestHTTP_Consent_Deny(t *testing.T) {
 	if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
 		t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
 	}
-	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
-		t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
+	if got := loc.Query().Get("iss"); got != f.issuer {
+		t.Errorf("RFC 9207 iss = %q, want %q", got, f.issuer)
 	}
 }
 
@@ -610,8 +642,8 @@ func TestHTTP_FullE2E_AuthorizeConsentToken(t *testing.T) {
 	if code == "" {
 		t.Fatal("step 2: missing code")
 	}
-	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
-		t.Errorf("step 2: iss = %q, want https://test.e2a.dev", got)
+	if got := loc.Query().Get("iss"); got != f.issuer {
+		t.Errorf("step 2: iss = %q, want %q", got, f.issuer)
 	}
 
 	// Step 3: exchange the code at /token.
