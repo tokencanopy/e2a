@@ -264,6 +264,31 @@ func TestHTTP_Authorize_WithSession(t *testing.T) {
 	}
 }
 
+// TestHTTP_Authorize_ExplicitQueryMode verifies that a client may explicitly
+// request the sole response mode advertised in OAuth discovery.
+func TestHTTP_Authorize_ExplicitQueryMode(t *testing.T) {
+	f := newConsentFixture(t)
+	_, challenge := newPKCE(t)
+	q := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	q.Set("response_mode", "query")
+
+	resp := f.authorizeRequest(t, q, true)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want 302 consent redirect", resp.StatusCode)
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("Location parse: %v", err)
+	}
+	if !strings.HasSuffix(loc.Path, "/oauth/consent") {
+		t.Errorf("Location path = %q, want /oauth/consent", loc.Path)
+	}
+	if got := loc.Query().Get("response_mode"); got != "query" {
+		t.Errorf("response_mode = %q, want query", got)
+	}
+}
+
 // TestHTTP_Authorize_InvalidClient — fosite rejects before we get a
 // chance to check the session. The response is a fosite-emitted
 // direct error (not a redirect to redirect_uri, since redirect_uri

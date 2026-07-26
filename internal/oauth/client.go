@@ -27,19 +27,25 @@ type Client struct {
 	CreatedByUserID          string
 }
 
-// fosite.Client interface methods. We satisfy the minimal Client
-// interface; richer subtypes (e.g. ResponseModeClient, OpenIDConnect-
-// Client) are deliberately not implemented because we don't support
-// those flows.
+// fosite.Client interface methods. We also implement ResponseModeClient
+// because OAuth discovery advertises explicit query-mode support. Richer
+// subtypes such as OpenIDConnectClient remain deliberately unsupported.
 
 func (c *Client) GetID() string                      { return c.ID }
-func (c *Client) GetHashedSecret() []byte             { return c.SecretHash }
-func (c *Client) GetRedirectURIs() []string           { return c.RedirectURIs }
-func (c *Client) GetGrantTypes() fosite.Arguments     { return fosite.Arguments(c.GrantTypeStrings) }
-func (c *Client) GetResponseTypes() fosite.Arguments  { return fosite.Arguments(c.ResponseTypeStrings) }
-func (c *Client) GetScopes() fosite.Arguments         { return fosite.Arguments(c.ScopeStrings) }
-func (c *Client) IsPublic() bool                      { return c.Public }
-func (c *Client) GetAudience() fosite.Arguments       { return fosite.Arguments(c.AudienceStrings) }
+func (c *Client) GetHashedSecret() []byte            { return c.SecretHash }
+func (c *Client) GetRedirectURIs() []string          { return c.RedirectURIs }
+func (c *Client) GetGrantTypes() fosite.Arguments    { return fosite.Arguments(c.GrantTypeStrings) }
+func (c *Client) GetResponseTypes() fosite.Arguments { return fosite.Arguments(c.ResponseTypeStrings) }
+func (c *Client) GetScopes() fosite.Arguments        { return fosite.Arguments(c.ScopeStrings) }
+func (c *Client) IsPublic() bool                     { return c.Public }
+func (c *Client) GetAudience() fosite.Arguments      { return fosite.Arguments(c.AudienceStrings) }
+
+// GetResponseModes returns the authorization response modes accepted from
+// every registered client. The server supports authorization code flow only,
+// whose default and sole explicit response mode is query.
+func (c *Client) GetResponseModes() []fosite.ResponseModeType {
+	return []fosite.ResponseModeType{fosite.ResponseModeDefault, fosite.ResponseModeQuery}
+}
 
 // GetTokenEndpointAuthMethod returns the registered auth method.
 // fosite reads this opportunistically via a runtime type-assert on
@@ -54,3 +60,4 @@ func (c *Client) GetTokenEndpointAuthMethod() string { return c.TokenEndpointAut
 // assertion. Until then, the minimal fosite.Client surface is enough
 // for auth_code + PKCE + refresh + revoke.
 var _ fosite.Client = (*Client)(nil)
+var _ fosite.ResponseModeClient = (*Client)(nil)
