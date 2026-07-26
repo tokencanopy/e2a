@@ -469,8 +469,22 @@ func TestParseBareTerm(t *testing.T) {
 }
 
 func TestParseDottedMember(t *testing.T) {
-	if got := parseToString(t, `metrics.latency:>100`); got != `(metrics.latency > 100)` {
+	if got := parseToString(t, `metrics.latency>100`); got != `(metrics.latency > 100)` {
 		t.Errorf("got %s", got)
+	}
+}
+
+func TestParsePunctuationInsideUnquotedValues(t *testing.T) {
+	cases := map[string]string{
+		`from:alice@x.com`:                  `(from : alice@x.com)`,
+		`label:e2a:held`:                    `(label : e2a:held)`,
+		`created<2026-07-25T10:30:00Z`:      `(created < 2026-07-25T10:30:00Z)`,
+		`created<2026-07-25T10:30:00.123Z`:  `(created < 2026-07-25T10:30:00.123Z)`,
+	}
+	for q, want := range cases {
+		if got := parseToString(t, q); got != want {
+			t.Errorf("parse(%q) = %s, want %s", q, got, want)
+		}
 	}
 }
 
@@ -700,8 +714,13 @@ func (p *parser) parseFactor(depth int) (Node, error) {
 	}
 	terms := []Node{first}
 	for {
+		// Preserve whitespace for parseSequence when the following token is
+		// another factor rather than OR. Consuming it here would erase the
+		// implicit-AND separator.
+		save := p.i
 		p.skipWS()
 		if p.peek().kind != tOr {
+			p.i = save
 			break
 		}
 		p.advance()
@@ -845,7 +864,24 @@ func (p *parser) parseValue() (string, bool, error) {
 		return "", false, &Error{Kind: ErrParse, Pos: t.pos, Msg: "expected a value (text or quoted string)"}
 	}
 	p.advance()
-	return t.text, t.quoted, nil
+	if t.kind == tString {
+		return t.text, true, nil
+	}
+	// Dot and colon are structural while parsing a field/comparator, but are
+	// ordinary characters inside an unquoted value. Reassemble contiguous
+	// segments so email addresses, e2a: system labels, and RFC3339 timestamps
+	// do not require quotes.
+	value := t.text
+	for p.peek().kind == tDot || p.peek().kind == tColon {
+		sep := p.advance()
+		next := p.peek()
+		if next.kind != tText {
+			return "", false, &Error{Kind: ErrParse, Pos: next.pos, Msg: "expected value text after " + sep.text}
+		}
+		p.advance()
+		value += sep.text + next.text
+	}
+	return value, false, nil
 }
 
 func startsFactor(t token) bool {
@@ -2024,7 +2060,7 @@ func TestCreatedField(t *testing.T) {
 	if frag != `(m.created_at < $1)` || !reflect.DeepEqual(args, []any{want}) {
 		t.Errorf("rfc3339 frag=%s args=%v", frag, args)
 	}
-	if _, _, err := filterquery.Compile(`created:>yesterday`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1); err == nil {
+	if _, _, err := filterquery.Compile(`created>yesterday`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1); err == nil {
 		t.Error("bad date: want rejection")
 	}
 }

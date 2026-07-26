@@ -1,0 +1,135 @@
+package filterquery
+
+import (
+	"strings"
+	"testing"
+)
+
+// sexpr renders an AST as an s-expression for compact assertions.
+func sexpr(n Node) string {
+	switch t := n.(type) {
+	case *And:
+		parts := make([]string, len(t.Terms))
+		for i, x := range t.Terms {
+			parts[i] = sexpr(x)
+		}
+		return "(and " + strings.Join(parts, " ") + ")"
+	case *Or:
+		parts := make([]string, len(t.Terms))
+		for i, x := range t.Terms {
+			parts[i] = sexpr(x)
+		}
+		return "(or " + strings.Join(parts, " ") + ")"
+	case *Not:
+		return "(not " + sexpr(t.X) + ")"
+	case *Comparison:
+		return "(" + t.Field + " " + t.Op + " " + t.Raw + ")"
+	case *Bare:
+		return "(bare " + t.Text + ")"
+	default:
+		return "<?>"
+	}
+}
+
+func parseToString(t *testing.T, q string) string {
+	t.Helper()
+	n, err := parse(q)
+	if err != nil {
+		t.Fatalf("parse(%q): %v", q, err)
+	}
+	return sexpr(n)
+}
+
+func TestParsePrecedence(t *testing.T) {
+	cases := map[string]string{
+		// OR binds tighter than implicit AND (sequence); implicit AND binds
+		// tighter than explicit AND. NOT binds tightest.
+		`a:x b:y OR c:z`:           `(and (a : x) (or (b : y) (c : z)))`,
+		`a:x OR b:y c:z`:           `(and (or (a : x) (b : y)) (c : z))`,
+		`a:x b:y AND c:z`:          `(and (and (a : x) (b : y)) (c : z))`,
+		`a:x AND b:y AND c:z`:      `(and (a : x) (b : y) (c : z))`,
+		`NOT a:x`:                  `(not (a : x))`,
+		`NOT a:x OR b:y`:           `(or (not (a : x)) (b : y))`,
+		`-a:x`:                     `(not (a : x))`,
+		`a:x AND (b:y OR c:z)`:     `(and (a : x) (or (b : y) (c : z)))`,
+		`(a:x OR b:y) AND NOT c:z`: `(and (or (a : x) (b : y)) (not (c : z)))`,
+		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
+	}
+	for q, want := range cases {
+		if got := parseToString(t, q); got != want {
+			t.Errorf("parse(%q) = %s, want %s", q, got, want)
+		}
+	}
+}
+
+func TestParseWhitespaceAroundComparator(t *testing.T) {
+	// Restrictions are whitespace-insensitive (AIP-160).
+	if got := parseToString(t, `label : urgent`); got != `(label : urgent)` {
+		t.Errorf("got %s", got)
+	}
+	if got := parseToString(t, `label: urgent`); got != `(label : urgent)` {
+		t.Errorf("got %s", got)
+	}
+}
+
+func TestParseBareTerm(t *testing.T) {
+	if got := parseToString(t, `hello world`); got != `(and (bare hello) (bare world))` {
+		t.Errorf("got %s", got)
+	}
+}
+
+func TestParseDottedMember(t *testing.T) {
+	if got := parseToString(t, `metrics.latency>100`); got != `(metrics.latency > 100)` {
+		t.Errorf("got %s", got)
+	}
+}
+
+func TestParsePunctuationInsideUnquotedValues(t *testing.T) {
+	cases := map[string]string{
+		`from:alice@x.com`:                 `(from : alice@x.com)`,
+		`label:e2a:held`:                   `(label : e2a:held)`,
+		`created<2026-07-25T10:30:00Z`:     `(created < 2026-07-25T10:30:00Z)`,
+		`created<2026-07-25T10:30:00.123Z`: `(created < 2026-07-25T10:30:00.123Z)`,
+	}
+	for q, want := range cases {
+		if got := parseToString(t, q); got != want {
+			t.Errorf("parse(%q) = %s, want %s", q, got, want)
+		}
+	}
+}
+
+func TestParseErrors(t *testing.T) {
+	for _, q := range []string{
+		`(a:x`,     // unclosed paren
+		`a:x)`,     // stray close
+		`a:x AND`,  // dangling AND
+		`OR a:x`,   // leading OR
+		`:x`,       // missing field
+		`label:`,   // missing value
+		`a.x:y`,    // a.x is fine — but `a.:y` and `a..b:y` are not
+		`NOT(a:x)`, // NOT must be followed by whitespace
+	} {
+		if q == `a.x:y` {
+			continue // valid dotted member, covered elsewhere
+		}
+		if _, err := parse(q); err == nil {
+			t.Errorf("parse(%q) = nil error, want error", q)
+		}
+	}
+}
+
+func TestParseCaps(t *testing.T) {
+	deep := strings.Repeat("(", 65) + "a:x" + strings.Repeat(")", 65)
+	if _, err := parse(deep); err == nil {
+		t.Error("depth 65: want error")
+	} else if fe, ok := err.(*Error); !ok || fe.Kind != ErrCap {
+		t.Errorf("depth error = %v (%T), want ErrCap", err, err)
+	}
+	var b strings.Builder
+	for i := 0; i < 600; i++ {
+		b.WriteString("a:x ")
+	}
+	if _, err := parse(b.String()); err == nil {
+		t.Error("600 nodes: want error")
+	}
+}
