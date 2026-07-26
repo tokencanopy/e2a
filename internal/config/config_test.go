@@ -586,3 +586,117 @@ func TestLoadConfigMetricsYAMLAndEnvOverrides(t *testing.T) {
 		t.Errorf("Metrics.ListenAddr = %q, want env override", cfg.Metrics.ListenAddr)
 	}
 }
+
+func TestLoadConfigProvisioningDefaultsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`env: "development"`), 0644)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Provisioning.Enabled {
+		t.Error("Provisioning.Enabled should default to false")
+	}
+	if cfg.Provisioning.Secret != "" {
+		t.Errorf("Provisioning.Secret should default to empty, got %q", cfg.Provisioning.Secret)
+	}
+}
+
+func TestLoadConfigProvisioningEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`env: "development"`), 0644)
+
+	t.Setenv("E2A_PROVISIONING_ENABLED", "true")
+	t.Setenv("E2A_PROVISIONING_SECRET", "test-provisioning-secret")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Provisioning.Enabled {
+		t.Error("expected Provisioning.Enabled = true from env override")
+	}
+	if cfg.Provisioning.Secret != "test-provisioning-secret" {
+		t.Errorf("Provisioning.Secret = %q", cfg.Provisioning.Secret)
+	}
+}
+
+func TestValidateProvisioningEnabledRequiresSecret(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+env: "development"
+provisioning:
+  enabled: true
+`), 0644)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load should refuse provisioning.enabled without a secret")
+	}
+	if !strings.Contains(err.Error(), "provisioning") {
+		t.Errorf("expected error to mention provisioning, got: %v", err)
+	}
+}
+
+func TestValidateProvisioningEnabledAcceptsSecret(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+env: "development"
+provisioning:
+  enabled: true
+`), 0644)
+
+	t.Setenv("E2A_PROVISIONING_SECRET", "test-provisioning-secret")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load should accept provisioning.enabled with a secret, got: %v", err)
+	}
+	if !cfg.Provisioning.Enabled {
+		t.Error("expected Provisioning.Enabled = true")
+	}
+}
+
+func TestProvisioningSecretIsEnvOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	// Secrets never go in the yaml file — the field is yaml:"-", so a
+	// secret written here must be ignored (and enabled-without-env-secret
+	// must therefore fail validation).
+	os.WriteFile(cfgPath, []byte(`
+env: "development"
+provisioning:
+  enabled: true
+  secret: "must-be-ignored"
+`), 0644)
+
+	if _, err := Load(cfgPath); err == nil {
+		t.Fatal("Load should ignore a yaml provisioning secret and refuse enabled-without-env-secret")
+	}
+}
+
+func TestValidateProvisioningProductionRequiresStrongSecret(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+env: "production"
+provisioning:
+  enabled: true
+`), 0644)
+
+	t.Setenv("E2A_HMAC_SECRET", strings.Repeat("a", 32))
+	t.Setenv("E2A_PROVISIONING_SECRET", "short")
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load should refuse a short provisioning secret in production")
+	}
+	if !strings.Contains(err.Error(), "provisioning secret") {
+		t.Errorf("expected error to mention provisioning secret, got: %v", err)
+	}
+}

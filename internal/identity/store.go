@@ -4536,6 +4536,54 @@ func (s *Store) BootstrapUser(ctx context.Context, email string) (*User, error) 
 	return u, nil
 }
 
+// ErrEmailConflict is returned by ProvisionUser when the requested email is
+// already held by a DIFFERENT user row. Callers must surface it as a
+// conflict — never attach to or merge the existing account.
+var ErrEmailConflict = errors.New("identity: email already held by another user")
+
+// ProvisionUser creates a user row on behalf of an external control plane
+// (POST /api/internal/users/provision), idempotently keyed by externalRef:
+// the row's google_subject is "bootstrap:"+externalRef, so a replay of the
+// same ref returns the existing user (created=false) without touching its
+// email or name. A different ref carrying an email that another user already
+// holds fails with ErrEmailConflict. account_class stays at the DB default.
+func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name string) (*User, bool, error) {
+	subject := "bootstrap:" + externalRef
+	u := &User{}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO users (id, email, name, google_subject)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (google_subject) DO NOTHING
+		 RETURNING id, email, name, google_subject, created_at`,
+		generateID(), email, name, subject,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	if err == nil {
+		return u, true, nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.SQLState() == "23505" {
+		// ON CONFLICT covers google_subject; the only other unique key the
+		// caller can collide with is email. (An id collision is astronomically
+		// unlikely and is not caller-actionable — surface it as a plain error.)
+		if pgErr.ConstraintName == "users_email_key" {
+			return nil, false, ErrEmailConflict
+		}
+		return nil, false, err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+	// The insert was swallowed by ON CONFLICT (google_subject) DO NOTHING:
+	// this ref was already provisioned. Re-read and report the existing row.
+	u = &User{}
+	if err := s.pool.QueryRow(ctx,
+		`SELECT id, email, name, google_subject, created_at FROM users WHERE google_subject = $1`, subject,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt); err != nil {
+		return nil, false, err
+	}
+	return u, false, nil
+}
+
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,

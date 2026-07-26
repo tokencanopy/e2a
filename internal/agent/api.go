@@ -197,25 +197,27 @@ type API struct {
 	// it when the deployment serves the API on a different host than the web
 	// app (e.g. api.e2a.dev vs e2a.dev). The OAuth authorization_endpoint
 	// and login/consent pages stay on publicURL (the browser-facing web app).
-	apiURL            string
-	production        bool
-	sendLimit         *ratelimit.Limiter
-	regLimit          *ratelimit.Limiter
-	pollLimit         *ratelimit.Limiter
-	feedbackLimit     *ratelimit.Limiter
-	dcrLimit          *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
-	downloadLimit     *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
-	unsubscribeLimit  *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
-	approvalSigner    *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
-	notifyEnq         NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
-	oauthProvider     fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
-	oauthStorage      *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
-	signer            *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
-	idempotency       *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
-	enforcer          limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
-	usageStore        *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
-	internalAPISecret string                // optional; when empty, /api/internal/* endpoints return 503
-	billingHookURL    string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	apiURL              string
+	production          bool
+	sendLimit           *ratelimit.Limiter
+	regLimit            *ratelimit.Limiter
+	pollLimit           *ratelimit.Limiter
+	feedbackLimit       *ratelimit.Limiter
+	dcrLimit            *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
+	downloadLimit       *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
+	unsubscribeLimit    *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
+	approvalSigner      *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
+	notifyEnq           NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
+	oauthProvider       fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
+	oauthStorage        *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
+	signer              *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
+	idempotency         *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
+	enforcer            limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
+	usageStore          *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
+	internalAPISecret   string                // optional; when empty, /api/internal/* endpoints return 503
+	provisioningEnabled bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
+	provisioningSecret  string                // required with provisioningEnabled; signs /api/internal/users/provision
+	billingHookURL      string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -501,6 +503,15 @@ func (a *API) SetUsageStore(s *usage.Store) { a.usageStore = s }
 // who don't run a billing provisioner never need to configure it.
 func (a *API) SetInternalAPISecret(s string) { a.internalAPISecret = s }
 
+// ConfigureProvisioning wires the explicit feature gate and shared HMAC
+// secret used to authenticate /api/internal/users/provision. The gate and
+// secret are deliberately separate: merely injecting a secret must not turn
+// account creation on. Disabled or missing-secret configurations return 503.
+func (a *API) ConfigureProvisioning(enabled bool, secret string) {
+	a.provisioningEnabled = enabled
+	a.provisioningSecret = secret
+}
+
 // SetBillingHookURL wires in the URL of an external billing service's
 // user-event endpoint. When the user deletes their account, the API
 // HMAC-signs a JSON payload and POSTs it there so the billing service
@@ -603,6 +614,14 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	// writes account_limits. Authenticated by shared HMAC over the
 	// request body; deliberately not advertised in OpenAPI.
 	r.HandleFunc("/api/internal/limits/invalidate", a.handleInvalidateLimits).Methods("POST")
+
+	// Internal machine-to-machine endpoint: an external control plane
+	// calls this to provision an e2a user idempotently (keyed by the
+	// caller's external_ref) ahead of that user's first sign-in.
+	// Authenticated by a dedicated shared HMAC over the request body;
+	// deliberately not advertised in OpenAPI. Off by default — 503s
+	// unless provisioning.enabled + the provisioning secret are set.
+	r.HandleFunc("/api/internal/users/provision", a.handleProvisionUser).Methods("POST")
 
 	// HITL magic-link pages (/v1/approve, /v1/reject) are NOT registered on
 	// this mux: the chi root (internal/httpapi) owns every /v1/* path and

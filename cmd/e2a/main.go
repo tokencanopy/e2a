@@ -615,6 +615,7 @@ func main() {
 	api.SetEnforcer(enforcer)
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
+	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
 	api.SetBillingHookURL(cfg.Limits.BillingHookURL)
 	api.SetSubscriberStore(subscriberStore)
 	// Account-delete cascade (decision 4 / Slice 4): when SES is configured,
