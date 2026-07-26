@@ -49,7 +49,7 @@ type ContactImportItemResult struct {
 	Index      int    `json:"index" doc:"Zero-based position of this row in the submitted contacts array."`
 	Address    string `json:"address,omitempty" doc:"Canonicalized address. Absent when the row could not be parsed."`
 	Status     string `json:"status" doc:"Outcome for this row. Known values: created, updated, skipped, failed."`
-	Code       string `json:"code,omitempty" doc:"Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request."`
+	Code       string `json:"code,omitempty" doc:"Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached."`
 	Message    string `json:"message,omitempty" doc:"Human-readable explanation for a skipped or failed row."`
 	Suppressed bool   `json:"suppressed,omitempty" doc:"True when this address is on a suppression list. The contact is still recorded — suppression is surfaced here so the import count stays honest rather than silently smaller — but sends to it will be refused."`
 }

@@ -67,6 +67,7 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "limit_exceeded", Status: "402", Family: "capacity", DetailsSchema: "LimitExceededDetails"},
 	{Code: "rate_limited", Status: "429", Family: "capacity", Retryable: true, DetailsSchema: "RateLimitedDetails"},
 	{Code: "template_limit_reached", Status: "400", Family: "capacity"},
+	{Code: "contact_limit_reached", Status: "400", Family: "capacity"},
 	{Code: "webhook_limit_reached", Status: "400", Family: "capacity"},
 	{Code: "idempotency_in_flight", Status: "409", Family: "idempotency", Retryable: true},
 	{Code: "idempotency_key_reuse", Status: "422", Family: "idempotency"},

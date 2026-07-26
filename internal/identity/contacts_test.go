@@ -514,3 +514,64 @@ func TestDeleteImportBatchRetainsContactsWithHistory(t *testing.T) {
 		t.Errorf("an untouched imported contact survived the reversal: %v", err)
 	}
 }
+
+// TestContactCapIsEnforcedAndImportStaysPartial pins both halves of the cap.
+//
+// The number itself is a safety ceiling, so the interesting behaviour is not
+// that a limit exists but HOW it is reached: import must fill the remaining
+// headroom and fail only the overflow, per row. Rejecting the whole batch
+// would contradict the per-row model the endpoint commits to and leave the
+// caller unable to see which lines they could have kept.
+func TestContactCapIsEnforcedAndImportStaysPartial(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "cap")
+
+	// Tighten this account's cap so the test does not need 10k rows.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO account_limits (user_id, max_agents, max_domains, max_messages_month, max_storage_bytes, max_contacts)
+		      VALUES ($1, 10, 10, 1000, 1073741824, 2)
+		 ON CONFLICT (user_id) DO UPDATE SET max_contacts = 2`, user.ID); err != nil {
+		t.Fatalf("set cap: %v", err)
+	}
+
+	// Import three against a cap of two: two land, the third fails alone.
+	out, err := store.ImportContacts(ctx, user.ID, "imp_cap", []identity.ContactImportRow{
+		{Address: "a@cap.vc"}, {Address: "b@cap.vc"}, {Address: "c@cap.vc"},
+	}, true)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusCreated || out[1].Status != identity.ImportStatusCreated {
+		t.Errorf("rows within headroom did not land: %+v %+v", out[0], out[1])
+	}
+	if out[2].Status != identity.ImportStatusFailed || out[2].Code != "contact_limit_reached" {
+		t.Errorf("overflow row = %+v, want failed/contact_limit_reached — the batch "+
+			"must fill the cap and fail only the excess", out[2])
+	}
+
+	// A single create at the cap is refused, and distinguishably so: "at the
+	// cap" and "already exists" both produce no row from the insert.
+	if _, err := store.CreateContact(ctx, user.ID, "d@cap.vc", "", nil,
+		identity.ContactSourceManual, ""); !errors.Is(err, identity.ErrContactLimitReached) {
+		t.Errorf("create at cap err = %v, want ErrContactLimitReached", err)
+	}
+	if _, err := store.CreateContact(ctx, user.ID, "a@cap.vc", "", nil,
+		identity.ContactSourceManual, ""); !errors.Is(err, identity.ErrContactExists) {
+		t.Errorf("duplicate at cap err = %v, want ErrContactExists — a full account "+
+			"must still report a duplicate as a duplicate", err)
+	}
+
+	// Re-importing an EXISTING contact must still work at the cap: an update
+	// consumes no headroom, and correcting a full account is the common case.
+	out, err = store.ImportContacts(ctx, user.ID, "imp_cap2", []identity.ContactImportRow{
+		{Address: "a@cap.vc", DisplayName: strPtr("Corrected")},
+	}, true)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusUpdated {
+		t.Errorf("re-import of an existing contact at the cap = %+v, want updated", out[0])
+	}
+}

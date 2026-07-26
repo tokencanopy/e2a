@@ -23,7 +23,13 @@ var (
 	// ErrImportBatchNotFound means no contacts remain that were created by
 	// that batch — absent, already reversed, or another account's.
 	ErrImportBatchNotFound = errors.New("import batch not found")
+	// ErrContactLimitReached means the account is at its contact cap.
+	ErrContactLimitReached = errors.New("contact limit reached")
 )
+
+// DefaultMaxContacts is the per-account contact cap when account_limits has no
+// row or no explicit value. See migration 081 for why this number.
+const DefaultMaxContacts = 10000
 
 // ContactSource records how a contact first entered the account. It is
 // provenance, not lifecycle: it is set once at insert and never updated, so a
@@ -105,16 +111,35 @@ func (s *Store) CreateContact(ctx context.Context, userID, address, displayName 
 	if importBatchID != "" {
 		batch = &importBatchID
 	}
+	// The cap is enforced INSIDE the insert rather than as a count-then-insert:
+	// two concurrent creates at the boundary would both pass a prior check and
+	// both land. The subquery counts within the same statement's snapshot.
+	max, err := s.MaxContactsForUser(ctx, userID)
+	if err != nil {
+		return Contact{}, err
+	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
-		      VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 SELECT $1, $2, $3, $4, $5, $6, $7
+		  WHERE (SELECT count(*) FROM contacts WHERE user_id = $2) < $8
 		 ON CONFLICT (user_id, address) DO NOTHING
 		   RETURNING `+contactColumns,
-		NewContactID(), userID, address, displayName, encoded, source, batch)
+		NewContactID(), userID, address, displayName, encoded, source, batch, max)
 	c, err := scanContact(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// DO NOTHING suppressed the insert: the row already exists.
-		return Contact{}, ErrContactExists
+		// No row can mean either "already exists" (ON CONFLICT DO NOTHING) or
+		// "at the cap" (the WHERE filtered the insert out). They are different
+		// errors to the caller, so disambiguate rather than guess.
+		var exists bool
+		if qerr := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM contacts WHERE user_id = $1 AND address = $2)`,
+			userID, address).Scan(&exists); qerr != nil {
+			return Contact{}, qerr
+		}
+		if exists {
+			return Contact{}, ErrContactExists
+		}
+		return Contact{}, ErrContactLimitReached
 	}
 	if err != nil {
 		return Contact{}, err
@@ -212,6 +237,25 @@ func (s *Store) DeleteContact(ctx context.Context, userID, address string) (bool
 	return tag.RowsAffected() > 0, nil
 }
 
+// MaxContactsForUser resolves the account's contact cap, falling back to the
+// default when the account has no limits row or no explicit value.
+func (s *Store) MaxContactsForUser(ctx context.Context, userID string) (int, error) {
+	var n *int
+	err := s.pool.QueryRow(ctx,
+		`SELECT max_contacts FROM account_limits WHERE user_id = $1`, userID,
+	).Scan(&n)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DefaultMaxContacts, nil
+		}
+		return 0, err
+	}
+	if n == nil {
+		return DefaultMaxContacts, nil
+	}
+	return *n, nil
+}
+
 // CountContacts returns the account's contact total, for entitlement checks.
 func (s *Store) CountContacts(ctx context.Context, userID string) (int, error) {
 	var n int
@@ -279,6 +323,25 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 	}
 	defer tx.Rollback(ctx)
 
+	// Cap headroom for this batch. Import stays partial-success: a 1000-row
+	// upload against 400 free slots fills those 400 and fails the rest
+	// individually, rather than rejecting everything. Rejecting the batch would
+	// contradict the per-row model the endpoint commits to, and would leave the
+	// caller unable to see which lines they could keep.
+	max, err := s.MaxContactsForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var existing int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM contacts WHERE user_id = $1`, userID).Scan(&existing); err != nil {
+		return nil, err
+	}
+	headroom := max - existing
+	if headroom < 0 {
+		headroom = 0
+	}
+
 	// Collapse duplicates WITHIN the batch before touching the database, so a
 	// spreadsheet listing the same person twice reports the second occurrence
 	// explicitly instead of racing itself inside one transaction.
@@ -322,6 +385,26 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 			insertName = *row.DisplayName
 		}
 
+		// An UPDATE to an existing contact consumes no headroom; only a new row
+		// does. Checking existence first keeps a re-import of an already-full
+		// account working, which is the common corrective case.
+		if headroom <= 0 {
+			var already bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM contacts WHERE user_id = $1 AND address = $2)`,
+				userID, address).Scan(&already); err != nil {
+				return nil, err
+			}
+			if !already {
+				outcomes[i] = ContactImportOutcome{
+					Index: i, Address: address, Status: ImportStatusFailed,
+					Code:    "contact_limit_reached",
+					Message: fmt.Sprintf("account is at its contact limit of %d", max),
+				}
+				continue
+			}
+		}
+
 		var stored string
 		var inserted bool
 		if merge {
@@ -358,6 +441,7 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 		status := ImportStatusUpdated
 		if inserted {
 			status = ImportStatusCreated
+			headroom--
 		}
 		outcomes[i] = ContactImportOutcome{Index: i, Address: stored, Status: status}
 	}

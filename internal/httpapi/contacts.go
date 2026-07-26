@@ -383,6 +383,10 @@ func (s *Server) handleCreateContact(ctx context.Context, in *createContactInput
 			if errors.Is(cerr, identity.ErrContactExists) {
 				return 0, ContactView{}, NewError(http.StatusConflict, "conflict", "a contact with this address already exists")
 			}
+			if errors.Is(cerr, identity.ErrContactLimitReached) {
+				return 0, ContactView{}, NewError(http.StatusBadRequest, "contact_limit_reached",
+					"the account is at its contact limit")
+			}
 			if cerr != nil {
 				return 0, ContactView{}, NewError(http.StatusInternalServerError, "internal_error", "failed to create contact")
 			}
