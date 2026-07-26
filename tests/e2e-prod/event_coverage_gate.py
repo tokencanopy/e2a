@@ -48,6 +48,11 @@ ENVIRONMENT-AWARE ALLOWLIST: two tiers.
     domain.sending_failed now — it needs a real AWS-classified sending-identity
     FAILURE, and no suite has induced one anywhere; prod-vs-staging does not
     unlock it.
+  - PROD_ONLY_ALLOWLIST: the INVERSE — allowlisted only on a production run,
+    REQUIRED on staging. email.failed lives here because its deterministic
+    trigger is manufactured by staging's narrow SES IAM scope, which production
+    deliberately lacks. Tiering is therefore not "prod can do more": each
+    environment can do things the other cannot.
   - STAGING_ONLY_ALLOWLIST: allowlisted ONLY when this run did not target
     production. Most trace back to the real-SES-feedback blocker staging's
     e2a-staging-smtp IAM policy imposes; production has no such block, so a
@@ -130,6 +135,27 @@ STAGING_ONLY_ALLOWLIST = {
 }
 
 
+# Allowlisted ONLY on a PRODUCTION run — REQUIRED on staging. The inverse of the
+# tier above, and it exists because one trigger is manufactured by staging's
+# DELIBERATELY NARROW SES IAM scope, which production does not have.
+PROD_ONLY_ALLOWLIST = {
+    "email.failed": "the only deterministic trigger is a SYNCHRONOUS provider "
+    "refusal, which staging manufactures by scoping ses:SendRawEmail to a small "
+    "recipient allowlist — a send outside it gets an SMTP 554 and the outbound "
+    "worker terminally fails the message. Production's sending identity is "
+    "deliberately NOT recipient-scoped, so the identical send is accepted and the "
+    "unroutable recipient bounces asynchronously instead (live-probed 2026-07-26: "
+    "only email.sent appeared). There is no safe production equivalent: a genuine "
+    "SES Reject needs a virus payload, which is inappropriate to send from a real "
+    "sending identity and counts against reputation; and the other terminal path "
+    "— every recipient suppressed at send time — is unreachable because the API "
+    "pre-checks suppression and returns 422 before the message is queued. "
+    "suites/21-webhook-events.test.ts asserts production's real outcome (the send "
+    "IS accepted) rather than skipping, so neither environment reports a vacuous "
+    "pass.",
+}
+
+
 def load_event_types(openapi_path):
     try:
         import yaml
@@ -170,7 +196,7 @@ def main():
 
     # An allowlist entry that no longer names a real event type is a silent hole
     # (e.g. the type was renamed) — fail loudly so either tier can't drift stale.
-    stale = (set(ALWAYS_ALLOWLIST) | set(STAGING_ONLY_ALLOWLIST)) - all_types
+    stale = (set(ALWAYS_ALLOWLIST) | set(STAGING_ONLY_ALLOWLIST) | set(PROD_ONLY_ALLOWLIST)) - all_types
     if stale:
         print(
             f"event_coverage_gate: allowlist entries not in the spec (renamed/removed?): {sorted(stale)}",
@@ -187,6 +213,7 @@ def main():
     allowlist = dict(ALWAYS_ALLOWLIST)
     if targeted_prod:
         env_label = "PRODUCTION"
+        allowlist.update(PROD_ONLY_ALLOWLIST)
     else:
         env_label = "non-production (staging/self-hosted)"
         allowlist.update(STAGING_ONLY_ALLOWLIST)
