@@ -266,9 +266,13 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   const returnedId = parsed.id ?? parsed.message_id;
   assert.equal(returnedId, id, `expected id ${id}, got ${returnedId}`);
 
-  // Bogus id — should isError.
-  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}`, email: apiClient.env.primaryAgentEmail });
-  assert.equal(r2.isError, true, "get_message with a bogus id must surface as an error");
+  // The same real ID under a different owned agent must remain hidden.
+  const r2 = await callTool(mcp, "get_message", {
+    message_id: id,
+    email: apiClient.env.primaryAgentEmail,
+  });
+  assert.equal(r2.isError, true, "get_message must not read a message from another agent's mailbox");
+  assert.match(extractText(r2), /\[not_found\]/, "cross-mailbox get_message must surface canonical not_found");
 });
 
 test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
@@ -308,10 +312,10 @@ test("mcp-ext: reply_to_message via MCP — to bogus id surfaces error", async (
   const r = await callTool(mcp, "reply_to_message", {
     message_id: `msg_bogus_${Date.now()}`,
     text: "should never go out",
+    email: apiClient.env.primaryAgentEmail,
   });
-  if (!r.isError) {
-    fail(SUITE, "reply-bogus-not-error", `reply_to_message with bogus id did not error: ${extractText(r).slice(0, 200)}`);
-  }
+  assert.equal(r.isError, true, "reply_to_message with bogus id must surface as an error");
+  assert.match(extractText(r), /\[not_found\]/, "bogus reply_to_message must surface canonical not_found");
 });
 
 test("mcp-ext: cross-tool consistency — list_agents matches API surface", async () => {
