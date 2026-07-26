@@ -25,6 +25,7 @@ var betaOperationIDs = []string{
 	"getAccountMetrics",
 	"getAgentMetrics",
 	"getAgentProtection",
+	"getBatch",
 	"getContact",
 	"getEngagement",
 	"importContacts",
@@ -40,6 +41,7 @@ var betaOperationIDs = []string{
 	"listTemplates",
 	"putAgentProtection",
 	"rejectReview",
+	"sendBatch",
 	"updateContact",
 	"updateTemplate",
 	"upsertEngagement",
@@ -328,6 +330,16 @@ func TestSpecBetaMarkers(t *testing.T) {
 	if desc, _ := lifecycleOp["description"].(string); !strings.Contains(desc, "Beta: message lifecycle") {
 		t.Errorf("getMessageLifecycle description must describe its beta status, got %q", desc)
 	}
+	const batchBetaSentence = "Beta: the batch-send surface"
+	for _, id := range []string{"sendBatch", "getBatch"} {
+		op := opFor(id)
+		if summary, _ := op["summary"].(string); !strings.Contains(summary, "(beta)") {
+			t.Errorf("%s summary must visibly say (beta), got %q", id, summary)
+		}
+		if desc, _ := op["description"].(string); !strings.Contains(desc, batchBetaSentence) {
+			t.Errorf("%s description must contain the batch beta sentence, got %q", id, desc)
+		}
+	}
 	for _, id := range []string{"sendMessage", "replyToMessage", "forwardMessage", "listSuppressions", "deleteSuppression", "createAgent", "listMessages", "createWebhook", "listEvents", "deleteMessage", "restoreMessage", "restoreAgent", "deleteAgent"} {
 		if got := opExt(id, "x-stability"); got != nil {
 			t.Errorf("%s is stable GA surface and must NOT carry x-stability, got %v", id, got)
@@ -365,7 +377,10 @@ func TestSpecBetaMarkers(t *testing.T) {
 		}
 		return sc[extension]
 	}
-	for _, name := range []string{"AgentSuppressionView", "CreateAgentSuppressionRequest", "PageAgentSuppressionView", "UnsubscribeOptions", "TemplateView", "CreateTemplateRequest", "StarterTemplateView", "ProtectionConfigView", "ProtectionConfigRequest", "ReviewView", "PageReviewView", "ApproveRequest", "RejectRequest", "RejectResultView", "HoldReasonView", "ProtectionFindingView", "ThreatCategoryView", "MessageLifecycleTransition", "PageMessageLifecycleTransition"} {
+	for _, name := range []string{"AgentSuppressionView", "CreateAgentSuppressionRequest", "PageAgentSuppressionView", "UnsubscribeOptions", "TemplateView", "CreateTemplateRequest", "StarterTemplateView", "ProtectionConfigView", "ProtectionConfigRequest", "ReviewView", "PageReviewView", "ApproveRequest", "RejectRequest", "RejectResultView", "HoldReasonView", "ProtectionFindingView", "ThreatCategoryView", "MessageLifecycleTransition", "PageMessageLifecycleTransition",
+		// Batch send is beta: its exclusive schemas inherit the marker from the
+		// beta sendBatch/getBatch operations (they must never enter the /v1 freeze).
+		"SendBatchRequest", "SendBatchResponse", "BatchMessage", "BatchResult", "BatchSuppressedResult", "BatchView", "BatchStatusRollupView", "BatchSuppressedItem"} {
 		if got := schemaExt(name, "x-stability"); got != nil {
 			t.Errorf("schema %s must not carry duplicate x-stability alias, got %v", name, got)
 		}
@@ -433,6 +448,16 @@ func TestSpecBetaMarkers(t *testing.T) {
 			if property == nil || property["x-stability-level"] != "beta" {
 				t.Errorf("%s.%s must carry canonical x-stability-level: beta", schema, field)
 			}
+		}
+	}
+
+	// Batch send is beta: the batch_id correlation field rides on the STABLE
+	// outbound event payloads, so it carries a per-field beta marker while the
+	// parent event schemas stay stable.
+	for _, schema := range []string{"EmailSentData", "EmailFailedData", "EmailDeliveredData", "EmailBouncedData", "EmailComplainedData"} {
+		property, _ := schemaProps(t, doc, schema)["batch_id"].(map[string]any)
+		if property == nil || property["x-stability-level"] != "beta" {
+			t.Errorf("%s.batch_id must carry canonical x-stability-level: beta", schema)
 		}
 	}
 

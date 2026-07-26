@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
 
@@ -125,7 +126,7 @@ func (a *API) DeliverBatch(
 	// of all `to` addresses, partition items into keep[] and suppressed[].
 	// §2.2: an item is dropped as a whole if ANY of its recipients hits
 	// the suppression list.
-	suppressionByAddr, err := a.suppressionLookupForBatch(ctx, user.ID, items)
+	suppressionByAddr, err := a.suppressionLookupForBatch(ctx, user.ID, agent.ID, items)
 	if err != nil {
 		// Fail-open on suppression store errors (matches
 		// checkSuppression's send-time posture) — a suppression store
@@ -197,11 +198,51 @@ func (a *API) DeliverBatch(
 		}
 	}
 
+	// Account message/storage quota (parity with single-send's
+	// EnforceMessageSend, which runs after the rate check). Charge every
+	// ACCEPTED item: len(items) is the post-suppression keep count, so
+	// suppressed items — dropped, never sent — don't count against the cap
+	// (§4.3). The count-aware CheckMessageSendN blocks when current month
+	// usage + N would exceed the cap, rather than only checking for one free
+	// slot. Enforced inside the idempotency wrapper, like single send.
+	if a.enforcer != nil && len(items) > 0 {
+		if err := a.enforcer.CheckMessageSendN(ctx, user.ID, len(items)); err != nil {
+			if le, ok := limits.IsLimitExceeded(err); ok {
+				det := map[string]any{
+					"resource": le.Resource,
+					"limit":    int64(le.Limit),
+					"current":  int64(le.Current),
+				}
+				if le.Limits.PlanCode != "" {
+					det["plan_code"] = le.Limits.PlanCode
+				}
+				if le.Limits.UpgradeURL != "" {
+					det["upgrade_url"] = le.Limits.UpgradeURL
+				}
+				return nil, &OutboundError{
+					Status:  http.StatusPaymentRequired,
+					Code:    "limit_exceeded",
+					Msg:     le.Error(),
+					Details: det,
+				}
+			}
+			log.Printf("[api] batch quota check failed: agent=%s error=%v", agent.Domain, err)
+			return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "limits check unavailable"}
+		}
+	}
+
 	// Step 8 & 9 (§9): Per-item compose. Templates were already resolved
 	// at the handler layer (matching single-send's prepare()); Compose
 	// runs recipient normalize + DKIM sign + MIME assembly here.
 	composed := make([]composedBatchItem, len(items))
 	for i, item := range items {
+		// Resolve the thread id per item exactly like single send
+		// (DeliverOutbound → resolveOutboundConversationID): an explicit
+		// caller id wins, otherwise mint a fresh anchor. Batch items are cold
+		// sends (no referenced message), so an omitted id is minted here rather
+		// than copied through empty to persistence — resolved before compose so
+		// the X-E2A-Conversation-Id header and the stored row share one value.
+		item.ConversationID = resolveOutboundConversationID(item.ConversationID, "send", nil)
 		comp, cerr := a.sender.ComposeForAccept(agent, item)
 		if cerr != nil {
 			if outbound.IsValidationError(cerr) {
@@ -237,6 +278,18 @@ func (a *API) DeliverBatch(
 	result := &BatchAcceptResult{
 		BatchID: batchID,
 		Items:   make([]BatchAcceptItem, originalCount),
+	}
+
+	// Populate the suppressed slots BEFORE the accept-tx runs. idemCompleteTx
+	// serializes `result` inside the tx (both the all-suppressed early return
+	// and the normal path below), so the suppressed slots must already be set
+	// or a keyed replay returns empty message_id entries miscounted as accepted
+	// instead of the original suppression results. Accepted slots are filled
+	// inside the tx (before the same idemCompleteTx call).
+	for _, drop := range suppressedItems {
+		result.Items[drop.ItemIndex] = BatchAcceptItem{
+			Suppressed: &SuppressedInfo{Address: drop.Address, Reason: drop.Reason},
+		}
 	}
 
 	if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
@@ -318,14 +371,6 @@ func (a *API) DeliverBatch(
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept batch for send"}
 	}
 
-	// Fill in suppressed slots on result.Items (accepted slots were
-	// filled inside the tx).
-	for _, drop := range suppressedItems {
-		result.Items[drop.ItemIndex] = BatchAcceptItem{
-			Suppressed: &SuppressedInfo{Address: drop.Address, Reason: drop.Reason},
-		}
-	}
-
 	log.Printf("[batch:%s] agent=%s accepted=%d suppressed=%d", batchID, agent.EmailAddress(), len(composed), len(suppressedItems))
 	return result, nil
 }
@@ -349,30 +394,34 @@ type suppressedDrop struct {
 	Reason    string `json:"reason"`
 }
 
-// suppressionLookupForBatch queries the suppression list ONCE for the
-// union of every batch item's `to` addresses and returns a map of
-// address → source. On error the caller is expected to fail-open (see
-// DeliverBatch's use-site).
-func (a *API) suppressionLookupForBatch(ctx context.Context, userID string, items []outbound.SendRequest) (map[string]string, error) {
+// suppressionLookupForBatch queries the suppression list ONCE for the union of
+// every batch item's To/CC/BCC addresses and returns a map of address → source.
+// It uses the same effective-suppression semantics as single send (account
+// suppressions ∪ this agent's agent_suppressions), so the batch response never
+// reports an item accepted that the worker would later refuse. On error the
+// caller is expected to fail-open (see DeliverBatch's use-site).
+func (a *API) suppressionLookupForBatch(ctx context.Context, userID, agentID string, items []outbound.SendRequest) (map[string]string, error) {
 	all := make([]string, 0)
 	seen := map[string]struct{}{}
 	for _, item := range items {
-		for _, addr := range item.To {
-			if _, ok := seen[addr]; ok {
-				continue
+		for _, addrs := range [][]string{item.To, item.CC, item.BCC} {
+			for _, addr := range addrs {
+				if _, ok := seen[addr]; ok {
+					continue
+				}
+				seen[addr] = struct{}{}
+				all = append(all, addr)
 			}
-			seen[addr] = struct{}{}
-			all = append(all, addr)
 		}
 	}
 	if len(all) == 0 {
 		return map[string]string{}, nil
 	}
-	return a.store.SuppressedAddressesWithSource(ctx, userID, all)
+	return a.store.EffectiveSuppressionsWithSource(ctx, userID, agentID, all)
 }
 
 // partitionSuppressed splits items into keep[] (unaffected) and dropped[]
-// (any `to` address in the suppression map). Returns:
+// (any To/CC/BCC address in the suppression map). Returns:
 //   - keep: the subset of items that proceed
 //   - keepIndexes: original positions in the input, positionally aligned
 //     with keep (keep[i] came from items[keepIndexes[i]])
@@ -392,15 +441,20 @@ func partitionSuppressed(items []outbound.SendRequest, suppressionByAddr map[str
 		return keep, keepIndexes, nil
 	}
 	for i, item := range items {
-		var hit string
-		for _, addr := range item.To {
-			if _, ok := suppressionByAddr[identity.NormalizeEmail(addr)]; ok {
-				hit = addr
+		var hit, hitReason string
+		for _, addrs := range [][]string{item.To, item.CC, item.BCC} {
+			for _, addr := range addrs {
+				if reason, ok := suppressionByAddr[identity.NormalizeMailboxAddress(addr)]; ok {
+					hit, hitReason = addr, reason
+					break
+				}
+			}
+			if hit != "" {
 				break
 			}
 		}
 		if hit != "" {
-			reason := suppressionByAddr[identity.NormalizeEmail(hit)]
+			reason := hitReason
 			if reason == "" {
 				reason = "manual"
 			}

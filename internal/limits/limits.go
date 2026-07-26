@@ -72,6 +72,12 @@ type Enforcer interface {
 	// month against MaxMessagesMonth.
 	CheckMessageSend(ctx context.Context, userID string) error
 
+	// CheckMessageSendN is the count-aware form of CheckMessageSend: nil if
+	// the user may accept n more messages this calendar month, or
+	// *LimitExceededError if current count + n would exceed the cap. Used by
+	// batch send to charge every accepted item. CheckMessageSend is n=1.
+	CheckMessageSendN(ctx context.Context, userID string, n int) error
+
 	// Invalidate evicts the user's cached Limits so the next Get/Check
 	// re-reads from the database. Called by the limits-invalidate HTTP
 	// endpoint when an external writer (e.g. billing sidecar) has just

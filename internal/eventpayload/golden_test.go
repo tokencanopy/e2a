@@ -171,6 +171,7 @@ func canonicalEvents() []struct {
 					Direction:            "outbound",
 					DeliveredTo:          "alice@customer.example.com",
 					Subject:              "Re: Order #1234 delayed",
+					BatchID:              "bat_9c8b7a6d5e4f3a2b1c0d9e8f",
 					LifecycleTransitions: []messagelifecycle.MessageLifecycleTransition{deliveredTransition},
 					// smtp_detail omitted: SES Delivery notifications carry no
 					// per-recipient diagnostic.
@@ -192,6 +193,7 @@ func canonicalEvents() []struct {
 					SMTPDetail:           "550 5.1.1 no such user",
 					BounceType:           "permanent",
 					BounceSubType:        "General",
+					BatchID:              "bat_9c8b7a6d5e4f3a2b1c0d9e8f",
 					LifecycleTransitions: []messagelifecycle.MessageLifecycleTransition{bouncedTransition},
 				},
 			},
@@ -209,6 +211,7 @@ func canonicalEvents() []struct {
 					DeliveredTo:          "carol@customer.example.com",
 					Subject:              "Re: Order #1234 delayed",
 					SMTPDetail:           "abuse",
+					BatchID:              "bat_9c8b7a6d5e4f3a2b1c0d9e8f",
 					LifecycleTransitions: []messagelifecycle.MessageLifecycleTransition{complainedTransition},
 				},
 			},

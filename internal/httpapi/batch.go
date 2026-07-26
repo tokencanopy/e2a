@@ -50,12 +50,27 @@ type SendBatchRequest struct {
 	ReplyTo  string         `json:"reply_to,omitempty" maxLength:"320" doc:"Optional batch-level Reply-To default. Applied to any item that leaves reply_to empty; a per-item value always wins. This is the ONLY batch-level default in MVP; every other field is per-item (docs/design/batch-send.md §1.2)."`
 }
 
-// BatchResult is one slot in the results[] array. Discriminated:
-//   - Accepted item: MessageID non-empty, Suppressed absent.
-//   - Suppressed item: MessageID empty, Suppressed populated.
+// Batch result slot discriminator values. status is always populated so a
+// client branches on one required field rather than inferring the slot shape
+// from which optional field happens to be present (mentor review — the schema
+// otherwise permits neither/both).
+const (
+	batchResultAccepted   = "accepted"
+	batchResultSuppressed = "suppressed"
+)
+
+// BatchResult is one slot in the results[] array, discriminated by status:
+//   - status "accepted":   MessageID set, Suppressed absent.
+//   - status "suppressed": Suppressed set, MessageID absent.
 type BatchResult struct {
-	MessageID  string                 `json:"message_id,omitempty" doc:"Minted message id when the item was accepted (delivery_status='accepted' persisted and River outbound_send job enqueued). Absent when Suppressed is present."`
-	Suppressed *BatchSuppressedResult `json:"suppressed,omitempty" doc:"Present when the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit."`
+	// Status is deliberately a CLOSED enum despite being response-side: every
+	// slot is by construction exactly one of accepted|suppressed — a binary
+	// invariant of the discriminated union, not an evolving vocabulary (same
+	// rationale as MessageView.direction). Allowlisted in
+	// closedResponseEnumAllowlist (response_enum_stance_test.go).
+	Status     string                 `json:"status" enum:"accepted,suppressed" doc:"Slot discriminator, always present: \"accepted\" (message_id is set) or \"suppressed\" (suppressed is set). Branch on this rather than inferring the slot shape from which optional field is populated."`
+	MessageID  string                 `json:"message_id,omitempty" doc:"Minted message id when the item was accepted (delivery_status='accepted' persisted and River outbound_send job enqueued). Present iff status is \"accepted\"."`
+	Suppressed *BatchSuppressedResult `json:"suppressed,omitempty" doc:"Present iff status is \"suppressed\": the item was dropped by the suppression-list filter (docs/design/batch-send.md §2.2). No message row exists for a suppressed slot; the caller can un-suppress via DELETE /v1/account/suppressions/{address} and resubmit."`
 }
 
 // BatchSuppressedResult describes one dropped item — the first
@@ -64,8 +79,8 @@ type BatchResult struct {
 // (the durable record stored in batches.suppressed_json) minus the
 // item_index which is implicit in results[]'s position.
 type BatchSuppressedResult struct {
-	Address string `json:"address" doc:"The recipient address in this item's to list that triggered the drop. If multiple addresses in the same item are suppressed, only the first is surfaced (dropping the whole item is enough signal)."`
-	Reason  string `json:"reason" doc:"The suppression-list category from suppressions.source. Known values: bounce, complaint, manual. Open set — treat as string and tolerate unknown values."`
+	Address string `json:"address" doc:"The recipient address in this item's to/cc/bcc envelope that triggered the drop. If multiple addresses in the same item are suppressed, only the first is surfaced (dropping the whole item is enough signal)."`
+	Reason  string `json:"reason" doc:"The suppression category. Known values: bounce, complaint, manual (account-level, from suppressions.source), unsubscribe (agent-level, from agent_suppressions.source). Open set — treat as string and tolerate unknown values."`
 }
 
 // SendBatchResponse is the 202 body of POST /v1/agents/{email}/batches.
@@ -74,7 +89,7 @@ type BatchSuppressedResult struct {
 // without walking Results.
 type SendBatchResponse struct {
 	BatchID         string        `json:"batch_id" doc:"Durable id for this batch (bat_<base32>). Use GET /v1/batches/{batch_id} to retrieve the header + status rollup."`
-	Results         []BatchResult `json:"results" nullable:"false" doc:"One slot per request item, positionally aligned. Each slot is either {message_id} (accepted) or {suppressed:{address,reason}} (dropped by the suppression filter)."`
+	Results         []BatchResult `json:"results" nullable:"false" doc:"One slot per request item, positionally aligned. Each slot carries a status discriminator: status=\"accepted\" → {message_id}; status=\"suppressed\" → {suppressed:{address,reason}} (dropped by the suppression filter)."`
 	Accepted        int           `json:"accepted" doc:"Count of results[] slots that are {message_id}. Redundant with results[] but convenient for logging + zero-check."`
 	SuppressedCount int           `json:"suppressed_count" doc:"Count of results[] slots that are {suppressed}. Zero when no per-item drops occurred."`
 }
@@ -104,14 +119,18 @@ type sendBatchOutput struct {
 // validateOutboundBody / validateAttachments).
 const maxBatchAttachmentBytes = 25 * 1024 * 1024 // 25 MiB
 
-// maxBatchRequestBodyBytes bounds the raw HTTP request body Huma will
-// accept before returning 413 payload_too_large. Sized to comfortably
-// fit 100 items at the per-item body caps (subject 2 KiB + text 1 MiB +
-// html 1 MiB) plus the batch attachment ceiling (25 MiB) + overhead.
-// Base-64 attachment encoding is 4/3 the byte size, so 25 MiB of
-// attachments occupy ~33.3 MiB on the wire; add ~5 MiB per item × 100 =
-// 500 MiB overhead theoretical max, but real batches don't put max
-// bodies on every item — settle for 60 MiB.
+// maxBatchRequestBodyBytes is the DOCUMENTED aggregate request-body ceiling:
+// Huma rejects a raw HTTP body larger than this with 413 payload_too_large.
+//
+// It is deliberately an aggregate constraint SEPARATE from — and stricter in
+// aggregate than — the per-item schema bounds. The schema permits up to 100
+// items each with independently bounded text (1 MiB) + html (1 MiB) + a 25 MiB
+// batch-wide attachment ceiling, whose theoretical sum (~hundreds of MiB once
+// base-64 and JSON escaping are counted) would force us to buffer an
+// implausibly large request in memory. Rather than accept that DoS surface, we
+// cap the aggregate and PUBLISH the cap in the operation description (and the
+// 413 response) so callers can size requests predictably and split an
+// oversized batch. Keep this constant in sync with that documented number.
 const maxBatchRequestBodyBytes = 60 * 1024 * 1024 // 60 MiB
 
 // batchAccepted202 returns the 202 response schema declaration for
@@ -122,17 +141,23 @@ func (s *Server) batchAccepted202() *huma.Response {
 }
 
 // registerSendBatch is called from the API constructor to wire the
+// batchSendBetaDescription is the shared beta-status sentence stamped on both
+// batch operations' descriptions, so the whole batch-send surface stays outside
+// the /v1 stability freeze (mentor review — keep the MVP evolvable).
+const batchSendBetaDescription = "Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable."
+
 // sendBatch operation. Kept as a method-on-Server to match the other
 // per-endpoint register* helpers in outbound.go.
 func (s *Server) registerSendBatch() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "sendBatch",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/batches",
-		Summary:     "Send a batch of up to 100 emails",
+		Summary:     "Send a batch of up to 100 emails (beta)",
 		Tags:        []string{"messages"},
-		Description: "Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.\n\nMVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.",
+		Description: "Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account's suppression list). See docs/design/batch-send.md for the full contract.\n\nMVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.\n\nAggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item's content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.\n\n" + batchSendBetaDescription,
 		Security:     []map[string][]string{{"bearer": {}}},
+		Extensions:   beta(),
 		MaxBodyBytes: maxBatchRequestBodyBytes,
 		Responses: map[string]*huma.Response{
 			"202": s.batchAccepted202(),
@@ -148,14 +173,15 @@ func (s *Server) registerSendBatch() {
 		},
 	}, s.handleSendBatch)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getBatch",
 		Method:      http.MethodGet,
 		Path:        "/v1/batches/{batch_id}",
-		Summary:     "Get a batch's header and delivery-status rollup",
+		Summary:     "Get a batch's header and delivery-status rollup (beta)",
 		Tags:        []string{"messages"},
-		Description:  "Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.",
+		Description:  "Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch's child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.\n\n" + batchSendBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
+		Extensions:  beta(),
 		Responses: map[string]*huma.Response{
 			"200":     s.jsonResponse(reflect.TypeOf(BatchView{}), "BatchView", "The batch header + per-status rollup."),
 			"404":     s.errorEnvelopeResponse(),
@@ -313,6 +339,14 @@ func (s *Server) handleSendBatch(ctx context.Context, in *sendBatchInput) (*send
 // delegates to agent.API.DeliverBatch for the accept-tx. Extracted from
 // handleSendBatch so the idempotency wrapper can invoke it as a closure.
 func (s *Server) deliverBatch(ctx context.Context, user *identity.User, ag *identity.AgentIdentity, body SendBatchRequest, idemKey string) (int, SendBatchResponse, error) {
+	// Domain verification (parity with single send). The sending agent is
+	// shared across the whole batch, so check once — an unverified domain
+	// fails the entire batch with 403 domain_not_verified, exactly like
+	// single send refuses a single unverified send.
+	if !ag.DomainVerified {
+		return 0, SendBatchResponse{}, NewError(http.StatusForbidden, "domain_not_verified", "agent domain must be verified before sending")
+	}
+
 	items := make([]outbound.SendRequest, len(body.Messages))
 	for i := range body.Messages {
 		bm := body.Messages[i]
@@ -341,6 +375,19 @@ func (s *Server) deliverBatch(ctx context.Context, user *identity.User, ag *iden
 			replyTo = body.ReplyTo
 		}
 		if env := validateReplyTo(replyTo); env != nil {
+			return 0, SendBatchResponse{}, envelopeWithItemIndex(env, i)
+		}
+
+		// Per-item attachment + composed-size checks (parity with single
+		// send's deliver()). validateAttachments enforces the per-item
+		// attachment contract (single ≤ 10 MiB, item combined ≤ 25 MiB,
+		// decodable base64); composedMessageSizeError enforces the composed
+		// ceiling HERE so an oversized item returns the documented 413 with
+		// item_index rather than a generic 500 raised later at compose time.
+		if env := validateAttachments(asSend.Attachments); env != nil {
+			return 0, SendBatchResponse{}, envelopeWithItemIndex(env, i)
+		}
+		if env := composedMessageSizeError(asSend.Subject, asSend.Body, asSend.HTMLBody, asSend.Attachments); env != nil {
 			return 0, SendBatchResponse{}, envelopeWithItemIndex(env, i)
 		}
 
@@ -407,14 +454,14 @@ func sendBatchResponseFromAcceptResult(r *agent.BatchAcceptResult) SendBatchResp
 	resp := SendBatchResponse{BatchID: r.BatchID, Results: make([]BatchResult, len(r.Items))}
 	for i, item := range r.Items {
 		if item.Suppressed != nil {
-			resp.Results[i] = BatchResult{Suppressed: &BatchSuppressedResult{
+			resp.Results[i] = BatchResult{Status: batchResultSuppressed, Suppressed: &BatchSuppressedResult{
 				Address: item.Suppressed.Address,
 				Reason:  item.Suppressed.Reason,
 			}}
 			resp.SuppressedCount++
 			continue
 		}
-		resp.Results[i] = BatchResult{MessageID: item.MessageID}
+		resp.Results[i] = BatchResult{Status: batchResultAccepted, MessageID: item.MessageID}
 		resp.Accepted++
 	}
 	return resp

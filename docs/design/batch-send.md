@@ -76,10 +76,10 @@ The sending agent (`from` of every message) is the path agent — no `from` in t
 {
   "batch_id": "bat_...",
   "results": [
-    { "message_id": "msg_..." },
-    { "message_id": "msg_..." },
-    { "suppressed": { "address": "spammy@example.com", "reason": "hard_bounce" } },
-    { "message_id": "msg_..." }
+    { "status": "accepted",   "message_id": "msg_..." },
+    { "status": "accepted",   "message_id": "msg_..." },
+    { "status": "suppressed", "suppressed": { "address": "spammy@example.com", "reason": "hard_bounce" } },
+    { "status": "accepted",   "message_id": "msg_..." }
     // ... length == len(request.messages)
   ],
   "accepted":   98,
@@ -88,9 +88,9 @@ The sending agent (`from` of every message) is the path agent — no `from` in t
 ```
 
 - `batch_id` — durable id, format `bat_<26-char base32 lower>` (same alphabet as `msg_` per project convention).
-- `results[]` — **positionally aligned with `request.messages`**. Each slot is a discriminated union:
-  - **Accepted item**: `{ "message_id": "msg_..." }` — a `messages` row was inserted and a River `outbound_send` job enqueued.
-  - **Suppressed item**: `{ "suppressed": { "address": "...", "reason": "..." } }` — the (first) recipient address in this item hit the suppression list; no `messages` row exists. `reason` is the suppression-list category (`hard_bounce` / `complaint` / `unsubscribe` / `manual`) as recorded in the `suppressions` table.
+- `results[]` — **positionally aligned with `request.messages`**. Each slot is a discriminated union keyed by a required `status` field (`accepted` | `suppressed`), so a client branches on `status` rather than probing which optional field is present:
+  - **Accepted item** (`status: "accepted"`): `{ "message_id": "msg_..." }` — a `messages` row was inserted and a River `outbound_send` job enqueued.
+  - **Suppressed item** (`status: "suppressed"`): `{ "suppressed": { "address": "...", "reason": "..." } }` — the (first) recipient address in this item hit the suppression list; no `messages` row exists. `reason` is the suppression-list category (`hard_bounce` / `complaint` / `unsubscribe` / `manual`) as recorded in the `suppressions` table.
   This shape preserves per-item correlation (the i-th request item produced `results[i]`) while making the caller's success/skip branching explicit.
 - `accepted` — count of `results[]` entries whose shape is `{ message_id }`. Redundant but useful for logs and metrics.
 - `suppressed_count` — count of `results[]` entries whose shape is `{ suppressed }`. Also redundant; useful for zero-check without walking `results[]`.
@@ -133,6 +133,7 @@ Validation runs **per item** for content-related checks, but any single failure 
 - Same recipient address appears in the `to` set of two different items → 400 `duplicate_recipient` (**not silently deduplicated** — silent dedup would send N-k messages when the caller asked for N and there's no way to know whether the duplicate was intentional; see §14 Q11). Only cross-item duplicates in `to` are checked; duplicates in cc/bcc across items are allowed (matches how real callers cc a common address across items).
 - Any item exceeds per-item attachment caps (single attachment > 10 MiB, item combined > 25 MiB) → 413 `payload_too_large` with `details.scope = "item"`, `details.item_index`
 - **Batch-level combined attachment bytes across all items > 25 MiB** → 413 `payload_too_large` with `details.scope = "batch"`, `details.computed_batch_bytes`, `details.max_batch_bytes` (§14 Q15)
+- **Aggregate raw request body > 60 MiB** → 413 `payload_too_large` (`maxBatchRequestBodyBytes`, enforced by Huma before handler dispatch). This is a DOCUMENTED aggregate ceiling on the whole base-64/JSON-encoded body, deliberately stricter than the per-item body caps summed over 100 items: the schema permits ~hundreds of MiB in theory, but buffering that per request is an unacceptable memory/DoS surface, so the aggregate is capped and published in the operation description. Callers size against it and split an oversized batch across calls. (Documented per mentor review — the ceiling was previously undocumented, silently rejecting some schema-valid requests.)
 - Sending domain not verified → 400 `domain_not_verified`
 - Screening produces a **block** verdict for any item — either that item's content trips a content-scan block, or any recipient in that item's envelope is not in the outbound `allowlist`/`domain` gate under `action=block` → 403 `blocked_by_policy` with `details.item_index`, `details.reason` (§14 Q14 all-or-nothing; block-only agents still reach batch, HITL agents were already refused at §5.1)
 - Adding N sends would exceed rate limit or plan quota → 429 `rate_limited` / 402 `limit_exceeded` (see §4)
@@ -190,7 +191,7 @@ CREATE INDEX batches_user_created_at_idx  ON batches (user_id,  created_at DESC)
 CREATE INDEX batches_agent_created_at_idx ON batches (agent_id, created_at DESC);
 ```
 
-**Type corrections from the initial draft.** The initial draft referenced `accounts(account_id)` and `agents(agent_id)` with `UUID` FKs. Neither exists in this codebase — the actual ownership chain is `users.id` (TEXT, `usr_...`) → `agent_identities.id` (TEXT, `agt_...`); there is no `accounts` table (the word appears only in the /v1 `AccountView` API resource, which is a projection over users + limits + usage). The schema above uses the real column shapes and reference targets; migration `067_batches.sql` embeds this SQL.
+**Type corrections from the initial draft.** The initial draft referenced `accounts(account_id)` and `agents(agent_id)` with `UUID` FKs. Neither exists in this codebase — the actual ownership chain is `users.id` (TEXT, `usr_...`) → `agent_identities.id` (TEXT, `agt_...`); there is no `accounts` table (the word appears only in the /v1 `AccountView` API resource, which is a projection over users + limits + usage). The schema above uses the real column shapes and reference targets; migration `095_batches.sql` embeds this SQL.
 
 Rationale for storing `suppressed_json` on the batch row (not per-message): a suppressed item produces NO `messages` row, so there is no other durable place to record the drop. The batch row is the only place that remembers "item i was in your request but we skipped it because address X hit the suppression list."
 

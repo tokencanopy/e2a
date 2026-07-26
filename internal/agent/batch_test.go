@@ -3,10 +3,12 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
@@ -196,6 +198,137 @@ func TestDeliverBatch_AllSuppressed(t *testing.T) {
 	}
 }
 
+// TestDeliverBatch_ConversationIDResolvedPerItem: each item runs through the
+// same conversation-id resolution as single send — an omitted id is minted (a
+// fresh "conv_" anchor persisted to the row, never left empty), a caller-
+// provided id is preserved verbatim.
+func TestDeliverBatch_ConversationIDResolvedPerItem(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "batchconv")
+
+	const callerID = "conv_caller_supplied"
+	items := []outbound.SendRequest{
+		{From: ag.EmailAddress(), To: []string{"alice@gmail.com"}, Subject: "omitted", Body: "a"},
+		{From: ag.EmailAddress(), To: []string{"bob@gmail.com"}, Subject: "provided", Body: "b", ConversationID: callerID},
+	}
+	res, oerr := api.DeliverBatch(ctx, user, ag, items, nil)
+	if oerr != nil {
+		t.Fatalf("DeliverBatch: %+v", oerr)
+	}
+	if len(res.Items) != 2 || res.Items[0].MessageID == "" || res.Items[1].MessageID == "" {
+		t.Fatalf("expected 2 accepted items: %+v", res.Items)
+	}
+
+	readConvID := func(msgID string) string {
+		var cid string
+		if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT conversation_id FROM messages WHERE id=$1`, msgID).Scan(&cid)
+		}); err != nil {
+			t.Fatalf("read conversation_id for %s: %v", msgID, err)
+		}
+		return cid
+	}
+
+	// Omitted → minted anchor (non-empty, "conv_" prefixed), not left empty.
+	if got := readConvID(res.Items[0].MessageID); got == "" || !strings.HasPrefix(got, "conv_") {
+		t.Errorf("omitted item conversation_id = %q, want a minted conv_ id", got)
+	}
+	// Caller-provided → preserved verbatim.
+	if got := readConvID(res.Items[1].MessageID); got != callerID {
+		t.Errorf("provided item conversation_id = %q, want %q", got, callerID)
+	}
+}
+
+// TestDeliverBatch_IdempotencySerializesSuppressedSlots_Mixed: the idempotency
+// completer runs INSIDE the accept-tx and serializes result.Items into the
+// cached replay body. This regression-guards the ordering bug where suppressed
+// slots were filled only AFTER the tx — a keyed replay would then have returned
+// empty message_id entries (miscounted as accepted) for the dropped items
+// instead of their suppression results. The spy completer captures exactly what
+// idempotency would serialize; both accepted and suppressed slots must be set.
+func TestDeliverBatch_IdempotencySerializesSuppressedSlots_Mixed(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "batchidemmix")
+
+	if _, err := store.AddSuppression(ctx, user.ID, "bounced@gmail.com", "hard bounce", "bounce", ""); err != nil {
+		t.Fatalf("AddSuppression: %v", err)
+	}
+
+	items := []outbound.SendRequest{
+		{From: ag.EmailAddress(), To: []string{"good1@gmail.com"}, Subject: "a", Body: "a"},
+		{From: ag.EmailAddress(), To: []string{"bounced@gmail.com"}, Subject: "b", Body: "b"},
+		{From: ag.EmailAddress(), To: []string{"good2@gmail.com"}, Subject: "c", Body: "c"},
+	}
+
+	var serialized []agent.BatchAcceptItem
+	spy := func(ctx context.Context, tx pgx.Tx, result *agent.BatchAcceptResult) error {
+		// Snapshot the slots as idempotency sees them at serialization time.
+		serialized = append([]agent.BatchAcceptItem(nil), result.Items...)
+		return nil
+	}
+
+	if _, oerr := api.DeliverBatch(ctx, user, ag, items, spy); oerr != nil {
+		t.Fatalf("DeliverBatch: %+v", oerr)
+	}
+	if len(serialized) != 3 {
+		t.Fatalf("serialized items = %d, want 3", len(serialized))
+	}
+	if serialized[1].Suppressed == nil {
+		t.Error("item 1 serialized without suppression → a replay would report it accepted with an empty message_id")
+	}
+	if serialized[1].MessageID != "" {
+		t.Errorf("suppressed item 1 has message_id %q, want empty", serialized[1].MessageID)
+	}
+	if serialized[0].MessageID == "" || serialized[2].MessageID == "" {
+		t.Error("accepted slots (0,2) not populated when idempotency serialized the result")
+	}
+}
+
+// TestDeliverBatch_IdempotencySerializesSuppressedSlots_AllSuppressed: the
+// all-suppressed path takes the early return inside the tx and still completes
+// idempotency; every slot must be serialized as suppressed (never an empty
+// accepted slot) so a replay of an all-suppressed batch is faithful.
+func TestDeliverBatch_IdempotencySerializesSuppressedSlots_AllSuppressed(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "batchidemall")
+
+	if _, err := store.AddSuppression(ctx, user.ID, "a@gmail.com", "", "complaint", ""); err != nil {
+		t.Fatalf("AddSuppression a: %v", err)
+	}
+	if _, err := store.AddSuppression(ctx, user.ID, "b@gmail.com", "", "manual", ""); err != nil {
+		t.Fatalf("AddSuppression b: %v", err)
+	}
+
+	items := []outbound.SendRequest{
+		{From: ag.EmailAddress(), To: []string{"a@gmail.com"}, Subject: "a", Body: "a"},
+		{From: ag.EmailAddress(), To: []string{"b@gmail.com"}, Subject: "b", Body: "b"},
+	}
+
+	var serialized []agent.BatchAcceptItem
+	spy := func(ctx context.Context, tx pgx.Tx, result *agent.BatchAcceptResult) error {
+		serialized = append([]agent.BatchAcceptItem(nil), result.Items...)
+		return nil
+	}
+
+	if _, oerr := api.DeliverBatch(ctx, user, ag, items, spy); oerr != nil {
+		t.Fatalf("DeliverBatch: %+v", oerr)
+	}
+	if len(serialized) != 2 {
+		t.Fatalf("serialized items = %d, want 2", len(serialized))
+	}
+	for i, item := range serialized {
+		if item.Suppressed == nil {
+			t.Errorf("item %d serialized without suppression → replay would report it accepted", i)
+		}
+		if item.MessageID != "" {
+			t.Errorf("suppressed item %d has message_id %q, want empty", i, item.MessageID)
+		}
+	}
+}
+
 // TestDeliverBatch_HITLAgentRefused: an agent with an outbound review gate is
 // refused batch send outright (§5.1). No batch/message rows are created.
 func TestDeliverBatch_HITLAgentRefused(t *testing.T) {
@@ -204,7 +337,7 @@ func TestDeliverBatch_HITLAgentRefused(t *testing.T) {
 	user, ag := selfAgent(t, store, "batchhitl")
 
 	// Turn on an outbound review gate — makes agentUsesHITL true.
-	if err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, identity.ProtectionConfig{
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, identity.ProtectionConfig{
 		InboundGatePolicy:       identity.OutboundPolicyOpen,
 		InboundGateAction:       "flag",
 		InboundScanSensitivity:  "off",

@@ -113,6 +113,75 @@ func recordingFirer() (Firer, *[]firedEvent) {
 	return f, &events
 }
 
+// payloadBatchID extracts batch_id from any of the outbound event payloads
+// that carry it, so the propagation test can assert one field across the four
+// feedback outcomes without a type switch at each call site.
+func payloadBatchID(data any) (string, bool) {
+	switch d := data.(type) {
+	case eventpayload.EmailDeliveredData:
+		return d.BatchID, true
+	case eventpayload.EmailBouncedData:
+		return d.BatchID, true
+	case eventpayload.EmailComplainedData:
+		return d.BatchID, true
+	case eventpayload.EmailFailedData:
+		return d.BatchID, true
+	}
+	return "", false
+}
+
+// TestConsumerPropagatesBatchID pins that batch correlation survives PAST
+// provider acceptance: every delivery-feedback event for a batch-originated
+// message carries the same batch_id as email.sent/email.failed, so a subscriber
+// can group delivered/bounced/complained/failed outcomes back to the batch
+// call. The empty-BatchID (single-send) case omits it — locked by the golden
+// .min.json fixtures.
+func TestConsumerPropagatesBatchID(t *testing.T) {
+	const batchID = "bat_feedbackcorrelation0001"
+	cases := []struct {
+		name     string
+		ev       *Event
+		wantType string
+	}{
+		{"delivered", &Event{ProviderEventID: "sns-test", OccurredAt: testFeedbackOccurredAt, Kind: KindDelivery, SESMessageID: "ses-b",
+			Recipients: []RecipientOutcome{{Address: "a@x.com", Status: StatusDelivered}}}, EventEmailDelivered},
+		{"bounced", &Event{ProviderEventID: "sns-test", OccurredAt: testFeedbackOccurredAt, Kind: KindBounce, SESMessageID: "ses-b", BounceType: "permanent",
+			Recipients: []RecipientOutcome{{Address: "a@x.com", Status: StatusBounced}}}, EventEmailBounced},
+		{"complained", &Event{ProviderEventID: "sns-test", OccurredAt: testFeedbackOccurredAt, Kind: KindComplaint, SESMessageID: "ses-b",
+			Recipients: []RecipientOutcome{{Address: "a@x.com", Status: StatusComplained}}}, EventEmailComplained},
+		{"reject->failed", &Event{ProviderEventID: "sns-test", OccurredAt: testFeedbackOccurredAt, Kind: KindReject, SESMessageID: "ses-b",
+			Recipients: []RecipientOutcome{{Address: "a@x.com", Status: StatusFailed, Detail: "Bad content"}}}, EventEmailFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeConsumerStore()
+			store.corr["ses-b"] = &CorrelatedMessage{MessageID: "msg_b", UserID: "u_b", AgentID: "bot@x.com", BatchID: batchID}
+			fire, events := recordingFirer()
+			c := NewConsumer(store, fire)
+			if err := c.Process(context.Background(), tc.ev); err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, e := range *events {
+				if e.eventType != tc.wantType {
+					continue
+				}
+				got, ok := payloadBatchID(e.data)
+				if !ok {
+					t.Fatalf("%s payload is not a batch_id-carrying type: %T", tc.wantType, e.data)
+				}
+				if got != batchID {
+					t.Errorf("%s batch_id = %q, want %q propagated from the correlated message", tc.wantType, got, batchID)
+				}
+				found = true
+			}
+			if !found {
+				t.Fatalf("no %s event fired", tc.wantType)
+			}
+		})
+	}
+}
+
 func TestConsumerProcess(t *testing.T) {
 	t.Run("uncorrelated message is a no-op ack", func(t *testing.T) {
 		store := newFakeConsumerStore()
@@ -539,12 +608,13 @@ func TestConsumerGoldenPayloads(t *testing.T) {
 		userID  = "user_7a6b5c4d"
 		agent   = "support@agents.example.com"
 		subject = "Re: Order #1234 delayed"
+		batchID = "bat_9c8b7a6d5e4f3a2b1c0d9e8f"
 		fixture = "../eventpayload/testdata/"
 	)
 	fireGolden := func(sesEvent *Event) *[]firedEvent {
 		t.Helper()
 		store := newFakeConsumerStore()
-		store.corr["ses-golden"] = &CorrelatedMessage{MessageID: msgID, UserID: userID, AgentID: agent, Subject: subject}
+		store.corr["ses-golden"] = &CorrelatedMessage{MessageID: msgID, UserID: userID, AgentID: agent, Subject: subject, BatchID: batchID}
 		fire, events := recordingFirer()
 		c := NewConsumer(store, fire)
 		if err := c.Process(context.Background(), sesEvent); err != nil {

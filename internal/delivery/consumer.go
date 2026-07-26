@@ -30,6 +30,11 @@ type CorrelatedMessage struct {
 	To             []string
 	CC             []string
 	BCC            []string
+	// BatchID is the batch this message was submitted under, empty for single
+	// sends. Propagated onto the delivery-feedback event payloads so batch
+	// correlation survives past provider acceptance (email.delivered/bounced/
+	// complained), matching email.sent/email.failed.
+	BatchID string
 }
 
 // Store is the narrow persistence surface the consumer needs. *identity.Store
@@ -411,6 +416,7 @@ func deliveryEventData(evType string, m *CorrelatedMessage, ev *Event, r Recipie
 			SMTPDetail:           r.Detail,
 			BounceType:           bounceType,
 			BounceSubType:        ev.BounceSubType,
+			BatchID:              m.BatchID,
 			LifecycleTransitions: transitions,
 		}
 	case EventEmailComplained:
@@ -421,6 +427,7 @@ func deliveryEventData(evType string, m *CorrelatedMessage, ev *Event, r Recipie
 			DeliveredTo:          r.Address,
 			Subject:              m.Subject,
 			SMTPDetail:           r.Detail,
+			BatchID:              m.BatchID,
 			LifecycleTransitions: transitions,
 		}
 	default: // EventEmailDelivered
@@ -431,6 +438,7 @@ func deliveryEventData(evType string, m *CorrelatedMessage, ev *Event, r Recipie
 			DeliveredTo:          r.Address,
 			Subject:              m.Subject,
 			SMTPDetail:           r.Detail,
+			BatchID:              m.BatchID,
 			LifecycleTransitions: transitions,
 		}
 	}
@@ -456,6 +464,7 @@ func failedEventData(m *CorrelatedMessage, reason string, transitions ...message
 		BCC:                  m.BCC,
 		Subject:              m.Subject,
 		MessageType:          m.MessageType,
+		BatchID:              m.BatchID,
 		Reason:               reason,
 		ReasonCode:           string(messagelifecycle.ReasonSubmissionProviderRejected),
 		Retryable:            &retryable,

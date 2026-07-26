@@ -155,14 +155,17 @@ func TestSendBatch_BatchAttachmentSumExceeded(t *testing.T) {
 		})))
 	t.Cleanup(srv.Close)
 
-	// Two items, each with a ~15 MiB attachment → 30 MiB total > 25 MiB cap.
-	// Each item is individually under the per-item 25 MiB cap.
-	blob := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("A"), 15*1024*1024))
+	// Three items, each with a 9 MiB attachment → 27 MiB total > 25 MiB batch
+	// cap. Each item is individually valid (9 MiB < the 10 MiB single-attachment
+	// cap AND < the 25 MiB per-item combined cap), so per-item validateAttachments
+	// passes and the failure is specifically the batch-wide SUM cap.
+	blob := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("A"), 9*1024*1024))
 	att := []map[string]any{{"filename": "big.bin", "content_type": "application/octet-stream", "data": blob}}
 	status, out := postBatch(t, srv, map[string]any{
 		"messages": []map[string]any{
 			{"to": []string{"a@x.com"}, "subject": "a", "text": "a", "attachments": att},
 			{"to": []string{"b@x.com"}, "subject": "b", "text": "b", "attachments": att},
+			{"to": []string{"c@x.com"}, "subject": "c", "text": "c", "attachments": att},
 		},
 	}, "")
 	if status != http.StatusRequestEntityTooLarge {

@@ -47,7 +47,7 @@ func (s *Store) CorrelateBySESMessageID(ctx context.Context, sesMessageID string
 		`SELECT m.id, a.user_id, m.agent_id, COALESCE(m.subject, ''),
 		        COALESCE(m.conversation_id, ''), COALESCE(m.method, ''),
 		        COALESCE(m.message_type, ''), COALESCE(m.sender, ''),
-		        m.to_recipients, m.cc, m.bcc
+		        m.to_recipients, m.cc, m.bcc, COALESCE(m.batch_id, '')
 		   FROM messages m
 		   JOIN agent_identities a ON a.id = m.agent_id
 		  WHERE m.direction = 'outbound'
@@ -58,7 +58,7 @@ func (s *Store) CorrelateBySESMessageID(ctx context.Context, sesMessageID string
 		sesMessageID,
 	).Scan(&m.MessageID, &m.UserID, &m.AgentID, &m.Subject,
 		&m.ConversationID, &m.Method, &m.MessageType, &m.From,
-		&m.To, &m.CC, &m.BCC)
+		&m.To, &m.CC, &m.BCC, &m.BatchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -84,14 +84,14 @@ func (s *Store) CorrelateByE2AMessageID(ctx context.Context, e2aMessageID string
 		`SELECT m.id, a.user_id, m.agent_id, COALESCE(m.subject, ''),
 		        COALESCE(m.conversation_id, ''), COALESCE(m.method, ''),
 		        COALESCE(m.message_type, ''), COALESCE(m.sender, ''),
-		        m.to_recipients, m.cc, m.bcc
+		        m.to_recipients, m.cc, m.bcc, COALESCE(m.batch_id, '')
 		   FROM messages m
 		   JOIN agent_identities a ON a.id = m.agent_id
 		  WHERE m.id = $1 AND m.direction = 'outbound'`,
 		e2aMessageID,
 	).Scan(&m.MessageID, &m.UserID, &m.AgentID, &m.Subject,
 		&m.ConversationID, &m.Method, &m.MessageType, &m.From,
-		&m.To, &m.CC, &m.BCC)
+		&m.To, &m.CC, &m.BCC, &m.BatchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -1074,45 +1074,6 @@ func (s *Store) SuppressedAddresses(ctx context.Context, userID string, addrs []
 		out = append(out, a)
 	}
 	return out, rows.Err()
-}
-
-// SuppressedAddressesWithSource returns address→source for every address in
-// addrs that is suppressed for the user. Used by batch-send accept-tx to
-// populate the per-item `suppressed` slot in the response with the reason
-// category (bounce / complaint / manual), per
-// docs/design/batch-send.md §1.3.
-//
-// The `source` values come straight from suppressions.source (see
-// migrations/031_delivery_feedback.sql). Empty input → empty map (not nil,
-// so callers can iterate without a nil-check).
-func (s *Store) SuppressedAddressesWithSource(ctx context.Context, userID string, addrs []string) (map[string]string, error) {
-	out := map[string]string{}
-	if len(addrs) == 0 {
-		return out, nil
-	}
-	norm := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		norm = append(norm, NormalizeEmail(a))
-	}
-	rows, err := s.pool.Query(ctx,
-		`SELECT address, source FROM suppressions WHERE user_id = $1 AND address = ANY($2)`,
-		userID, norm,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var address, source string
-		if err := rows.Scan(&address, &source); err != nil {
-			return nil, err
-		}
-		out[address] = source
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // ListSuppressions returns the user's suppression list, newest first.

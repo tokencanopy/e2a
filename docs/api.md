@@ -408,6 +408,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `getAccountMetrics` | `GET /v1/metrics` | Delivery metrics |
 | `getAgentMetrics` | `GET /v1/agents/{email}/metrics` | Delivery metrics |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
+| `getBatch` | `GET /v1/batches/{batch_id}` | Batch send |
 | `getContact` | `GET /v1/contacts/{address}` | Contacts |
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
@@ -423,6 +424,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `listTemplates` | `GET /v1/templates` | Templates |
 | `putAgentProtection` | `PUT /v1/agents/{email}/protection` | Protection config |
 | `rejectReview` | `POST /v1/reviews/{id}/reject` | Reviews |
+| `sendBatch` | `POST /v1/agents/{email}/batches` | Batch send |
 | `updateContact` | `PATCH /v1/contacts/{address}` | Contacts |
 | `updateTemplate` | `PATCH /v1/templates/{id}` | Templates |
 | `upsertEngagement` | `PUT /v1/agents/{email}/contacts/{address}` | Contacts |

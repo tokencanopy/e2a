@@ -426,7 +426,7 @@ type Message struct {
 	// delivery-feedback UPDATE...RETURNING that builds email.sent /
 	// email.failed events, so batch children carry batch_id on those
 	// events — docs/design/batch-send.md §7.3). Source: messages.batch_id
-	// (migration 067).
+	// (migration 095).
 	BatchID string `json:"batch_id,omitempty"`
 
 	// Labels are user-applied string tags (`urgent`, `follow-up`, …).
@@ -4153,7 +4153,7 @@ type MessageListFilter struct {
 	From            string
 	SubjectContains string
 	ConversationID  string    // exact match
-	BatchID         string    // exact match; child messages of a batch send (migration 067)
+	BatchID         string    // exact match; child messages of a batch send (migration 095)
 	Since           time.Time // created_at >= Since
 	Until           time.Time // created_at <  Until
 	// Labels filters rows where ALL given labels are present on the
