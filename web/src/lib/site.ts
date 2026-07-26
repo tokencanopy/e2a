@@ -32,3 +32,35 @@ export const FEEDBACK_EMAIL = process.env.NEXT_PUBLIC_FEEDBACK_EMAIL || "";
 // configured, so forks don't accidentally inherit the upstream property.
 export const GOOGLE_SITE_VERIFICATION =
   process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
+
+// Sign-in entry point for the dashboard's "Sign in" links. Defaults to the
+// legacy Google OAuth door, which every self-host deployment has. The hosted
+// deployment bakes in NEXT_PUBLIC_E2A_SIGN_IN_URL=/api/auth/oidc/login at
+// image build time to make the TokenCanopy OIDC door (multi-provider chooser)
+// the default. The OIDC route only exists when the server runs with
+// E2A_OIDC_ENABLED=true, so self-hosters must leave this unset — pointing it
+// at /api/auth/oidc/login without the server flag is a dead link.
+export const LEGACY_SIGN_IN_URL = "/api/auth/login";
+export const SIGN_IN_URL =
+  process.env.NEXT_PUBLIC_E2A_SIGN_IN_URL || LEGACY_SIGN_IN_URL;
+
+// Button copy derived from the same variable: the legacy door IS Google, but
+// the OIDC door leads to a multi-provider chooser (Google/Microsoft/GitHub),
+// so naming Google there would be wrong.
+export const SIGN_IN_LABEL =
+  SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Sign in with Google" : "Sign in";
+
+// Adds the post-login destination to whichever sign-in door this build uses.
+// SIGN_IN_URL may be a same-origin path or an absolute operator-supplied URL;
+// a placeholder origin lets URL handle either shape without leaking into the
+// returned same-origin path.
+export function signInURLWithReturnTo(returnTo: string): string {
+  const placeholderOrigin = "https://e2a-sign-in.invalid";
+  const url = new URL(SIGN_IN_URL, placeholderOrigin);
+  url.searchParams.set("return_to", returnTo);
+
+  if (url.origin === placeholderOrigin) {
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+  return url.toString();
+}

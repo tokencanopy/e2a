@@ -7,6 +7,7 @@ import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
 import { SignInLink } from "../components/SignInLink";
 import { Sidebar } from "../components/loft/Sidebar";
+import { SIGN_IN_LABEL } from "../../lib/site";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -109,7 +110,7 @@ export default function AppLayout({
               borderRadius: "var(--r-md)",
             }}
           >
-            Sign in with Google
+            {SIGN_IN_LABEL}
           </SignInLink>
         </div>
       </div>

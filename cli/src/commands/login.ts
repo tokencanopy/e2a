@@ -101,6 +101,10 @@ function closeServer(server: Server): Promise<void> {
 }
 
 function buildBrowserLoginURL(apiUrl: string, callbackUrl: string, cliState: string): string {
+  // Keep the legacy Google door as the deployment-agnostic default. The OIDC
+  // door supports the same cli_callback/cli_state handoff, but the server
+  // exposes no public auth-methods endpoint the CLI can consult to discover
+  // which optional door an operator configured for the static dashboard.
   const loginUrl = new URL("/api/auth/login", apiUrl);
   loginUrl.searchParams.set("cli_callback", callbackUrl);
   loginUrl.searchParams.set("cli_state", cliState);

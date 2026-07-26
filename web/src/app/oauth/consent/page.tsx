@@ -4,6 +4,10 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "../../components/AuthProvider";
 import { SignInLink } from "../../components/SignInLink";
+import {
+  SIGN_IN_LABEL,
+  signInURLWithReturnTo,
+} from "../../../lib/site";
 import type { DashboardAgent } from "../../components/types";
 
 // Required OAuth params the consent screen needs. If any is missing
@@ -165,31 +169,26 @@ function ConsentInner() {
     return <ConsentShell><p className="text-muted">Loading…</p></ConsentShell>;
   }
 
-  // Not signed in → bounce through Google login carrying return_to so
+  // Not signed in → bounce through login carrying return_to so
   // the user lands back on /oauth2/authorize (which then re-renders
   // this page with a session). We construct return_to from the same
   // params so the round-trip preserves everything.
   if (!user) {
     const qs = new URLSearchParams(params).toString();
     const returnTo = `/oauth2/authorize?${qs}`;
-    const loginURL = `/api/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+    const loginURL = signInURLWithReturnTo(returnTo);
     return (
       <ConsentShell>
         <h1 className="text-xl font-semibold mb-3">Sign in to continue</h1>
         <p className="text-muted text-sm mb-6">
           Sign in to authorize this application.
         </p>
-        <SignInLink className="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition">
-          Sign in with Google
+        <SignInLink
+          href={loginURL}
+          className="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition"
+        >
+          {SIGN_IN_LABEL}
         </SignInLink>
-        {/* Fallback: SignInLink hits /api/auth/login with no return_to.
-            Provide an alternate link that carries return_to for the
-            common case. */}
-        <p className="mt-4">
-          <a className="text-sm text-accent underline" href={loginURL}>
-            Sign in and return to this authorization
-          </a>
-        </p>
       </ConsentShell>
     );
   }
