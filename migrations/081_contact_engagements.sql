@@ -1,4 +1,4 @@
--- 080_contact_engagements.sql
+-- 081_contact_engagements.sql
 --
 -- Per-agent outreach state (docs/design/2026-07-24-contacts-and-outreach-state.md
 -- §3.2). An engagement is one agent's relationship with one contact: what stage
