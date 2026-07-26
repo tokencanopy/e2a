@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
 
@@ -149,8 +151,8 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 	}
 	if handled {
 		slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-		log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to=%v slug=%s subject=%q edited=%v approved=user:%s delivery=async",
-			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), sent.ToRecipients, slug, sent.Subject, sent.Edited, userID)
+		log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to_count=%d to_domains=%v slug=%s subject_len=%d edited=%v approved=user:%s delivery=async",
+			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), slug, utf8.RuneCountInString(sent.Subject), sent.Edited, userID)
 		a.publishApproved(ctx, a.buildApprovedEvent(agent, sent, userID), sent)
 		// No metering here — the SendWorker meters on MarkSent.
 		return sent, nil
@@ -175,8 +177,8 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 
 	a.recordLoopbackUsage(ctx, userID, agent)
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to=%v slug=%s subject=%q edited=%v approved=user:%s",
-		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), sent.ToRecipients, slug, sent.Subject, sent.Edited, userID)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s from=%s to_count=%d to_domains=%v slug=%s subject_len=%d edited=%v approved=user:%s",
+		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), slug, utf8.RuneCountInString(sent.Subject), sent.Edited, userID)
 	a.publishApproved(ctx, a.buildApprovedEvent(agent, sent, userID), sent)
 	return sent, nil
 }
@@ -369,8 +371,8 @@ func (a *API) RejectPendingCore(ctx context.Context, userID, messageID, expected
 			return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to reject message"}
 		}
 	}
-	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s rejected_by=user:%s reason=%q",
-		rejected.ID, rejected.Type, rejected.Status, rejected.AgentID, userID, reason)
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s rejected_by=user:%s reason_len=%d",
+		rejected.ID, rejected.Type, rejected.Status, rejected.AgentID, userID, utf8.RuneCountInString(reason))
 	a.publishRejected(ctx, a.buildRejectedEvent(userID, rejected, reason), rejected.ID)
 	return rejected, nil
 }
@@ -429,8 +431,8 @@ func (a *API) RejectInboundReviewCore(ctx context.Context, userID, reason string
 		log.Printf("[api] reject inbound review %s: %v", msg.ID, err)
 		return &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to reject message"}
 	}
-	log.Printf("[mail:%s] dir=inbound type=%s status=%s agent=%s rejected_by=user:%s reason=%q",
-		msg.ID, msg.Type, identity.MessageStatusReviewRejected, msg.AgentID, userID, reason)
+	log.Printf("[mail:%s] dir=inbound type=%s status=%s agent=%s rejected_by=user:%s reason_len=%d",
+		msg.ID, msg.Type, identity.MessageStatusReviewRejected, msg.AgentID, userID, utf8.RuneCountInString(reason))
 	a.publishRejected(ctx, a.buildInboundRejectedEvent(msg, a.reviewOwnerID(ctx, msg.AgentID, userID), userID, reason, transition), msg.ID)
 	return nil
 }

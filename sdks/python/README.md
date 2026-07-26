@@ -351,8 +351,11 @@ listener for the same agent superseded this one; terminal, no auto-reconnect),
 `E2AWebhookSignatureError`. The 402/429 split is permanent — branch on
 the exception type: 402 → surface a quota/upgrade path, 429 → back off and retry.
 
-> e2a hides the existence of agents you don't own — `agents.get` of an unknown
-> address raises `E2APermissionError` (403), not `E2ANotFoundError`.
+> e2a hides the existence of agents you don't own — `agents.get` of an
+> unknown *or* unowned address raises `E2ANotFoundError` (404); the two cases
+> are deliberately indistinguishable, so a 404 is not proof the agent doesn't
+> exist. `E2APermissionError` (403) means something else: an *agent-scoped*
+> credential tried to act on a different agent in the account.
 
 ### Pagination
 

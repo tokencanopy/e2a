@@ -2,6 +2,8 @@ package testutil
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -52,11 +54,13 @@ func baseTestDBURL() string {
 // pools, the in-process contract server — lands on the same database.
 // Non-test binaries (cmd/e2a-contract-server) and E2A_TEST_DB_SHARED=1 get
 // the base URL verbatim. Missing databases self-provision on first open
-// (see OpenPreparedTestDB); concurrent SESSIONS running the SAME package
-// still contend, so per-session base URLs remain the guidance in AGENTS.md.
+// (see OpenPreparedTestDB). Concurrent sessions, agents, and worktrees are
+// isolated by the per-workspace component below, so handing each runner its
+// own base URL is no longer required — only useful for pointing a run at an
+// entirely separate server.
 func TestDBURL() string {
 	base := baseTestDBURL()
-	suffix := packageDBSuffix()
+	suffix := derivedDBSuffix()
 	if suffix == "" {
 		return base
 	}
@@ -74,12 +78,44 @@ func TestDBURL() string {
 		return base
 	}
 	u.Path = u.Path + suffix
+	// Postgres truncates identifiers past maxPostgresIdentifier bytes, and it does
+	// so SILENTLY. Truncation lands at the END — inside the package component — so
+	// sibling packages sharing a prefix collapse onto ONE database: internal/identity
+	// and internal/idempotency both become ..._pkg_ide, then truncate each other's
+	// tables under -p 4. That is exactly the corruption this derivation exists to
+	// prevent, so a base too long to derive from has to fail loudly rather than
+	// quietly reintroduce it.
+	if name := strings.TrimPrefix(u.Path, "/"); len(name) > maxPostgresIdentifier {
+		panic(fmt.Sprintf("testutil: derived test database name %q is %d bytes, over Postgres's "+
+			"%d-byte identifier limit — Postgres would truncate it silently and collide sibling "+
+			"packages onto one database. Shorten the base in E2A_TEST_DATABASE_URL; the derived "+
+			"suffix needs %d bytes.", name, len(name), maxPostgresIdentifier, len(suffix)))
+	}
 	return u.String()
 }
 
-// packageDBSuffix derives the per-package database suffix, or "" when the
-// process is not a test binary or sharing is forced.
-func packageDBSuffix() string {
+// maxPostgresIdentifier is Postgres's NAMEDATALEN-1 ceiling for identifiers,
+// database names included. Measured in BYTES, which is what len() reports.
+const maxPostgresIdentifier = 63
+
+// derivedDBSuffix derives the database-name suffix beneath the configured base:
+// a per-WORKSPACE component plus a per-PACKAGE component, or "" when the process
+// is not a test binary or sharing is forced.
+//
+// Two dimensions, because per-package alone was not enough. It stops packages in
+// ONE run from truncating each other, but every checkout computed the same names,
+// so two agents (or two worktrees, or a second terminal) running the same package
+// shared a database and corrupted each other. AGENTS.md asked people to hand out
+// their own base URL; that is convention, and convention does not scale across
+// callers who do not know about each other. Deriving from the module root path
+// makes the isolation structural: two checkouts cannot collide even when nobody
+// configures anything.
+//
+// Name length: <base>_ws<8>_pkg_<package> runs ~40 chars for this repo's longest
+// package names, well inside Postgres's 63-byte identifier limit. A much longer
+// custom base could push past it, where Postgres truncates silently — keep bases
+// short.
+func derivedDBSuffix() string {
 	switch strings.ToLower(os.Getenv("E2A_TEST_DB_SHARED")) {
 	case "1", "true", "yes":
 		return ""
@@ -98,7 +134,44 @@ func packageDBSuffix() string {
 			sanitized = append(sanitized, '_')
 		}
 	}
-	return "_pkg_" + string(sanitized)
+	return workspaceSuffix(moduleRootDir()) + "_pkg_" + string(sanitized)
+}
+
+// workspaceSuffix is the per-checkout component: a short, stable digest of the
+// module root's absolute path. Empty when the root cannot be resolved, which
+// degrades to the previous per-package-only behavior rather than failing.
+//
+// Pure and path-taking so it is directly testable: the same path must always
+// give the same suffix, and different paths must differ.
+func workspaceSuffix(moduleRoot string) string {
+	if moduleRoot == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(moduleRoot)))
+	return "_ws" + hex.EncodeToString(sum[:])[:8]
+}
+
+// moduleRootDir returns the directory holding go.mod at or above the working
+// directory, or "" if there is none. Symlinks are resolved so two paths that
+// reach the same checkout derive the same workspace suffix.
+func moduleRootDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if resolved, rerr := filepath.EvalSymlinks(dir); rerr == nil {
+		dir = resolved
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 func OpenPreparedTestDB(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
@@ -230,8 +303,24 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // calls this helper hundreds of times; repeatedly truncating inbound_intake also
 // recreates and fsyncs its three indexes and requires an ACCESS EXCLUSIVE lock.
 // Any future FK-less table MUST be added to the DELETE section here.
+// truncateAllLockTimeout bounds how long cleanup will WAIT ON A LOCK — not how
+// long it may take. Cleanup is expected to be lock-free (inbound_intake is
+// DELETEd precisely so a concurrent reader's ACCESS SHARE cannot block it), so a
+// wait this long means something genuinely holds a conflicting lock. Failing
+// fast with SQLSTATE 55P03 (lock_not_available) makes that case
+// self-identifying, instead of hanging until the caller's context expires and
+// reporting an indistinguishable deadline error.
+//
+// Deliberately NOT a statement timeout: cleanup is legitimately slow under a
+// loaded parallel run (`-p 4` across every package), and slowness must not be
+// conflated with a lock conflict — that conflation is what made
+// TestTruncateAll_CleansInboundIntakeWithoutExclusiveTableLock flaky in CI.
+const truncateAllLockTimeout = "5s"
+
 func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
+		SET LOCAL lock_timeout = '`+truncateAllLockTimeout+`';
+
 		DELETE FROM inbound_intake;
 
 		TRUNCATE oauth_pkce_requests, oauth_refresh_tokens, oauth_access_tokens,
