@@ -1825,6 +1825,13 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 **Interfaces:**
 - Consumes: `parse`, `sexpr` (helpers_test.go), toy registry.
 
+**Coverage correction:** The illustrative cases below are not a complete
+enumeration by themselves. The implementation must generate the full 3×3
+ordered matrix for `{explicit AND, implicit AND, OR}` across the two operator
+positions in a three-leaf expression, including equal-operator associativity,
+plus generated NOT and parenthesized left/right regrouping variants. Use named
+subtests that identify the operator pair and variant.
+
 - [ ] **Step 1: Write the test**
 
 ```go
