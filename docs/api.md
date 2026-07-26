@@ -415,8 +415,9 @@ single message.
 
 - `GET …/messages` — list inbound + outbound with filters (`direction`,
   `read_status`, `sort`, `from`, `subject_contains`, `conversation_id`, `labels`,
-  `since`, `until`) and cursor pagination. Held outbound drafts appear with
-  `status=pending_review`.
+  `since`, `until`) and cursor pagination. `q` adds boolean composition; see
+  [message filtering](filtering.md) for its grammar and v1 fields. Held outbound
+  drafts appear with `status=pending_review`.
 - `POST …/messages` — send a new email (a new thread). Returns `202 Accepted` for
   every non-terminal outcome — `pending_review` when the agent's protection policy
   holds it for review, or `accepted` when the async pipeline durably queues it —
