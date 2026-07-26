@@ -680,8 +680,8 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// Update contact-engagement counters for this sender, best-effort and OUTSIDE
 	// the message transaction — same rationale as the metering above: nothing
 	// about outreach bookkeeping may block or reject real inbound mail, and a
-	// failed statement inside the tx would abort the persist. Drift is corrected
-	// and reported by ReconcileEngagementCounts.
+	// failed statement inside the tx would abort the persist. The update is
+	// idempotent (GREATEST), so a repeat or an out-of-order arrival converges.
 	//
 	// Update-only: this never creates an engagement, so a stranger writing in
 	// does not silently appear in anyone's outreach list. And because `replied`

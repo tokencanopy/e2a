@@ -15,7 +15,6 @@ package janitor
 import (
 	"context"
 	"errors"
-	"github.com/tokencanopy/e2a/internal/identity"
 	"log"
 	"time"
 
@@ -84,9 +83,6 @@ type Metrics interface {
 
 // Janitor holds the prune dependencies and runs the cleanup sweep. All fields
 // are required except oauth, which is nil when the OAuth provider is disabled.
-// engagementReconcileBatch bounds one reconciliation pass so the consistency
-// check cannot dominate a maintenance run on a large account.
-const engagementReconcileBatch = 500
 
 type Janitor struct {
 	messages     MessagePruner
@@ -95,25 +91,8 @@ type Janitor struct {
 	webhookEvent WebhookEventPruner
 	oauth        OAuthPruner // optional; nil when OAuth is not configured
 	idempotency  IdempotencyPruner
-	// engagements is optional (nil when contacts are not wired) — the sweep is
-	// a consistency check, not a prune, so its absence must not break cleanup.
-	engagements EngagementReconciler
-	metrics     Metrics
+	metrics      Metrics
 }
-
-// EngagementReconciler recomputes the materialized contact-engagement counters
-// from message history and corrects drift, returning what it fixed.
-//
-// This is the safety net for materializing those counters instead of computing
-// them on read. A non-empty result means an activity hook was missed — it is a
-// bug signal, not routine maintenance — so the sweep logs corrections loudly
-// rather than fixing them silently.
-type EngagementReconciler interface {
-	ReconcileEngagementCounts(ctx context.Context, userID string, limit int) ([]identity.EngagementCountDrift, error)
-}
-
-// SetEngagementReconciler wires the contact-engagement consistency sweep.
-func (j *Janitor) SetEngagementReconciler(r EngagementReconciler) { j.engagements = r }
 
 // New builds the Janitor. oauth may be nil (interface, not a typed-nil pointer)
 // to skip the OAuth cleanup pass.
@@ -144,24 +123,6 @@ func New(
 // run or spins River's retry.
 func (j *Janitor) Sweep(ctx context.Context) error {
 	var errs []error
-
-	// Contact-engagement counters: a consistency check rather than a prune.
-	// Bounded per run so one pass cannot dominate the maintenance job; drift
-	// left over is picked up on the next sweep.
-	if j.engagements != nil {
-		if drift, err := j.engagements.ReconcileEngagementCounts(ctx, "", engagementReconcileBatch); err != nil {
-			log.Printf("Failed to reconcile contact engagement counters: %v", err)
-			errs = append(errs, err)
-		} else if len(drift) > 0 {
-			// Loud on purpose: every correction means an activity hook did not
-			// fire, which is a defect to chase rather than expected churn.
-			for _, d := range drift {
-				log.Printf("Corrected contact engagement drift: agent=%s address=%s %s stored=%d actual=%d",
-					d.AgentID, d.Address, d.Field, d.Stored, d.Actual)
-			}
-			j.metrics.JanitorRowsDeleted("contact_engagements_reconciled", len(drift))
-		}
-	}
 
 	if deleted, err := j.messages.DeleteExpiredMessages(ctx); err != nil {
 		log.Printf("Failed to purge messages past trash retention: %v", err)

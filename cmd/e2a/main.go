@@ -409,10 +409,6 @@ func main() {
 		oauthPruner = oauthStorage
 	}
 	cleanupJanitor := janitor.New(store, deliveryStore, subscriberStore, webhookOutbox, oauthPruner, idempotencyStore, metrics)
-	// Contact-engagement consistency sweep. Optional on the Janitor, so this is
-	// the one place it becomes live — without it, drift in the materialized
-	// outreach counters would never be detected or corrected.
-	cleanupJanitor.SetEngagementReconciler(store)
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 
 	if len(registrars) > 0 {

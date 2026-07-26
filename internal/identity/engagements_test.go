@@ -395,9 +395,6 @@ func TestRecordOutboundPinsFirstContact(t *testing.T) {
 	if !e.Replied() {
 		t.Error("a later send un-replied a contact who had already answered")
 	}
-	if e.OutboundCount != 2 || e.InboundCount != 1 {
-		t.Errorf("counts = out:%d in:%d, want 2 and 1", e.OutboundCount, e.InboundCount)
-	}
 }
 
 // TestRecordActivityIgnoresOutOfOrderTimestamps pins that a late-arriving or
@@ -453,56 +450,121 @@ func TestRecordActivityIsScopedPerAgent(t *testing.T) {
 	}
 }
 
-// TestReconcileEngagementCountsCorrectsDrift pins the safety net for
-// materialized counters. Drift is the known cost of not computing these on
-// read, so the sweep must both detect and correct it — and report what it
-// found, because a non-empty result means a hook was missed.
-func TestReconcileEngagementCountsCorrectsDrift(t *testing.T) {
+// TestRecordOutboundConvergesOnEarliestSend pins that first_outbound_at holds
+// the EARLIEST send rather than whichever event happened to land first.
+//
+// Under at-least-once delivery a retried or re-driven job can settle out of
+// order. With set-once semantics that pins first_outbound_at to the LATER
+// time, and because replied is last_inbound_at > first_outbound_at, a genuine
+// reply then reads as no reply — leaving a contact who already answered in the
+// follow-up queue to be chased again.
+func TestRecordOutboundConvergesOnEarliestSend(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "actrecon")
-	enroll(t, store, user.ID, "raise@e.com", "partner@recon.vc", "touch1")
+	user := newContactOwner(t, store, "earliest")
+	enroll(t, store, user.ID, "raise@e.com", "partner@earliest.vc", "touch1")
 
-	// Simulate a missed hook by inflating the stored counter directly.
-	if _, err := pool.Exec(ctx,
-		`UPDATE contact_engagements SET outbound_count = 7 WHERE user_id = $1`, user.ID); err != nil {
-		t.Fatalf("seed drift: %v", err)
-	}
+	early := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
+	late := early.Add(48 * time.Hour)
+	reply := early.Add(time.Hour) // answered the FIRST send
 
-	drift, err := store.ReconcileEngagementCounts(ctx, user.ID, 100)
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+	// The later send is recorded first — the out-of-order case.
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", late); err != nil {
+		t.Fatalf("late send: %v", err)
 	}
-	if len(drift) == 0 {
-		t.Fatal("reconcile reported no drift despite a counter of 7 with no messages")
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", early); err != nil {
+		t.Fatalf("early send: %v", err)
 	}
-	found := false
-	for _, d := range drift {
-		if d.Field == "outbound_count" && d.Stored == 7 && d.Actual == 0 {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("drift report = %+v, want outbound_count 7 -> 0", drift)
+	if _, err := store.RecordInboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", reply); err != nil {
+		t.Fatalf("reply: %v", err)
 	}
 
-	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@recon.vc")
+	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@earliest.vc")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if e.OutboundCount != 0 {
-		t.Errorf("outbound_count = %d after reconcile, want 0 — drift detected but not corrected", e.OutboundCount)
+	if e.FirstOutboundAt == nil || !e.FirstOutboundAt.Equal(early) {
+		t.Errorf("first_outbound_at = %v, want %v — it must converge on the earliest "+
+			"send regardless of the order events arrive", e.FirstOutboundAt, early)
+	}
+	if !e.Replied() {
+		t.Error("a contact who answered the first send reads as unreplied — they would " +
+			"be chased again after already replying")
+	}
+	// last_outbound_at still tracks the most recent send.
+	if e.LastOutboundAt == nil || !e.LastOutboundAt.Equal(late) {
+		t.Errorf("last_outbound_at = %v, want %v", e.LastOutboundAt, late)
+	}
+}
+
+// TestEngagementCountsAreComputedFromMessages pins that the counts reported on
+// an engagement come from real message rows rather than a stored counter
+// (design §10).
+//
+// The multi-recipient case is the one that matters: a single outbound message
+// addressed to two enrolled contacts must count once for EACH, which a scalar
+// recipient column cannot express. Because the counts are derived here, there
+// is no counter to drift and nothing to reconcile — the property this test
+// really guards is that removing the stored columns did not silently start
+// reporting zeros.
+func TestEngagementCountsAreComputedFromMessages(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "computed")
+	if _, err := store.ClaimOrCreateDomain(ctx, "computed.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@computed.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "computed.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
 	}
 
-	// A second pass must report nothing: the sweep is idempotent, so a
-	// non-empty result is always a real signal.
-	drift, err = store.ReconcileEngagementCounts(ctx, user.ID, 100)
-	if err != nil {
-		t.Fatalf("second reconcile: %v", err)
+	const first = "first@computed.vc"
+	const second = "second@computed.vc"
+	enroll(t, store, user.ID, agent, first, "touch1")
+	enroll(t, store, user.ID, agent, second, "touch1")
+
+	// One message to BOTH — must count once for each.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first, second}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-c", []byte("raw")); err != nil {
+		t.Fatalf("send: %v", err)
 	}
-	if len(drift) != 0 {
-		t.Errorf("second pass reported %+v, want none — the sweep must be idempotent", drift)
+	// A second message to only the first.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first}, nil, nil,
+		"Follow up", "send", "smtp", "", "conv-c", []byte("raw")); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	e, err := store.GetEngagement(ctx, user.ID, agent, first)
+	if err != nil {
+		t.Fatalf("get first: %v", err)
+	}
+	if e.OutboundCount != 2 {
+		t.Errorf("%s outbound_count = %d, want 2", first, e.OutboundCount)
+	}
+	e, err = store.GetEngagement(ctx, user.ID, agent, second)
+	if err != nil {
+		t.Fatalf("get second: %v", err)
+	}
+	if e.OutboundCount != 1 {
+		t.Errorf("%s outbound_count = %d, want 1 — a message addressed to two "+
+			"contacts must count for both", second, e.OutboundCount)
+	}
+
+	// The list path must agree with the single-record path.
+	rows, err := store.ListEngagements(ctx, user.ID, agent, identity.EngagementFilter{}, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.Address] = r.OutboundCount
+	}
+	if got[first] != 2 || got[second] != 1 {
+		t.Errorf("list counts = %v, want first:2 second:1 — the list and get paths disagree", got)
 	}
 }
 
@@ -567,116 +629,5 @@ func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
 	}
 	if len(blocked) != 1 {
 		t.Errorf("suppression lookup = %v — consent must survive agent deletion", blocked)
-	}
-}
-
-// TestReconcileEngagementCountsWithMultiRecipientMessages exercises the
-// reconcile SQL against REAL message rows, which the older drift test does not:
-// that one runs with an empty messages table, so its join logic is never
-// executed and it would pass even if the counting query were nonsense.
-//
-// The case that matters is a single outbound message addressed to TWO enrolled
-// contacts. messages.recipient stores only the first recipient, while the
-// activity hook increments every To recipient — so a sweep that counts by the
-// scalar computes the right number for the first contact and zero for the
-// second, then "corrects" a correct counter down to zero and reports drift on
-// every run forever. Scheduling that sweep hourly would destroy real data.
-func TestReconcileEngagementCountsWithMultiRecipientMessages(t *testing.T) {
-	pool := testutil.TestDB(t)
-	store := identity.NewStore(pool)
-	ctx := context.Background()
-	user := newContactOwner(t, store, "multirecip")
-	if _, err := store.ClaimOrCreateDomain(ctx, "multirecip.example.com", user.ID); err != nil {
-		t.Fatalf("claim domain: %v", err)
-	}
-	const agent = "raise@multirecip.example.com"
-	if _, err := store.CreateAgent(ctx, agent, "multirecip.example.com", "",
-		"https://example.com/webhook", "", user.ID); err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-
-	const first = "first@multirecip.vc"
-	const second = "second@multirecip.vc"
-	enroll(t, store, user.ID, agent, first, "touch1")
-	enroll(t, store, user.ID, agent, second, "touch1")
-
-	// One message, both recipients — the shape that breaks a scalar-keyed sweep.
-	if _, err := store.CreateOutboundMessage(ctx, agent, []string{first, second}, nil, nil,
-		"Intro", "send", "smtp", "", "conv-multi", []byte("raw")); err != nil {
-		t.Fatalf("create outbound: %v", err)
-	}
-	// Record activity exactly as the hook does: once per To recipient.
-	sentAt := time.Now().UTC()
-	for _, addr := range []string{first, second} {
-		if _, err := store.RecordOutboundActivity(ctx, user.ID, agent, addr, "conv-multi", sentAt); err != nil {
-			t.Fatalf("record %s: %v", addr, err)
-		}
-	}
-
-	drift, err := store.ReconcileEngagementCounts(ctx, user.ID, 100)
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if len(drift) != 0 {
-		t.Errorf("reconcile reported drift %+v on correct counters — "+
-			"the sweep is miscounting multi-recipient sends and would zero them out", drift)
-	}
-
-	for _, addr := range []string{first, second} {
-		e, err := store.GetEngagement(ctx, user.ID, agent, addr)
-		if err != nil {
-			t.Fatalf("get %s: %v", addr, err)
-		}
-		if e.OutboundCount != 1 {
-			t.Errorf("%s outbound_count = %d after reconcile, want 1", addr, e.OutboundCount)
-		}
-	}
-}
-
-// TestRecordOutboundConvergesOnEarliestSend pins that first_outbound_at holds
-// the EARLIEST send rather than whichever event happened to land first.
-//
-// Under at-least-once delivery a retried or re-driven job can settle out of
-// order. With set-once semantics that pins first_outbound_at to the LATER
-// time, and because replied is last_inbound_at > first_outbound_at, a genuine
-// reply then reads as no reply — leaving a contact who already answered in the
-// follow-up queue to be chased again.
-func TestRecordOutboundConvergesOnEarliestSend(t *testing.T) {
-	pool := testutil.TestDB(t)
-	store := identity.NewStore(pool)
-	ctx := context.Background()
-	user := newContactOwner(t, store, "earliest")
-	enroll(t, store, user.ID, "raise@e.com", "partner@earliest.vc", "touch1")
-
-	early := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	late := early.Add(48 * time.Hour)
-	reply := early.Add(time.Hour) // answered the FIRST send
-
-	// The later send is recorded first — the out-of-order case.
-	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", late); err != nil {
-		t.Fatalf("late send: %v", err)
-	}
-	if _, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", early); err != nil {
-		t.Fatalf("early send: %v", err)
-	}
-	if _, err := store.RecordInboundActivity(ctx, user.ID, "raise@e.com", "partner@earliest.vc", "", reply); err != nil {
-		t.Fatalf("reply: %v", err)
-	}
-
-	e, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@earliest.vc")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if e.FirstOutboundAt == nil || !e.FirstOutboundAt.Equal(early) {
-		t.Errorf("first_outbound_at = %v, want %v — it must converge on the earliest "+
-			"send regardless of the order events arrive", e.FirstOutboundAt, early)
-	}
-	if !e.Replied() {
-		t.Error("a contact who answered the first send reads as unreplied — they would " +
-			"be chased again after already replying")
-	}
-	// last_outbound_at still tracks the most recent send.
-	if e.LastOutboundAt == nil || !e.LastOutboundAt.Equal(late) {
-		t.Errorf("last_outbound_at = %v, want %v", e.LastOutboundAt, late)
 	}
 }
