@@ -45,6 +45,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // keeps mail volume down against the free-plan monthly cap instead of
 // self-sending twice.
 interface MessageFixture {
+  agentEmail: string;
   id: string;
   subject: string;
 }
@@ -87,7 +88,7 @@ function messageFixture(): Promise<MessageFixture> {
         { query: { direction: "inbound", read_status: "all", limit: 20 } },
       );
       const m = poll.body?.items?.find((x) => x.subject === subject);
-      if (m) return { id: m.id, subject };
+      if (m) return { agentEmail: fixtureAgent, id: m.id, subject };
       await sleep(1500);
     }
     throw new Error(`self-send fixture "${subject}" never appeared for ${fixtureAgent}`);
@@ -241,10 +242,7 @@ test("mcp-ext: approve_review via MCP sends the message", async () => {
 
 test("mcp-ext: get_message returns shape and only own messages", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "get_message")) {
-    info(SUITE, "get-msg-absent", "no get_message tool — skipping");
-    return;
-  }
+  assert.ok(list.tools.some((t) => t.name === "get_message"), "canonical get_message tool is required");
   // The MCP get_message tool fetches via the AGENT-scoped endpoint
   // GET /v1/agents/{agent_email}/messages/{id} — anti-enumeration
   // 404s on any message that doesn't belong to the pinned agent. Rather
@@ -252,11 +250,11 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   // (a prior version of this test silently `return`ed when it was empty,
   // which let the suite report all-green while never actually exercising
   // get_message's happy path), we produce a real fixture via self-send.
-  const { id } = await messageFixture();
+  const { agentEmail, id } = await messageFixture();
   // The conformance credential here is account-scoped (no agent_email to
   // pin — see the 08-mcp "whoami" test), so get_message needs an explicit
   // `email` to resolve which agent's mailbox to read from.
-  const r = await callTool(mcp, "get_message", { message_id: id, email: apiClient.env.primaryAgentEmail });
+  const r = await callTool(mcp, "get_message", { message_id: id, email: agentEmail });
   if (r.isError) {
     fail(SUITE, "get-msg-error", `get_message isError for our own ${id}: ${extractText(r).slice(0, 200)}`);
     return;
@@ -265,23 +263,24 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   const returnedId = parsed.id ?? parsed.message_id;
   assert.equal(returnedId, id, `expected id ${id}, got ${returnedId}`);
 
-  // Bogus id — should isError.
-  const r2 = await callTool(mcp, "get_message", { message_id: `msg_bogus_${Date.now()}`, email: apiClient.env.primaryAgentEmail });
-  assert.equal(r2.isError, true, "get_message with a bogus id must surface as an error");
+  // The same real ID under a different owned agent must remain hidden.
+  const r2 = await callTool(mcp, "get_message", {
+    message_id: id,
+    email: apiClient.env.primaryAgentEmail,
+  });
+  assert.equal(r2.isError, true, "get_message must not read a message from another agent's mailbox");
+  assert.match(extractText(r2), /\[not_found\]/, "cross-mailbox get_message must surface canonical not_found");
 });
 
 test("mcp-ext: reply_to_message happy path replies to a real message", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "reply_to_message")) {
-    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
-    return;
-  }
-  const { id } = await messageFixture();
+  assert.ok(list.tools.some((t) => t.name === "reply_to_message"), "canonical reply_to_message tool is required");
+  const { agentEmail, id } = await messageFixture();
   // Same account-scoped-credential caveat as get_message above.
   const r = await callTool(mcp, "reply_to_message", {
     message_id: id,
     text: "reply from 12-mcp-extended happy path",
-    email: apiClient.env.primaryAgentEmail,
+    email: agentEmail,
   });
   assert.equal(r.isError, undefined, `reply_to_message isError: ${extractText(r).slice(0, 200)}`);
   const parsed = JSON.parse(extractText(r)) as { message_id?: string; status?: string };
@@ -300,17 +299,14 @@ test("mcp-ext: reply_to_message happy path replies to a real message", async () 
 
 test("mcp-ext: reply_to_message via MCP — to bogus id surfaces error", async () => {
   const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
-  if (!list.tools.find((t) => t.name === "reply_to_message")) {
-    info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
-    return;
-  }
+  assert.ok(list.tools.some((t) => t.name === "reply_to_message"), "canonical reply_to_message tool is required");
   const r = await callTool(mcp, "reply_to_message", {
     message_id: `msg_bogus_${Date.now()}`,
     text: "should never go out",
+    email: apiClient.env.primaryAgentEmail,
   });
-  if (!r.isError) {
-    fail(SUITE, "reply-bogus-not-error", `reply_to_message with bogus id did not error: ${extractText(r).slice(0, 200)}`);
-  }
+  assert.equal(r.isError, true, "reply_to_message with bogus id must surface as an error");
+  assert.match(extractText(r), /\[not_found\]/, "bogus reply_to_message must surface canonical not_found");
 });
 
 test("mcp-ext: cross-tool consistency — list_agents matches API surface", async () => {
