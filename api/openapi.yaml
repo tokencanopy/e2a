@@ -4950,6 +4950,13 @@ paths:
             type:
               - array
               - "null"
+        - description: "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."
+          explode: false
+          in: query
+          name: q
+          schema:
+            description: "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."
+            type: string
         - description: RFC3339; created_at >= since.
           explode: false
           in: query
