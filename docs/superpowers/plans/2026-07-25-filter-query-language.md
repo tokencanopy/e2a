@@ -2380,25 +2380,49 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `MessagesQRegistry()` (Task 9), `filterquery.Expr`.
-- Produces: `MessageListFilter.QEmit func(startIdx int) (fragment string, args []interface{})` — the handler (Task 11) sets it.
+- Produces: `MessageListFilter.Q *filterquery.Expr` — the handler (Task 11) sets it and the Postgres store emits it at the correct placeholder offset.
+
+**Binding corrections (supersede the illustrative callback/evaluator/Root
+sections below):**
+
+- Pass the validated expression as data (`Q *filterquery.Expr`), not an
+  errorless callback. `GetMessagesByAgent` calls `Q.Emit` with
+  `PostgresDialect{}` after all flat filters, propagates any emission error,
+  and appends its fragment/arguments. Add a store error-path test and a
+  flat-filter composition test that proves placeholder numbering.
+- Do **not** add `Expr.Root()` or any other mutable-AST exposure. The generic
+  package deliberately keeps a validated expression encapsulated; production
+  API must not be widened solely for a test.
+- Replace the AST-sharing "naive evaluator" below with an independent fixture
+  oracle: each query declares expected fixture keys/IDs explicitly. Cover
+  precedence, NOT, labels, case-insensitive exact/substring text matching,
+  escaped `%`/`_`/`\`, `*` wildcard behavior, attachments, Unicode, and all
+  date-only boundaries. Include fixtures immediately before the day, exactly
+  at its first midnight, exactly at the following midnight, and after it so
+  `<`, `<=`, `=`, `!=`, `>`, and `>=` cannot share a mistaken boundary.
+- Build attachment fixtures with `encoding/json` (or a valid fixed JSON
+  array); never use the invalid `fmt.Sprintf(...[:{}])` example below.
+- The old Step 2 evaluator and Step 3 `Expr.Root()` snippets are retained only
+  as historical illustration and must not be implemented.
 
 - [ ] **Step 1: Add the filter field and the store splice**
 
 In `MessageListFilter` (store.go ~3661, after `Labels []string`):
 
 ```go
-	// QEmit, when non-nil, emits the validated q-expression predicate with
-	// placeholders numbered from the given 1-based start index. The store
-	// invokes it after the built-in filters so $n numbering stays correct.
-	// Built by the handler from internal/filterquery.Expr.
-	QEmit func(startIdx int) (fragment string, args []interface{})
+	// Q is a parsed and validated q-expression. The Postgres store emits it
+	// after built-in filters so placeholder numbering stays correct.
+	Q *filterquery.Expr
 ```
 
 In `GetMessagesByAgent`, immediately after the `if len(f.Labels) > 0 { … }` block:
 
 ```go
-	if f.QEmit != nil {
-		frag, qargs := f.QEmit(len(args) + 1)
+	if f.Q != nil {
+		frag, qargs, err := f.Q.Emit(filterquery.PostgresDialect{}, len(args)+1)
+		if err != nil {
+			return nil, fmt.Errorf("emit q filter: %w", err)
+		}
 		if frag != "" {
 			query += " AND " + frag
 			args = append(args, qargs...)
