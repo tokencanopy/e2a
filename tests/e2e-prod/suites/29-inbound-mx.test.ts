@@ -2,9 +2,9 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ApiClient } from "../../harness/client.ts";
-import { uniqueSlug, uniqueSubject } from "../../harness/fixtures.ts";
-import { writeReport, info } from "../../harness/report.ts";
+import { ApiClient } from "../harness/client.ts";
+import { uniqueSlug, uniqueSubject } from "../harness/fixtures.ts";
+import { writeReport, info } from "../harness/report.ts";
 
 // PRODUCTION-ONLY: a genuine agent-to-agent send over the REAL wire — SES
 // egress, a real external MX hop back into e2a's own inbound SMTP listener —
@@ -55,7 +55,7 @@ import { writeReport, info } from "../../harness/report.ts";
 // proved the same dual-assertion way. Flagged explicitly rather than silently
 // assumed; a follow-up with a real capture endpoint would tighten this to an
 // actual byte-level signature check.
-const SUITE = "prod/30-inbound-mx";
+const SUITE = "29-inbound-mx";
 const client = new ApiClient();
 
 const EVENT_COVERAGE_DIR = fileURLToPath(new URL("../../reports/event-coverage/", import.meta.url));
@@ -252,13 +252,30 @@ test("real wire round trip: agent A → agent B egresses via SES and re-enters o
       agentA.toLowerCase(),
       "header_from is e2a's own relay address for a shared-domain send, not the sending agent's own address (that equality only holds for a customer's sending-verified domain)",
     );
-    assert.ok(
-      String(envelopeFrom).toLowerCase().endsWith("send.e2a.dev"),
-      `envelope_from is expected under the outbound relay's own domain (send.e2a.dev, or SES's custom MAIL FROM subdomain mail.send.e2a.dev), got ${JSON.stringify(envelopeFrom)}`,
+    // Assert the SHAPE, not a literal domain. What proves the wire path is that
+    // envelope_from is a VERP bounce token under SES's custom MAIL FROM
+    // subdomain — NOT that the domain is the production one. Hardcoding
+    // send.e2a.dev made this suite fail on staging purely because its relay is
+    // send-staging.e2a.dev, even though the round trip completed correctly.
+    //   prod:    ...@mail.send.e2a.dev
+    //   staging: ...@mail.send-staging.e2a.dev
+    // The distinguishing property against a loopback short-circuit is the same
+    // either way: a loopback never leaves e2a, so envelope_from would be the
+    // agent's own address rather than a provider-generated return-path.
+    assert.match(
+      String(envelopeFrom).toLowerCase(),
+      /^[^@]+@mail\.send(-[a-z0-9-]+)?\.e2a\.dev$/,
+      `envelope_from should be SES's VERP return-path under the deployment's custom MAIL FROM subdomain (mail.send.e2a.dev on prod, mail.send-staging.e2a.dev on staging) — that is what proves the message left via SES and re-entered over the MX rather than short-circuiting through loopback. Got ${JSON.stringify(envelopeFrom)}`,
     );
-    assert.ok(
-      String(headerFrom).toLowerCase().endsWith("send.e2a.dev"),
-      `header_from is expected under the outbound relay's own domain (send.e2a.dev), got ${JSON.stringify(headerFrom)}`,
+    // Shape, not a literal domain — same reasoning as envelope_from above. The
+    // relay's from_domain is deployment-specific (send.e2a.dev on prod,
+    // send-staging.e2a.dev on staging); what matters is that header_from is the
+    // RELAY's address and not the sending agent's, which the assert.equal above
+    // already pins.
+    assert.match(
+      String(headerFrom).toLowerCase(),
+      /^[^@]+@send(-[a-z0-9-]+)?\.e2a\.dev$/,
+      `header_from should be the deployment's own outbound relay address (agent@send.e2a.dev on prod, agent@send-staging.e2a.dev on staging), got ${JSON.stringify(headerFrom)}`,
     );
     assert.notEqual(
       receivedEv!.data.authentication,
