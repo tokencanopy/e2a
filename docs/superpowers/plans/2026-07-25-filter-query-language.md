@@ -2875,6 +2875,11 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 **Interfaces:**
 - Consumes: regenerated TS SDK `ListMessagesParams.q` (Task 14 runs `make generate-sdk`; if the MCP typecheck needs it first, run `make generate-sdk-ts` before this task's implementation step and commit it in Task 14).
 
+**Binding correction:** Zod's plain `.max(500)` counts UTF-16 code units, while
+the HTTP API counts Unicode code points. Use a schema refinement based on
+`Array.from(value).length <= 500` with a clear max-length message. Test both
+ASCII 500/501 and astral-Unicode 500/501 boundaries.
+
 - [ ] **Step 1: Add the schema field + passthrough + test**
 
 In the `list_messages` `inputSchema` (after `labels`, ~line 435):
