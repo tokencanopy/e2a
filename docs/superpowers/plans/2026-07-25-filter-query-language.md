@@ -2056,7 +2056,24 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `filterquery` public API (Tasks 1–4); existing `escapeLikePattern` (identity/store.go).
-- Produces: `MessagesQRegistry() *filterquery.Registry` (lazy singleton); unexported `messagesFieldRegistry()`; value type `createdValue{at time.Time, dayRange bool}`. Task 10's differential tests and Task 11's handler consume these.
+- Produces: `MessagesQRegistry() *filterquery.Registry` (lazy singleton); value type `createdValue{at time.Time, dayRange bool}`. Task 10's differential tests and Task 11's handler consume these.
+
+**Binding corrections and coverage requirements:**
+
+- Imports use the repository module path
+  `github.com/tokencanopy/e2a/internal/filterquery`.
+- Date-only values denote the entire UTC calendar day. Unit tests must cover
+  every operator and its exact arguments: `=` is `[start,end)`, `!=` is
+  outside that range, `<` ends at `start`, `<=` ends at `end`, `>` begins at
+  `end`, and `>=` begins at `start`. In particular,
+  `created<=YYYY-MM-DD` includes that whole day and
+  `created>YYYY-MM-DD` starts at the following midnight.
+- `from:` and `subject:` must preserve the flat-filter behavior exactly:
+  byte-counted 200-byte bound, case-insensitive substring, literal `%`, `_`,
+  and `\` escaping, and `*` translated to the ILIKE wildcard. Add boundary
+  tests for 200/201 bytes and exact tests showing `=`/`!=` do not translate
+  wildcards.
+- Registry unit tests must be parallel-safe and must not mutate global state.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2068,7 +2085,7 @@ import (
 	"testing"
 	"time"
 
-	"e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/filterquery"
 )
 
 func compileQ(t *testing.T, q string, start int) (string, []any) {
@@ -2187,7 +2204,7 @@ import (
 	"sync"
 	"time"
 
-	"e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/filterquery"
 )
 
 // q-language field registry for the messages table. Semantics MUST match the
@@ -2404,8 +2421,8 @@ import (
 	"testing"
 	"time"
 
-	"e2a/internal/filterquery"
-	"e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
 // Differential testing: for each q expression, the rows returned by the
@@ -2795,7 +2812,7 @@ Pass `QEmit: qEmit` in the `identity.MessageListFilter{…}` literal (~737), inc
 
 (find the existing `if cur.AgentID != … || … !stringSlicesEqual(cur.Labels, labelsFilter)` block and add the one line; also set `Q: in.Q` on the cursor struct literal that encodes the next cursor.)
 
-Import `"e2a/internal/filterquery"` in messages.go.
+Import `"github.com/tokencanopy/e2a/internal/filterquery"` in messages.go.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
