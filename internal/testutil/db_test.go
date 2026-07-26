@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -199,6 +200,92 @@ func testDBChildEnv(testName, dbURL string) []string {
 		env = append(env, item)
 	}
 	return append(env, testDBErrorChildEnv+"="+testName, "E2A_TEST_DATABASE_URL="+dbURL)
+}
+
+// workspaceSuffix is the per-CHECKOUT half of the isolation. Per-package alone
+// let two agents (or two worktrees, or a second terminal) running the same
+// package share a database and corrupt each other, which is how an unmerged
+// branch's migration ended up producing ~40 spurious failures in a run.
+func TestWorkspaceSuffixIsStablePerPathAndDistinctAcrossPaths(t *testing.T) {
+	const a = "/Users/dev/Desktop/e2a"
+	const b = "/Users/dev/.agents/worktrees/e2a/feature-x"
+
+	if got, again := workspaceSuffix(a), workspaceSuffix(a); got != again {
+		t.Errorf("same path must derive the same suffix: %q vs %q", got, again)
+	}
+	if workspaceSuffix(a) == workspaceSuffix(b) {
+		t.Errorf("different checkouts must derive different suffixes; both gave %q", workspaceSuffix(a))
+	}
+	// Trailing separators and redundant elements name the same checkout.
+	if workspaceSuffix(a) != workspaceSuffix(a+"/") {
+		t.Errorf("path must be cleaned before hashing: %q vs %q", workspaceSuffix(a), workspaceSuffix(a+"/"))
+	}
+	if got := workspaceSuffix(a); !strings.HasPrefix(got, "_ws") || len(got) != len("_ws")+8 {
+		t.Errorf("suffix = %q, want _ws + 8 hex chars", got)
+	}
+	// Unresolvable root degrades to per-package-only rather than failing.
+	if got := workspaceSuffix(""); got != "" {
+		t.Errorf("empty root should yield no workspace component, got %q", got)
+	}
+}
+
+// The derived name must carry BOTH components, so a database is unique to
+// (checkout, package) rather than to package alone.
+func TestTestDBURLIsUniquePerWorkspaceAndPackage(t *testing.T) {
+	// Pin BOTH inputs. Reading the ambient environment made this test fail for
+	// reasons that were nothing to do with the code: E2A_TEST_DB_SHARED=1 (a
+	// documented escape hatch) suppresses derivation entirely, and a long custom
+	// base — which this PR newly makes possible through make — blew the length
+	// assertion below. A test that fails because of how the developer configured
+	// their machine is the same defect as a test with a wall-clock budget.
+	t.Setenv("E2A_TEST_DB_SHARED", "")
+	t.Setenv("E2A_TEST_DATABASE_URL", "postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable")
+
+	u, err := url.Parse(TestDBURL())
+	if err != nil {
+		t.Fatalf("parse TestDBURL: %v", err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if !strings.Contains(name, "_ws") {
+		t.Errorf("dbname = %q, want a _ws<hash> workspace component", name)
+	}
+	if !strings.HasSuffix(name, "_pkg_testutil") {
+		t.Errorf("dbname = %q, want the _pkg_testutil suffix retained", name)
+	}
+	if ws := workspaceSuffix(moduleRootDir()); ws == "" || !strings.Contains(name, ws) {
+		t.Errorf("dbname = %q, want it to contain this checkout's suffix %q", name, ws)
+	}
+	// With the base pinned above this is a real assertion about the derivation's
+	// size, not about the machine it runs on.
+	if len(name) > maxPostgresIdentifier {
+		t.Errorf("dbname %q is %d bytes, over Postgres's %d-byte identifier limit",
+			name, len(name), maxPostgresIdentifier)
+	}
+}
+
+// A base too long to derive from must FAIL, not silently truncate. Postgres cuts
+// identifiers at 63 bytes from the end — inside the package component — so
+// internal/identity and internal/idempotency would collapse onto ..._pkg_ide and
+// truncate each other's tables: precisely the corruption this derivation prevents.
+// Reachable now that the Makefile honors an exported base, where naming it after a
+// branch is the obvious first thing someone tries.
+func TestTestDBURLPanicsRatherThanLetPostgresTruncate(t *testing.T) {
+	t.Setenv("E2A_TEST_DB_SHARED", "")
+	t.Setenv("E2A_TEST_DATABASE_URL",
+		"postgres://e2a:e2a@localhost:5433/"+strings.Repeat("b", 60)+"?sslmode=disable")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("an over-long derived name must panic, not silently truncate into a collision")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "63") || !strings.Contains(msg, "E2A_TEST_DATABASE_URL") {
+			t.Errorf("panic should name the limit and the fix, got: %q", msg)
+		}
+	}()
+
+	_ = TestDBURL()
 }
 
 func TestTestDBURLDerivesPerPackageDatabase(t *testing.T) {

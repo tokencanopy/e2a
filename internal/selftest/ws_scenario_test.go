@@ -25,20 +25,41 @@ import (
 // and DELETE …/messages/{id} (recorded into deleted, so tests can pin the
 // scenario's residue cleanup against the actual response shape).
 type wsStubState struct {
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	deleted  []string
-	sawClose bool
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	deleted   []string
+	closeSeen chan struct{} // closed once the stub reads a normal-closure frame
+	closeOnce sync.Once
 }
 
-// sawCloseFrame reports whether the stub read a normal-closure frame from the
-// client. This is the DETERMINISTIC signal that the close handshake completed:
-// conn.Close blocks until the peer answers (or its 5s timeout expires), so if
-// this is false by the time the scenario returns, the handshake did not happen.
-func (st *wsStubState) sawCloseFrame() bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.sawClose
+// noteCloseFrame records that the stub read the client's normal-closure frame.
+// Safe to call more than once.
+func (st *wsStubState) noteCloseFrame() {
+	st.closeOnce.Do(func() { close(st.closeSeen) })
+}
+
+// awaitCloseFrame reports whether the stub read a normal-closure frame from the
+// client, waiting up to d for the stub's read goroutine to record it.
+//
+// The wait is NOT a wall-clock budget on the handshake — it is the missing
+// happens-before edge. The library echoes the close frame from inside
+// handleControl BEFORE the error propagates out of the stub's c.Read, so
+// conn.Close can return (and the scenario with it) while the stub goroutine
+// has not yet been scheduled to record what it saw. Measured margin on an idle
+// machine is ~6µs, so any deschedule longer than that flipped this assertion —
+// which is exactly what a loaded, coverage-instrumented CI runner does.
+//
+// The contract this pins is unchanged: if the handshake genuinely does not
+// complete, the frame is never read, closeSeen is never closed, and this
+// returns false. A non-reading stub also makes conn.Close burn its full 5s
+// timeout first, so d is only ever paid on an already-failing test.
+func (st *wsStubState) awaitCloseFrame(d time.Duration) bool {
+	select {
+	case <-st.closeSeen:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 func (st *wsStubState) deletedIDs() []string {
@@ -49,7 +70,7 @@ func (st *wsStubState) deletedIDs() []string {
 
 func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 	t.Helper()
-	st := &wsStubState{}
+	st := &wsStubState{closeSeen: make(chan struct{})}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -84,9 +105,7 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 				for {
 					if _, _, err := c.Read(context.Background()); err != nil {
 						if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-							st.mu.Lock()
-							st.sawClose = true
-							st.mu.Unlock()
+							st.noteCloseFrame()
 						}
 						return
 					}
@@ -150,9 +169,10 @@ func TestScenarioWebSocketRoundTrip(t *testing.T) {
 	// Close-handshake contract. conn.Close waits for the peer's close frame and
 	// gives up after 5s, so a stub that does not read makes EVERY invocation of
 	// this scenario cost 5s of pure waiting. Asserting the stub observed the
-	// frame pins that deterministically — without a wall-clock budget, which is
-	// the flake pattern this suite already got bitten by.
-	if !st.sawCloseFrame() {
+	// frame pins that — without a wall-clock budget, which is the flake pattern
+	// this suite already got bitten by. See awaitCloseFrame for why the wait is
+	// a happens-before edge rather than a timing budget.
+	if !st.awaitCloseFrame(2 * time.Second) {
 		t.Error("stub never observed the client's close frame: the close handshake " +
 			"did not complete, so conn.Close burned the library's full 5s timeout")
 	}

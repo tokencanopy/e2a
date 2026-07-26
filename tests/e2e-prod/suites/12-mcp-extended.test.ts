@@ -23,6 +23,9 @@ afterEach(async () => {
 
 after(async () => {
   await mcp.stop();
+  // The loopback fixture must survive the afterEach cleanup between the two
+  // tests that share it, so register it for deletion only at suite teardown.
+  if (messageFixtureAgentEmail) track("agent", messageFixtureAgentEmail);
   const r = await cleanup(apiClient);
   if (r.failed.length) warn(SUITE, "cleanup", `failed ${r.failed.length}`, r.failed);
   writeReport(`./reports/12-mcp-extended.json`);
@@ -45,28 +48,49 @@ interface MessageFixture {
   id: string;
   subject: string;
 }
+let messageFixtureAgentEmail: string | undefined;
 let messageFixturePromise: Promise<MessageFixture> | undefined;
 function messageFixture(): Promise<MessageFixture> {
   messageFixturePromise ??= (async () => {
-    const pinnedAgent = apiClient.env.primaryAgentEmail;
+    // Do not depend on the persistent conformance agent's mutable protection
+    // posture. A previous or interrupted test run may legitimately leave it
+    // review-gated, which would turn this send into a pending draft and make
+    // the loopback poll time out. A fresh agent starts with the open defaults.
+    const slug = uniqueSlug("mcpe-loopback");
+    const created = await apiClient.post<{ email: string }>("/v1/agents", {
+      body: {
+        email: `${slug}@${apiClient.env.sharedDomain}`,
+        name: "mcp extended loopback fixture",
+      },
+      expect: 201,
+    });
+    const fixtureAgent = created.body?.email;
+    if (!fixtureAgent) {
+      throw new Error(`loopback fixture agent did not return an email: ${created.raw.slice(0, 200)}`);
+    }
+    messageFixtureAgentEmail = fixtureAgent;
+
     const subject = uniqueSubject("mcp-ext get-msg fixture");
-    const send = await apiClient.post<{ message_id: string }>(
-      `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
-      { body: { to: [pinnedAgent], subject, text: "12-mcp-extended self-send fixture" }, expect: [200, 202] },
+    const send = await apiClient.post<{ message_id: string; status: string }>(
+      `/v1/agents/${encodeURIComponent(fixtureAgent)}/messages`,
+      { body: { to: [fixtureAgent], subject, text: "12-mcp-extended self-send fixture" }, expect: [200, 202] },
     );
     if (!send.body?.message_id) {
       throw new Error(`self-send fixture did not return a message_id: ${send.raw.slice(0, 200)}`);
     }
+    if (send.body.status === "pending_review") {
+      throw new Error(`fresh loopback fixture agent unexpectedly held message ${send.body.message_id} for review`);
+    }
     for (let i = 0; i < 12; i++) {
       const poll = await apiClient.get<{ items: Array<{ id: string; subject: string }> }>(
-        `/v1/agents/${encodeURIComponent(pinnedAgent)}/messages`,
+        `/v1/agents/${encodeURIComponent(fixtureAgent)}/messages`,
         { query: { direction: "inbound", read_status: "all", limit: 20 } },
       );
       const m = poll.body?.items?.find((x) => x.subject === subject);
       if (m) return { id: m.id, subject };
       await sleep(1500);
     }
-    throw new Error(`self-send fixture "${subject}" never appeared for ${pinnedAgent}`);
+    throw new Error(`self-send fixture "${subject}" never appeared for ${fixtureAgent}`);
   })();
   return messageFixturePromise;
 }

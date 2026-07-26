@@ -133,7 +133,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
 | `domain_not_registered` | 400 | Create-agent on a domain the account has not registered. |
-| `domain_has_agents` | 400 | Domain delete blocked while agents exist on it. |
+| `domain_has_agents` | 400 | Domain delete blocked while agents exist on it — **including agents in the trash**, which keep their addresses for the 30-day restore window and do not appear in `list_agents`. The message names which kind is blocking and how many; purge trashed ones with `?confirm=DELETE&permanent=true`. |
 | `domain_not_verified` | 400 / 403 | Domain verification pending — 400 on create-agent, 403 on send paths. |
 | `inbound_mx_missing` | 400 | Inherited subdomain agent creation requires an exact or wildcard MX routing to e2a. |
 | **Capacity — see the 402/429 split above** | | |

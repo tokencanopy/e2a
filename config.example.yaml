@@ -70,6 +70,22 @@ oidc:
   user_id_claim: ""       # TokenCanopy uses "e2a_user_id". Override: E2A_OIDC_USER_ID_CLAIM
   # Enable with: E2A_OIDC_ENABLED=true
 
+# — Internal user provisioning ———————————————————————————————————————————————
+# Optional, off by default, internal-only (not part of the public /v1 API or
+# the OpenAPI spec). When enabled, an external control plane can create e2a
+# users idempotently via POST /api/internal/users/provision — keyed by its
+# own external_ref — ahead of each user's first sign-in. Requests are
+# authenticated by a shared HMAC over the request body
+# (X-E2A-Internal-Signature), signed with the provisioning secret. The
+# secret is env-only (E2A_PROVISIONING_SECRET), is deliberately separate
+# from limits.internal_api_secret so each can be rotated independently, and
+# must be set to the same value on both ends. Leave disabled for self-host —
+# the endpoint 503s.
+provisioning:
+  enabled: false
+  # Enable with: E2A_PROVISIONING_ENABLED=true
+  # Secret (env only, generate with `openssl rand -hex 32`): E2A_PROVISIONING_SECRET
+
 signing:
   # Generate with: openssl rand -hex 32
   # Production refuses to start with this placeholder or with anything < 32 bytes.

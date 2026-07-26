@@ -384,9 +384,14 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		DeleteDomain:      func(ctx context.Context, domain, userID string) error { return nil },
-		HasAgentsOnDomain: func(ctx context.Context, domain, userID string) (bool, error) { return domain == "busy.com", nil },
-		SMTPDomain:        "mx.e2a.dev",
+		DeleteDomain: func(ctx context.Context, domain, userID string) error { return nil },
+		CountAgentsOnDomain: func(ctx context.Context, domain, userID string) (int, int, error) {
+			if domain == "busy.com" {
+				return 1, 0, nil
+			}
+			return 0, 0, nil
+		},
+		SMTPDomain: "mx.e2a.dev",
 		GetLimits: func(ctx context.Context, userID string) (limits.Limits, error) {
 			return limits.Limits{PlanCode: "pro", MaxAgents: 10, MaxDomains: 5, MaxMessagesMonth: 1000, MaxStorageBytes: 1 << 30, UpgradeURL: "https://e2a.dev/upgrade"}, nil
 		},
