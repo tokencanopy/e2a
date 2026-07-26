@@ -54,3 +54,14 @@ if (bySeverity.warn.length > 0) {
 }
 console.log("=== INFO (highlights) ===");
 for (const f of bySeverity.info) console.log(`  [${f.suite}] ${f.test}: ${f.message}`);
+
+// Gate: any recorded FAIL finding fails the run. Suites deliberately record
+// several findings and keep going (fail() must not throw mid-test), so the
+// exit-code decision lives here at consolidation — the documented design is
+// "the gate MUST read the JSON". Without this, every fail() in every suite is
+// decorative: a pipeline that runs the suites and never consolidates (or
+// consolidates but ignores the exit code) reports green over real failures.
+if (bySeverity.fail.length > 0) {
+  console.error(`\nconsolidate: ${bySeverity.fail.length} FAIL finding(s) recorded — failing the run.`);
+  process.exit(1);
+}

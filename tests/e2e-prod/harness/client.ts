@@ -1,5 +1,6 @@
 import { loadEnv, type ProdEnv } from "./env.ts";
 import { recordRequest } from "./coverage.ts";
+import { recordTarget } from "./target.ts";
 
 export interface RawResponse<T = unknown> {
   status: number;
@@ -42,6 +43,11 @@ export class ApiClient {
     this.env = env ?? loadEnv();
     this.limiter = new RateLimiter(rpsOverride ?? this.env.rateLimitRps);
     this.baseUrl = baseUrlOverride ?? this.env.apiUrl;
+    // Record which deployment this process's requests actually target — the
+    // event/operation coverage gates read this to decide whether the
+    // production-only allowlist entries are required or merely allowlisted.
+    // See target.ts for why this must be derived here, not from a flag.
+    recordTarget(this.env.apiUrl);
   }
 
   async request<T = unknown>(method: string, path: string, opts: RequestOpts = {}): Promise<RawResponse<T>> {

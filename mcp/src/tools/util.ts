@@ -139,6 +139,22 @@ export const paginationInput = {
     .describe("Max items in this page (1–100). Defaults to a server-chosen page size (100)."),
 } as const;
 
+// emailSelector is the ONE agent-selector field for every tool that acts on a
+// single agent's mailbox. The credential's scope decides whether it may be
+// omitted: an agent-scoped credential IS one agent, so the field defaults to
+// that bound agent; an account-scoped credential owns many agents and has no
+// default, so the field is REQUIRED at runtime even though the schema marks it
+// optional (the schema cannot know the credential's scope). Share this field —
+// and its wording — everywhere the selector appears so agents learn one rule,
+// not ten. Description-only contract: do NOT change the optionality; making it
+// schema-required would break agent-scoped callers that correctly omit it.
+export const emailSelector = z
+  .string()
+  .optional()
+  .describe(
+    "Owning agent's inbox (full email address). REQUIRED when the credential is account-scoped — an account-scoped credential owns many agents and has no bound agent to default to, so omitting `email` fails the call. Defaults to the bound agent for agent-scoped credentials (omit it there).",
+  );
+
 // CodedError: a wrapper-thrown error that carries a stable machine `code`
 // from the SERVER'S canonical vocabulary (e.g. "not_found") instead of the
 // blanket `invalid_request` that plain wrapper Errors map to. Use it when the

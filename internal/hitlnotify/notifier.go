@@ -160,7 +160,7 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 	}
 
 	log.Printf("[hitl-notify] sent approval email: msg=%s owner=%s agent=%s",
-		msg.ID, owner.Email, agent.ID)
+		msg.ID, owner.ID, agent.ID)
 	return nil
 }
 

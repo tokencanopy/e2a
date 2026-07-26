@@ -240,7 +240,7 @@ test("messaging: reply to bogus message ID returns 404", async () => {
   assert.ok(r.status === 404 || (r.status >= 400 && r.status < 500), `expected 4xx (404), got ${r.status}: ${r.raw.slice(0, 200)}`);
 });
 
-test("messaging: reply with empty body returns 400", async () => {
+test("messaging: reply with empty body is rejected as invalid_request", async () => {
   // /reply requires the target message be inbound and belong to the
   // agent in the path. The previous version fell back to any message
   // including outbound, which routinely 404'd before the 400-missing-
@@ -269,7 +269,21 @@ test("messaging: reply with empty body returns 400", async () => {
     info(SUITE, "reply-empty-404-on-listed-msg", `inbound list returned ${candidate.message_id} but /reply 404'd — possible listing/storage skew`);
     return;
   }
-  assert.equal(r.status, 400, `expected 400 (empty body) on owned inbound message, got ${r.status}: ${r.raw.slice(0, 200)}`);
+  // The v1 contract treats 400 and 422 as the SAME outcome for input validation:
+  // "invalid_request is the single canonical code for input-validation failures
+  // whether they arrive as 400 (malformed) or 422 (semantically invalid)"
+  // (api/openapi.yaml, ErrorEnvelope.code). A missing required `text` is
+  // semantically invalid, so the server answers 422 — contract-compliant. The
+  // old exact-400 assertion encoded one of two permitted statuses and so
+  // recorded a permanent failure, invisible until findings started gating the
+  // run. Assert the contract (a validation rejection carrying invalid_request),
+  // not one particular status code.
+  assert.ok(
+    r.status === 400 || r.status === 422,
+    `expected a validation rejection (400 or 422) on owned inbound message, got ${r.status}: ${r.raw.slice(0, 200)}`,
+  );
+  const code = (JSON.parse(r.raw) as { error?: { code?: string } })?.error?.code;
+  assert.equal(code, "invalid_request", `expected canonical validation code invalid_request, got "${code}"`);
 });
 
 test("messaging: /messages search filters — surface what's supported", async () => {

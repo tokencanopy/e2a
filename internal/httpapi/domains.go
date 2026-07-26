@@ -546,12 +546,12 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	}
 	// Confirm is enforced declaratively by Huma (required + enum:[DELETE] on
 	// DeleteConfirm): a missing/wrong ?confirm is a 422 before this handler.
-	hasAgents, err := s.deps.HasAgentsOnDomain(ctx, in.Domain, user.ID)
+	live, trashed, err := s.deps.CountAgentsOnDomain(ctx, in.Domain, user.ID)
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to check domain agents")
 	}
-	if hasAgents {
-		return nil, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
+	if live > 0 || trashed > 0 {
+		return nil, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
 	}
 	if err := s.deps.DeleteDomain(ctx, in.Domain, user.ID); err != nil {
 		switch {
@@ -564,4 +564,29 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 		}
 	}
 	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain}}, nil
+}
+
+// domainHasAgentsMessage explains WHICH agents are blocking a domain delete.
+//
+// Both live and trashed agents block it — the FK is ON DELETE NO ACTION and a
+// trashed agent is still a row that owns its address for the 30-day restore
+// window. But the two need different remedies, and a trashed agent does not
+// appear in list_agents, so a generic "agents exist" sends the caller hunting
+// for agents they cannot see. Naming the count, the state, and the escape turns
+// a dead end into a signpost.
+func domainHasAgentsMessage(live, trashed int) string {
+	switch {
+	case live > 0 && trashed > 0:
+		return fmt.Sprintf(
+			"cannot delete domain: %d live and %d trashed agent(s) still on it. Delete the live ones, then purge the trashed ones (DELETE /v1/agents/{email}?confirm=DELETE&permanent=true) — a trashed agent keeps its address for the 30-day restore window, so it still blocks the domain.",
+			live, trashed)
+	case live > 0:
+		return fmt.Sprintf(
+			"cannot delete domain: %d agent(s) still on it. Delete them first, then delete the domain.",
+			live)
+	default:
+		return fmt.Sprintf(
+			"cannot delete domain: no live agents, but %d agent(s) on it are in the TRASH and still hold their addresses for the 30-day restore window. They will not appear in list_agents — list them with the deleted filter. To proceed, permanently delete them (DELETE /v1/agents/{email}?confirm=DELETE&permanent=true), then delete the domain.",
+			trashed)
+	}
 }
