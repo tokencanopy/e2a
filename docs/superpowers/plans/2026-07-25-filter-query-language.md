@@ -917,7 +917,7 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `Node` tree (Task 2), `Error`/`ErrValidate` (Task 1).
-- Produces: `FieldSpec{Name string, Ops []string, Coerce func(raw string, quoted bool) (any, error), Emit func(c *Comparison, e *EmitCtx) (string, error)}`; `Registry` with `NewRegistry(specs ...FieldSpec) (*Registry, error)`, `Names() []string`, `Validate(n Node) error`; `EmitCtx` with `PH(arg any) string`; toy registry helper `toyRegistry(t *testing.T) *Registry` (fields: `name` text `:`/`=`/`!=`, `price` int all comparators, `active` bool `=`/`!=`, `tags` text[] `:`).
+- Produces: `FieldSpec{Name string, Ops []string, Coerce func(raw string, quoted bool) (any, error), Emit func(c *Comparison, e *EmitCtx) (string, error)}`; `Registry` with `NewRegistry(specs ...FieldSpec) (*Registry, error)`, `Names() []string`, `Validate(n Node) error`; the one-method `Dialect` interface (`Placeholder(n int) string`) required by `EmitCtx`; `EmitCtx` with `PH(arg any) string`; toy registry helper `toyRegistry(t *testing.T) *Registry` (fields: `name` text `:`/`=`/`!=`, `price` int all comparators, `active` bool `=`/`!=`, `tags` text[] `:`). Task 4 supplies `PostgresDialect`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1008,10 +1008,10 @@ func toyRegistry(t *testing.T) *Registry {
 	return reg
 }
 
-func validateToErr(reg *Registry, q string) error {
+func validateToErr(t *testing.T, reg *Registry, q string) error {
+	t.Helper()
 	n, err := parse(q)
 	if err != nil {
-		t := &testing.T{}
 		t.Fatalf("parse(%q): %v", q, err)
 	}
 	return reg.Validate(n)
@@ -1019,7 +1019,7 @@ func validateToErr(reg *Registry, q string) error {
 
 func TestValidateUnknownField(t *testing.T) {
 	reg := toyRegistry(t)
-	err := validateToErr(reg, `color:red`)
+	err := validateToErr(t, reg, `color:red`)
 	fe, ok := err.(*Error)
 	if !ok || fe.Kind != ErrValidate {
 		t.Fatalf("err = %v (%T)", err, err)
@@ -1031,7 +1031,7 @@ func TestValidateUnknownField(t *testing.T) {
 
 func TestValidateBareTermRejected(t *testing.T) {
 	reg := toyRegistry(t)
-	err := validateToErr(reg, `hello`)
+	err := validateToErr(t, reg, `hello`)
 	fe, _ := err.(*Error)
 	if fe == nil || !strings.Contains(fe.Msg, "bare term") {
 		t.Errorf("err = %v, want bare-term rejection", err)
@@ -1040,7 +1040,7 @@ func TestValidateBareTermRejected(t *testing.T) {
 
 func TestValidateOperatorNotAllowed(t *testing.T) {
 	reg := toyRegistry(t)
-	err := validateToErr(reg, `tags=new`)
+	err := validateToErr(t, reg, `tags=new`)
 	fe, _ := err.(*Error)
 	if fe == nil || !strings.Contains(fe.Msg, `operator "=" is not allowed on field "tags"`) {
 		t.Errorf("err = %v", err)
@@ -1049,13 +1049,13 @@ func TestValidateOperatorNotAllowed(t *testing.T) {
 
 func TestValidateCoercion(t *testing.T) {
 	reg := toyRegistry(t)
-	if err := validateToErr(reg, `price:notanumber`); err == nil {
+	if err := validateToErr(t, reg, `price:notanumber`); err == nil {
 		t.Error("want coercion error — wait, ':' is not allowed on price either; still an error")
 	}
-	if err := validateToErr(reg, `price=abc`); err == nil {
+	if err := validateToErr(t, reg, `price=abc`); err == nil {
 		t.Error("want integer coercion error")
 	}
-	if err := validateToErr(reg, `active=maybe`); err == nil {
+	if err := validateToErr(t, reg, `active=maybe`); err == nil {
 		t.Error("want bool coercion error")
 	}
 	n, err := parse(`price>=42`)
@@ -1073,10 +1073,10 @@ func TestValidateCoercion(t *testing.T) {
 
 func TestValidateRecurses(t *testing.T) {
 	reg := toyRegistry(t)
-	if err := validateToErr(reg, `name:ok AND (price>1 OR bogus:field)`); err == nil {
+	if err := validateToErr(t, reg, `name:ok AND (price>1 OR bogus:field)`); err == nil {
 		t.Error("want unknown-field error from inside the tree")
 	}
-	if err := validateToErr(reg, `name:ok AND (price>1 OR NOT tags:sale)`); err != nil {
+	if err := validateToErr(t, reg, `name:ok AND (price>1 OR NOT tags:sale)`); err != nil {
 		t.Errorf("valid expression rejected: %v", err)
 	}
 }
@@ -1085,11 +1085,37 @@ func TestNewRegistryRejectsBadSpecs(t *testing.T) {
 	if _, err := NewRegistry(FieldSpec{Name: "x"}); err == nil {
 		t.Error("missing Coerce/Emit: want error")
 	}
+	if _, err := NewRegistry(FieldSpec{
+		Name: "x", Coerce: func(s string, q bool) (any, error) { return s, nil },
+		Emit: func(c *Comparison, e *EmitCtx) (string, error) { return "1=1", nil },
+	}); err == nil {
+		t.Error("missing Ops: want error")
+	}
 	mk := func() FieldSpec {
 		return FieldSpec{Name: "x", Ops: []string{":"}, Coerce: func(s string, q bool) (any, error) { return s, nil }, Emit: func(c *Comparison, e *EmitCtx) (string, error) { return "1=1", nil }}
 	}
 	if _, err := NewRegistry(mk(), mk()); err == nil {
 		t.Error("duplicate field: want error")
+	}
+}
+
+func TestNewRegistryCopiesOps(t *testing.T) {
+	ops := []string{":"}
+	reg, err := NewRegistry(FieldSpec{
+		Name: "x", Ops: ops,
+		Coerce: func(s string, q bool) (any, error) { return s, nil },
+		Emit: func(c *Comparison, e *EmitCtx) (string, error) { return "1=1", nil },
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	ops[0] = "="
+	n, err := parse(`x:value`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := reg.Validate(n); err != nil {
+		t.Errorf("caller mutation changed registry operators: %v", err)
 	}
 }
 ```
@@ -1111,6 +1137,12 @@ import (
 	"sort"
 	"strings"
 )
+
+// Dialect abstracts SQL placeholder style. Task 4 adds the built-in
+// Postgres adapter; defining the interface here keeps EmitCtx compilable.
+type Dialect interface {
+	Placeholder(n int) string
+}
 
 // FieldSpec describes one filterable field: which operators it accepts, how
 // raw values coerce, and how a validated comparison emits SQL.
@@ -1150,12 +1182,13 @@ type Registry struct {
 func NewRegistry(specs ...FieldSpec) (*Registry, error) {
 	r := &Registry{fields: make(map[string]FieldSpec, len(specs))}
 	for _, s := range specs {
-		if s.Name == "" || s.Coerce == nil || s.Emit == nil {
-			return nil, fmt.Errorf("filterquery: FieldSpec %q needs Name, Coerce and Emit", s.Name)
+		if s.Name == "" || len(s.Ops) == 0 || s.Coerce == nil || s.Emit == nil {
+			return nil, fmt.Errorf("filterquery: FieldSpec %q needs Name, Ops, Coerce and Emit", s.Name)
 		}
 		if _, dup := r.fields[s.Name]; dup {
 			return nil, fmt.Errorf("filterquery: duplicate field %q", s.Name)
 		}
+		s.Ops = append([]string(nil), s.Ops...)
 		r.fields[s.Name] = s
 	}
 	return r, nil
@@ -1235,7 +1268,7 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 ---
 
-### Task 4: Dialect + emitter + public API
+### Task 4: Postgres dialect + emitter + public API
 
 **Files:**
 - Create: `internal/filterquery/emit.go`
@@ -1243,7 +1276,7 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `Registry`, `FieldSpec.Emit`, `EmitCtx` (Task 3); `parse` (Task 2).
-- Produces: `Dialect` interface (`Placeholder(n int) string`), `PostgresDialect`; `Expr` type with `Parse(q string, reg *Registry) (*Expr, error)`, `(e *Expr) Emit(d Dialect, start int) (string, []any, error)`, `(e *Expr) Empty() bool`; `Compile(q string, reg *Registry, d Dialect, start int) (string, []any, error)` convenience. The HTTP handler (Task 12) and store closure (Task 11) consume `Expr.Emit`.
+- Produces: `PostgresDialect` implementing Task 3's `Dialect`; `Expr` type with `Parse(q string, reg *Registry) (*Expr, error)`, `(e *Expr) Emit(d Dialect, start int) (string, []any, error)`, `(e *Expr) Empty() bool`; `Compile(q string, reg *Registry, d Dialect, start int) (string, []any, error)` convenience. The HTTP handler (Task 12) and store closure (Task 11) consume `Expr.Emit`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1386,13 +1419,6 @@ import (
 	"fmt"
 	"strings"
 )
-
-// Dialect abstracts SQL placeholder style. Postgres is built in; a Spanner
-// (@pN) or MySQL (?) dialect is a one-method implementation later.
-type Dialect interface {
-	// Placeholder returns the bind placeholder for the 1-based parameter n.
-	Placeholder(n int) string
-}
 
 // PostgresDialect uses $n placeholders.
 type PostgresDialect struct{}
