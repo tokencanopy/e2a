@@ -385,8 +385,29 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 	if total == 0 {
 		return 0, 0, ErrImportBatchNotFound
 	}
+	// Contacts this account has actually corresponded with are RETAINED, not
+	// deleted. Reversing an upload is an undo for a mistaken import, not a
+	// licence to destroy a record someone has since built history on — and
+	// because the reversal is addressed by batch id, the caller cannot tell
+	// which rows those are. The counts in the receipt are how they find out.
+	//
+	// History is checked against messages rather than any engagement table so
+	// this holds regardless of whether outreach state exists: a contact is
+	// "corresponded with" if the account has sent to that address or received
+	// from it.
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM contacts WHERE user_id = $1 AND import_batch_id = $2`,
+		`DELETE FROM contacts c
+		  WHERE c.user_id = $1
+		    AND c.import_batch_id = $2
+		    AND NOT EXISTS (
+		          SELECT 1
+		            FROM messages m
+		            JOIN agent_identities a ON a.id = m.agent_id AND a.user_id = c.user_id
+		           WHERE lower(m.sender) = c.address
+		              OR EXISTS (
+		                   SELECT 1 FROM unnest(m.to_recipients) AS r
+		                    WHERE lower(r) = c.address)
+		    )`,
 		userID, batchID)
 	if err != nil {
 		return 0, 0, err

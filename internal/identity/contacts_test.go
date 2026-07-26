@@ -460,3 +460,57 @@ func TestImportMergeOmittedMetadataIsPreserved(t *testing.T) {
 		t.Errorf("metadata = %#v — an explicit object must REPLACE, not merge key-by-key", got.Metadata)
 	}
 }
+
+// TestDeleteImportBatchRetainsContactsWithHistory pins the safety rule that
+// makes an import reversal an undo rather than a destructive operation.
+//
+// The reversal is addressed by batch id, so the caller cannot see which rows
+// it would remove. If it deleted indiscriminately, undoing a months-old import
+// would silently destroy contacts the account has since corresponded with —
+// and the receipt would report success. The design named this rule and the
+// response has always carried contacts_retained; the condition itself was
+// missing, so retained was always zero.
+func TestDeleteImportBatchRetainsContactsWithHistory(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "retain")
+
+	if _, err := store.ClaimOrCreateDomain(ctx, "retain.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@retain.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "retain.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	const contacted = "contacted@retain.vc"
+	const untouched = "untouched@retain.vc"
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_retain", []identity.ContactImportRow{
+		{Address: contacted}, {Address: untouched},
+	}, true); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	// Correspond with exactly one of them.
+	if _, err := store.CreateOutboundMessage(ctx, agent, []string{contacted}, nil, nil,
+		"Intro", "send", "smtp", "", "conv-retain", []byte("raw")); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	deleted, retained, err := store.DeleteImportBatch(ctx, user.ID, "imp_retain")
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if deleted != 1 || retained != 1 {
+		t.Errorf("reversal deleted=%d retained=%d, want 1 and 1 — a contact with "+
+			"message history was destroyed by an undo", deleted, retained)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, contacted); err != nil {
+		t.Errorf("a contact this account has corresponded with was deleted by the reversal: %v", err)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, untouched); !errors.Is(err, identity.ErrContactNotFound) {
+		t.Errorf("an untouched imported contact survived the reversal: %v", err)
+	}
+}
