@@ -24,6 +24,12 @@ func TestAuthorizeErrorResponseWriterOmitsEmptyIssuer(t *testing.T) {
 	if location.Query().Has("iss") {
 		t.Errorf("empty issuer must be omitted; Location=%q", location.String())
 	}
+	if got := location.Query().Get("error"); got != "invalid_scope" {
+		t.Errorf("error = %q, want invalid_scope; Location=%q", got, location.String())
+	}
+	if got := location.String(); got != "https://client.example/callback?error=invalid_scope" {
+		t.Errorf("Location = %q, want original redirect preserved", got)
+	}
 }
 
 func TestQueryModeAuthorizeRequesterPreservesLanguage(t *testing.T) {

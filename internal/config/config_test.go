@@ -208,6 +208,44 @@ signing:
 	}
 }
 
+func TestValidateAPIURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		apiURL  string
+		wantErr bool
+	}{
+		{name: "empty disables issuer-dependent features", apiURL: ""},
+		{name: "https origin", apiURL: "https://api.e2a.dev"},
+		{name: "http loopback development", apiURL: "http://localhost:8080"},
+		{name: "issuer path", apiURL: "https://example.com/e2a"},
+		{name: "relative", apiURL: "/", wantErr: true},
+		{name: "dangerous scheme", apiURL: "javascript:alert(1)", wantErr: true},
+		{name: "userinfo", apiURL: "https://user@example.com", wantErr: true},
+		{name: "query", apiURL: "https://api.e2a.dev?tenant=one", wantErr: true},
+		{name: "fragment", apiURL: "https://api.e2a.dev#issuer", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				HTTP:  HTTPConfig{APIURL: tc.apiURL},
+				Trash: TrashConfig{RetentionDays: 1},
+			}
+			err := cfg.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Validate() accepted invalid http.api_url %q", tc.apiURL)
+				}
+				if !strings.Contains(err.Error(), "http.api_url") {
+					t.Errorf("error = %q, want http.api_url context", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("Validate() rejected http.api_url %q: %v", tc.apiURL, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigOIDCDefaultsDisabled(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
