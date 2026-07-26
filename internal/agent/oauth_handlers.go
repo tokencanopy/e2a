@@ -1054,6 +1054,17 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// queryModeAuthorizeRequester makes error responses follow the only response
+// mode this server advertises. fosite otherwise uses a requested but unsupported
+// fragment or form_post mode while reporting an earlier validation error.
+type queryModeAuthorizeRequester struct {
+	fosite.AuthorizeRequester
+}
+
+func (queryModeAuthorizeRequester) GetResponseMode() fosite.ResponseModeType {
+	return fosite.ResponseModeQuery
+}
+
 // authorizeErrorResponseWriter decorates redirecting authorization errors
 // with the RFC 9207 issuer identifier. fosite v0.49.0 owns the validation,
 // status code, and error parameters but has no native RFC 9207 support, so we
@@ -1064,6 +1075,10 @@ type authorizeErrorResponseWriter struct {
 	http.ResponseWriter
 	issuer      string
 	wroteHeader bool
+}
+
+func (w *authorizeErrorResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (w *authorizeErrorResponseWriter) WriteHeader(statusCode int) {
@@ -1101,7 +1116,7 @@ func (a *API) writeAuthorizeError(ctx context.Context, w http.ResponseWriter, ar
 	a.oauthProvider.WriteAuthorizeError(ctx, &authorizeErrorResponseWriter{
 		ResponseWriter: w,
 		issuer:         strings.TrimRight(a.apiURL, "/"),
-	}, ar, err)
+	}, queryModeAuthorizeRequester{AuthorizeRequester: ar}, err)
 }
 
 // issueOAuthCode is the no-new-agent path. fosite mints the code via

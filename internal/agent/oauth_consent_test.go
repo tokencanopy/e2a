@@ -319,6 +319,45 @@ func TestHTTP_Authorize_InvalidScope_RedirectIncludesIssuer(t *testing.T) {
 	}
 }
 
+// TestHTTP_Authorize_ErrorUsesAdvertisedQueryMode verifies that an invalid
+// request cannot move the error parameters away from the server's sole
+// advertised response mode. In particular, fosite otherwise honors an
+// unsupported response_mode while writing an error, putting the error in a
+// fragment or an HTML form where RFC 9207's iss decorator cannot accompany it.
+func TestHTTP_Authorize_ErrorUsesAdvertisedQueryMode(t *testing.T) {
+	for _, responseMode := range []string{"fragment", "form_post"} {
+		t.Run(responseMode, func(t *testing.T) {
+			f := newConsentFixture(t)
+			_, challenge := newPKCE(t)
+			q := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+			q.Set("scope", "agent unknown")
+			q.Set("response_mode", responseMode)
+
+			resp := f.authorizeRequest(t, q, true)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+				t.Fatalf("status = %d, want 302/303 redirect-with-error", resp.StatusCode)
+			}
+			loc, err := url.Parse(resp.Header.Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loc.Fragment != "" {
+				t.Errorf("fragment = %q, want empty because only query mode is supported", loc.Fragment)
+			}
+			if got := loc.Query().Get("error"); got != "invalid_scope" {
+				t.Errorf("error = %q, want invalid_scope", got)
+			}
+			if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
+				t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
+			}
+			if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
+				t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
+			}
+		})
+	}
+}
+
 // ──────────────────────── /consent ────────────────────────
 
 // TestHTTP_Consent_Allow_CreateNew is the happy path: user picks
