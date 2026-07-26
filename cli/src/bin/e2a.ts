@@ -74,6 +74,7 @@ Usage:
         --direction <d>            inbound|outbound|all
         --since <ISO>              Messages created AT or after this timestamp
                                    (inclusive — dedup by message id when cursoring)
+        --q <expr>                 Boolean filter expression (see API filtering docs)
         --conversation <id>        Filter to one conversation (alias: --conversation-id)
         --read-status <s>          unread|read|all (default all — safe for poll loops)
         --limit <n>                Stop after n messages
@@ -470,13 +471,14 @@ async function main() {
       if (sub === "list") {
         checkFlags(rest, [
           "--direction", "--since", "--conversation", "--conversation-id",
-          "--read-status", "--limit", "--agent", "--json",
+          "--read-status", "--limit", "--agent", "--q", "--json",
         ]);
         getPositionals(rest, 0, "usage: e2a messages list [options]");
         await messagesList({
           agent: getFlagChecked(rest, "--agent"),
           direction: getFlagChecked(rest, "--direction"),
           since: getFlagChecked(rest, "--since"),
+          q: getFlagChecked(rest, "--q"),
           conversation: getConversationId(rest),
           readStatus: getFlagChecked(rest, "--read-status"),
           limit: getFlagChecked(rest, "--limit"),

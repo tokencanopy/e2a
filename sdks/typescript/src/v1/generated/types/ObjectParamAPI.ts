@@ -1454,6 +1454,13 @@ export interface MessagesApiListMessagesRequest {
      */
     labels?: Array<string>
     /**
+     * Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. \&#39;label:urgent OR (from:alerts AND NOT subject:newsletter) created&gt;&#x3D;2026-07-01\&#39;). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApilistMessages
+     */
+    q?: string
+    /**
      * RFC3339; created_at &gt;&#x3D; since.
      * Defaults to: undefined
      * @type string
@@ -1702,7 +1709,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessagesWithHttpInfo(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<HttpInfo<PageMessageSummaryView>> {
-        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
+        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.q, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
     }
 
     /**
@@ -1711,7 +1718,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessages(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<PageMessageSummaryView> {
-        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
+        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.q, param.since, param.until, param.cursor, param.limit, param.deleted,  options).toPromise();
     }
 
     /**

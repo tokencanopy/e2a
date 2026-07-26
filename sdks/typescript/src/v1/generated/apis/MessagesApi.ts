@@ -342,19 +342,21 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
      * @param subjectContains Case-insensitive substring match on subject.
      * @param conversationId 
      * @param labels Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
+     * @param q Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. \&#39;label:urgent OR (from:alerts AND NOT subject:newsletter) created&gt;&#x3D;2026-07-01\&#39;). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      * @param since RFC3339; created_at &gt;&#x3D; since.
      * @param until RFC3339; created_at &lt; until.
      * @param cursor 
      * @param limit 
      * @param deleted List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
      */
-    public async listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, _options?: Configuration): Promise<RequestContext> {
+    public async listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, labels?: Array<string>, q?: string, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'email' is not null or undefined
         if (email === null || email === undefined) {
             throw new RequiredError("MessagesApi", "listMessages", "email");
         }
+
 
 
 
@@ -410,6 +412,11 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
         // Query Params
         if (labels !== undefined) {
             requestContext.setQueryParam("labels", ObjectSerializer.serialize(labels, "Array<string>", ""));
+        }
+
+        // Query Params
+        if (q !== undefined) {
+            requestContext.setQueryParam("q", ObjectSerializer.serialize(q, "string", ""));
         }
 
         // Query Params

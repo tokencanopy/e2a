@@ -407,6 +407,14 @@ describe("E2AClient", () => {
     expect(url.searchParams.has("from_")).toBe(false);
   });
 
+  it("messages.list serializes q as the wire query", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+
+    await client.messages.list("bot@test.dev", { q: "label:urgent" }).page();
+
+    expect(new URL(lastCall().url).searchParams.get("q")).toBe("label:urgent");
+  });
+
   it("messages.list({ deleted: true }) lists the trash", async () => {
     globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
     await client.messages.list("bot@test.dev", { deleted: true }).toArray({ limit: 10 });

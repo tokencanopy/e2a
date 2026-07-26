@@ -103,6 +103,10 @@ describe("getFlag", () => {
     // --to should still work
     expect(getFlag(args, "--to")).toBe("a@b.com");
   });
+
+  it("extracts a messages list q expression verbatim", () => {
+    expect(getFlag(["--q", "label:urgent"], "--q")).toBe("label:urgent");
+  });
 });
 
 describe("getFlags", () => {
