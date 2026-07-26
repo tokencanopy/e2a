@@ -25,7 +25,7 @@ func (r *Registry) Emit(n Node, d Dialect, start int) (string, []any, error) {
 		return "", nil, &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: placeholder start must be at least 1"}
 	}
 	ctx := &EmitCtx{dialect: d, next: start}
-	frag, err := r.emitNode(n, ctx)
+	frag, err := r.emitNode(n, ctx, newTraversalState())
 	if err != nil {
 		return "", nil, err
 	}
@@ -45,18 +45,21 @@ func isNilDialect(d Dialect) bool {
 	}
 }
 
-func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
+func (r *Registry) emitNode(n Node, ctx *EmitCtx, state *traversalState) (string, error) {
+	leave, err := state.enter(n)
+	if err != nil {
+		return "", err
+	}
+	defer leave()
+
 	switch t := n.(type) {
 	case *And:
-		if t == nil {
-			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *And"}
-		}
 		if len(t.Terms) == 0 {
 			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: cannot emit empty AND"}
 		}
 		parts := make([]string, len(t.Terms))
 		for i, x := range t.Terms {
-			s, err := r.emitNode(x, ctx)
+			s, err := r.emitNode(x, ctx, state)
 			if err != nil {
 				return "", err
 			}
@@ -64,15 +67,12 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 		}
 		return "(" + strings.Join(parts, " AND ") + ")", nil
 	case *Or:
-		if t == nil {
-			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Or"}
-		}
 		if len(t.Terms) == 0 {
 			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: cannot emit empty OR"}
 		}
 		parts := make([]string, len(t.Terms))
 		for i, x := range t.Terms {
-			s, err := r.emitNode(x, ctx)
+			s, err := r.emitNode(x, ctx, state)
 			if err != nil {
 				return "", err
 			}
@@ -80,23 +80,17 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 		}
 		return "(" + strings.Join(parts, " OR ") + ")", nil
 	case *Not:
-		if t == nil {
-			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Not"}
-		}
-		s, err := r.emitNode(t.X, ctx)
+		s, err := r.emitNode(t.X, ctx, state)
 		if err != nil {
 			return "", err
 		}
 		return "(NOT " + s + ")", nil
 	case *Comparison:
-		if t == nil {
-			return "", &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: cannot emit nil *Comparison"}
-		}
 		if t.validatedBy != r {
 			return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: comparison was not validated by this registry"}
 		}
 		copy := *t
-		if err := r.Validate(&copy); err != nil {
+		if err := r.validateComparison(&copy); err != nil {
 			return "", err
 		}
 		spec, ok := r.fields[copy.Field]
@@ -108,6 +102,8 @@ func (r *Registry) emitNode(n Node, ctx *EmitCtx) (string, error) {
 			return "", err
 		}
 		return "(" + leaf + ")", nil
+	case *Bare:
+		return "", &Error{Kind: ErrValidate, Pos: t.At, Msg: "filterquery: cannot emit bare term"}
 	default:
 		return "", &Error{Kind: ErrValidate, Pos: -1, Msg: fmt.Sprintf("filterquery: cannot emit node type %T", n)}
 	}
