@@ -865,7 +865,7 @@ func (a *API) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// fosite writes the right response shape (redirect-with-error
 		// when the URI was verified, direct error otherwise).
-		a.oauthProvider.WriteAuthorizeError(ctx, w, ar, err)
+		a.writeAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
@@ -951,7 +951,7 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	authReq.URL.RawQuery = r.PostForm.Encode()
 	ar, err := a.oauthProvider.NewAuthorizeRequest(ctx, authReq)
 	if err != nil {
-		a.oauthProvider.WriteAuthorizeError(ctx, w, ar, err)
+		a.writeAuthorizeError(ctx, w, ar, err)
 		return
 	}
 
@@ -964,9 +964,9 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	action := r.PostFormValue("action")
 	if action == "deny" {
 		// RFC 6749 §4.1.2.1: redirect back with error=access_denied.
-		// fosite's WriteAuthorizeError emits the redirect for us when
-		// the error is shaped right.
-		a.oauthProvider.WriteAuthorizeError(ctx, w, ar,
+		// writeAuthorizeError delegates the error shape to fosite and
+		// adds the RFC 9207 issuer when fosite emits a redirect.
+		a.writeAuthorizeError(ctx, w, ar,
 			fosite.ErrAccessDenied.WithHint("user denied consent"))
 		return
 	}
@@ -987,7 +987,7 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	switch scopeChoice {
 	case identity.ScopeAccount:
 		if !accountEligibleRedirect(ar.GetRedirectURI().String()) {
-			a.oauthProvider.WriteAuthorizeError(ctx, w, ar,
+			a.writeAuthorizeError(ctx, w, ar,
 				fosite.ErrInvalidScope.WithHint(
 					"account scope may only be granted to a client with a loopback or https redirect_uri"))
 			return
@@ -997,7 +997,7 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 		// exactly like an e2a_acct_ key; any agent_choice is ignored.
 		if err := a.issueOAuthCode(ctx, w, r, ar, user.ID, "", identity.ScopeAccount); err != nil {
 			log.Printf("[oauth] /consent issue (account) failed: request_id=%s err=%v", reqID, err)
-			a.oauthProvider.WriteAuthorizeError(ctx, w, ar, err)
+			a.writeAuthorizeError(ctx, w, ar, err)
 		}
 		return
 	case identity.ScopeAgent:
@@ -1027,7 +1027,7 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 		// issue path with the resolved email on the session.
 		if err := a.issueOAuthCode(ctx, w, r, ar, user.ID, email, identity.ScopeAgent); err != nil {
 			log.Printf("[oauth] /consent issue (existing agent) failed: request_id=%s err=%v", reqID, err)
-			a.oauthProvider.WriteAuthorizeError(ctx, w, ar, err)
+			a.writeAuthorizeError(ctx, w, ar, err)
 		}
 
 	case agentChoice == "create_new":
@@ -1046,12 +1046,62 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 		agentEmail := slug + "@" + a.sharedDomain
 		if err := a.issueOAuthCodeWithNewAgent(ctx, w, r, ar, user.ID, agentEmail, identity.ScopeAgent); err != nil {
 			log.Printf("[oauth] /consent issue (new agent) failed: request_id=%s err=%v", reqID, err)
-			a.oauthProvider.WriteAuthorizeError(ctx, w, ar, err)
+			a.writeAuthorizeError(ctx, w, ar, err)
 		}
 
 	default:
 		http.Error(w, "agent_choice must be 'existing:<email>' or 'create_new'", http.StatusBadRequest)
 	}
+}
+
+// authorizeErrorResponseWriter decorates redirecting authorization errors
+// with the RFC 9207 issuer identifier. fosite v0.49.0 owns the validation,
+// status code, and error parameters but has no native RFC 9207 support, so we
+// amend only a Location header it has already decided is safe to emit. Direct
+// error responses (for example, an unknown client or untrusted redirect_uri)
+// have no Location and pass through unchanged.
+type authorizeErrorResponseWriter struct {
+	http.ResponseWriter
+	issuer      string
+	wroteHeader bool
+}
+
+func (w *authorizeErrorResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.appendIssuer()
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *authorizeErrorResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *authorizeErrorResponseWriter) appendIssuer() {
+	location := w.Header().Get("Location")
+	if location == "" {
+		return
+	}
+	redirect, err := url.Parse(location)
+	if err != nil {
+		return
+	}
+	q := redirect.Query()
+	q.Set("iss", w.issuer)
+	redirect.RawQuery = q.Encode()
+	w.Header().Set("Location", redirect.String())
+}
+
+func (a *API) writeAuthorizeError(ctx context.Context, w http.ResponseWriter, ar fosite.AuthorizeRequester, err error) {
+	a.oauthProvider.WriteAuthorizeError(ctx, &authorizeErrorResponseWriter{
+		ResponseWriter: w,
+		issuer:         strings.TrimRight(a.apiURL, "/"),
+	}, ar, err)
 }
 
 // issueOAuthCode is the no-new-agent path. fosite mints the code via

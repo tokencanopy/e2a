@@ -284,6 +284,39 @@ func TestHTTP_Authorize_InvalidClient(t *testing.T) {
 			t.Errorf("unknown client should NOT redirect to consent; Location=%q", loc)
 		}
 	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("unknown client must not redirect to an untrusted redirect_uri; Location=%q", loc)
+	}
+}
+
+// TestHTTP_Authorize_InvalidScope_RedirectIncludesIssuer covers an authorize
+// error after fosite has verified the client and redirect_uri. RFC 9207
+// requires the redirect to identify the authorization server just like a
+// successful code response does.
+func TestHTTP_Authorize_InvalidScope_RedirectIncludesIssuer(t *testing.T) {
+	f := newConsentFixture(t)
+	_, challenge := newPKCE(t)
+	q := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	q.Set("scope", "agent unknown")
+
+	resp := f.authorizeRequest(t, q, true)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 302/303 redirect-with-error", resp.StatusCode)
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loc.Query().Get("error"); got != "invalid_scope" {
+		t.Errorf("error = %q, want invalid_scope", got)
+	}
+	if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
+		t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
+	}
+	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
+		t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
+	}
 }
 
 // ──────────────────────── /consent ────────────────────────
@@ -401,8 +434,8 @@ func TestHTTP_Consent_Deny(t *testing.T) {
 
 	resp := f.consentPOST(t, form)
 	defer resp.Body.Close()
-	// fosite's WriteAuthorizeError emits 302 for redirect-uri-bound
-	// errors.
+	// Redirect-uri-bound authorization errors remain 302/303 after the
+	// RFC 9207 issuer is added.
 	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 302/303 redirect-with-error", resp.StatusCode)
 	}
@@ -415,6 +448,12 @@ func TestHTTP_Consent_Deny(t *testing.T) {
 	}
 	if got := loc.Query().Get("error"); got != "access_denied" {
 		t.Errorf("error = %q, want access_denied", got)
+	}
+	if got := loc.Query().Get("state"); got != "s1s1s1s1s1s1s1s1" {
+		t.Errorf("state = %q, want s1s1s1s1s1s1s1s1", got)
+	}
+	if got := loc.Query().Get("iss"); got != "https://test.e2a.dev" {
+		t.Errorf("RFC 9207 iss = %q, want https://test.e2a.dev", got)
 	}
 }
 
