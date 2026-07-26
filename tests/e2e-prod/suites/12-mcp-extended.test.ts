@@ -45,6 +45,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // keeps mail volume down against the free-plan monthly cap instead of
 // self-sending twice.
 interface MessageFixture {
+  agentEmail: string;
   id: string;
   subject: string;
 }
@@ -87,7 +88,7 @@ function messageFixture(): Promise<MessageFixture> {
         { query: { direction: "inbound", read_status: "all", limit: 20 } },
       );
       const m = poll.body?.items?.find((x) => x.subject === subject);
-      if (m) return { id: m.id, subject };
+      if (m) return { agentEmail: fixtureAgent, id: m.id, subject };
       await sleep(1500);
     }
     throw new Error(`self-send fixture "${subject}" never appeared for ${fixtureAgent}`);
@@ -252,11 +253,11 @@ test("mcp-ext: get_message returns shape and only own messages", async () => {
   // (a prior version of this test silently `return`ed when it was empty,
   // which let the suite report all-green while never actually exercising
   // get_message's happy path), we produce a real fixture via self-send.
-  const { id } = await messageFixture();
+  const { agentEmail, id } = await messageFixture();
   // The conformance credential here is account-scoped (no agent_email to
   // pin — see the 08-mcp "whoami" test), so get_message needs an explicit
   // `email` to resolve which agent's mailbox to read from.
-  const r = await callTool(mcp, "get_message", { message_id: id, email: apiClient.env.primaryAgentEmail });
+  const r = await callTool(mcp, "get_message", { message_id: id, email: agentEmail });
   if (r.isError) {
     fail(SUITE, "get-msg-error", `get_message isError for our own ${id}: ${extractText(r).slice(0, 200)}`);
     return;
@@ -276,12 +277,12 @@ test("mcp-ext: reply_to_message happy path replies to a real message", async () 
     info(SUITE, "reply-tool-absent", "no reply_to_message tool — skipping");
     return;
   }
-  const { id } = await messageFixture();
+  const { agentEmail, id } = await messageFixture();
   // Same account-scoped-credential caveat as get_message above.
   const r = await callTool(mcp, "reply_to_message", {
     message_id: id,
     text: "reply from 12-mcp-extended happy path",
-    email: apiClient.env.primaryAgentEmail,
+    email: agentEmail,
   });
   assert.equal(r.isError, undefined, `reply_to_message isError: ${extractText(r).slice(0, 200)}`);
   const parsed = JSON.parse(extractText(r)) as { message_id?: string; status?: string };
