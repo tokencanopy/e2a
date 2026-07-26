@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -61,11 +62,16 @@ type oidcFixture struct {
 	tokenStatus       int
 	tokenCalls        int
 	expectedChallenge string
+	redirectURL       string
 }
 
 func setupOIDC(t *testing.T) *oidcFixture {
 	t.Helper()
+	return setupOIDCForApp(t, testOIDCRedirectURL, "http://app.example.com")
+}
 
+func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
+	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
@@ -81,13 +87,12 @@ func setupOIDC(t *testing.T) *oidcFixture {
 		includeIDToken:   true,
 		includeUserID:    true,
 		userIDClaimValue: "",
+		redirectURL:      redirectURL,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", fx.handleDiscovery)
-	mux.HandleFunc("/authorize", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "authorization is exercised as a redirect only", http.StatusNotImplemented)
-	})
+	mux.HandleFunc("/authorize", fx.handleAuthorize)
 	mux.HandleFunc("/token", fx.handleToken)
 	mux.HandleFunc("/jwks", fx.handleJWKS)
 	fx.server = httptest.NewServer(mux)
@@ -99,10 +104,10 @@ func setupOIDC(t *testing.T) *oidcFixture {
 		IssuerURL:    fx.server.URL,
 		ClientID:     testOIDCClientID,
 		ClientSecret: testOIDCClientSecret,
-		RedirectURL:  testOIDCRedirectURL,
+		RedirectURL:  redirectURL,
 		UserIDClaim:  testOIDCUserIDClaim,
 	}
-	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, "http://app.example.com",
+	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, baseURL,
 		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff))
 	if err != nil {
 		t.Fatalf("NewOIDCAuth: %v", err)
@@ -116,6 +121,29 @@ func setupOIDC(t *testing.T) *oidcFixture {
 	// synchronous completion.
 	waitOIDCReady(t, fx.oidc)
 	return fx
+}
+
+func (fx *oidcFixture) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("client_id") != testOIDCClientID ||
+		query.Get("response_type") != "code" ||
+		query.Get("redirect_uri") != fx.redirectURL {
+		http.Error(w, "invalid authorization request", http.StatusBadRequest)
+		return
+	}
+
+	callbackURL, err := url.Parse(query.Get("redirect_uri"))
+	if err != nil {
+		http.Error(w, "invalid redirect URI", http.StatusBadRequest)
+		return
+	}
+	fx.expectedChallenge = query.Get("code_challenge")
+	fx.tokenNonce = query.Get("nonce")
+	callbackQuery := callbackURL.Query()
+	callbackQuery.Set("code", "valid-code")
+	callbackQuery.Set("state", query.Get("state"))
+	callbackURL.RawQuery = callbackQuery.Encode()
+	http.Redirect(w, r, callbackURL.String(), http.StatusFound)
 }
 
 // waitOIDCReady bound-polls oa until background issuer discovery has
@@ -925,6 +953,76 @@ func TestOIDCCallbackHonorsReturnTo(t *testing.T) {
 	}
 	if cookie := findCookie(w.Result().Cookies(), "e2a_oidc_resume"); cookie == nil || cookie.MaxAge >= 0 {
 		t.Error("resume cookie was not deleted after callback")
+	}
+}
+
+func TestOIDCLocalServerCompletesReturnToRoundTrip(t *testing.T) {
+	var oidcAuth *auth.OIDCAuth
+	appMux := http.NewServeMux()
+	appMux.HandleFunc("/api/auth/oidc/login", func(w http.ResponseWriter, r *http.Request) {
+		oidcAuth.HandleLogin(w, r)
+	})
+	appMux.HandleFunc("/api/auth/oidc/callback", func(w http.ResponseWriter, r *http.Request) {
+		oidcAuth.HandleCallback(w, r)
+	})
+	appMux.HandleFunc("/oauth2/authorize", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(r.URL.Query().Get("state")))
+	})
+	appServer := httptest.NewServer(appMux)
+	t.Cleanup(appServer.Close)
+
+	fx := setupOIDCForApp(
+		t,
+		appServer.URL+"/api/auth/oidc/callback",
+		appServer.URL,
+	)
+	oidcAuth = fx.oidc
+	user, err := fx.store.CreateOrGetUser(
+		context.Background(),
+		"local-roundtrip@example.com",
+		"Local Round Trip",
+		"google-sub-local-roundtrip",
+	)
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	fx.userID = user.ID
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+	returnTo := "/oauth2/authorize?client_id=mcp_local&state=roundtrip-state"
+	response, err := client.Get(
+		appServer.URL +
+			"/api/auth/oidc/login?return_to=" +
+			url.QueryEscape(returnTo),
+	)
+	if err != nil {
+		t.Fatalf("complete OIDC redirect chain: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("final status = %d, want 200", response.StatusCode)
+	}
+	if got, want := response.Request.URL.String(), appServer.URL+returnTo; got != want {
+		t.Fatalf("final URL = %q, want %q", got, want)
+	}
+	if fx.tokenCalls != 1 {
+		t.Fatalf("token endpoint calls = %d, want 1", fx.tokenCalls)
+	}
+	var sessionFound bool
+	for _, cookie := range jar.Cookies(response.Request.URL) {
+		if cookie.Name == auth.SessionCookieName && cookie.Value != "" {
+			sessionFound = true
+			break
+		}
+	}
+	if !sessionFound {
+		t.Fatal("OIDC round trip did not leave an authenticated e2a session")
 	}
 }
 
