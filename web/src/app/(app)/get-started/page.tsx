@@ -56,7 +56,8 @@ export default function GetStartedPage() {
   // effect below translates them to the equivalent ?step value via
   // router.replace (no extra history entry).
   const stepParam = searchParams.get("step");
-  const step: Step = isStep(stepParam) ? stepParam : "choose";
+  const routeStep: Step = isStep(stepParam) ? stepParam : "choose";
+  const [step, setStep] = useState<Step>(routeStep);
   const initialMode = searchParams.get("mode") === "shared" ? "shared" : null;
   const initialDomain = searchParams.get("domain");
 
@@ -66,6 +67,14 @@ export default function GetStartedPage() {
   const [domainData, setDomainData] = useState<DomainInfo | null>(null);
   const [error, setError] = useState("");
   const [bootstrapping, setBootstrapping] = useState(true);
+
+  // Route state remains canonical for deep links and browser navigation, but
+  // forward interactions update locally first. Same-page router transitions
+  // can lag briefly; deriving the rendered step only from useSearchParams made
+  // a selected option appear inert until the URL commit completed.
+  useEffect(() => {
+    setStep(routeStep);
+  }, [routeStep]);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,16 +93,19 @@ export default function GetStartedPage() {
           if (!matchedDomain) {
             setDomainData(null);
             setAddressType(null);
+            setStep("choose");
             router.replace("/get-started");
             setError(`Domain ${initialDomain} not found in your account`);
           } else {
             setDomainData(matchedDomain);
+            setStep("custom_checklist");
             router.replace("/get-started?step=custom_checklist");
           }
         } catch (err) {
           if (cancelled) return;
           setDomainData(null);
           setAddressType(null);
+          setStep("choose");
           router.replace("/get-started");
           setError(
             err instanceof Error
@@ -111,6 +123,7 @@ export default function GetStartedPage() {
         // Replace the legacy ?mode=shared with the canonical ?step= so
         // back from shared_form lands on the choose step rather than
         // bouncing back to ?mode=shared again.
+        setStep("shared_form");
         router.replace("/get-started?step=shared_form");
         setBootstrapping(false);
         return;
@@ -136,6 +149,7 @@ export default function GetStartedPage() {
   // again and the same fallback fires in a loop.
   useEffect(() => {
     if (step === "success" && !agent && !bootstrapping) {
+      setStep("choose");
       router.replace("/get-started");
     }
   }, [step, agent, bootstrapping, router]);
@@ -146,13 +160,16 @@ export default function GetStartedPage() {
     setMethod(m);
     setError("");
     track("setup_method_selected", { method: m });
-    router.push(`/get-started?step=${m === "agent" ? "agent_mcp" : "address"}`);
+    const nextStep = m === "agent" ? "agent_mcp" : "address";
+    setStep(nextStep);
+    router.push(`/get-started?step=${nextStep}`);
   };
 
   const handleAddressChoice = (type: AddressType) => {
     setAddressType(type);
     setError("");
     track("address_type_selected", { type });
+    setStep(type === "shared" ? "shared_form" : "custom_checklist");
     router.push(
       `/get-started?step=${type === "shared" ? "shared_form" : "custom_checklist"}`,
     );
@@ -228,6 +245,7 @@ export default function GetStartedPage() {
           onBack={handleBackToChoose}
           onCreated={(agentData) => {
             setAgent(agentData);
+            setStep("success");
             router.push("/get-started?step=success");
           }}
         />
@@ -239,6 +257,7 @@ export default function GetStartedPage() {
           onBack={handleBackToChoose}
           onComplete={(agentData) => {
             setAgent(agentData);
+            setStep("success");
             router.push("/get-started?step=success");
           }}
         />
