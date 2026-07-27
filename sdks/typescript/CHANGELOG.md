@@ -80,14 +80,14 @@ in this release, so read those three sections together when upgrading from 4.x.
   Generated types: `EventJSON` → `EventView`, `PageEventJSON` →
   `PageEventView`, `Suppression` → `SuppressionView`, `PageSuppression` →
   `PageSuppressionView`; the duplicate `Result` collapsed into the existing
-  `AuthVerdict`, and the duplicate `AttachmentMeta` collapsed into the
+  `Authentication`, and the duplicate `AttachmentMeta` collapsed into the
   canonical `AttachmentMetaView` (one attachment-metadata shape for REST
   responses, stable event payloads, and the account export — the hand-written
   webhook payload interface in `webhook-signature.ts` follows the same
   rename). The wire JSON is unchanged — field names, optionality, and values
   are identical; only the exported type names changed. Migrate:
   `EventJSON` → `EventView`, `Suppression` → `SuppressionView`,
-  `Result` → `AuthVerdict`, `AttachmentMeta` → `AttachmentMetaView`.
+  `Result` → `Authentication`, `AttachmentMeta` → `AttachmentMetaView`.
 
 - **The reserved-word wire field `from` is exposed as `from_` where a sender is
   still projected** (was the private-looking `_from`, an OpenAPI Generator

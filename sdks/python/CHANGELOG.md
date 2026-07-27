@@ -84,14 +84,14 @@ in this release, so read those three sections together when upgrading from 4.x.
   ``event_json`` → ``event_view``), ``PageEventJSON`` → ``PageEventView``,
   ``Suppression`` → ``SuppressionView``, ``PageSuppression`` →
   ``PageSuppressionView``; the duplicate ``Result`` collapsed into the
-  existing ``AuthVerdict``, and the duplicate ``AttachmentMeta`` collapsed
+  existing ``Authentication``, and the duplicate ``AttachmentMeta`` collapsed
   into the canonical ``AttachmentMetaView`` (one attachment-metadata shape for
   REST responses, stable event payloads, and the account export — the
   hand-written webhook payload TypedDict in ``webhook_signature.py`` follows
   the same rename). The wire JSON is unchanged — field names, optionality, and
   values are identical; only the exported type names changed. Migrate:
   ``EventJSON`` → ``EventView``, ``Suppression`` → ``SuppressionView``,
-  ``Result`` → ``AuthVerdict``, ``AttachmentMeta`` → ``AttachmentMetaView``.
+  ``Result`` → ``Authentication``, ``AttachmentMeta`` → ``AttachmentMetaView``.
 
 - **The reserved-word wire field `from` is exposed as `from_` (PEP 8 trailing
   underscore) where a sender is still projected** (was the generator-mangled
