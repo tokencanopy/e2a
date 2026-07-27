@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import useSWR, { mutate } from "swr";
 import { listPendingMessages } from "../../components/onboarding/api";
@@ -25,7 +25,17 @@ import { PendingRow } from "./_components/PendingRow";
 function PendingContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const selectedId = searchParams.get("id") ?? "";
+  const routeSelectedId = searchParams.get("id") ?? "";
+  const [selectedId, setSelectedId] = useState(routeSelectedId);
+
+  // Keep deep links and browser navigation in sync, while letting row clicks
+  // update the accordion immediately. A same-page router.replace can lag
+  // briefly after resolving a hold; deriving expansion only from
+  // useSearchParams made the next row appear inert until that transition
+  // committed (or the page was refreshed).
+  useEffect(() => {
+    setSelectedId(routeSelectedId);
+  }, [routeSelectedId]);
 
   // Shared SWR key with the Sidebar's usePendingCount so the queue and
   // the badge share one fetch + cache entry.
@@ -45,8 +55,10 @@ function PendingContent() {
   const handleToggle = useCallback(
     (id: string) => {
       if (id === selectedId) {
+        setSelectedId("");
         router.replace("/reviews", { scroll: false });
       } else {
+        setSelectedId(id);
         router.replace(`/reviews?id=${encodeURIComponent(id)}`, {
           scroll: false,
         });
@@ -69,6 +81,7 @@ function PendingContent() {
       invalidateAgents(),
       invalidateAllAgentMessages(),
     ]);
+    setSelectedId("");
     router.replace("/reviews", { scroll: false });
     await mutate(pendingMessagesKey);
   }, [router, selectedId, messages]);
