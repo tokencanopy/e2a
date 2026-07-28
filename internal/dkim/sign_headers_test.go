@@ -80,10 +80,10 @@ func verifySigned(t *testing.T, signed []byte, domain, selector, publicKeyDNS st
 	return v
 }
 
-// The regression this package exists to prevent. Signing oversigned
-// Message-ID even though the composer omits it; SES then added the header
-// and every delivered message carried a permanently-broken signature.
-func TestSign_SurvivesDownstreamMessageIDInjection(t *testing.T) {
+// The regression this package exists to prevent. SES owns Message-ID and
+// Date on delivered mail: it adds Message-ID when the composer omits it and
+// replaces the supplied Date. Neither mutation may break our signature.
+func TestSign_SurvivesSESHeaderRewrites(t *testing.T) {
 	kp, err := GenerateKeypair()
 	if err != nil {
 		t.Fatalf("GenerateKeypair: %v", err)
@@ -94,15 +94,24 @@ func TestSign_SurvivesDownstreamMessageIDInjection(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	// SES prepends its own Message-ID to the message we handed it.
-	delivered := append([]byte(sesMessageIDHeader), signed...)
+	// SES replaces Date and prepends its own Message-ID.
+	delivered := bytes.Replace(
+		signed,
+		[]byte("Date: Fri, 22 May 2026 12:00:00 +0000"),
+		[]byte("Date: Fri, 22 May 2026 12:00:01 +0000"),
+		1,
+	)
+	if bytes.Equal(delivered, signed) {
+		t.Fatal("Date replacement target not found — test is inert")
+	}
+	delivered = append([]byte(sesMessageIDHeader), delivered...)
 
 	verifications := verifySigned(t, delivered, "example.com", kp.Selector, kp.PublicKeyDNS)
 	if len(verifications) != 1 {
 		t.Fatalf("expected 1 verification result, got %d", len(verifications))
 	}
 	if verifications[0].Err != nil {
-		t.Errorf("signature broke when a downstream MTA added Message-ID: %v", verifications[0].Err)
+		t.Errorf("signature broke after SES rewrote Message-ID/Date: %v", verifications[0].Err)
 	}
 }
 
@@ -123,7 +132,6 @@ func TestSign_AnyAbsentCandidateMayBeAddedDownstream(t *testing.T) {
 		"To":                    "alice@elsewhere.test",
 		"Cc":                    "bob@elsewhere.test",
 		"Subject":               "stamped subject",
-		"Date":                  "Sat, 23 May 2026 12:00:00 +0000",
 		"Message-ID":            "<ses@us-east-2.amazonses.com>",
 		"In-Reply-To":           "<parent@example.com>",
 		"References":            "<a@example.com> <b@example.com>",
@@ -205,7 +213,7 @@ func TestSign_TamperingWithASignedHeaderIsDetected(t *testing.T) {
 	}
 }
 
-func TestSign_OmitsAbsentHeadersFromH(t *testing.T) {
+func TestSign_CoversOnlyStablePresentHeaders(t *testing.T) {
 	kp, err := GenerateKeypair()
 	if err != nil {
 		t.Fatalf("GenerateKeypair: %v", err)
@@ -216,13 +224,13 @@ func TestSign_OmitsAbsentHeadersFromH(t *testing.T) {
 	}
 
 	h := signedHTag(t, signed)
-	for _, absent := range []string{"message-id", "in-reply-to", "references", "list-unsubscribe", "list-unsubscribe-post", "cc", "reply-to"} {
-		if hasHeader(h, absent) {
-			t.Errorf("h= covers %q, which the message does not carry: %v", absent, h)
+	for _, notSigned := range []string{"date", "message-id", "in-reply-to", "references", "list-unsubscribe", "list-unsubscribe-post", "cc", "reply-to"} {
+		if hasHeader(h, notSigned) {
+			t.Errorf("h= unexpectedly covers %q: %v", notSigned, h)
 		}
 	}
-	// The headers that ARE present must still be covered.
-	for _, want := range []string{"from", "to", "subject", "date", "mime-version", "content-type"} {
+	// Stable headers that are present must still be covered.
+	for _, want := range []string{"from", "to", "subject", "mime-version", "content-type"} {
 		if !hasHeader(h, want) {
 			t.Errorf("h= is missing present header %q: %v", want, h)
 		}
@@ -263,7 +271,7 @@ func TestSignedHeaderKeys(t *testing.T) {
 		{
 			name:    "composer shape drops absent headers",
 			message: composerShapedMessage,
-			want:    []string{"From", "To", "Subject", "Date", "MIME-Version", "Content-Type"},
+			want:    []string{"From", "To", "Subject", "MIME-Version", "Content-Type"},
 		},
 		{
 			name:    "unsubscribe headers covered when set",

@@ -86,16 +86,17 @@ func GenerateKeypair() (*Keypair, error) {
 	}, nil
 }
 
-// signedHeaderCandidates is the whitelist of headers worth covering when
-// they are present. Signing every header is brittle — receivers reject
-// messages whose intermediary MTAs rewrite or fold a covered header — so
-// the list stays narrow and keeps DMARC alignment intact while tolerating
-// typical send-via-SES rewrites.
+// signedHeaderCandidates is the whitelist of stable headers worth covering
+// when they are present. Signing every header is brittle — receivers reject
+// messages whose intermediary MTAs rewrite or fold a covered header — so the
+// list stays narrow and keeps DMARC alignment intact while tolerating typical
+// send-via-SES rewrites. Date is deliberately excluded because SES replaces
+// even a supplied value with its acceptance timestamp.
 //
 // Presence matters: see signedHeaderKeys for why a header on this list is
 // only signed when the message actually carries it.
 var signedHeaderCandidates = []string{
-	"From", "To", "Cc", "Subject", "Date",
+	"From", "To", "Cc", "Subject",
 	"Message-ID", "In-Reply-To", "References",
 	"MIME-Version", "Content-Type", "Reply-To",
 	"List-Unsubscribe", "List-Unsubscribe-Post",
