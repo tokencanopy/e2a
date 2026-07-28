@@ -48,10 +48,20 @@ export type WebhookDeliveryView = {
 };
 
 // `retrying` and `retry_due` are both IN FLIGHT — split so the UI can show a
-// countdown for the first and nothing for the second. `unknown` exists
-// because status is an open set (the redeliver endpoint documents a
-// `scheduled` value absent from the deliveries enum); it fails closed, never
-// collapsing an unrecognized status into success.
+// next-attempt time for the first and nothing for the second.
+//
+// Observed against a local instance: immediately after a failed attempt,
+// next_retry_at still equals created_at and therefore sits in the PAST, so a
+// normal failing-but-not-exhausted delivery classifies as retry_due. Treat
+// retry_due as the ordinary between-attempts state, not an anomaly — the
+// split exists so we never render a countdown we'd have to negate, not to
+// flag lateness. (Whether next_retry_at advances into the future once the
+// retry worker reschedules was not observable in that run; see the design
+// doc's open questions.)
+//
+// `unknown` exists because status is an open set (the redeliver endpoint
+// documents a `scheduled` value absent from the deliveries enum); it fails
+// closed, never collapsing an unrecognized status into success.
 export type DeliveryStateKind =
   | "delivered"
   | "failed"

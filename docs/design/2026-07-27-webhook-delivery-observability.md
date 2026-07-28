@@ -261,7 +261,7 @@ Phase 1 closes the incident-shaped hole using only endpoints that exist today.
 |---|---|
 | **Orphaned delivery** (event 30d+ old, `410 Gone`) | Normal state per C1. Render the delivery; disable the event link with "Event expired (30-day retention)". Never an error toast. |
 | **`no_match` event** | D4 — distinct state and label. |
-| **Pending with `next_retry_at` in the past** | Worker lag or clock skew. Render "retry due" rather than a negative countdown. Never compute a duration that can go negative. |
+| **Pending with `next_retry_at` in the past** | Render "retry due" rather than a negative countdown; never compute a duration that can go negative. **Corrected during implementation:** this was designed as an anomaly (worker lag / clock skew), but an over-the-wire run showed `next_retry_at` still equal to `created_at` immediately after a failed attempt — so it is the *ordinary* between-attempts state. The handling is unchanged; the framing was wrong. See open question 8. |
 | **Auto-disabled webhook** | Loud banner on detail, badge on list row. Explain *why* e2a disabled it and what re-enabling requires. |
 | **`last_error` is hostile** | Untrusted text (A2). Render as plain text — never `dangerouslySetInnerHTML` — truncate at a fixed length with expand-on-demand. |
 | **Deliveries exist, webhook deleted** | Delivery rows outlive the subscription. Detail page for a deleted webhook should 404 cleanly rather than render a half-page. |
@@ -351,3 +351,10 @@ worth seeing live at least once.
    painful in a UI.
 7. **Should the PR template gain a web-dashboard row?** Out of scope here, but
    it is the mechanism that caused this gap and will cause the next one.
+8. **Does `next_retry_at` ever advance into the future?** In a local run it
+   stayed equal to `created_at` through a failed attempt and had not moved
+   ~50s later (attempts stuck at 1 — the retry worker may not have been
+   running in that environment). If it never advances in production, the
+   `retrying` branch is effectively dead and every in-flight delivery reads
+   "retry due", which would be noisy at volume. Worth confirming against a
+   real failing endpoint before phase 2.
