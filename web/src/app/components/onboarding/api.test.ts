@@ -16,6 +16,8 @@ import {
   projectMessageDetail,
   projectPending,
   UNREAD_BADGE_CAP,
+  getWebhook,
+  listWebhookDeliveries,
   type MessageViewWire,
 } from "./api";
 
@@ -419,5 +421,73 @@ describe("getInboxUnread (Inboxes list badge probe)", () => {
       url.includes("/messages") ? okJson({ items: [], next_cursor: null }) : notFound(),
     );
     expect(await getInboxUnread("billing@acme.dev")).toEqual({ count: 0, more: false });
+  });
+});
+
+describe("getWebhook", () => {
+  it("fetches one webhook by id, percent-encoding the id", async () => {
+    mockFetch.mockImplementation(() =>
+      okJson({ id: "wh_1", url: "https://x.test/h", enabled: true, created_at: "2026-07-01T00:00:00Z" }),
+    );
+    const wh = await getWebhook("wh_1");
+    expect(mockFetch.mock.calls[0][0]).toBe("/v1/webhooks/wh_1");
+    expect(wh.id).toBe("wh_1");
+  });
+
+  // The detail page routes on a query param the user can edit, so a bad or
+  // deleted id must surface as a 404 the page can render cleanly rather than
+  // an unhandled throw.
+  it("throws ApiError with status 404 for an unknown id", async () => {
+    mockFetch.mockImplementation(() => notFound());
+    await expect(getWebhook("wh_missing")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("listWebhookDeliveries", () => {
+  it("requests the delivery log for the webhook with no filter by default", async () => {
+    mockFetch.mockImplementation(() => okJson({ items: [], next_cursor: null }));
+    await listWebhookDeliveries("wh_1");
+    expect(mockFetch.mock.calls[0][0]).toBe("/v1/webhooks/wh_1/deliveries");
+  });
+
+  it("forwards the status filter and cursor", async () => {
+    mockFetch.mockImplementation(() => okJson({ items: [], next_cursor: null }));
+    await listWebhookDeliveries("wh_1", { status: "failed", cursor: "abc", pageSize: 25 });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("status=failed");
+    expect(url).toContain("cursor=abc");
+    expect(url).toContain("limit=25");
+  });
+
+  it("normalizes a missing items array and next_cursor to empty values", async () => {
+    mockFetch.mockImplementation(() => okJson({}));
+    expect(await listWebhookDeliveries("wh_1")).toEqual({ items: [], next_cursor: null });
+  });
+
+  it("passes delivery rows through without dropping open-set fields", async () => {
+    mockFetch.mockImplementation(() =>
+      okJson({
+        items: [
+          {
+            id: "whd_1",
+            type: "some.future.event",
+            status: "scheduled",
+            attempts: 2,
+            next_retry_at: "2026-07-27T12:30:00Z",
+            created_at: "2026-07-27T12:00:00Z",
+            last_status_code: 503,
+            last_error: "upstream unavailable",
+          },
+        ],
+        next_cursor: "next",
+      }),
+    );
+    const page = await listWebhookDeliveries("wh_1");
+    expect(page.next_cursor).toBe("next");
+    expect(page.items[0]).toMatchObject({
+      type: "some.future.event",
+      status: "scheduled",
+      last_status_code: 503,
+    });
   });
 });

@@ -2,6 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { PageShell } from "../../components/loft/PageShell";
+import {
+  AgentPromptCard,
+  AGENT_PROMPTS,
+} from "../../components/AgentPromptCard";
+import Link from "next/link";
+import {
+  classifyWebhookHealth,
+  describeScope,
+  HEALTH_LABEL,
+  healthColor,
+  type WebhookView,
+} from "../../../lib/webhooks";
 
 // /webhooks owns the user's webhook lifecycle — create, reveal
 // the one-time signing secret, rotate it, delete. In the /v1 redesign
@@ -11,29 +23,20 @@ import { PageShell } from "../../components/loft/PageShell";
 
 // Inline-code chip used inline in the subtitle copy. Pulled out so
 // the two usages in the page header stay byte-identical.
+// Inline code inside running prose. Sized in `em` so the chip tracks the
+// paragraph's font size instead of jumping to a fixed 12px mid-sentence,
+// and given a tight line-height so the border box stays inside the 1.6
+// line box — otherwise the chip crowds the lines above and below it.
 const inlineCodeStyle: React.CSSProperties = {
   fontFamily: "var(--f-mono)",
-  fontSize: 12,
+  fontSize: "0.92em",
+  lineHeight: 1,
   padding: "1px 6px",
   background: "var(--bg-elev)",
   border: "1px solid var(--border-sub)",
   borderRadius: "var(--r-sm)",
   color: "var(--fg)",
-};
-
-// WebhookView (GET /v1/webhooks → { items: [...] }). GET never
-// returns `signing_secret` — it's only present on create / rotate
-// responses, which we surface once in the reveal banner.
-type WebhookView = {
-  id: string;
-  url: string;
-  description?: string;
-  events?: string[] | null;
-  enabled: boolean;
-  created_at: string;
-  last_delivered_at?: string;
-  signing_secret?: string;
-  previous_secret_expires_at?: string;
+  whiteSpace: "nowrap",
 };
 
 // The curated set of common event types shown in the create picker. The
@@ -157,18 +160,27 @@ export default function WebhooksPage() {
         <>
           <span style={{ display: "block" }}>
             <strong style={{ color: "var(--fg)" }}>For webhook delivery.</strong>{" "}
-            When your inbox receives mail via a webhook subscription, e2a
-            HMAC-signs every payload it POSTs to the endpoint with that
-            webhook&apos;s signing secret so your handler can confirm the
-            request really came from e2a.
+            When your inbox receives mail via a webhook subscription, e2a{" "}
+            {/* The hyphen in "HMAC-signs" is a valid break opportunity, so it
+                lands at end-of-line and reads as a hyphenation artifact.
+                nowrap keeps the compound intact. */}
+            <span style={{ whiteSpace: "nowrap" }}>HMAC-signs</span>{" "}
+            every payload it POSTs to the endpoint with that webhook&apos;s
+            signing secret so your handler can confirm the request really came
+            from e2a.
           </span>
           <span style={{ display: "block", marginTop: 10 }}>
             The signing secret is shown <strong style={{ color: "var(--fg)" }}>once</strong>{" "}
             when you create or rotate a webhook — copy it then. Pass it to{" "}
-            <code style={inlineCodeStyle}>constructEvent()</code> /{" "}
-            <code style={inlineCodeStyle}>construct_event()</code> in the
-            SDK to validate. Rotation keeps the previous secret valid for a
-            short overlap so you can swap it in without dropping deliveries.
+            {/* Keep the two chips and their separator on one line: split
+                across a line break they read as two unrelated fragments. */}
+            <span style={{ whiteSpace: "nowrap" }}>
+              <code style={inlineCodeStyle}>constructEvent()</code> /{" "}
+              <code style={inlineCodeStyle}>construct_event()</code>
+            </span>{" "}
+            in the SDK to validate. Rotation keeps the previous secret valid
+            for a short overlap so you can swap it in without dropping
+            deliveries.
           </span>
           <span
             style={{
@@ -190,6 +202,10 @@ export default function WebhooksPage() {
           onDismiss={() => setRevealed(null)}
         />
       )}
+
+      <div className="mb-10">
+        <AgentPromptCard {...AGENT_PROMPTS.webhooks} />
+      </div>
 
       {loading ? (
         <p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
@@ -471,6 +487,7 @@ function WebhooksTable({
           >
             <th className="px-4 py-2 font-semibold">URL</th>
             <th className="px-4 py-2 font-semibold">Events</th>
+            <th className="px-4 py-2 font-semibold">Scope</th>
             <th className="px-4 py-2 font-semibold">Status</th>
             <th className="px-4 py-2 font-semibold">Created</th>
             <th className="px-4 py-2"></th>
@@ -562,6 +579,8 @@ function WebhookRow({
   };
 
   const busy = deleting || rotating;
+  const scope = describeScope(webhook.filters);
+  const health = classifyWebhookHealth(webhook, new Date());
 
   return (
     <tr
@@ -569,22 +588,54 @@ function WebhookRow({
         borderTop: isFirstRow ? undefined : "1px solid var(--border-sub)",
       }}
     >
-      <td className="px-4 py-3 font-mono text-[12px] break-all" style={{ color: "var(--fg)" }}>
-        {webhook.url}
+      {/* The URL is the row's entry point into the per-endpoint view. Query
+          param, not a route segment — the dashboard is a static export with
+          no dynamic segments. */}
+      <td className="px-4 py-3 font-mono text-[12px] break-all">
+        <Link
+          href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
+          className="hover:underline"
+          style={{ color: "var(--fg)", textDecoration: "none" }}
+        >
+          {webhook.url}
+        </Link>
       </td>
       <td className="px-4 py-3 font-mono text-[11px]" style={{ color: "var(--fg-muted)" }}>
         {(webhook.events ?? []).length > 0
           ? (webhook.events ?? []).join(", ")
           : "all"}
       </td>
-      <td className="px-4 py-3 font-mono text-[12px]">
-        <span
-          style={{
-            color: webhook.enabled ? "var(--success)" : "var(--fg-subtle)",
-          }}
-        >
-          {webhook.enabled ? "enabled" : "disabled"}
+      {/* Scope. An unscoped subscription receives every agent's events, so it
+          is called out in warn tone rather than rendered as blank/"none" —
+          a silent empty cell reads as "nothing notable here", which is the
+          opposite of the truth. */}
+      <td className="px-4 py-3 font-mono text-[11px]">
+        {scope.scoped ? (
+          <span style={{ color: "var(--fg-muted)" }}>
+            {scope.parts.join(" · ")}
+          </span>
+        ) : (
+          <span
+            style={{ color: "var(--warn-strong)" }}
+            title="No filters set — this endpoint receives events for every agent on the account."
+          >
+            all agents
+          </span>
+        )}
+      </td>
+      {/* Status carries the health signal rather than just the enabled flag:
+          "enabled" alone is true of an endpoint that has silently never
+          delivered, or that e2a switched off. Derived from fields already on
+          this response — no per-row probe. */}
+      <td className="px-4 py-3 font-mono text-[11px]">
+        <span style={{ color: healthColor(health.kind) }}>
+          {HEALTH_LABEL[health.kind]}
         </span>
+        {health.lastDeliveredAt ? (
+          <span className="block" style={{ color: "var(--fg-subtle)" }}>
+            last {health.lastDeliveredAt.toLocaleDateString()}
+          </span>
+        ) : null}
       </td>
       <td
         className="px-4 py-3 font-mono text-[12px]"
@@ -633,7 +684,19 @@ function WebhookRow({
             </button>
           </span>
         ) : (
-          <span className="inline-flex gap-1">
+          <span className="inline-flex gap-1 items-center">
+            {/* The primary read action, signposted rather than hidden behind
+                the URL: a bare endpoint address doesn't read as a control. */}
+            <Link
+              href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
+              className="px-2 py-1 text-[11px] transition hover:underline whitespace-nowrap"
+              style={{
+                color: "var(--accent-strong)",
+                textDecoration: "none",
+              }}
+            >
+              Deliveries <span aria-hidden>→</span>
+            </Link>
             <button
               onClick={handleRotate}
               disabled={busy}
