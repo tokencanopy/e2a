@@ -74,7 +74,6 @@ describe("classifyWebhookHealth", () => {
 });
 
 describe("classifyDelivery", () => {
-  const NOW = new Date("2026-07-27T12:00:00Z");
   const base = {
     id: "whd_1",
     type: "email.received",
@@ -84,54 +83,49 @@ describe("classifyDelivery", () => {
   };
 
   it("classifies a delivered row", () => {
-    expect(classifyDelivery({ ...base, status: "delivered" }, NOW)).toEqual({
+    expect(classifyDelivery({ ...base, status: "delivered" })).toEqual({
       kind: "delivered",
       raw: "delivered",
     });
   });
 
   it("classifies a terminally failed row", () => {
-    expect(classifyDelivery({ ...base, status: "failed" }, NOW)).toEqual({
+    expect(classifyDelivery({ ...base, status: "failed" })).toEqual({
       kind: "failed",
       raw: "failed",
     });
   });
 
-  // A pending delivery with a future retry is IN FLIGHT, not broken. The
-  // retry envelope runs 72h, so this state is long-lived and must not read
-  // as failure or people escalate on a delivery that is still working.
-  it("classifies pending with a future retry as retrying", () => {
+  // River owns the retry schedule. next_retry_at is a legacy column that is
+  // not advanced by the River worker, so it must not be used to distinguish
+  // an ordinary retry from an overdue one.
+  it("classifies pending with a future legacy retry time as pending", () => {
     expect(
       classifyDelivery(
         { ...base, status: "pending", next_retry_at: "2026-07-27T12:30:00Z" },
-        NOW,
       ),
-    ).toEqual({ kind: "retrying", raw: "pending" });
+    ).toEqual({ kind: "pending", raw: "pending" });
   });
 
-  // Worker lag or clock skew puts next_retry_at in the past. Rendering a
-  // countdown here would produce a negative duration.
-  it("classifies pending with a past retry as retry_due", () => {
+  it("classifies pending with a stale legacy retry time as pending", () => {
     expect(
       classifyDelivery(
         { ...base, status: "pending", next_retry_at: "2026-07-27T11:30:00Z" },
-        NOW,
       ),
-    ).toEqual({ kind: "retry_due", raw: "pending" });
+    ).toEqual({ kind: "pending", raw: "pending" });
   });
 
-  it("classifies pending with an unparseable retry time as retry_due", () => {
+  it("classifies pending with an unparseable retry time as pending", () => {
     expect(
       classifyDelivery(
         { ...base, status: "pending", next_retry_at: "not-a-date" },
-        NOW,
       ),
-    ).toEqual({ kind: "retry_due", raw: "pending" });
+    ).toEqual({ kind: "pending", raw: "pending" });
   });
 
-  it("classifies pending with a missing retry time as retry_due", () => {
-    // next_retry_at is required by the schema, but the UI must not crash or
-    // fabricate a countdown if the server ever omits it.
+  it("classifies pending with a missing retry time as pending", () => {
+    // next_retry_at is required by the schema, but classification does not
+    // depend on it because it is not the active scheduler's source of truth.
     const noRetry = {
       id: base.id,
       type: base.type,
@@ -139,8 +133,8 @@ describe("classifyDelivery", () => {
       created_at: base.created_at,
       status: "pending",
     } as unknown as Parameters<typeof classifyDelivery>[0];
-    expect(classifyDelivery(noRetry, NOW)).toEqual({
-      kind: "retry_due",
+    expect(classifyDelivery(noRetry)).toEqual({
+      kind: "pending",
       raw: "pending",
     });
   });
@@ -150,14 +144,14 @@ describe("classifyDelivery", () => {
   // pending/delivered/failed. Forward-compat: whatever a future value is, it
   // must surface verbatim rather than being bucketed as success.
   it("classifies an unrecognized status as unknown, preserving the raw value", () => {
-    expect(classifyDelivery({ ...base, status: "deferred" }, NOW)).toEqual({
+    expect(classifyDelivery({ ...base, status: "deferred" })).toEqual({
       kind: "unknown",
       raw: "deferred",
     });
   });
 
   it("classifies an empty status as unknown", () => {
-    expect(classifyDelivery({ ...base, status: "" }, NOW)).toEqual({
+    expect(classifyDelivery({ ...base, status: "" })).toEqual({
       kind: "unknown",
       raw: "",
     });

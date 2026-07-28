@@ -202,10 +202,13 @@ The fan-out rollup renders compactly elsewhere: `3 matched · 2 delivered ·
 
 ### D5 — Retry state is visually distinct from failure
 
-A delivery with `status: "pending"` and a future `next_retry_at` is *in
-flight*, not broken. Render it as "Attempt 3 — next retry 14:32", visually
-distinct from terminal `failed`. Conflating them causes false escalation, and
-with a 72h retry envelope the in-flight window is long.
+A delivery with `status: "pending"` is *in flight*, not broken. River owns the
+authoritative retry schedule and does not advance the delivery row's legacy
+`next_retry_at` column between attempts, so the UI must not infer lateness or
+show a countdown from that field. Render a row with zero attempts as "pending"
+and one with prior attempts as "retrying", visually distinct from terminal
+`failed`. Conflating them causes false escalation, and with a 72h retry
+envelope the in-flight window is long.
 
 ### D6 — Redeliver states its own semantics
 
@@ -261,7 +264,7 @@ Phase 1 closes the incident-shaped hole using only endpoints that exist today.
 |---|---|
 | **Orphaned delivery** (event 30d+ old, `410 Gone`) | Normal state per C1. Render the delivery; disable the event link with "Event expired (30-day retention)". Never an error toast. |
 | **`no_match` event** | D4 — distinct state and label. |
-| **Pending with `next_retry_at` in the past** | Render "retry due" rather than a negative countdown; never compute a duration that can go negative. **Corrected during implementation:** this was designed as an anomaly (worker lag / clock skew), but an over-the-wire run showed `next_retry_at` still equal to `created_at` immediately after a failed attempt — so it is the *ordinary* between-attempts state. The handling is unchanged; the framing was wrong. See open question 8. |
+| **Pending with stale `next_retry_at`** | Ignore the legacy schedule field. River owns retry timing; render zero attempts as "pending" and prior attempts as "retrying", with no fabricated countdown or overdue state. |
 | **Auto-disabled webhook** | Loud banner on detail, badge on list row. Explain *why* e2a disabled it and what re-enabling requires. |
 | **`last_error` is hostile** | Untrusted text (A2). Render as plain text — never `dangerouslySetInnerHTML` — truncate at a fixed length with expand-on-demand. |
 | **Deliveries exist, webhook deleted** | Delivery rows outlive the subscription. Detail page for a deleted webhook should 404 cleanly rather than render a half-page. |
@@ -288,7 +291,7 @@ correctly rendered "nothing to report" while the underlying truth was
   or omitting. The existing `EVENT_TYPES` constant in the webhooks page is a
   *curated picker* list, not an exhaustive catalog — reusing it for display
   would silently drop unknown types.
-- **Deliberately narrow for v1:** the health window is a fixed 24h rather than
+- **Deliberately narrow for v1:** the health window is a fixed 7d rather than
   a user-selectable range; no charting library is introduced.
 - **Made easier later:** G1 + G2 are the joins any future cross-cutting view
   needs (per-agent event feeds, reconciliation UI, bulk replay). Landing them
@@ -303,15 +306,18 @@ correctly rendered "nothing to report" while the underlying truth was
    or open-set; parsing is where malformed and unknown values must be
    normalized. Unit-testable without React.
 2. **Component render** for state classification — the mapping from
-   `{status, attempts, next_retry_at, last_status_code}` to a rendered state.
+   `{status, attempts, last_status_code}` to a rendered state, plus cursor
+   continuation through the delivery log.
 
 There is deliberately no adapter seam between them: there is one API and one
 renderer, and a seam nothing varies across is a hypothetical, not a real one.
 
 **Required tests:**
 
-- Classification table: delivered / failed / pending-retrying / pending-overdue
-  / unknown-status → expected label and tone.
+- Classification table: delivered / failed / pending-first-attempt /
+  pending-retrying / unknown-status → expected label and tone.
+- A non-null `next_cursor` renders "Load older"; continuation preserves the
+  current rows and selected server-side status filter.
 - `no_match` renders its own state, not `0 delivered`.
 - Orphaned delivery renders with the event link disabled, no error.
 - Unknown event type renders the raw string rather than throwing.
@@ -340,8 +346,8 @@ worth seeing live at least once.
 3. **Should the 30-day event retention move to 90 to match deliveries?** A4
    assumes not, and C1 is handled — but if orphaned deliveries prove confusing
    in practice, aligning retention removes the state entirely.
-4. **What window defines "healthy"?** 24h is proposed. 7d is steadier for
-   low-volume accounts, where 24h may legitimately contain zero deliveries.
+4. **Resolved in phase 1: 7d defines "healthy".** A 24h window was too noisy
+   for low-volume accounts that legitimately receive no traffic for a day.
 5. **Should the events log be account-wide or agent-scoped by default?** For a
    250-agent account an account-wide firehose may be unusable as a default
    view.
@@ -351,10 +357,7 @@ worth seeing live at least once.
    painful in a UI.
 7. **Should the PR template gain a web-dashboard row?** Out of scope here, but
    it is the mechanism that caused this gap and will cause the next one.
-8. **Does `next_retry_at` ever advance into the future?** In a local run it
-   stayed equal to `created_at` through a failed attempt and had not moved
-   ~50s later (attempts stuck at 1 — the retry worker may not have been
-   running in that environment). If it never advances in production, the
-   `retrying` branch is effectively dead and every in-flight delivery reads
-   "retry due", which would be noisy at volume. Worth confirming against a
-   real failing endpoint before phase 2.
+8. **Resolved in phase 1: `next_retry_at` is not authoritative under River.**
+   River's job row owns the schedule; `RecordSubscriberAttempt` intentionally
+   records attempts/error/status without updating the legacy delivery column.
+   The dashboard therefore ignores it for state classification.

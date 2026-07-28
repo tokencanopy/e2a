@@ -5,8 +5,11 @@
 // working" view — the question that had no answer anywhere in the dashboard.
 
 import { useState } from "react";
-import useSWR from "swr";
-import { listWebhookDeliveries } from "../../../components/onboarding/api";
+import useSWRInfinite from "swr/infinite";
+import {
+  listWebhookDeliveries,
+  type WebhookDeliveryPage,
+} from "../../../components/onboarding/api";
 import {
   classifyDelivery,
   type DeliveryStateKind,
@@ -32,8 +35,7 @@ const ERROR_PREVIEW_LEN = 160;
 const STATE_LABEL: Record<DeliveryStateKind, string> = {
   delivered: "delivered",
   failed: "failed",
-  retrying: "retrying",
-  retry_due: "retry due",
+  pending: "pending",
   unknown: "",
 };
 
@@ -43,8 +45,7 @@ function stateColor(kind: DeliveryStateKind): string {
       return "var(--success)";
     case "failed":
       return "var(--danger-strong)";
-    case "retrying":
-    case "retry_due":
+    case "pending":
       return "var(--warn-strong)";
     default:
       // Unknown fails closed: never styled as success.
@@ -54,15 +55,34 @@ function stateColor(kind: DeliveryStateKind): string {
 
 export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
   const [status, setStatus] = useState("");
-  const { data, error, isLoading } = useSWR(
-    webhookDeliveriesKey(webhookId, status),
-    () => listWebhookDeliveries(webhookId, { status: status || undefined }),
+  const {
+    data: pages,
+    error,
+    isLoading,
+    isValidating,
+    size,
+    setSize,
+  } = useSWRInfinite<WebhookDeliveryPage>(
+    (pageIndex, previousPage) => {
+      if (previousPage && !previousPage.next_cursor) return null;
+      const cursor =
+        pageIndex === 0 ? "" : (previousPage?.next_cursor ?? "");
+      return webhookDeliveriesKey(webhookId, status, cursor);
+    },
+    (key: ReturnType<typeof webhookDeliveriesKey>) => {
+      const [, id, pageStatus, cursor] = key;
+      return listWebhookDeliveries(id, {
+        status: pageStatus || undefined,
+        cursor: cursor || undefined,
+      });
+    },
   );
 
-  const items = data?.items ?? [];
-  // `now` is captured once per render and threaded into every row so the
-  // whole table classifies against a single instant.
-  const now = new Date();
+  const items = pages?.flatMap((page) => page.items) ?? [];
+  const nextCursor = pages?.at(-1)?.next_cursor ?? null;
+  const loadingOlder =
+    isValidating && pages !== undefined && pages.length < size;
+  const initialError = error && !pages;
 
   return (
     <section className="mt-8">
@@ -100,7 +120,7 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
         <p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
           Loading…
         </p>
-      ) : error ? (
+      ) : initialError ? (
         <p className="text-[13px]" style={{ color: "var(--danger-strong)" }}>
           Couldn&apos;t load deliveries.
         </p>
@@ -137,7 +157,6 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
                 <DeliveryRow
                   key={d.id}
                   delivery={d}
-                  now={now}
                   isFirstRow={i === 0}
                 />
               ))}
@@ -146,14 +165,27 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
         </div>
       )}
 
-      {data?.next_cursor ? (
-        <p
-          className="text-[12px] mt-3 mb-0"
-          style={{ color: "var(--fg-subtle)" }}
-        >
-          Showing the most recent {items.length}. Older deliveries are
-          available over the API.
+      {error && pages ? (
+        <p className="text-[12px] mt-3 mb-0" style={{ color: "var(--danger-strong)" }}>
+          Couldn&apos;t load older deliveries. Try again.
         </p>
+      ) : null}
+
+      {nextCursor ? (
+        <button
+          type="button"
+          onClick={() => void setSize(size + 1)}
+          disabled={loadingOlder}
+          className="mt-3 px-3 py-1.5 text-[12px] transition disabled:opacity-50"
+          style={{
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--r-sm)",
+            color: "var(--fg)",
+          }}
+        >
+          {loadingOlder ? "Loading older…" : "Load older"}
+        </button>
       ) : null}
     </section>
   );
@@ -176,18 +208,20 @@ function EmptyState({ filtered }: { filtered: boolean }) {
 
 function DeliveryRow({
   delivery,
-  now,
   isFirstRow,
 }: {
   delivery: WebhookDeliveryView;
-  now: Date;
   isFirstRow: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const state = classifyDelivery(delivery, now);
+  const state = classifyDelivery(delivery);
   // An unrecognized status is shown verbatim rather than mapped to a label
-  // we'd be inventing.
-  const label = STATE_LABEL[state.kind] || state.raw;
+  // we'd be inventing. A pending row with prior attempts is actively retrying;
+  // before its first attempt it is simply pending.
+  const label =
+    state.kind === "pending" && delivery.attempts > 0
+      ? "retrying"
+      : STATE_LABEL[state.kind] || state.raw;
 
   const err = delivery.last_error ?? "";
   const needsTruncation = err.length > ERROR_PREVIEW_LEN;
@@ -210,11 +244,6 @@ function DeliveryRow({
       </td>
       <td className="px-4 py-3 font-mono text-[11px]">
         <span style={{ color: stateColor(state.kind) }}>{label}</span>
-        {state.kind === "retrying" && delivery.next_retry_at ? (
-          <span className="block" style={{ color: "var(--fg-subtle)" }}>
-            next {formatTime(delivery.next_retry_at)}
-          </span>
-        ) : null}
       </td>
       <td
         className="px-4 py-3 font-mono text-[11px] tabular-nums"

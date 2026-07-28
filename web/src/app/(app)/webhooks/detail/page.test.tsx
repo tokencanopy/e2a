@@ -2,7 +2,7 @@
 // wrapper gives each render a fresh cache with dedupingInterval 0. Without it
 // consecutive tests reusing the same webhook id fall inside SWR's dedup window
 // and silently reuse the previous test's cache entry instead of refetching.
-import { render, screen, waitFor } from "../../../../test-utils/swr";
+import { fireEvent, render, screen, waitFor } from "../../../../test-utils/swr";
 import WebhookDetailPage from "./page";
 
 // The detail page addresses its resource by query param, not a dynamic route
@@ -162,7 +162,9 @@ describe("webhook detail page", () => {
       expect(screen.getByText(/upstream connect error/)).toBeInTheDocument();
     });
 
-    // A pending delivery with a future retry is in flight, not broken.
+    // A pending delivery with prior attempts is retrying, regardless of the
+    // legacy next_retry_at field: River owns the real schedule and does not
+    // advance that column between attempts.
     it("distinguishes a retrying delivery from a failed one", async () => {
       searchParams = new URLSearchParams("id=wh_1");
       respond({
@@ -173,9 +175,7 @@ describe("webhook detail page", () => {
                 ...delivery,
                 status: "pending",
                 attempts: 3,
-                // Far future so the row is 'retrying' regardless of when the
-                // suite runs.
-                next_retry_at: "2099-01-01T00:00:00Z",
+                next_retry_at: "2000-01-01T00:00:00Z",
               },
             ],
             next_cursor: null,
@@ -189,8 +189,7 @@ describe("webhook detail page", () => {
       expect(screen.queryByText(/^failed$/)).not.toBeInTheDocument();
     });
 
-    // Worker lag or clock skew. Must not render a negative countdown.
-    it("renders an overdue retry without a countdown", async () => {
+    it("renders a not-yet-attempted pending delivery as pending", async () => {
       searchParams = new URLSearchParams("id=wh_1");
       respond({
         deliveries: () =>
@@ -199,6 +198,7 @@ describe("webhook detail page", () => {
               {
                 ...delivery,
                 status: "pending",
+                attempts: 0,
                 next_retry_at: "2000-01-01T00:00:00Z",
               },
             ],
@@ -208,9 +208,9 @@ describe("webhook detail page", () => {
 
       render(<WebhookDetailPage />);
       await waitFor(() => {
-        expect(screen.getByText(/retry due/i)).toBeInTheDocument();
+        expect(screen.getByText(/^pending$/i)).toBeInTheDocument();
       });
-      expect(document.body.textContent).not.toMatch(/-\d+/);
+      expect(screen.queryByText(/retry due/i)).not.toBeInTheDocument();
     });
 
     // Both are open sets. An unrecognized status must not read as success,
@@ -277,7 +277,7 @@ describe("webhook detail page", () => {
       });
       expect(screen.queryByText(long)).not.toBeInTheDocument();
 
-      screen.getByRole("button", { name: /show full error/i }).click();
+      fireEvent.click(screen.getByRole("button", { name: /show full error/i }));
       await waitFor(() => {
         expect(screen.getByText(long)).toBeInTheDocument();
       });
@@ -304,11 +304,52 @@ describe("webhook detail page", () => {
         expect(screen.getByText(/no deliveries yet/i)).toBeInTheDocument();
       });
 
-      screen.getByRole("button", { name: "Failed" }).click();
+      fireEvent.click(screen.getByRole("button", { name: "Failed" }));
       await waitFor(() => {
         const urls = mockFetch.mock.calls.map((c) => c[0] as string);
         expect(urls.some((u) => u.includes("status=failed"))).toBe(true);
       });
+    });
+
+    it("loads older delivery pages with the server cursor and keeps existing rows", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      mockFetch.mockImplementation((url: string) => {
+        if (!url.includes("/deliveries")) return okJson(webhook);
+        if (url.includes("cursor=next-page")) {
+          return okJson({
+            items: [
+              {
+                ...delivery,
+                id: "whd_older",
+                type: "email.sent",
+                created_at: "2026-07-26T11:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        }
+        return okJson({ items: [delivery], next_cursor: "next-page" });
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("email.received")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /load older/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText("email.sent")).toBeInTheDocument();
+      });
+      expect(screen.getAllByText("email.received")).toHaveLength(2);
+      expect(
+        mockFetch.mock.calls.some(([url]) =>
+          String(url).includes("cursor=next-page"),
+        ),
+      ).toBe(true);
+      expect(
+        screen.queryByRole("button", { name: /load older/i }),
+      ).not.toBeInTheDocument();
     });
   });
 

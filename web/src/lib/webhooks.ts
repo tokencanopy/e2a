@@ -47,17 +47,11 @@ export type WebhookDeliveryView = {
   last_status_code?: number;
 };
 
-// `retrying` and `retry_due` are both IN FLIGHT — split so the UI can show a
-// next-attempt time for the first and nothing for the second.
-//
-// Observed against a local instance: immediately after a failed attempt,
-// next_retry_at still equals created_at and therefore sits in the PAST, so a
-// normal failing-but-not-exhausted delivery classifies as retry_due. Treat
-// retry_due as the ordinary between-attempts state, not an anomaly — the
-// split exists so we never render a countdown we'd have to negate, not to
-// flag lateness. (Whether next_retry_at advances into the future once the
-// retry worker reschedules was not observable in that run; see the design
-// doc's open questions.)
+// River owns webhook retry scheduling. The delivery row's legacy
+// next_retry_at column is initialized when the row is created but the River
+// worker deliberately does not advance it between attempts. Pending is
+// therefore one truthful state here; treating next_retry_at as authoritative
+// would report every ordinary retry as overdue.
 //
 // `unknown` exists because the OpenAPI schema declares status an open set
 // ("tolerate unknown values"). Today a delivery row cannot actually hold
@@ -69,8 +63,7 @@ export type WebhookDeliveryView = {
 export type DeliveryStateKind =
   | "delivered"
   | "failed"
-  | "retrying"
-  | "retry_due"
+  | "pending"
   | "unknown";
 
 export type DeliveryClassification = {
@@ -80,11 +73,8 @@ export type DeliveryClassification = {
   raw: string;
 };
 
-// `now` is a required parameter rather than a call to Date.now() so the
-// retrying/retry_due boundary is testable without faking timers.
 export function classifyDelivery(
   delivery: WebhookDeliveryView,
-  now: Date,
 ): DeliveryClassification {
   const raw = delivery.status ?? "";
   switch (raw) {
@@ -92,17 +82,8 @@ export function classifyDelivery(
       return { kind: "delivered", raw };
     case "failed":
       return { kind: "failed", raw };
-    case "pending": {
-      const next = delivery.next_retry_at
-        ? new Date(delivery.next_retry_at)
-        : null;
-      // A missing or unparseable schedule means we know it is in flight but
-      // not when it resumes. Claiming a future time we do not have would be
-      // a fabrication; retry_due renders without a countdown.
-      const hasFutureRetry =
-        next !== null && !Number.isNaN(next.getTime()) && next > now;
-      return { kind: hasFutureRetry ? "retrying" : "retry_due", raw };
-    }
+    case "pending":
+      return { kind: "pending", raw };
     default:
       return { kind: "unknown", raw };
   }

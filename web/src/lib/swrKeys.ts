@@ -88,8 +88,11 @@ export const webhookKey = (id: string) => ["webhook", id] as const;
 // slot is part of the key because the server filters server-side: switching
 // the filter is a different query, not a client-side narrowing of one cache
 // entry.
-export const webhookDeliveriesKey = (id: string, status: string) =>
-  ["webhook-deliveries", id, status] as const;
+export const webhookDeliveriesKey = (
+  id: string,
+  status: string,
+  cursor: string,
+) => ["webhook-deliveries", id, status, cursor] as const;
 
 // ── Invalidation helpers ─────────────────────────────────
 
