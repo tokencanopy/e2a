@@ -9,6 +9,8 @@
 
 Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Every sender — human or agent — **identity-verified**.
 
+<sub>A [Token Canopy](https://tokencanopy.com) product</sub>
+
 [![Tests](https://github.com/tokencanopy/e2a/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/test.yml)
 [![Build image](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml)
 [![License](https://img.shields.io/github/license/tokencanopy/e2a)](LICENSE)
