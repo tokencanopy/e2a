@@ -2,31 +2,34 @@ package outbound
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	msgauth "github.com/emersion/go-msgauth/dkim"
 
 	"github.com/tokencanopy/e2a/internal/dkim"
+	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 // These tests assert the property the encoding work exists to protect, end
-// to end rather than per-unit: a message this package composes must still
+// to end rather than per-unit: a message this package produces must still
 // carry a VALID DKIM signature after a downstream MTA has done the things
 // MTAs are entitled to do to it.
 //
-// Signing happens after composition (see Sender.signMessage), so anything
-// the composer emits that an MTA feels obliged to "fix" — an over-length
-// line it must wrap, a bare LF it must normalise — mutates the payload
-// after the body hash is computed.
+// They drive Sender.ComposeForAccept rather than the Compose* functions
+// directly, so the real ordering is covered — body composition, then
+// managed List-Unsubscribe headers, then signing. Signing last is what
+// makes this fragile: anything emitted that a relay feels obliged to
+// "fix" mutates the payload after the body hash is computed.
 //
-// The two mutations are NOT equivalent, which is the subtlety worth
+// The two mutations below are NOT equivalent, which is the subtlety worth
 // locking down. Relaxed body canonicalisation (RFC 6376 § 3.4.4, what
-// dkim.Sign uses) absorbs a REWRITTEN line ending, so LF -> CRLF is
+// dkim.Sign uses) absorbs a REWRITTEN line ending, so bare LF -> CRLF is
 // harmless. It does not absorb an INSERTED break, so a wrap mid-line
 // changes the canonical body and the signature dies with "body hash did
-// not verify". Only the second is a real hazard, and the fix is to make
-// sure the composer never emits a line long enough to need wrapping.
+// not verify". Only the second is a real hazard, and the defence is that
+// the composer never emits a line long enough to need wrapping.
 
 const dkimTestDomain = "example.com"
 
@@ -89,21 +92,27 @@ func verifyDKIM(t *testing.T, raw []byte, kp *dkim.Keypair) error {
 	return v[0].Err
 }
 
-// composeAndSign builds a message the way Sender does — compose, then sign.
-func composeAndSign(t *testing.T, kp *dkim.Keypair, text, html string) []byte {
+// composeViaSender runs the production accept path: compose, apply managed
+// unsubscribe headers, sign. Returns the exact bytes handed to the relay.
+func composeViaSender(t *testing.T, kp *dkim.Keypair, req SendRequest) []byte {
 	t.Helper()
-	raw, err := ComposeMultipartMessage(
-		"agent@example.com", []string{"alice@elsewhere.test"}, nil,
-		"Subject line", text, html, "", nil, "relay.e2a.dev", "", "",
-	)
+	lookup := &fakeDKIMLookup{get: func(_ context.Context, domain string) (string, []byte, error) {
+		if domain != dkimTestDomain {
+			t.Fatalf("DKIM lookup domain = %q, want %q", domain, dkimTestDomain)
+		}
+		return kp.Selector, kp.PrivateKeyDER, nil
+	}}
+	sender := NewSenderWithDKIM(nil, dkimTestDomain, lookup)
+	agent := &identity.AgentIdentity{ID: "bot@" + dkimTestDomain, Domain: dkimTestDomain}
+
+	res, err := sender.ComposeForAccept(agent, req)
 	if err != nil {
-		t.Fatalf("compose: %v", err)
+		t.Fatalf("ComposeForAccept: %v", err)
 	}
-	signed, err := dkim.Sign(raw, dkimTestDomain, kp.Selector, kp.PrivateKeyDER)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	if len(res.Raw) == 0 {
+		t.Fatal("ComposeForAccept returned an empty message")
 	}
-	return signed
+	return res.Raw
 }
 
 func TestComposedMessageSurvivesMTAMutation(t *testing.T) {
@@ -112,26 +121,54 @@ func TestComposedMessageSurvivesMTAMutation(t *testing.T) {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
 
-	bodies := []struct {
-		name string
-		text string
-		html string
-	}{
-		{"short ascii, unix newlines", "Line one\nLine two\nLine three\n", ""},
-		{"short ascii, crlf newlines", "Line one\r\nLine two\r\n", ""},
-		{"non-ascii", "It's GA today — stable /v1 API.\nSecond line.\n", ""},
-		{"over-length ascii line", strings.Repeat("a", 4000), ""},
-		{"over-length non-ascii line", strings.Repeat("é", 2000), ""},
-		{"multipart with both", "Plain — text\nline two\n", "<p>HTML — body</p>"},
-		{"empty text with html", "", "<p>only html</p>"},
-		{"body ending without newline", "no trailing newline", ""},
-		{"body with trailing spaces", "trailing spaces here   \nand more   \n", ""},
-		{"long url on one line", "See https://example.com/" + strings.Repeat("x", 1500), ""},
+	base := func(body, html string) SendRequest {
+		return SendRequest{
+			To:       []string{"alice@elsewhere.test"},
+			Subject:  "Subject line",
+			Body:     body,
+			HTMLBody: html,
+		}
 	}
 
-	for _, b := range bodies {
-		t.Run(b.name, func(t *testing.T) {
-			signed := composeAndSign(t, kp, b.text, b.html)
+	cases := []struct {
+		name string
+		req  SendRequest
+	}{
+		{"short ascii, unix newlines", base("Line one\nLine two\nLine three\n", "")},
+		{"short ascii, crlf newlines", base("Line one\r\nLine two\r\n", "")},
+		{"non-ascii", base("It's GA today — stable /v1 API.\nSecond line.\n", "")},
+		{"over-length ascii line", base(strings.Repeat("a", 4000), "")},
+		{"over-length non-ascii line", base(strings.Repeat("é", 2000), "")},
+		{"multipart with both", base("Plain — text\nline two\n", "<p>HTML — body</p>")},
+		{"body ending without newline", base("no trailing newline", "")},
+		{"body with trailing spaces", base("trailing spaces here   \nand more   \n", "")},
+		{"long url on one line", base("See https://example.com/"+strings.Repeat("x", 1500), "")},
+		{"with attachment", func() SendRequest {
+			r := base("Body — with attachment\n", "")
+			r.Attachments = []Attachment{{
+				Filename: "a.txt", ContentType: "text/plain", Data: strings.Repeat("aGk=", 500),
+			}}
+			return r
+		}()},
+		{"managed unsubscribe headers", func() SendRequest {
+			r := base("Newsletter — body\n", "<p>Newsletter — body</p>")
+			r.Unsubscribe = &UnsubscribeOptions{
+				Mode: "managed",
+				URL:  "https://api.example.com/u/u1_token",
+			}
+			return r
+		}()},
+		{"reply with a references chain", func() SendRequest {
+			r := base("Reply — body\n", "")
+			r.ReplyToMessageID = "<parent@example.com>"
+			r.References = []string{"<a@example.com>", "<b@example.com>", "<parent@example.com>"}
+			return r
+		}()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			signed := composeViaSender(t, kp, tc.req)
 
 			if err := verifyDKIM(t, signed, kp); err != nil {
 				t.Fatalf("signature invalid before any mutation: %v", err)
@@ -151,6 +188,38 @@ func TestComposedMessageSurvivesMTAMutation(t *testing.T) {
 				t.Errorf("signature broke after MTA line-ending normalisation: %v", err)
 			}
 		})
+	}
+}
+
+// Every body part on the production path must declare a transfer encoding.
+// A part without one falls back to the RFC 2045 § 6.1 default of 7bit,
+// which is the defect these changes exist to remove.
+func TestSenderPathDeclaresEncodingOnEveryPart(t *testing.T) {
+	kp, err := dkim.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	raw := composeViaSender(t, kp, SendRequest{
+		To:       []string{"alice@elsewhere.test"},
+		Subject:  "Subject — line",
+		Body:     "Plain — text",
+		HTMLBody: "<p>HTML — body</p>",
+	})
+
+	if !bytes.Contains(raw, []byte("Content-Transfer-Encoding: quoted-printable")) {
+		t.Errorf("non-ASCII parts did not declare quoted-printable:\n%s", raw)
+	}
+	// text/plain and text/html are the two leaf parts here.
+	if n := bytes.Count(raw, []byte("Content-Transfer-Encoding: ")); n != 2 {
+		t.Errorf("got %d Content-Transfer-Encoding headers, want 2\n%s", n, raw)
+	}
+	// No 8-bit byte may survive in a message that declares quoted-printable.
+	idx := bytes.Index(raw, []byte("\r\n\r\n"))
+	for i, b := range raw[idx:] {
+		if b > 127 {
+			t.Fatalf("body byte %d = %#x is 8-bit on the production path", i, b)
+		}
 	}
 }
 
