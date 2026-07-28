@@ -72,3 +72,33 @@ it("edits outreach in a form and guards the write with If-Match", async () => {
   expect(put.method).toBe("PUT");
   expect((put.headers as Record<string, string>)["If-Match"]).toBe('"outreach-v1"');
 });
+
+it("keeps outreach editing fail-closed when the fresh version cannot be loaded", async () => {
+  const outreach = {
+    address: "partner@fund.vc",
+    agent_email: "raise@example.com",
+    stage: "stale-list-stage",
+    next_action_at: "2026-07-28T17:00:00Z",
+    replied: false,
+    suppressed: false,
+    outbound_count: 2,
+    inbound_count: 0,
+    contact: { display_name: "A. Partner", metadata: {} },
+  };
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [outreach] }) })
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: { message: "Could not load the latest outreach state" } }),
+    });
+  render(<OutreachPage />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Edit partner@fund.vc" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the latest outreach state");
+  expect(screen.getByRole("textbox", { name: "Stage" })).toBeDisabled();
+  expect(screen.getByLabelText("Next action")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save outreach" })).toBeDisabled();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});

@@ -407,9 +407,13 @@ function EditContactPanel({
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(await responseError(response));
+        const freshETag = response.headers.get("ETag");
+        if (!freshETag) {
+          throw new Error("The latest contact version is unavailable. Close this editor and try again.");
+        }
         const current: Contact = await response.json();
         setName(current.display_name);
-        setETag(response.headers.get("ETag") ?? "");
+        setETag(freshETag);
       } catch (err) {
         if (!controller.signal.aborted) {
           setError(err instanceof Error ? err.message : "Failed to load the contact");
@@ -423,15 +427,17 @@ function EditContactPanel({
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!etag) {
+      setError("Load the latest contact version before saving.");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (etag) headers["If-Match"] = etag;
       const response = await fetch(`/v1/contacts/${encodeURIComponent(contact.address)}`, {
         method: "PATCH",
         credentials: "include",
-        headers,
+        headers: { "Content-Type": "application/json", "If-Match": etag },
         body: JSON.stringify({ display_name: name }),
       });
       if (!response.ok) {
@@ -460,12 +466,12 @@ function EditContactPanel({
             style={fieldStyle}
             value={name}
             onChange={(event) => setName(event.target.value)}
-            disabled={loading || saving}
+            disabled={loading || saving || !etag}
           />
         </label>
         <div className="flex gap-2">
           <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
-          <Button type="submit" disabled={loading || saving}>
+          <Button type="submit" disabled={loading || saving || !etag}>
             {saving ? "Saving…" : "Save contact"}
           </Button>
         </div>

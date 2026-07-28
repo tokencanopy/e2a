@@ -296,10 +296,14 @@ function EditOutreachPanel({
       try {
         const response = await fetch(path, { credentials: "include", signal: controller.signal });
         if (!response.ok) throw new Error(await apiError(response));
+        const freshETag = response.headers.get("ETag");
+        if (!freshETag) {
+          throw new Error("The latest outreach version is unavailable. Close this editor and try again.");
+        }
         const current: Outreach = await response.json();
         setStage(current.stage);
         setNextAction(toLocalDateTime(current.next_action_at));
-        setETag(response.headers.get("ETag") ?? "");
+        setETag(freshETag);
       } catch (err) {
         if (!controller.signal.aborted) {
           setError(err instanceof Error ? err.message : "Failed to load outreach state");
@@ -313,6 +317,10 @@ function EditOutreachPanel({
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!etag) {
+      setError("Load the latest outreach version before saving.");
+      return;
+    }
     const parsed = nextAction ? new Date(nextAction) : null;
     if (nextAction && Number.isNaN(parsed!.getTime())) {
       setError("Next action must be a valid local date and time");
@@ -321,12 +329,10 @@ function EditOutreachPanel({
     setSaving(true);
     setError("");
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (etag) headers["If-Match"] = etag;
       const response = await fetch(path, {
         method: "PUT",
         credentials: "include",
-        headers,
+        headers: { "Content-Type": "application/json", "If-Match": etag },
         body: JSON.stringify({
           stage,
           next_action_at: parsed ? parsed.toISOString() : null,
@@ -360,7 +366,7 @@ function EditOutreachPanel({
           Stage
           <input aria-label="Stage" autoFocus value={stage}
             onChange={(event) => setStage(event.target.value)}
-            disabled={loading || saving}
+            disabled={loading || saving || !etag}
             className="mt-1 w-full rounded-[var(--r-md)] border px-3 py-2 text-[13px] outline-none"
             style={{ borderColor: "var(--border)", background: "var(--bg)", color: "var(--fg)" }} />
         </label>
@@ -368,13 +374,13 @@ function EditOutreachPanel({
           Next action <span style={{ color: "var(--fg-faint)" }}>(local time)</span>
           <input aria-label="Next action" type="datetime-local" value={nextAction}
             onChange={(event) => setNextAction(event.target.value)}
-            disabled={loading || saving}
+            disabled={loading || saving || !etag}
             className="mt-1 w-full rounded-[var(--r-md)] border px-3 py-2 text-[13px] outline-none"
             style={{ borderColor: "var(--border)", background: "var(--bg)", color: "var(--fg)" }} />
         </label>
         <div className="flex gap-2">
           <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
-          <Button type="submit" disabled={loading || saving}>
+          <Button type="submit" disabled={loading || saving || !etag}>
             {saving ? "Saving…" : "Save outreach"}
           </Button>
         </div>

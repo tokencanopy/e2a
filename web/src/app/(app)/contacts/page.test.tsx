@@ -92,6 +92,32 @@ it("edits in an accessible form and guards the write with If-Match", async () =>
   expect((patch.headers as Record<string, string>)["If-Match"]).toBe('"contact-v1"');
 });
 
+it("keeps contact editing fail-closed when the fresh version cannot be loaded", async () => {
+  const contact = {
+    address: "partner@fund.vc",
+    display_name: "Stale list value",
+    metadata: {},
+    source: "manual",
+    created_at: "2026-07-27T00:00:00Z",
+    updated_at: "2026-07-27T00:00:00Z",
+  };
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [contact], next_cursor: null }) })
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: { message: "Could not load the latest contact" } }),
+    });
+  render(<ContactsPage />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Edit partner@fund.vc" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the latest contact");
+  expect(screen.getByRole("textbox", { name: "Display name" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save contact" })).toBeDisabled();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 it("shows a reversible import receipt and refreshes the contact list", async () => {
   jest.spyOn(window, "confirm").mockReturnValue(true);
   fetchMock
