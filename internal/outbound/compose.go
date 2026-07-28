@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/textproto"
 	"strings"
 	"time"
@@ -56,8 +58,11 @@ func ComposeMessage(from string, to []string, cc []string, subject, body, conten
 	}
 	writeHeader("Subject", mime.QEncoding.Encode("utf-8", subject))
 	writeHeader("Date", time.Now().UTC().Format(time.RFC1123Z))
+	encoding, encodedBody := encodeBody(body)
+
 	writeHeader("MIME-Version", "1.0")
 	writeHeader("Content-Type", contentType+"; charset=utf-8")
+	writeHeader("Content-Transfer-Encoding", encoding)
 
 	writeThreadingHeaders(writeHeader, replyToMsgID, references)
 	if conversationID != "" {
@@ -65,7 +70,7 @@ func ComposeMessage(from string, to []string, cc []string, subject, body, conten
 	}
 
 	buf.WriteString("\r\n")
-	buf.WriteString(body)
+	buf.WriteString(encodedBody)
 
 	return []byte(buf.String()), nil
 }
@@ -107,15 +112,11 @@ func ComposeMultipartMessage(from string, to []string, cc []string, subject, tex
 
 	// text/plain part
 	buf.WriteString("--" + boundary + "\r\n")
-	buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-	buf.WriteString(textBody)
-	buf.WriteString("\r\n")
+	writeBodyPart(&buf, "text/plain", textBody)
 
 	// text/html part
 	buf.WriteString("--" + boundary + "\r\n")
-	buf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-	buf.WriteString(htmlBody)
-	buf.WriteString("\r\n")
+	writeBodyPart(&buf, "text/html", htmlBody)
 
 	// closing boundary
 	buf.WriteString("--" + boundary + "--\r\n")
@@ -178,21 +179,15 @@ func ComposeMessageWithAttachments(from string, to []string, cc []string, subjec
 		buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=%q\r\n\r\n", altBoundary))
 
 		buf.WriteString("--" + altBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		buf.WriteString(textBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/plain", textBody)
 
 		buf.WriteString("--" + altBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		buf.WriteString(htmlBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/html", htmlBody)
 
 		buf.WriteString("--" + altBoundary + "--\r\n")
 	} else {
 		buf.WriteString("--" + mixedBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		buf.WriteString(textBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/plain", textBody)
 	}
 
 	// Attachment parts
@@ -243,6 +238,114 @@ func writeThreadingHeaders(writeHeader func(string, string), replyToMsgID string
 	} else if replyToMsgID != "" {
 		writeHeader("References", replyToMsgID)
 	}
+}
+
+// encodeBody picks the Content-Transfer-Encoding for one body part and
+// returns the encoding name alongside the body encoded for that value.
+//
+// RFC 2045 § 6.1 makes "7bit" the default when no Content-Transfer-Encoding
+// header is present, so writing a UTF-8 body raw and omitting the header —
+// which is what this package used to do — declares 7bit while delivering
+// 8-bit bytes. Receivers treat that as malformed: SpamAssassin scores it
+// CTE_8BIT_MISMATCH (+1.0), because a broken transfer encoding is a common
+// bulk-mailer tell. A single em dash in an otherwise clean message was
+// enough to trigger it.
+//
+// Over-length lines force the same treatment even when the body is pure
+// ASCII. RFC 5322 § 2.1.1 caps a line at 998 octets, and a compliant MTA
+// hard-wraps anything longer — after we have signed. Relaxed DKIM body
+// canonicalisation absorbs *rewritten* line endings (bare LF to CRLF is
+// harmless) but not *inserted* ones, so a wrap mid-line changes the body
+// hash and the signature fails with "body hash did not verify". Routing
+// those bodies through quoted-printable, which soft-wraps at 76 octets,
+// means no downstream wrap is ever needed.
+//
+// Otherwise transport-safe ASCII bodies stay 7bit and byte-identical. NUL and
+// a lone CR are not valid 7bit data even though their bytes are ASCII, so they
+// take the same quoted-printable path as non-ASCII data. Bare LF remains on
+// the fast path because net/textproto.DotWriter canonicalises it to CRLF
+// before SMTP transmission, and preserving it here keeps the stored composed
+// body byte-identical. Quoted-printable keeps the text human-readable on the
+// wire, needs no 8BITMIME support from the relay, and is already decoded on
+// the receive side by internal/mailparse.
+func encodeBody(body string) (encoding, encoded string) {
+	if is7BitTransportSafe(body) && !hasOverlongLine(body) {
+		return "7bit", body
+	}
+	body = canonicalizeLineEndings(body)
+	var buf strings.Builder
+	w := quotedprintable.NewWriter(&buf)
+	if _, err := io.WriteString(w, body); err != nil {
+		return "8bit", body
+	}
+	if err := w.Close(); err != nil {
+		return "8bit", body
+	}
+	return "quoted-printable", buf.String()
+}
+
+// canonicalizeLineEndings converts every CRLF, lone CR, and bare LF line
+// ending to CRLF before quoted-printable encoding. Go's text-mode QP writer
+// tracks a pending CR internally; feeding it an encoded byte between CR and LF
+// can otherwise make it mistake the later LF for the CR's partner and drop it.
+func canonicalizeLineEndings(s string) string {
+	s = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s)
+	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
+// maxLineOctets is the RFC 5322 § 2.1.1 limit on a line's content,
+// excluding the trailing CRLF.
+const maxLineOctets = 998
+
+// hasOverlongLine reports whether any line in s exceeds maxLineOctets.
+// Lines are split on LF and a trailing CR is discounted, so the check is
+// correct whether the caller supplied CRLF or bare LF endings.
+func hasOverlongLine(s string) bool {
+	for {
+		line, rest, more := strings.Cut(s, "\n")
+		if len(strings.TrimSuffix(line, "\r")) > maxLineOctets {
+			return true
+		}
+		if !more {
+			return false
+		}
+		s = rest
+	}
+}
+
+// is7BitTransportSafe reports whether s can safely take the 7bit path apart
+// from the line-length constraint checked separately by hasOverlongLine.
+// NUL is forbidden, as is a CR not followed by LF. Bare LF is accepted here
+// because the SMTP dot writer canonicalises it on the wire.
+func is7BitTransportSafe(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0:
+			return false
+		case '\r':
+			if i+1 >= len(s) || s[i+1] != '\n' {
+				return false
+			}
+			i++ // consume the LF in this CRLF pair
+		case '\n':
+			continue
+		default:
+			if s[i] > 127 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// writeBodyPart writes one MIME part's Content-Type, Content-Transfer-Encoding
+// and encoded body, using the encoding encodeBody selected for it.
+func writeBodyPart(buf *strings.Builder, contentType, body string) {
+	encoding, encoded := encodeBody(body)
+	buf.WriteString("Content-Type: " + contentType + "; charset=utf-8\r\n")
+	buf.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n\r\n")
+	buf.WriteString(encoded)
+	buf.WriteString("\r\n")
 }
 
 func headerWriter(buf *strings.Builder) func(string, string) {
