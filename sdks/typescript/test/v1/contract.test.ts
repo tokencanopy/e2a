@@ -16,6 +16,7 @@
  * gated behind live-server env vars and is not part of the unit build.
  */
 import { describe, it, expect, afterAll, vi } from "vitest";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import { parse as yamlParse } from "yaml";
@@ -109,6 +110,9 @@ it("keeps the scheduled-send scenario self-cleaning and projection-complete", ()
     (candidate) => candidate.name === "scheduled_send_fields",
   );
   expect(scenario).toBeDefined();
+  expect(scenario!.setup?.[0]?.register_agent?.email).toBe(
+    "scheduled-contract-{scenario_token}@agents.e2a.dev",
+  );
 
   const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
   const send = steps.get("schedule_send");
@@ -182,6 +186,23 @@ it("resolves future_rfc3339 once per scenario to a future UTC instant", () => {
   expect(parsed).toBeGreaterThanOrEqual(before + 4 * 60_000);
   expect(parsed).toBeLessThanOrEqual(Date.now() + 6 * 60_000);
   expect(first).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+});
+
+it("assigns a unique lowercase-hex token to each scenario", () => {
+  const first = new Runner("https://contract.test", "key", {
+    name: "first",
+    description: "unique dynamic placeholder",
+    steps: [],
+  });
+  const second = new Runner("https://contract.test", "key", {
+    name: "second",
+    description: "unique dynamic placeholder",
+    steps: [],
+  });
+
+  const firstToken = first.resolve("{scenario_token}");
+  expect(firstToken).toMatch(/^[0-9a-f]{12}$/);
+  expect(second.resolve("{scenario_token}")).not.toBe(firstToken);
 });
 
 it("surfaces cleanup failure when the scenario itself succeeds", async () => {
@@ -367,6 +388,7 @@ class Runner {
     const future = new Date(Date.now() + 5 * 60_000);
     future.setUTCMilliseconds(0);
     this.vars.future_rfc3339 = future.toISOString().replace(".000Z", "Z");
+    this.vars.scenario_token = randomBytes(6).toString("hex");
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }

@@ -16,6 +16,8 @@ package contract
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -274,10 +276,52 @@ type runner struct {
 }
 
 func newRunner(env *testEnv, sc scenario) *runner {
+	tokenBytes := make([]byte, 6)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		panic(fmt.Sprintf("generate contract scenario token: %v", err))
+	}
+	future := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second)
 	return &runner{
-		env:  env,
-		sc:   sc,
-		vars: make(map[string]string),
+		env: env,
+		sc:  sc,
+		vars: map[string]string{
+			"future_rfc3339": future.Format(time.RFC3339),
+			"scenario_token": hex.EncodeToString(tokenBytes),
+		},
+	}
+}
+
+func TestRunnerInitializesDynamicScenarioVars(t *testing.T) {
+	before := time.Now().UTC()
+	env := &testEnv{baseURL: "https://contract.test", apiKey: "key"}
+	first := newRunner(env, scenario{})
+	second := newRunner(env, scenario{})
+
+	futureValue := first.resolve("{future_rfc3339}")
+	future, err := time.Parse(time.RFC3339, futureValue)
+	if err != nil {
+		t.Fatalf("future_rfc3339 = %q: %v", futureValue, err)
+	}
+	if futureValue != first.resolve("{future_rfc3339}") {
+		t.Fatal("future_rfc3339 changed within one scenario")
+	}
+	if future.Before(before.Add(4*time.Minute)) || future.After(time.Now().UTC().Add(6*time.Minute)) {
+		t.Fatalf("future_rfc3339 = %s, want approximately five minutes ahead", futureValue)
+	}
+	if future.Nanosecond() != 0 {
+		t.Fatalf("future_rfc3339 = %s, want whole-second precision", futureValue)
+	}
+
+	firstToken := first.resolve("{scenario_token}")
+	secondToken := second.resolve("{scenario_token}")
+	if len(firstToken) != 12 {
+		t.Fatalf("scenario_token length = %d, want 12", len(firstToken))
+	}
+	if _, err := strconv.ParseUint(firstToken, 16, 64); err != nil {
+		t.Fatalf("scenario_token = %q, want lowercase hex: %v", firstToken, err)
+	}
+	if firstToken == secondToken {
+		t.Fatalf("scenario_token collision: %q", firstToken)
 	}
 }
 

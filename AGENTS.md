@@ -300,12 +300,13 @@ manually on every API change even though the template won't remind you.
   and launches it automatically; locally you need it running for
   `test:contract` / `test_contract.py`). **Every new or changed public `/v1`
   API feature must add or update a self-cleaning shared scenario in
-  `tests/contract/scenarios.yaml` and prove it through both the TypeScript and
+  `tests/contract/scenarios.yaml` and prove it through the Go, TypeScript, and
   Python live-server contract runners.** Handler/unit tests, generated-client
   tests, and OpenAPI golden tests are complementary and do not substitute for
   cross-SDK conformance. If the shared scenario language cannot express the
-  feature, extend both interpreters in parity, add runner-level regressions in
-  both languages, and prefer dynamic placeholders over fixtures that age.
+  feature, extend all three interpreters in parity, add runner-level regressions
+  in every language, and prefer dynamic placeholders over fixtures that age or
+  collide under concurrent runs.
 - **Schema-change rule**: when changing a table shape, add/update DB-backed
   tests in every package that writes direct SQL against that table — the
   idempotent migration runner will not catch drifted runtime SQL.

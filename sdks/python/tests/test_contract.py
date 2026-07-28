@@ -118,7 +118,8 @@ class Runner:
             microsecond=0
         )
         self.vars: dict[str, str] = {
-            "future_rfc3339": future.isoformat().replace("+00:00", "Z")
+            "future_rfc3339": future.isoformat().replace("+00:00", "Z"),
+            "scenario_token": uuid.uuid4().hex[:12],
         }
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
@@ -450,6 +451,26 @@ def test_runner_resolves_future_rfc3339_once_per_scenario():
     assert parsed.microsecond == 0
 
 
+def test_runner_assigns_unique_lowercase_hex_token_per_scenario():
+    first = Runner(
+        "https://contract.test",
+        "key",
+        {"name": "first", "description": "unique dynamic placeholder", "steps": []},
+    )
+    second = Runner(
+        "https://contract.test",
+        "key",
+        {"name": "second", "description": "unique dynamic placeholder", "steps": []},
+    )
+    try:
+        first_token = first.resolve("{scenario_token}")
+        assert re.fullmatch(r"[0-9a-f]{12}", first_token)
+        assert second.resolve("{scenario_token}") != first_token
+    finally:
+        first.close()
+        second.close()
+
+
 def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeypatch):
     scenario = {
         "name": "failure_cleanup",
@@ -564,6 +585,9 @@ def test_scheduled_send_scenario_is_self_cleaning_and_projection_complete():
     scenario = _scenario_by_name("scheduled_send_fields")
     steps = {step["id"]: step for step in scenario["steps"]}
 
+    assert scenario["setup"][0]["register_agent"]["email"] == (
+        "scheduled-contract-{scenario_token}@agents.e2a.dev"
+    )
     assert steps["schedule_send"]["body"]["send_at"] == "{future_rfc3339}"
     assert steps["schedule_send"]["expect"]["body_match"] == {
         "status": "scheduled",

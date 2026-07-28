@@ -829,7 +829,7 @@ scenarios:
       immediately rather than waiting for the future instant.
     setup:
       - register_agent:
-          email: scheduled-contract@agents.e2a.dev
+          email: scheduled-contract-{scenario_token}@agents.e2a.dev
     steps:
       - id: schedule_send
         action: request
