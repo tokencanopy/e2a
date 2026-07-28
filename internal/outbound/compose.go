@@ -358,7 +358,7 @@ const contentDispositionHeaderPrefix = "Content-Disposition: "
 // attachment filename.
 //
 // MIME parameter values are ASCII-only. A non-ASCII filename must be
-// encoded per RFC 2231 as filename*=utf-8”<percent-encoded>, otherwise the
+// encoded per RFC 2231 as filename*=utf-8''<percent-encoded>, otherwise the
 // raw UTF-8 bytes land in a header field — an 8-bit value in a place that
 // only permits 7-bit, which receivers are free to mangle or reject.
 // mime.FormatMediaType applies that encoding, and quotes or escapes values
@@ -421,13 +421,94 @@ func continuedAttachmentDisposition(filename string) string {
 	return disposition.String()
 }
 
+// maxHeaderOctets is the RFC 5322 § 2.1.1 line limit, excluding CRLF.
+// SMTP (RFC 5321 § 4.5.3.1.6) allows 1000 including CRLF, so a header
+// line longer than this can be rejected outright by a strict relay.
+const maxHeaderOctets = 998
+
+// foldTarget is the length a folded header aims for. RFC 5322 § 2.1.1
+// recommends 78 including CRLF; a fold is only triggered by exceeding
+// maxHeaderOctets, so this governs the shape of an already-broken header
+// rather than reformatting ordinary ones.
+const foldTarget = 76
+
 func headerWriter(buf *strings.Builder) func(string, string) {
 	return func(key, value string) {
-		buf.WriteString(textproto.CanonicalMIMEHeaderKey(key))
-		buf.WriteString(": ")
-		buf.WriteString(sanitizeHeaderValue(value))
+		line := textproto.CanonicalMIMEHeaderKey(key) + ": " + sanitizeHeaderValue(value)
+		buf.WriteString(foldHeaderLine(line))
 		buf.WriteString("\r\n")
 	}
+}
+
+// foldHeaderLine breaks an over-length header field into continuation
+// lines per RFC 5322 § 2.2.3, each beginning with a single space.
+//
+// Nothing was folding before, so a long Q-encoded Subject or a deep
+// References chain went out as one line — measured at over 3200 octets
+// for a long non-ASCII subject. That is past both the RFC 5322 limit and
+// the SMTP line limit, and a strict relay may refuse the message.
+//
+// Only lines past maxHeaderOctets are touched, so ordinary headers are
+// byte-identical to before. This is deliberately not a reformat of every
+// header: shortening lines that already fit would change the wire output
+// of essentially every message to fix a case that only arises at the
+// extremes.
+//
+// Folding is safe for DKIM regardless of whether it happens here or at a
+// relay: relaxed header canonicalisation (RFC 6376 § 3.4.2) unfolds and
+// collapses whitespace before hashing. Composition also runs before
+// signing, so the signature covers the folded form either way.
+func foldHeaderLine(line string) string {
+	if len(line) <= maxHeaderOctets {
+		return line
+	}
+
+	var out strings.Builder
+	out.Grow(len(line) + len(line)/foldTarget*3)
+
+	// Never fold at the space directly after the field name: it moves the
+	// whole value to a continuation line without shortening anything, so a
+	// single unfoldable token would gain useless structure and stay over
+	// the limit anyway. Requiring fold points past the name means such a
+	// value is returned verbatim instead.
+	minFold := strings.Index(line, ": ") + 2
+
+	cur := 0        // octets on the current output line
+	lastSpace := -1 // index in the current line's buffer of the last foldable space
+	var pending strings.Builder
+	inQuotes := false
+
+	flush := func(upTo int) {
+		s := pending.String()
+		out.WriteString(s[:upTo])
+		out.WriteString("\r\n ")
+		rest := strings.TrimPrefix(s[upTo:], " ")
+		pending.Reset()
+		pending.WriteString(rest)
+		cur = len(rest) + 1
+		lastSpace = -1
+	}
+
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		// Track quoted strings so a fold never lands inside one, where a
+		// receiver would read the inserted CRLF+SPACE as content.
+		if c == '"' && (i == 0 || line[i-1] != '\\') {
+			inQuotes = !inQuotes
+		}
+		if c == ' ' && !inQuotes && i > minFold {
+			lastSpace = pending.Len()
+		}
+		pending.WriteByte(c)
+		cur++
+
+		if cur > foldTarget && lastSpace > 0 {
+			flush(lastSpace)
+		}
+	}
+
+	out.WriteString(pending.String())
+	return out.String()
 }
 
 // sanitizeHeaderValue strips CR and LF to prevent header injection.
