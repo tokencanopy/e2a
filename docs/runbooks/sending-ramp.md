@@ -22,8 +22,8 @@ sustained over-cap admission or a ramp-store incident.
 
 ## Exemptions
 
-Migration 067 exempts domains that were already sending-verified when the
-feature shipped. A verified domain that sends while `sending_ramp.enabled` is
+Migration `067_domain_sending_ramp.sql` exempts domains that were already
+sending-verified when the feature shipped. A verified domain that sends while `sending_ramp.enabled` is
 false is also persistently exempt. Enabling the feature later does not revoke
 those exemptions. This prevents a rollout from unexpectedly throttling an
 established sender.
