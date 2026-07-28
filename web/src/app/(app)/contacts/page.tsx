@@ -400,6 +400,10 @@ function EditContactPanel({
 
   useEffect(() => {
     const controller = new AbortController();
+    setName(contact.display_name);
+    setETag("");
+    setLoading(true);
+    setError("");
     void (async () => {
       try {
         const response = await fetch(`/v1/contacts/${encodeURIComponent(contact.address)}`, {
@@ -423,7 +427,7 @@ function EditContactPanel({
       }
     })();
     return () => controller.abort();
-  }, [contact.address]);
+  }, [contact.address, contact.display_name]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();

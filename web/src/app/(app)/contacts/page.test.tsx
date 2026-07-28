@@ -118,6 +118,39 @@ it("keeps contact editing fail-closed when the fresh version cannot be loaded", 
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
+it("clears the prior contact version before switching editors", async () => {
+  const first = {
+    address: "first@fund.vc",
+    display_name: "First",
+    metadata: {},
+    source: "manual",
+    created_at: "2026-07-27T00:00:00Z",
+    updated_at: "2026-07-27T00:00:00Z",
+  };
+  const second = { ...first, address: "second@fund.vc", display_name: "Second" };
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [first, second], next_cursor: null }) })
+    .mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ ETag: '"first-v1"' }),
+      json: async () => first,
+    })
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: { message: "Could not load the second contact" } }),
+    });
+  render(<ContactsPage />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Edit first@fund.vc" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save contact" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Edit second@fund.vc" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the second contact");
+  expect(screen.getByRole("textbox", { name: "Display name" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save contact" })).toBeDisabled();
+});
+
 it("shows a reversible import receipt and refreshes the contact list", async () => {
   jest.spyOn(window, "confirm").mockReturnValue(true);
   fetchMock

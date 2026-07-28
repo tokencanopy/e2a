@@ -104,3 +104,45 @@ it("keeps outreach editing fail-closed when the fresh version cannot be loaded",
   expect(screen.getByRole("button", { name: "Save outreach" })).toBeDisabled();
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
+
+it("clears the prior outreach version before switching editors", async () => {
+  const first = {
+    address: "first@fund.vc",
+    agent_email: "raise@example.com",
+    stage: "first",
+    next_action_at: "2026-07-28T17:00:00Z",
+    replied: false,
+    suppressed: false,
+    outbound_count: 1,
+    inbound_count: 0,
+    contact: { display_name: "First", metadata: {} },
+  };
+  const second = {
+    ...first,
+    address: "second@fund.vc",
+    stage: "second",
+    contact: { display_name: "Second", metadata: {} },
+  };
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [first, second] }) })
+    .mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ ETag: '"first-v1"' }),
+      json: async () => first,
+    })
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: { message: "Could not load the second outreach state" } }),
+    });
+  render(<OutreachPage />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Edit first@fund.vc" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save outreach" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Edit second@fund.vc" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the second outreach state");
+  expect(screen.getByRole("textbox", { name: "Stage" })).toBeDisabled();
+  expect(screen.getByLabelText("Next action")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save outreach" })).toBeDisabled();
+});

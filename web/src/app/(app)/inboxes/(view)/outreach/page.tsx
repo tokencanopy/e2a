@@ -292,6 +292,11 @@ function EditOutreachPanel({
 
   useEffect(() => {
     const controller = new AbortController();
+    setStage(row.stage);
+    setNextAction(toLocalDateTime(row.next_action_at));
+    setETag("");
+    setLoading(true);
+    setError("");
     void (async () => {
       try {
         const response = await fetch(path, { credentials: "include", signal: controller.signal });
@@ -313,7 +318,7 @@ function EditOutreachPanel({
       }
     })();
     return () => controller.abort();
-  }, [path]);
+  }, [path, row.next_action_at, row.stage]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
