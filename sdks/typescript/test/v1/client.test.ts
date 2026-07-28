@@ -343,6 +343,26 @@ describe("E2AClient", () => {
     expect(JSON.parse(lastCall().init.body as string).unsubscribe).toEqual({ mode: "managed" });
   });
 
+  it("messages.send serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Scheduled update",
+      text: "Hello later",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
   it("messages.send uses a caller-supplied idempotency key", async () => {
     globalThis.fetch = mockFetch(200, { message_id: "msg_s2", status: "sent" });
     await client.messages.send(

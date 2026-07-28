@@ -192,15 +192,24 @@ e2a send --to alice@example.com --subject "Hi" --body "Plain-text body." \
   --agent bot@acme.com
 e2a send --to alice@example.com --subject "Hi" --html-file body.html \
   --attach report.pdf --conversation-id conv_123 --idempotency-key <uuid>
+e2a send --to alice@example.com --subject "Tomorrow" --body "Later." \
+  --send-at 2026-08-01T09:00:00-07:00
 e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 ```
 
 Common `send`/`reply` flags: `--body` / `--body-file`, `--html-file` (text
 fallback derived if no `--body`), `--attach` (repeatable; max 10 files, 10 MB
-each, 25 MB total), `--reply-to`, `--idempotency-key`, `--agent`, `--json`
+each, 25 MB total), `--reply-to`, `--send-at` (RFC 3339 with an explicit UTC
+offset, at most 90 days ahead), `--idempotency-key`, `--agent`, `--json`
 (print the full send result). `send`-only: `--to` (repeatable), `--subject`,
 `--conversation-id` (alias `--conversation`) — `reply` infers these from the
 message being replied to and rejects them as unknown flags.
+
+A future schedule exits `0` with `status=scheduled`; it is durably queued, so
+do not retry. Direct self-send cannot be scheduled and returns a permanent
+request error unless a review hold takes precedence (held sends drop the
+schedule). Trashing the message prevents submission; restoring it before the
+send time re-arms it.
 
 ### `e2a messages`
 

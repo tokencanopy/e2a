@@ -158,8 +158,9 @@ shows the set your scope allows, with per-tool descriptions.
 
 | Tool | Description |
 | --- | --- |
-| `send_message` | Send a new email. The message is durably queued and returns `status: accepted` (the terminal outcome arrives via webhook/event or a follow-up read). When the agent's outbound policy or content scan holds it for review, it instead returns `status: pending_review`. |
-| `reply_to_message` | Reply to a message — one the agent received (replies to its sender) or one it sent (continues the thread to the original recipients). Preserves In-Reply-To / References for thread continuity. |
+| `send_message` | Send a new email. Immediate queueing returns `status: accepted`; future `send_at` returns `status: scheduled` plus `scheduled_at`; a review hold returns `status: pending_review`. All three are durable success outcomes — do not re-send. |
+| `reply_to_message` | Reply to a message — one the agent received (replies to its sender) or one it sent (continues the thread to the original recipients). Preserves In-Reply-To / References for thread continuity and accepts the same optional `send_at` as `send_message`. |
+| `forward_message` | Forward a message into a new thread, carrying its existing attachments by default. Accepts the same optional `send_at` as `send_message`. |
 | `list_messages` | List mail; pass `deleted:true` to list trash. Filter by `read_status` (unread / read / all) and sender with reserved-word-safe `from_`; cursor-paginated (`cursor` + `limit` in, `next_cursor` out). |
 | `delete_message` | Move a message to the trash (restorable for ~30 days). Requires `confirm: true`. Permanent deletion is deliberately not exposed over MCP — use the REST API/SDK. |
 | `restore_message` | Restore a soft-deleted message and resume its retention clock. |
@@ -324,9 +325,11 @@ Failed tool calls return `structuredContent` (see [Errors](#errors)):
 branch on `code` / `retryable` / `retry_after_seconds`. Retry only
 `retryable: true` errors with exponential backoff + jitter, ~3 attempts
 max. Never retry 4xx (401 → re-authenticate; 421 → fix the URL).
-`pending_review` on send tools is a success outcome — do not retry it. The
-transport is stateless, so "reconnect" after an interruption is simply
-re-POSTing; MCP clients do this automatically.
+`accepted`, `scheduled`, and `pending_review` on send tools are success outcomes
+— do not retry them. A future `send_at` to the sending agent's own address
+returns `400 invalid_request` when direct loopback applies; review holds take
+precedence and drop the schedule. The transport is stateless, so "reconnect"
+after an interruption is simply re-POSTing; MCP clients do this automatically.
 
 ## Links
 

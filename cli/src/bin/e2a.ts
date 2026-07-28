@@ -105,7 +105,8 @@ Usage:
         --conversation-id <id>     Thread id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
         --send-at <rfc3339>        Schedule the send for a future time (e.g. 2026-08-01T09:00:00Z);
-                                   status=scheduled, sent "not before" then. Cancel by trashing it (dashboard/API)
+                                   status=scheduled, sent "not before" then. Direct self-send is unsupported;
+                                   cancel by trashing it (restoring before send time re-arms it)
         --idempotency-key <k>      Stable key so a retried invocation can't double-send
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON

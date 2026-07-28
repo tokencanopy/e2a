@@ -347,7 +347,7 @@ func TestDeliverOutbound_QueueLifecycleFailureRollsBack(t *testing.T) {
 }
 
 // TestDeliverOutbound_ScheduledAccept pins the scheduled-send accept path
-// (migration 079): a future ScheduledAt is accepted as status=scheduled, threads
+// (migration 084): a future ScheduledAt is accepted as status=scheduled, threads
 // the instant into the River enqueue (EnqueueScheduledSendTx), persists
 // scheduled_at on the row, and — deliberately — leaves delivery_status='accepted'
 // (no new status; a future-scheduled River job is invisible to the reconciler).

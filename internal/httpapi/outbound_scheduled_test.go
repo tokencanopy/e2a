@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,5 +120,56 @@ func TestScheduledInstant(t *testing.T) {
 	tooFar := now.Add(maxScheduleHorizon + time.Hour)
 	if got, env := scheduledInstant(&tooFar, now); env == nil || got != nil {
 		t.Fatalf("over-horizon send_at: want error, got (%v,%v)", got, env)
+	}
+}
+
+// TestSpecDocumentsScheduledSendContract pins the machine-readable contract
+// consumed by generated SDKs and API-reference tooling. Scheduled acceptance is
+// a successful, non-retry outcome, wait=sent returns it immediately, and the
+// immediate loopback path cannot honor a future send_at.
+func TestSpecDocumentsScheduledSendContract(t *testing.T) {
+	doc := renderSpec(t)
+	requestSchemas := map[string]string{
+		"sendMessage":    "SendEmailRequest",
+		"replyToMessage": "ReplyRequest",
+		"forwardMessage": "ForwardRequest",
+	}
+	for operationID, schemaName := range requestSchemas {
+		operation := specOperation(t, doc, operationID)
+		description, _ := operation["description"].(string)
+		requireContractText(t, operationID, description, "status=scheduled")
+
+		acceptedDescription := specResponseDescription(t, operation, "202")
+		requireContractText(t, operationID+" 202", acceptedDescription,
+			"status=scheduled",
+			"do not re-send",
+		)
+
+		parameters, _ := operation["parameters"].([]any)
+		var waitDescription string
+		for _, raw := range parameters {
+			parameter, _ := raw.(map[string]any)
+			if parameter["in"] == "query" && parameter["name"] == "wait" {
+				waitDescription, _ = parameter["description"].(string)
+				break
+			}
+		}
+		requireContractText(t, operationID+" wait", waitDescription,
+			"status=scheduled immediately",
+			"does not wait",
+		)
+
+		sendAt, _ := schemaProps(t, doc, schemaName)["send_at"].(map[string]any)
+		sendAtDescription, _ := sendAt["description"].(string)
+		requireContractText(t, schemaName+".send_at", strings.ToLower(sendAtDescription),
+			"own address",
+			"400 invalid_request",
+		)
+
+		badRequestDescription := specResponseDescription(t, operation, "400")
+		requireContractText(t, operationID+" 400", strings.ToLower(badRequestDescription),
+			"send_at",
+			"own address",
+		)
 	}
 }

@@ -356,7 +356,7 @@ type Message struct {
 	// messages.sent_as.
 	SentAs string `json:"sent_as,omitempty"`
 	// ScheduledAt is the future instant a scheduled outbound send is queued to be
-	// submitted (migration 079). Nil for immediate sends and every inbound row.
+	// submitted (migration 084). Nil for immediate sends and every inbound row.
 	// The row stays delivery_status='accepted' while scheduled; this timestamp is
 	// the introspection marker (the actual deferral lives on the River job).
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`

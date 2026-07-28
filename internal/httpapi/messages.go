@@ -73,7 +73,7 @@ type MessageView struct {
 	// Outbound-only; omitted on inbound messages.
 	SentAs string `json:"sent_as,omitempty" doc:"From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."`
 	// ScheduledAt is the future instant a scheduled outbound send was queued to be
-	// submitted (migration 079). Set on outbound rows created with a future
+	// submitted (migration 084). Set on outbound rows created with a future
 	// send_at and retained afterwards (it records the scheduled instant and is not
 	// cleared once the send fires); omitted for immediate sends and all inbound
 	// rows. delivery_status stays 'accepted' while scheduled.
@@ -277,7 +277,7 @@ type MessageSummaryView struct {
 	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"`
 	DeliveryDetail string `json:"delivery_detail,omitempty"`
 	SentAs         string `json:"sent_as,omitempty" doc:"From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."`
-	// ScheduledAt mirrors MessageView.ScheduledAt on list rows (migration 079):
+	// ScheduledAt mirrors MessageView.ScheduledAt on list rows (migration 084):
 	// the future instant a scheduled outbound send is queued to be submitted.
 	// Outbound-only and present only when a future send_at was set — omitted
 	// otherwise — so a list consumer can distinguish a scheduled send from an

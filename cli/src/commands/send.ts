@@ -69,13 +69,12 @@ const REPLY_USAGE =
   "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
 
 /**
- * Parse the optional --send-at flag into a Date for scheduled send. Accepts any
- * value the Date constructor understands; an RFC 3339 timestamp with an explicit
- * offset (e.g. 2026-08-01T09:00:00Z) is recommended so the instant is
- * unambiguous. A value at or before now sends immediately (the server treats a
- * past instant as "now"); a value more than 90 days ahead is rejected server-
- * side. An unparseable value is a local usage error. Returns undefined when the
- * flag is absent (an immediate send).
+ * Parse the optional --send-at flag into a Date for scheduled send. Requires an
+ * RFC 3339 timestamp with an explicit offset so the instant is unambiguous. A
+ * value at or before now sends immediately; a value more than 90 days ahead is
+ * rejected server-side. Direct loopback to the sending agent's own address
+ * cannot be scheduled and returns 400 invalid_request unless a review hold
+ * takes precedence (holds drop send_at). Returns undefined when absent.
  */
 export function parseSendAt(value: string | undefined, usage: string): Date | undefined {
   if (value === undefined) return undefined;

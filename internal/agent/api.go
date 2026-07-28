@@ -1370,7 +1370,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		log.Printf("[api] async compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
-	// Scheduled send (migration 079): a future req.ScheduledAt defers WHEN the
+	// Scheduled send (migration 084): a future req.ScheduledAt defers WHEN the
 	// send job runs (river ScheduledAt) — the message is still accepted + queued
 	// atomically here, and the row stays delivery_status='accepted'. The edge has
 	// already validated that ScheduledAt, when set, is in the future and within

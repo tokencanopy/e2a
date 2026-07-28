@@ -33,7 +33,7 @@ export class SendResultView {
     */
     'sentAs'?: string;
     /**
-    * Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = accepted but deferred to a future send_at (see scheduled_at); it becomes accepted→sent at that time. failed = terminal failure. Always branch on this field, not the HTTP status code.
+    * Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code.
     */
     'status': string;
 
