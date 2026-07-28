@@ -97,6 +97,21 @@ describe("Webhooks page", () => {
     expect(document.body.innerHTML).not.toContain("signing_secret");
   });
 
+  it("links each row to that webhook's detail page", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText(webhook.url).closest("a")).toHaveAttribute(
+      "href",
+      "/webhooks/detail?id=wh_default0001",
+    );
+  });
+
   it("shows the coding-agent prompt card with the scoping nudge", async () => {
     global.fetch = makeFetchMock({
       "/v1/webhooks": () => jsonResp({ items: [webhook] }),

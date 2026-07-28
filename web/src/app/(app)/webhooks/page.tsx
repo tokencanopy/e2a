@@ -6,6 +6,7 @@ import {
   AgentPromptCard,
   AGENT_PROMPTS,
 } from "../../components/AgentPromptCard";
+import Link from "next/link";
 import { describeScope, type WebhookView } from "../../../lib/webhooks";
 
 // /webhooks owns the user's webhook lifecycle — create, reveal
@@ -580,8 +581,17 @@ function WebhookRow({
         borderTop: isFirstRow ? undefined : "1px solid var(--border-sub)",
       }}
     >
-      <td className="px-4 py-3 font-mono text-[12px] break-all" style={{ color: "var(--fg)" }}>
-        {webhook.url}
+      {/* The URL is the row's entry point into the per-endpoint view. Query
+          param, not a route segment — the dashboard is a static export with
+          no dynamic segments. */}
+      <td className="px-4 py-3 font-mono text-[12px] break-all">
+        <Link
+          href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
+          className="hover:underline"
+          style={{ color: "var(--fg)", textDecoration: "none" }}
+        >
+          {webhook.url}
+        </Link>
       </td>
       <td className="px-4 py-3 font-mono text-[11px]" style={{ color: "var(--fg-muted)" }}>
         {(webhook.events ?? []).length > 0
