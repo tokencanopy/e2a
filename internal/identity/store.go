@@ -534,6 +534,17 @@ type Store struct {
 	// Optional: nil ⇒ keys are stored as plaintext DER (dev/test without a
 	// configured signing secret). cmd/e2a always installs it in production.
 	dkimCipher *DKIMCipher
+	// outboundJobCanceller removes the delayed durable send when the owning
+	// message is permanently deleted. Soft deletion deliberately does not use
+	// it: restoring a trashed scheduled message before send_at must re-arm it.
+	outboundJobCanceller OutboundJobCanceller
+}
+
+// OutboundJobCanceller is the narrow River cancellation surface identity needs
+// for hard deletes. The caller's transaction makes cancellation atomic with the
+// message/agent/account deletion.
+type OutboundJobCanceller interface {
+	CancelTx(ctx context.Context, tx pgx.Tx, jobID int64) error
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -546,6 +557,43 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // are stored as plaintext DER. cmd/e2a always sets it in production, where
 // Signing.HMACSecret is enforced ≥32 bytes.
 func (s *Store) SetDKIMCipher(c *DKIMCipher) { s.dkimCipher = c }
+
+// SetOutboundJobCanceller wires durable send-job cleanup into irreversible
+// deletion paths. Production and full-stack test composition roots install the
+// shared River client before serving requests.
+func (s *Store) SetOutboundJobCanceller(c OutboundJobCanceller) {
+	s.outboundJobCanceller = c
+}
+
+func (s *Store) cancelOutboundJobIDsTx(ctx context.Context, tx pgx.Tx, jobIDs []int64) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	if s.outboundJobCanceller == nil {
+		return errors.New("identity: outbound job canceller is not configured")
+	}
+	for _, jobID := range jobIDs {
+		if err := s.outboundJobCanceller.CancelTx(ctx, tx, jobID); err != nil {
+			return fmt.Errorf("cancel outbound job %d: %w", jobID, err)
+		}
+	}
+	return nil
+}
+
+func scanOutboundJobIDs(rows pgx.Rows) ([]int64, error) {
+	defer rows.Close()
+	var jobIDs []int64
+	for rows.Next() {
+		var jobID *int64
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		if jobID != nil {
+			jobIDs = append(jobIDs, *jobID)
+		}
+	}
+	return jobIDs, rows.Err()
+}
 
 // sealDKIM encrypts a DKIM private key for storage when a cipher is configured,
 // else returns the plaintext DER unchanged. domain is bound as AAD.
@@ -1708,6 +1756,19 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 		if sending {
 			return ErrSendInProgress
 		}
+		jobRows, err := tx.Query(ctx,
+			`SELECT send_job_id FROM messages WHERE agent_id = $1 FOR UPDATE`,
+			agentID)
+		if err != nil {
+			return err
+		}
+		jobIDs, err := scanOutboundJobIDs(jobRows)
+		if err != nil {
+			return err
+		}
+		if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+			return err
+		}
 		msgTag, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, agentID)
 		if err != nil {
 			return err
@@ -1825,6 +1886,19 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 				return nil // drained
 			}
 			if err != nil {
+				return err
+			}
+			jobRows, err := tx.Query(ctx,
+				`SELECT send_job_id FROM messages WHERE agent_id = $1 FOR UPDATE`,
+				id)
+			if err != nil {
+				return err
+			}
+			jobIDs, err := scanOutboundJobIDs(jobRows)
+			if err != nil {
+				return err
+			}
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, id); err != nil {
@@ -4067,10 +4141,10 @@ func (s *Store) UpdateMessageDeliveryStatus(ctx context.Context, messageID, agen
 	return err
 }
 
-// expiredDeleteBatch bounds one DELETE statement in the janitor's batched sweeps.
+// expiredDeleteBatch bounds one transaction in the janitor's batched sweeps.
 // messages is prod-sized, so a single unbounded `DELETE ... WHERE expired` would take
 // a long row-lock + emit a huge WAL burst on the first sweep of a backlog. Deleting
-// in ctid-bounded chunks keeps each statement small; the caller's ctx bounds total
+// in bounded chunks keeps each transaction small; the caller's ctx bounds total
 // runtime (a partial sweep resumes next hour — the delete is idempotent). A var (not
 // const) so tests can shrink it to exercise the multi-batch loop cheaply.
 var expiredDeleteBatch int64 = 5000
@@ -4082,19 +4156,56 @@ var expiredDeleteBatch int64 = 5000
 func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 	var total int64
 	for {
-		tag, err := s.pool.Exec(ctx,
-			`DELETE FROM messages WHERE ctid IN (
-			   SELECT m.ctid FROM messages m
-			    WHERE m.deleted_at IS NOT NULL
-			      AND m.deleted_at <= now() - make_interval(secs => $2)
-			    LIMIT $1)`,
-			expiredDeleteBatch, TrashRetention.Seconds())
+		var deleted int64
+		err := s.WithTx(ctx, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx,
+				`SELECT m.id, m.send_job_id
+				   FROM messages m
+				  WHERE m.deleted_at IS NOT NULL
+				    AND m.deleted_at <= now() - make_interval(secs => $2)
+				  LIMIT $1
+				  FOR UPDATE SKIP LOCKED`,
+				expiredDeleteBatch, TrashRetention.Seconds())
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			messageIDs := make([]string, 0, expiredDeleteBatch)
+			jobIDs := make([]int64, 0)
+			for rows.Next() {
+				var messageID string
+				var jobID *int64
+				if err := rows.Scan(&messageID, &jobID); err != nil {
+					return err
+				}
+				messageIDs = append(messageIDs, messageID)
+				if jobID != nil {
+					jobIDs = append(jobIDs, *jobID)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			rows.Close()
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+				return err
+			}
+			if len(messageIDs) == 0 {
+				return nil
+			}
+			tag, err := tx.Exec(ctx, `DELETE FROM messages WHERE id = ANY($1)`, messageIDs)
+			if err != nil {
+				return err
+			}
+			deleted = tag.RowsAffected()
+			return nil
+		})
 		if err != nil {
 			return total, err
 		}
-		n := tag.RowsAffected()
-		total += n
-		if n < expiredDeleteBatch {
+		total += deleted
+		if deleted < expiredDeleteBatch {
 			return total, nil
 		}
 	}
@@ -4149,13 +4260,15 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		var deletedAt *time.Time
 		var deliveryStatus string
 		var activeSend bool
+		var sendJobID *int64
 		err := tx.QueryRow(ctx,
 			`SELECT deleted_at, COALESCE(delivery_status, ''),
-			        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+			        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false),
+			        send_job_id
 			   FROM messages
 			  WHERE id = $1 AND agent_id = $2 FOR UPDATE`,
 			messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
-		).Scan(&deletedAt, &deliveryStatus, &activeSend)
+		).Scan(&deletedAt, &deliveryStatus, &activeSend, &sendJobID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrMessageNotFound
 		}
@@ -4167,6 +4280,11 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		}
 		if deletedAt == nil {
 			return ErrNotInTrash
+		}
+		if sendJobID != nil {
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, []int64{*sendJobID}); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM messages WHERE id = $1`, messageID)
 		return err

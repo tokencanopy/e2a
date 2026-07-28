@@ -644,12 +644,11 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		// later proves an earlier crashed attempt DID reach SES, the §3.1
 		// correction may still record the truthful outcome on the hidden row.
 		//
-		// Scheduled-send note: this is the ONLY thing that "cancels" a scheduled
-		// send — the River job itself is never cancelled, only claim-gated here.
-		// So trash-cancel is REVERSIBLE: restoring a trashed scheduled message
-		// before its scheduled_at re-arms it (the job still fires and, finding the
-		// row un-trashed, submits). "Cancel by trashing" is final only if the row
-		// stays trashed past send time.
+		// Scheduled-send note: reversible trash does not cancel the River job; it
+		// is claim-gated here. Restoring a trashed scheduled message before its
+		// scheduled_at therefore re-arms it (the job fires and, finding the row
+		// un-trashed, submits). Irreversible message/agent/account deletion is
+		// different: those paths transactionally cancel the linked River job.
 		//
 		// Domain-verification note: verification is checked at accept, not
 		// re-checked here at fire (up to 90 days later). That's safe because a

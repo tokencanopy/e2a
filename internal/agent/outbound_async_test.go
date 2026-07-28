@@ -75,6 +75,7 @@ func eventLifecycle(t *testing.T, pool *pgxpool.Pool, messageID, eventType strin
 type fakeOutboundEnqueuer struct {
 	jobID       int64
 	scheduledAt time.Time // set when EnqueueScheduledSendTx was used
+	cancelled   []int64
 }
 
 func (f *fakeOutboundEnqueuer) EnqueueSendTx(_ context.Context, _ pgx.Tx, _ string) (int64, error) {
@@ -84,6 +85,11 @@ func (f *fakeOutboundEnqueuer) EnqueueSendTx(_ context.Context, _ pgx.Tx, _ stri
 func (f *fakeOutboundEnqueuer) EnqueueScheduledSendTx(_ context.Context, _ pgx.Tx, _ string, at time.Time) (int64, error) {
 	f.scheduledAt = at
 	return f.jobID, nil
+}
+
+func (f *fakeOutboundEnqueuer) CancelTx(_ context.Context, _ pgx.Tx, jobID int64) error {
+	f.cancelled = append(f.cancelled, jobID)
+	return nil
 }
 
 type txSentinelEnqueuer struct{}
@@ -185,6 +191,7 @@ func setupAsyncAPIWithPool(t *testing.T) (*agent.API, *identity.Store, webhookpu
 	api.SetOutbox(outbox)
 	enq := &fakeOutboundEnqueuer{jobID: 999}
 	api.SetOutboundEnqueuer(enq)
+	store.SetOutboundJobCanceller(enq)
 	return api, store, outbox, enq, pool
 }
 
@@ -1145,7 +1152,7 @@ func TestSendWorker_TrashCancellationLifecycleFailureRollsBackState(t *testing.T
 }
 
 func TestSendWorker_RetryBackoffReleasesClaimForPurge(t *testing.T) {
-	api, store, outbox, _ := setupAsyncAPI(t)
+	api, store, outbox, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncreleasepurge")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1167,10 +1174,13 @@ func TestSendWorker_RetryBackoffReleasesClaimForPurge(t *testing.T) {
 	if err := store.PurgeMessage(ctx, res.MessageID, ag.ID); err != nil {
 		t.Fatalf("PurgeMessage after released retry claim: %v", err)
 	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
+	}
 }
 
 func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
-	api, store, _, _ := setupAsyncAPI(t)
+	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstalepurge")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1196,10 +1206,13 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	if err := store.PurgeMessage(ctx, res.MessageID, ag.ID); err != nil {
 		t.Fatalf("PurgeMessage(stale claim): %v", err)
 	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
+	}
 }
 
 func TestDeleteAgent_AllowsStaleOrphanedSendClaim(t *testing.T) {
-	api, store, _, _ := setupAsyncAPI(t)
+	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstaleagent")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1224,6 +1237,9 @@ func TestDeleteAgent_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	}
 	if _, err := store.DeleteAgent(ctx, ag.ID, user.ID); err != nil {
 		t.Fatalf("DeleteAgent(stale claim): %v", err)
+	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
 	}
 }
 

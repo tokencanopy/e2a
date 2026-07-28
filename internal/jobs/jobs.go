@@ -13,6 +13,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -77,6 +78,17 @@ func (c Config) withDefaults() Config {
 // *river.Client[pgx.Tx], so it IS an Enqueuer and exposes Start/Stop directly.
 type Client struct {
 	*river.Client[pgx.Tx]
+}
+
+// CancelTx cancels a durable job atomically with a caller-owned transaction.
+// A missing job is already in the desired state (River may have pruned a
+// finalized row), so deletion workflows treat it as success.
+func (c *Client) CancelTx(ctx context.Context, tx pgx.Tx, jobID int64) error {
+	_, err := c.JobCancelTx(ctx, tx, jobID)
+	if errors.Is(err, rivertype.ErrNotFound) {
+		return nil
+	}
+	return err
 }
 
 // Migrate applies River's own schema (river_job et al.) to the pool. River tracks

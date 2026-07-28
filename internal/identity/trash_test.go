@@ -7,9 +7,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
+
+type recordingOutboundJobCanceller struct {
+	jobIDs []int64
+	err    error
+}
+
+func (c *recordingOutboundJobCanceller) CancelTx(_ context.Context, _ pgx.Tx, jobID int64) error {
+	c.jobIDs = append(c.jobIDs, jobID)
+	return c.err
+}
+
+func linkTrashTestSendJob(t *testing.T, pool *pgxpool.Pool, messageID string, jobID int64) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE messages SET send_job_id = $2, delivery_status = 'accepted' WHERE id = $1`,
+		messageID, jobID); err != nil {
+		t.Fatalf("link send job: %v", err)
+	}
+}
 
 // trashTestSetup creates a user + verified domain + agent for trash tests.
 func trashTestSetup(t *testing.T, store *identity.Store, slug string) (userID, agentID string) {
@@ -150,6 +171,121 @@ func TestMessageTrashLifecycle(t *testing.T) {
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM messages WHERE id = $1`, doomed.ID).Scan(&n); err != nil || n != 0 {
 		t.Errorf("purged message still present (n=%d, err=%v)", n, err)
+	}
+}
+
+func TestPurgeMessageCancelsLinkedSendJobTransactionally(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	ctx := context.Background()
+	_, agentID := trashTestSetup(t, store, "purge-job")
+
+	message, err := store.CreateOutboundMessage(ctx, agentID, []string{"x@example.com"}, nil, nil,
+		"scheduled", "send", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("CreateOutboundMessage: %v", err)
+	}
+	linkTrashTestSendJob(t, pool, message.ID, 101)
+
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage: %v", err)
+	}
+	if len(canceller.jobIDs) != 0 {
+		t.Fatalf("soft delete cancelled jobs %v; scheduled jobs must survive for restore", canceller.jobIDs)
+	}
+
+	canceller.err = errors.New("queue unavailable")
+	if err := store.PurgeMessage(ctx, message.ID, agentID); !errors.Is(err, canceller.err) {
+		t.Fatalf("PurgeMessage cancellation failure = %v, want %v", err, canceller.err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM messages WHERE id = $1)`, message.ID).Scan(&exists); err != nil {
+		t.Fatalf("check rollback: %v", err)
+	}
+	if !exists {
+		t.Fatal("message was deleted even though linked job cancellation failed")
+	}
+
+	canceller.err = nil
+	if err := store.PurgeMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("PurgeMessage: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 2 || got[0] != 101 || got[1] != 101 {
+		t.Fatalf("cancelled jobs = %v, want [101 101] (rolled-back attempt plus committed retry)", got)
+	}
+}
+
+func TestPermanentAgentDeletionCancelsLinkedSendJobs(t *testing.T) {
+	t.Run("explicit delete", func(t *testing.T) {
+		pool := testutil.TestDB(t)
+		store := identity.NewStore(pool)
+		canceller := &recordingOutboundJobCanceller{}
+		store.SetOutboundJobCanceller(canceller)
+		ctx := context.Background()
+		userID, agentID := trashTestSetup(t, store, "delete-agent-job")
+		message := trashInbound(t, store, agentID, agentID, "scheduled")
+		linkTrashTestSendJob(t, pool, message.ID, 201)
+
+		if _, err := store.DeleteAgent(ctx, agentID, userID); err != nil {
+			t.Fatalf("DeleteAgent: %v", err)
+		}
+		if got := canceller.jobIDs; len(got) != 1 || got[0] != 201 {
+			t.Fatalf("cancelled jobs = %v, want [201]", got)
+		}
+	})
+
+	t.Run("trash janitor", func(t *testing.T) {
+		pool := testutil.TestDB(t)
+		store := identity.NewStore(pool)
+		canceller := &recordingOutboundJobCanceller{}
+		store.SetOutboundJobCanceller(canceller)
+		ctx := context.Background()
+		userID, agentID := trashTestSetup(t, store, "purge-agent-job")
+		message := trashInbound(t, store, agentID, agentID, "scheduled")
+		linkTrashTestSendJob(t, pool, message.ID, 202)
+
+		if err := store.SoftDeleteAgent(ctx, agentID, userID); err != nil {
+			t.Fatalf("SoftDeleteAgent: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`UPDATE agent_identities SET deleted_at = now() - interval '31 days' WHERE id = $1`,
+			agentID); err != nil {
+			t.Fatalf("backdate agent: %v", err)
+		}
+		if _, err := store.PurgeDeletedAgents(ctx); err != nil {
+			t.Fatalf("PurgeDeletedAgents: %v", err)
+		}
+		if got := canceller.jobIDs; len(got) != 1 || got[0] != 202 {
+			t.Fatalf("cancelled jobs = %v, want [202]", got)
+		}
+	})
+}
+
+func TestDeleteExpiredMessagesCancelsLinkedSendJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	ctx := context.Background()
+	_, agentID := trashTestSetup(t, store, "expired-job")
+	message := trashInbound(t, store, agentID, agentID, "scheduled")
+	linkTrashTestSendJob(t, pool, message.ID, 301)
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages SET deleted_at = now() - interval '31 days' WHERE id = $1`,
+		message.ID); err != nil {
+		t.Fatalf("backdate message: %v", err)
+	}
+
+	if _, err := store.DeleteExpiredMessages(ctx); err != nil {
+		t.Fatalf("DeleteExpiredMessages: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 301 {
+		t.Fatalf("cancelled jobs = %v, want [301]", got)
 	}
 }
 

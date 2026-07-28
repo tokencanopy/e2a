@@ -426,6 +426,7 @@ func main() {
 			log.Fatalf("jobs: build shared river client: %v", jerr)
 		}
 		jobsClient = jc
+		store.SetOutboundJobCanceller(jobsClient)
 		if senderMgr != nil {
 			senderMgr.SetEnqueuer(jobsClient)
 			senderEnqueuer = senderMgr

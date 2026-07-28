@@ -87,6 +87,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		pool.Close()
 		return nil, err
 	}
+	store.SetOutboundJobCanceller(jobsClient)
 	outboundJobs.SetEnqueuer(jobsClient)
 
 	router := mux.NewRouter()

@@ -435,6 +435,35 @@ func TestDeleteUserData(t *testing.T) {
 	}
 }
 
+func TestDeleteUserDataCancelsLinkedSendJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	ctx := context.Background()
+	user := seedUserData(t, store, ctx, "delete-user-jobs")
+
+	var messageID string
+	if err := pool.QueryRow(ctx,
+		`SELECT m.id
+		   FROM messages m
+		   JOIN agent_identities a ON a.id = m.agent_id
+		  WHERE a.user_id = $1
+		  ORDER BY m.id
+		  LIMIT 1`,
+		user.ID).Scan(&messageID); err != nil {
+		t.Fatalf("find message: %v", err)
+	}
+	linkTrashTestSendJob(t, pool, messageID, 401)
+
+	if _, err := store.DeleteUserData(ctx, user.ID); err != nil {
+		t.Fatalf("DeleteUserData: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 401 {
+		t.Fatalf("cancelled jobs = %v, want [401]", got)
+	}
+}
+
 // TestDeleteUserData_DoesNotAffectOtherUsers is the cross-tenant
 // isolation check. Two users; deleting one must not touch the other's
 // data even when both have the same domain/agent shape.
