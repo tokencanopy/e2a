@@ -429,6 +429,20 @@ describe("e2a MCP server", () => {
     expect(replyProperties.conversation_id?.description).toMatch(/message_id still preserves/i);
   });
 
+  it("documents contact.due as a webhook event rather than a local-agent launcher", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const eventsProperties = (byName.get("list_events")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    })?.properties ?? {};
+    const outreachDescription = byName.get("set_outreach_contact")?.description ?? "";
+
+    expect(eventsProperties.type?.description).toContain("`contact.due`");
+    expect(outreachDescription).toMatch(/webhook/i);
+    expect(outreachDescription).toMatch(/deployed (?:agent|runtime)/i);
+    expect(outreachDescription).toMatch(/does not launch.*local coding-agent/i);
+  });
+
   it("documents claimed sender and DMARC trust semantics on list_messages", async () => {
     const { tools } = await client.listTools();
     const tool = tools.find((candidate) => candidate.name === "list_messages");

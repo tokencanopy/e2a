@@ -27,6 +27,8 @@ test("uses concise page-specific MCP prompts", () => {
   expect(AGENT_PROMPTS.templates.prompt).toBe(
     "Help me set up e2a email templates using https://api.e2a.dev/mcp",
   );
+  expect(AGENT_PROMPTS.contacts.blurb).toMatch(/while it is running/i);
+  expect(AGENT_PROMPTS.contacts.blurb).not.toMatch(/headlessly/i);
 });
 
 test("shows the optional outbound-review instruction for inbox setup", () => {

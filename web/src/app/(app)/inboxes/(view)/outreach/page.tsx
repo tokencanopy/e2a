@@ -117,7 +117,7 @@ function OutreachContent({ email }: { email: string }) {
             <Chip tone="warn">Beta</Chip>
           </div>
           <p className="mt-1 max-w-[680px] text-[13px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
-            State and real reply history for this inbox. e2a wakes your agent when a next action is due; it never composes or sends automatically.
+            State and real reply history for this inbox. A due next action emits contact.due to configured webhooks for a deployed agent; it does not launch local coding agents or send email.
           </p>
         </div>
         <Button variant="ghost" onClick={() => void refresh()}>Refresh</Button>
@@ -386,7 +386,7 @@ function EditOutreachPanel({
         </div>
       </form>
       <p className="mt-2 text-[11px]" style={{ color: "var(--fg-muted)" }}>
-        Clear next action to remove the schedule. e2a wakes your agent when due; it never sends automatically.
+        Clear next action to remove the schedule. A due action emits contact.due to configured webhooks; it does not launch local coding agents or send email.
       </p>
       {error && <p role="alert" className="mt-2 text-[12px]" style={{ color: "var(--danger-strong)" }}>{error}</p>}
     </section>

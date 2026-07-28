@@ -36,6 +36,8 @@ it("renders real activity, scheduling, and suppression state", async () => {
   expect(screen.getAllByText(/Suppressed · asked to stop/).length).toBeGreaterThan(0);
   expect(screen.getAllByText("2 sent · 0 received").length).toBeGreaterThan(0);
   expect(screen.getAllByText("No reply").length).toBeGreaterThan(0);
+  expect(screen.getByText(/emits contact\.due to configured webhooks for a deployed agent/i)).toBeInTheDocument();
+  expect(screen.getByText(/does not launch local coding agents/i)).toBeInTheDocument();
 });
 
 it("edits outreach in a form and guards the write with If-Match", async () => {

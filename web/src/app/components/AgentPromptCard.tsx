@@ -30,7 +30,7 @@ export const AGENT_PROMPTS = {
   },
   contacts: {
     blurb:
-      "Your coding agent can import contacts, enroll them with an inbox, and manage outreach headlessly over MCP.",
+      "Your coding agent can import contacts, enroll them with an inbox, and work outreach over MCP while it is running.",
     prompt:
       "Help me set up e2a contacts and outreach using https://api.e2a.dev/mcp",
   },

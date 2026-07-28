@@ -217,7 +217,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
       title: "Enroll or update an outreach contact (beta)",
       annotations: { destructiveHint: false, idempotentHint: true },
       description:
-        "Enroll a contact or update agent-owned stage, next action, and metadata. Omitted fields remain unchanged. Pass `if_match` from get_outreach_contact to reject a stale update; conditional writes never enroll a missing contact. This NEVER sends email; `next_action_at` only schedules a `contact.due` wake-up.",
+        "Enroll a contact or update agent-owned stage, next action, and metadata. Omitted fields remain unchanged. Pass `if_match` from get_outreach_contact to reject a stale update; conditional writes never enroll a missing contact. This NEVER sends email; `next_action_at` schedules `contact.due` for configured webhooks. A deployed agent runtime can consume that event; it does not launch a local coding-agent session over MCP or WebSocket.",
       inputSchema: strictInputSchema({
         email: emailSelector,
         address: contactAddress,
