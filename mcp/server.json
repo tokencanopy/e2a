@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Mnexa-AI/mcp-server",
+  "name": "dev.e2a/mcp-server",
   "title": "e2a — email for AI agents",
   "description": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verified.",
   "websiteUrl": "https://e2a.dev",
