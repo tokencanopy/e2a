@@ -146,7 +146,7 @@ var signedHeaderCandidates = []string{
 // the dangerous direction. Composed messages never take these paths;
 // headerWriter emits "Key: value" and strips CR/LF.
 func signedHeaderKeys(message []byte) []string {
-	present := map[string]bool{}
+	count := map[string]int{}
 	hdr, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(message))).ReadMIMEHeader()
 	if err != nil && len(hdr) == 0 {
 		// Unparseable header block: fall back to the full candidate list
@@ -154,13 +154,28 @@ func signedHeaderKeys(message []byte) []string {
 		// caller sends unsigned, which is the existing behavior.
 		return signedHeaderCandidates
 	}
-	for k := range hdr {
-		present[k] = true
+	for k, values := range hdr {
+		count[k] = len(values)
 	}
 
-	keys := make([]string, 0, len(signedHeaderCandidates))
+	keys := make([]string, 0, 2*len(signedHeaderCandidates))
 	for _, k := range signedHeaderCandidates {
-		if k == "From" || present[textproto.CanonicalMIMEHeaderKey(k)] {
+		n := count[textproto.CanonicalMIMEHeaderKey(k)]
+		if n == 0 {
+			// From must be covered even when absent (RFC 6376 § 5.4).
+			if k == "From" {
+				keys = append(keys, k)
+			}
+			continue
+		}
+		// N+1 oversigning: list a present header once more than it
+		// occurs. A verifier binds each listed instance from the bottom
+		// up, so the extra entry asserts "there is no further instance".
+		// Without it, a hop can PREPEND a second Subject: the verifier
+		// still matches the original and reports pass, while the MUA
+		// displays the attacker's copy. Confirmed both ways — listing
+		// once accepts the spoof, listing n+1 times rejects it.
+		for i := 0; i < n+1; i++ {
 			keys = append(keys, k)
 		}
 	}

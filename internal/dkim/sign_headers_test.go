@@ -213,6 +213,76 @@ func TestSign_TamperingWithASignedHeaderIsDetected(t *testing.T) {
 	}
 }
 
+// The attack N+1 oversigning exists to stop. A hop prepends a second
+// Subject; a verifier binds header instances from the bottom up, so with
+// the header listed only once it matches the original and reports pass —
+// while the MUA displays the attacker's copy at the top.
+func TestSign_PrependedDuplicateHeaderIsDetected(t *testing.T) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	spoofs := map[string]string{
+		"Subject":    "Subject: YOU HAVE WON",
+		"From":       "From: ceo@example.com",
+		"To":         "To: mallory@evil.test",
+		"Reply-To":   "Reply-To: mallory@evil.test",
+		"Message-ID": "Message-ID: <spoof@evil.test>",
+	}
+
+	// Message carries every header the spoofs target, so each is a
+	// duplicate rather than a fresh addition.
+	msg := "From: bot@example.com\r\n" +
+		"To: alice@elsewhere.test\r\n" +
+		"Reply-To: bot@example.com\r\n" +
+		"Subject: real subject\r\n" +
+		"Message-ID: <real@example.com>\r\n" +
+		"Date: Fri, 22 May 2026 12:00:00 +0000\r\n\r\nbody\r\n"
+
+	signed, err := Sign([]byte(msg), "example.com", kp.Selector, kp.PrivateKeyDER)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if v := verifySigned(t, signed, "example.com", kp.Selector, kp.PublicKeyDNS); v[0].Err != nil {
+		t.Fatalf("control: unmutated signature must verify: %v", v[0].Err)
+	}
+
+	for header, spoof := range spoofs {
+		t.Run(header, func(t *testing.T) {
+			mutated := append([]byte(spoof+"\r\n"), signed...)
+			v := verifySigned(t, mutated, "example.com", kp.Selector, kp.PublicKeyDNS)
+			if len(v) == 1 && v[0].Err == nil {
+				t.Errorf("a prepended duplicate %s went undetected", header)
+			}
+		})
+	}
+}
+
+// N+1 must not come at the cost of the fix it builds on: an ABSENT
+// candidate is still omitted entirely, so a relay adding one for the
+// first time (SES and Message-ID) still verifies.
+func TestSign_NPlusOneDoesNotResurrectOversigning(t *testing.T) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	signed, err := Sign([]byte(composerShapedMessage), "example.com", kp.Selector, kp.PrivateKeyDER)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if h := signedHTag(t, signed); hasHeader(h, "message-id") {
+		t.Fatalf("h= claims an absent Message-ID: %v", h)
+	}
+
+	delivered := append([]byte(sesMessageIDHeader), signed...)
+	v := verifySigned(t, delivered, "example.com", kp.Selector, kp.PublicKeyDNS)
+	if len(v) != 1 || v[0].Err != nil {
+		t.Errorf("SES stamping Message-ID broke the signature again: %+v", v)
+	}
+}
+
 func TestSign_CoversOnlyStablePresentHeaders(t *testing.T) {
 	kp, err := GenerateKeypair()
 	if err != nil {
@@ -269,24 +339,40 @@ func TestSignedHeaderKeys(t *testing.T) {
 		want    []string
 	}{
 		{
+			// Each present header appears n+1 times: N+1 oversigning, so
+			// a relay cannot append another instance unnoticed.
 			name:    "composer shape drops absent headers",
 			message: composerShapedMessage,
-			want:    []string{"From", "To", "Subject", "MIME-Version", "Content-Type"},
+			want: []string{
+				"From", "From", "To", "To", "Subject", "Subject",
+				"MIME-Version", "MIME-Version", "Content-Type", "Content-Type",
+			},
 		},
 		{
 			name:    "unsubscribe headers covered when set",
 			message: "From: a@b.test\r\nList-Unsubscribe: <https://x/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\nbody",
-			want:    []string{"From", "List-Unsubscribe", "List-Unsubscribe-Post"},
+			want: []string{
+				"From", "From", "List-Unsubscribe", "List-Unsubscribe",
+				"List-Unsubscribe-Post", "List-Unsubscribe-Post",
+			},
 		},
 		{
+			// Absent From is listed exactly once: RFC 6376 § 5.4 requires
+			// it in h=, and there is no instance to count.
 			name:    "From always covered even when missing",
 			message: "Subject: no from here\r\n\r\nbody",
-			want:    []string{"From", "Subject"},
+			want:    []string{"From", "Subject", "Subject"},
 		},
 		{
 			name:    "case-insensitive header match",
 			message: "from: a@b.test\r\nCONTENT-TYPE: text/plain\r\n\r\nbody",
-			want:    []string{"From", "Content-Type"},
+			want:    []string{"From", "From", "Content-Type", "Content-Type"},
+		},
+		{
+			// Already duplicated in the source message: listed n+1 = 3.
+			name:    "a header present twice is listed three times",
+			message: "From: a@b.test\r\nSubject: one\r\nSubject: two\r\n\r\nbody",
+			want:    []string{"From", "From", "Subject", "Subject", "Subject"},
 		},
 	}
 
