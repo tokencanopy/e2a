@@ -594,6 +594,61 @@ describe("e2a MCP server", () => {
     }, "contact:partner");
   });
 
+  it("maps the remaining contact CRUD and reversal tools", async () => {
+    await client.callTool({
+      name: "get_contact",
+      arguments: { address: "partner@fund.vc" },
+    });
+    expect(stub.getContactWithETag).toHaveBeenCalledWith("partner@fund.vc");
+
+    await client.callTool({
+      name: "update_contact",
+      arguments: {
+        address: "partner@fund.vc",
+        display_name: "",
+        metadata: { fund: "Example" },
+        if_match: '"contact-v1"',
+      },
+    });
+    expect(stub.updateContact).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { displayName: "", metadata: { fund: "Example" } },
+      '"contact-v1"',
+    );
+
+    await client.callTool({
+      name: "delete_contact",
+      arguments: { address: "partner@fund.vc" },
+    });
+    expect(stub.deleteContact).toHaveBeenCalledWith("partner@fund.vc");
+
+    await client.callTool({
+      name: "delete_contact_import",
+      arguments: { batch_id: "imp_1" },
+    });
+    expect(stub.deleteContactImport).toHaveBeenCalledWith("imp_1");
+  });
+
+  it("maps outreach reads and un-enrolment", async () => {
+    await client.callTool({
+      name: "get_outreach_contact",
+      arguments: { email: "raise@example.com", address: "partner@fund.vc" },
+    });
+    expect(stub.getOutreachWithETag).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      "raise@example.com",
+    );
+
+    await client.callTool({
+      name: "delete_outreach_contact",
+      arguments: { email: "raise@example.com", address: "partner@fund.vc" },
+    });
+    expect(stub.deleteOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      "raise@example.com",
+    );
+  });
+
   it("set_outreach_contact forwards If-Match for a guarded agent loop", async () => {
     await client.callTool({
       name: "set_outreach_contact",

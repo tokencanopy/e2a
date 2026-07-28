@@ -9,6 +9,11 @@ const mockList = vi.fn();
 const mockGetWithETag = vi.fn();
 const mockUpdate = vi.fn();
 const mockCreate = vi.fn();
+const mockDelete = vi.fn();
+const mockDeleteImport = vi.fn();
+const mockOutreach = vi.fn();
+const mockGetOutreachWithETag = vi.fn();
+const mockDeleteOutreach = vi.fn();
 
 vi.mock("../sdk.js", () => ({
   createClient: vi.fn(() => ({
@@ -19,6 +24,11 @@ vi.mock("../sdk.js", () => ({
       getWithETag: mockGetWithETag,
       update: mockUpdate,
       create: mockCreate,
+      delete: mockDelete,
+      deleteImport: mockDeleteImport,
+      outreach: mockOutreach,
+      getOutreachWithETag: mockGetOutreachWithETag,
+      deleteOutreach: mockDeleteOutreach,
     },
   })),
   requireAgentEmail: vi.fn((agent?: string) => agent ?? "bot@agents.e2a.dev"),
@@ -169,5 +179,84 @@ describe("contacts commands", () => {
       "partner@fund.vc",
       { stage: "", metadata: undefined },
     );
+  });
+
+  it("covers destructive receipts and outreach list/read/delete output", async () => {
+    mockDelete.mockResolvedValue({ deleted: true, address: "partner@fund.vc" });
+    mockDeleteImport.mockResolvedValue({
+      deleted: true,
+      batchId: "imp_1",
+      contactsDeleted: 2,
+      contactsRetained: 1,
+      engagementsDeleted: 3,
+    });
+    mockOutreach.mockReturnValue({
+      toArray: vi.fn(async () => [{
+        address: "partner@fund.vc",
+        stage: "touch2",
+        nextActionAt: new Date("2026-08-01T00:00:00Z"),
+        replied: false,
+        suppressed: false,
+      }]),
+    });
+    mockGetOutreachWithETag.mockResolvedValue({
+      data: {
+        address: "partner@fund.vc",
+        stage: "touch2",
+        nextActionAt: undefined,
+      },
+      etag: '"outreach-v1"',
+    });
+    mockDeleteOutreach.mockResolvedValue({ deleted: true, address: "partner@fund.vc" });
+    const {
+      contactsDelete,
+      contactsDeleteImport,
+      outreachList,
+      outreachGet,
+      outreachDelete,
+    } = await import("../commands/contacts.js");
+
+    await contactsDelete("partner@fund.vc", { json: false });
+    await contactsDeleteImport("imp_1", { json: false });
+    await outreachList({
+      agent: "raise@example.com",
+      replied: "false",
+      suppressed: "false",
+      nextActionBefore: "2026-08-01T00:00:00Z",
+      lastOutboundBefore: "2026-07-01T00:00:00Z",
+      limit: "1",
+      json: false,
+    });
+    await outreachGet("partner@fund.vc", { agent: "raise@example.com", json: true });
+    await outreachDelete("partner@fund.vc", { agent: "raise@example.com", json: false });
+
+    expect(mockOutreach).toHaveBeenCalledWith("raise@example.com", {
+      stage: undefined,
+      replied: false,
+      suppressed: false,
+      nextActionBefore: new Date("2026-08-01T00:00:00Z"),
+      lastOutboundBefore: new Date("2026-07-01T00:00:00Z"),
+    });
+    expect(mockDeleteOutreach).toHaveBeenCalledWith(
+      "raise@example.com",
+      "partner@fund.vc",
+    );
+  });
+
+  it("rejects conflicting clear flags and malformed list filters", async () => {
+    mockOutreach.mockReturnValue({ toArray: vi.fn(async () => []) });
+    const { contactsUpdate, outreachSet, outreachList, contactsList } =
+      await import("../commands/contacts.js");
+    await expect(contactsUpdate("partner@fund.vc", {
+      name: "Partner",
+      clearName: true,
+    })).rejects.toThrow("process.exit");
+    await expect(outreachSet("partner@fund.vc", {
+      stage: "touch2",
+      clearStage: true,
+    })).rejects.toThrow("process.exit");
+    await expect(outreachList({ replied: "maybe" })).rejects.toThrow("process.exit");
+    await expect(outreachList({ nextActionBefore: "not-a-date" })).rejects.toThrow("process.exit");
+    await expect(contactsList({ limit: "0" })).rejects.toThrow("process.exit");
   });
 });
