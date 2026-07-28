@@ -343,6 +343,10 @@ func TestEncodeBody(t *testing.T) {
 	}{
 		{"empty", "", "7bit"},
 		{"ascii", asciiBody, "7bit"},
+		{"canonical CRLF", "line one\r\nline two", "7bit"},
+		{"NUL is not valid 7bit data", "before\x00after", "quoted-printable"},
+		{"bare CR is not valid 7bit data", "line one\rline two", "quoted-printable"},
+		{"bare LF is canonicalised by SMTP", "line one\nline two", "7bit"},
 		{"em dash", "a — b", "quoted-printable"},
 		{"curly apostrophe", "it’s", "quoted-printable"},
 		{"emoji", "ship it \U0001F680", "quoted-printable"},
@@ -367,8 +371,10 @@ func TestEncodeBody(t *testing.T) {
 				}
 				return
 			}
-			if got := decodeQP(t, encoded); got != tc.body {
-				t.Errorf("round trip = %q, want %q", got, tc.body)
+			canonical := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(tc.body)
+			canonical = strings.ReplaceAll(canonical, "\n", "\r\n")
+			if got := decodeQP(t, encoded); got != canonical {
+				t.Errorf("round trip = %q, want %q", got, canonical)
 			}
 		})
 	}

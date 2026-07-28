@@ -260,12 +260,16 @@ func writeThreadingHeaders(writeHeader func(string, string), replyToMsgID string
 // those bodies through quoted-printable, which soft-wraps at 76 octets,
 // means no downstream wrap is ever needed.
 //
-// Otherwise pure-ASCII bodies stay 7bit and byte-identical, so the common
-// path is unchanged. Anything else becomes quoted-printable, which keeps
-// the text human-readable on the wire, needs no 8BITMIME support from the
-// relay, and is already decoded on the receive side by internal/mailparse.
+// Otherwise transport-safe ASCII bodies stay 7bit and byte-identical. NUL and
+// a lone CR are not valid 7bit data even though their bytes are ASCII, so they
+// take the same quoted-printable path as non-ASCII data. Bare LF remains on
+// the fast path because net/textproto.DotWriter canonicalises it to CRLF
+// before SMTP transmission, and preserving it here keeps the stored composed
+// body byte-identical. Quoted-printable keeps the text human-readable on the
+// wire, needs no 8BITMIME support from the relay, and is already decoded on
+// the receive side by internal/mailparse.
 func encodeBody(body string) (encoding, encoded string) {
-	if isASCII(body) && !hasOverlongLine(body) {
+	if is7BitTransportSafe(body) && !hasOverlongLine(body) {
 		return "7bit", body
 	}
 	var buf strings.Builder
@@ -299,13 +303,26 @@ func hasOverlongLine(s string) bool {
 	}
 }
 
-// isASCII reports whether s is entirely 7-bit. Checked bytewise rather than
-// by rune: the question is what goes on the wire, and any multi-byte UTF-8
-// sequence has the high bit set on every byte.
-func isASCII(s string) bool {
+// is7BitTransportSafe reports whether s can safely take the 7bit path apart
+// from the line-length constraint checked separately by hasOverlongLine.
+// NUL is forbidden, as is a CR not followed by LF. Bare LF is accepted here
+// because the SMTP dot writer canonicalises it on the wire.
+func is7BitTransportSafe(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if s[i] > 127 {
+		switch s[i] {
+		case 0:
 			return false
+		case '\r':
+			if i+1 >= len(s) || s[i+1] != '\n' {
+				return false
+			}
+			i++ // consume the LF in this CRLF pair
+		case '\n':
+			continue
+		default:
+			if s[i] > 127 {
+				return false
+			}
 		}
 	}
 	return true
