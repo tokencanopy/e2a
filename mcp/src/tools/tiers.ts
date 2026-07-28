@@ -42,6 +42,10 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "send_email",
   "reply_to_message",
   "forward_message",
+  "list_outreach_contacts",
+  "get_outreach_contact",
+  "set_outreach_contact",
+  "delete_outreach_contact",
   // Review discovery and decisions are deliberately NOT here. They expose the
   // account-wide queue and belong to the account owner / human reviewer.
 ]);
@@ -114,6 +118,13 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   "list_api_keys",
   "create_api_key",
   "delete_api_key",
+  "list_contacts",
+  "get_contact",
+  "create_contact",
+  "update_contact",
+  "delete_contact",
+  "import_contacts",
+  "delete_contact_import",
 ]);
 
 export type Scope = "account" | "agent";

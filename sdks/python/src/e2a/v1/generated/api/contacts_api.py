@@ -931,7 +931,7 @@ class ContactsApi:
     ) -> DeleteImportBatchResult:
         """Reverse a contact import (beta)
 
-        Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str
@@ -1002,7 +1002,7 @@ class ContactsApi:
     ) -> ApiResponse[DeleteImportBatchResult]:
         """Reverse a contact import (beta)
 
-        Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str
@@ -1073,7 +1073,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Reverse a contact import (beta)
 
-        Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str
@@ -1470,7 +1470,7 @@ class ContactsApi:
     ) -> ContactEngagementView:
         """Get one outreach record (beta)
 
-        Fetches this agent's relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+        Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -1541,7 +1541,7 @@ class ContactsApi:
     ) -> ApiResponse[ContactEngagementView]:
         """Get one outreach record (beta)
 
-        Fetches this agent's relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+        Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -1612,7 +1612,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Get one outreach record (beta)
 
-        Fetches this agent's relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+        Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -2784,7 +2784,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2806,7 +2806,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -2859,7 +2859,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2881,7 +2881,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -2934,7 +2934,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2956,7 +2956,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -3089,6 +3089,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3104,7 +3105,7 @@ class ContactsApi:
     ) -> ContactEngagementView:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3112,6 +3113,8 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -3138,6 +3141,7 @@ class ContactsApi:
             email=email,
             address=address,
             upsert_engagement_request=upsert_engagement_request,
+            if_match=if_match,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -3165,6 +3169,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3180,7 +3185,7 @@ class ContactsApi:
     ) -> ApiResponse[ContactEngagementView]:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3188,6 +3193,8 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -3214,6 +3221,7 @@ class ContactsApi:
             email=email,
             address=address,
             upsert_engagement_request=upsert_engagement_request,
+            if_match=if_match,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -3241,6 +3249,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3256,7 +3265,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Enrol or update outreach state (beta)
 
-        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+        Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -3264,6 +3273,8 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -3290,6 +3301,7 @@ class ContactsApi:
             email=email,
             address=address,
             upsert_engagement_request=upsert_engagement_request,
+            if_match=if_match,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -3312,6 +3324,7 @@ class ContactsApi:
         email,
         address,
         upsert_engagement_request,
+        if_match,
         _request_auth,
         _content_type,
         _headers,
@@ -3339,6 +3352,8 @@ class ContactsApi:
             _path_params['address'] = address
         # process the query parameters
         # process the header parameters
+        if if_match is not None:
+            _header_params['If-Match'] = if_match
         # process the form parameters
         # process the body parameter
         if upsert_engagement_request is not None:

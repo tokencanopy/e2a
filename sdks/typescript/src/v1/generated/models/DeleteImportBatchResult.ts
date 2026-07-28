@@ -19,10 +19,14 @@ export class DeleteImportBatchResult {
     */
     'contactsDeleted': number;
     /**
-    * How many contacts from this batch were deliberately kept because their provenance had moved on.
+    * How many contacts from this batch were deliberately kept because they have correspondence history.
     */
     'contactsRetained': number;
     'deleted': boolean;
+    /**
+    * How many per-agent outreach enrolments created by this import were removed.
+    */
+    'engagementsDeleted': number;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -52,6 +56,12 @@ export class DeleteImportBatchResult {
             "baseName": "deleted",
             "type": "boolean",
             "format": ""
+        },
+        {
+            "name": "engagementsDeleted",
+            "baseName": "engagements_deleted",
+            "type": "number",
+            "format": "int64"
         }    ];
 
     static getAttributeTypeMap() {

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, Awaitable, Callable, List, Literal, Optional, Protocol, Sequence, Type, TypeVar, Union
+from datetime import datetime
+from typing import Any, Awaitable, Callable, List, Literal, Mapping, Optional, Protocol, Sequence, Tuple, Type, TypeVar, Union
 
 from pydantic import ValidationError
 
@@ -341,6 +342,17 @@ class AsyncE2AClient:
 
 def _page(items: Optional[Sequence[T]], next_cursor: Optional[str] = None) -> Page:
     return Page(items=items or [], next_cursor=next_cursor)
+
+
+def _header(headers: Optional[Mapping[str, str]], name: str) -> Optional[str]:
+    """Read a response header without relying on transport-specific casing."""
+    if not headers:
+        return None
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
 
 
 class AgentsResource:
@@ -714,16 +726,19 @@ class ContactsResource:
         *,
         source: Optional[str] = None,
         import_batch_id: Optional[str] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
         limit: Optional[int] = None,
     ) -> AutoPager[ContactView]:
-        """List contacts, newest first. Optionally narrow by provenance
-        (``source``) or to a single upload (``import_batch_id``)."""
+        """List contacts, newest first. Optionally narrow by provenance,
+        upload, or creation-time window."""
 
         # Cursor-paginated: the AutoPager walks next_cursor to completion.
         async def fetch(cursor: Optional[str]) -> Page:
             resp = await self._c._read(
                 lambda h: self._api.list_contacts(
                     source=source, import_batch_id=import_batch_id,
+                    created_after=created_after, created_before=created_before,
                     cursor=cursor, limit=limit, _headers=h,
                 )
             )
@@ -736,18 +751,35 @@ class ContactsResource:
         ("A. Partner <partner@fund.vc>") — both resolve to the same contact."""
         return await self._c._read(lambda h: self._api.get_contact(address, _headers=h))
 
-    async def create(self, body: Body) -> ContactView:
+    async def get_with_etag(self, address: str) -> Tuple[ContactView, Optional[str]]:
+        """Fetch one contact and its optimistic-concurrency validator. Pass the
+        returned ETag to :meth:`update` as ``if_match`` to reject stale edits."""
+        response = await self._c._read(
+            lambda h: self._api.get_contact_with_http_info(address, _headers=h)
+        )
+        return response.data, _header(response.headers, "etag")
+
+    async def create(
+        self, body: Body, *, idempotency_key: Optional[str] = None
+    ) -> ContactView:
         """Create one contact. The address is canonicalized, so creating the same
         person twice in any form is a conflict rather than a duplicate row."""
         req = _coerce(CreateContactRequest, body)
-        return await self._c._write_unsafe(lambda h: self._api.create_contact(req, _headers=h))
+        return await self._c._write_keyed(
+            lambda h: self._api.create_contact(req, _headers=h),
+            idempotency_key,
+        )
 
-    async def update(self, address: str, patch: Body) -> ContactView:
+    async def update(
+        self, address: str, patch: Body, *, if_match: Optional[str] = None
+    ) -> ContactView:
         """Partial update; omitted fields are left unchanged, so editing the name
         never erases metadata. Address and provenance are immutable."""
         req = _coerce(UpdateContactRequest, patch)
         return await self._c._write_idempotent(
-            lambda h: self._api.update_contact(address, req, _headers=h)
+            lambda h: self._api.update_contact(
+                address, req, if_match=if_match, _headers=h
+            )
         )
 
     async def delete(self, address: str) -> DeleteContactResult:
@@ -757,17 +789,22 @@ class ContactsResource:
             lambda h: self._api.delete_contact(address, confirm="DELETE", _headers=h)
         )
 
-    async def import_(self, body: Body) -> ContactImportResult:
+    async def import_(
+        self, body: Body, *, idempotency_key: Optional[str] = None
+    ) -> ContactImportResult:
         """Import up to 1000 contacts in one request. Every submitted row gets its
         own result, so one bad line never rejects the upload. Import is inert — it
         records identity and sends nothing. A row that omits a field keeps the
         stored value, so a narrower re-upload does not erase columns it no longer
         carries."""
         req = _coerce(ImportContactsRequest, body)
-        return await self._c._write_unsafe(lambda h: self._api.import_contacts(req, _headers=h))
+        return await self._c._write_keyed(
+            lambda h: self._api.import_contacts(req, _headers=h),
+            idempotency_key,
+        )
 
     async def delete_import(self, batch_id: str) -> DeleteImportBatchResult:
-        """Reverse an import, removing the contacts it created."""
+        """Reverse an import, removing untouched contacts and agent enrolments it created."""
         return await self._c._write_idempotent(
             lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
         )
@@ -819,13 +856,29 @@ class ContactsResource:
         """Fetch one agent's outreach record for a contact."""
         return await self._c._read(lambda h: self._api.get_engagement(email, address, _headers=h))
 
-    async def set_outreach(self, email: str, address: str, body: Body) -> ContactEngagementView:
+    async def get_outreach_with_etag(
+        self, email: str, address: str
+    ) -> Tuple[ContactEngagementView, Optional[str]]:
+        """Fetch one outreach record and its validator for a guarded
+        read-modify-write loop."""
+        response = await self._c._read(
+            lambda h: self._api.get_engagement_with_http_info(
+                email, address, _headers=h
+            )
+        )
+        return response.data, _header(response.headers, "etag")
+
+    async def set_outreach(
+        self, email: str, address: str, body: Body, *, if_match: Optional[str] = None
+    ) -> ContactEngagementView:
         """Enrol a contact in an agent's outreach, or update the agent-owned
         fields. Omitted fields are left unchanged, so advancing the stage after a
         send does not disturb the schedule."""
         req = _coerce(UpsertEngagementRequest, body)
         return await self._c._write_idempotent(
-            lambda h: self._api.upsert_engagement(email, address, req, _headers=h)
+            lambda h: self._api.upsert_engagement(
+                email, address, req, if_match=if_match, _headers=h
+            )
         )
 
     async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:

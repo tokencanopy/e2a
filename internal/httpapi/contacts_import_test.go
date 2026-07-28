@@ -19,13 +19,46 @@ import (
 // live: it is the one surface a user points at a list of real people, so it
 // must never send, never resurrect consent, and never damage outreach state on
 // a re-run.
-//
-// agent_email / stage enrollment is deliberately out of this slice — it needs
-// the engagement resource — so these tests cover identity import only.
-
 func importBody(t *testing.T, srv *httptest.Server, body any) (int, map[string]any) {
 	t.Helper()
 	return sendJSON(t, http.MethodPost, srv.URL+"/v1/contacts/import", "account", body)
+}
+
+func TestImportCanEnrollRowsWithAnAgentAndInitialStage(t *testing.T) {
+	var got identity.ContactImportOptions
+	srv := newContactsServer(t, func(d *Deps, _ *contactFixture) {
+		d.GetAgent = func(context.Context, string) (*identity.AgentIdentity, error) {
+			return &identity.AgentIdentity{ID: "raise@example.com", UserID: "u_1"}, nil
+		}
+		base := d.ImportContactsWithOptions
+		d.ImportContactsWithOptions = func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, options identity.ContactImportOptions) ([]identity.ContactImportOutcome, error) {
+			got = options
+			return base(ctx, userID, batchID, rows, options)
+		}
+	})
+	code, body := importBody(t, srv, map[string]any{
+		"contacts":    []any{map[string]any{"address": "partner@enroll.vc"}},
+		"agent_email": "Raise@Example.com",
+		"stage":       "prospect",
+		"on_conflict": "skip",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d %v", code, body)
+	}
+	if got.AgentID != "raise@example.com" || got.Stage != "prospect" || got.Merge {
+		t.Errorf("store options=%+v", got)
+	}
+}
+
+func TestImportRejectsStageWithoutAgent(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body := importBody(t, srv, map[string]any{
+		"contacts": []any{map[string]any{"address": "partner@enroll.vc"}},
+		"stage":    "prospect",
+	})
+	if code != http.StatusBadRequest || errCode(body) != "invalid_request" {
+		t.Errorf("import stage without agent = %d %v, want 400 invalid_request", code, body)
+	}
 }
 
 // results indexes an import response's per-item results by their index field,
@@ -293,6 +326,9 @@ func TestDeleteImportBatchReversesTheImport(t *testing.T) {
 	if body["contacts_deleted"] != float64(2) {
 		t.Errorf("contacts_deleted = %v; want 2", body["contacts_deleted"])
 	}
+	if body["engagements_deleted"] != float64(0) {
+		t.Errorf("engagements_deleted = %v; want 0", body["engagements_deleted"])
+	}
 
 	code, _ = sendJSON(t, http.MethodGet, srv.URL+"/v1/contacts/undo1%40imp.vc", "account", nil)
 	if code != http.StatusNotFound {
@@ -384,6 +420,8 @@ func TestImportLoggingCarriesNoAddresses(t *testing.T) {
 // addresses the rows that were actually created.
 func TestImportIsIdempotentUnderRetry(t *testing.T) {
 	var imports int
+	var suppressionLookups int
+	suppressedNow := false
 	srv := newContactsServer(t, func(d *Deps, f *contactFixture) {
 		// The guard degrades to a no-op without a store, so wire the same
 		// body-aware fake the api-keys idempotency tests use.
@@ -393,6 +431,13 @@ func TestImportIsIdempotentUnderRetry(t *testing.T) {
 			imports++
 			return base(ctx, userID, batchID, rows, merge)
 		}
+		d.SuppressedAddresses = func(_ context.Context, _ string, addresses []string) ([]string, error) {
+			suppressionLookups++
+			if suppressedNow {
+				return addresses, nil
+			}
+			return nil, nil
+		}
 	})
 
 	body := map[string]any{"contacts": []any{map[string]any{"address": "retry@imp.vc"}}}
@@ -400,6 +445,10 @@ func TestImportIsIdempotentUnderRetry(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("first import = %d %v", code, first)
 	}
+	// Mutable consent state changes after the first response. A retry still
+	// replays that response byte-for-byte rather than recomputing advisory
+	// fields around an already-committed side effect.
+	suppressedNow = true
 	code, second := sendJSONFull2(t, srv, "idem-key-1", body)
 	if code != http.StatusOK {
 		t.Fatalf("retry = %d %v", code, second)
@@ -415,6 +464,14 @@ func TestImportIsIdempotentUnderRetry(t *testing.T) {
 	}
 	if second["created"] != first["created"] {
 		t.Errorf("retry reported different counts: %v vs %v", second["created"], first["created"])
+	}
+	if suppressionLookups != 1 {
+		t.Errorf("suppression state was recomputed %d times on replay; want 1", suppressionLookups)
+	}
+	firstResults := first["results"].([]any)
+	secondResults := second["results"].([]any)
+	if firstResults[0].(map[string]any)["suppressed"] != secondResults[0].(map[string]any)["suppressed"] {
+		t.Errorf("replay changed the original suppression receipt: %v vs %v", firstResults, secondResults)
 	}
 }
 

@@ -22,7 +22,8 @@ import (
 // import never sends anything, and it never weakens consent. A suppressed
 // address is imported and MARKED, so the count a user sees stays honest.
 const (
-	maxContactImportRows = 1000
+	maxContactImportRows      = 1000
+	maxContactImportBodyBytes = 20 << 20
 
 	contactImportBetaDescription = "Beta: the contact import surface may change before it is declared stable."
 )
@@ -38,6 +39,8 @@ type ContactImportRow struct {
 type ImportContactsRequest struct {
 	Contacts   []ContactImportRow `json:"contacts" required:"true" minItems:"1" maxItems:"1000" doc:"The rows to import. At most 1000 per request; paginate client-side for larger lists."`
 	OnConflict string             `json:"on_conflict,omitempty" enum:"merge,skip" default:"merge" doc:"What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone."`
+	AgentEmail string             `json:"agent_email,omitempty" maxLength:"320" doc:"Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved."`
+	Stage      string             `json:"stage,omitempty" maxLength:"128" doc:"Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage."`
 }
 
 type importContactsInput struct {
@@ -56,6 +59,7 @@ type ContactImportItemResult struct {
 	Code       string `json:"code,omitempty" doc:"Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached."`
 	Message    string `json:"message,omitempty" doc:"Human-readable explanation for a skipped or failed row."`
 	Suppressed bool   `json:"suppressed,omitempty" doc:"True when this address is on a suppression list. The contact is still recorded — suppression is surfaced here so the import count stays honest rather than silently smaller — but sends to it will be refused."`
+	Enrolled   bool   `json:"enrolled,omitempty" doc:"True when this import created the optional per-agent outreach enrolment for this row. False means no agent was requested or the enrolment already existed."`
 }
 
 // ContactImportResult summarizes one upload.
@@ -80,10 +84,11 @@ type deleteImportBatchInput struct {
 
 // DeleteImportBatchResult is the reversal receipt.
 type DeleteImportBatchResult struct {
-	Deleted          bool   `json:"deleted"`
-	BatchID          string `json:"batch_id"`
-	ContactsDeleted  int    `json:"contacts_deleted" doc:"How many contacts this reversal removed."`
-	ContactsRetained int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept because their provenance had moved on."`
+	Deleted            bool   `json:"deleted"`
+	BatchID            string `json:"batch_id"`
+	ContactsDeleted    int    `json:"contacts_deleted" doc:"How many contacts this reversal removed."`
+	ContactsRetained   int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept because they have correspondence history."`
+	EngagementsDeleted int    `json:"engagements_deleted" doc:"How many per-agent outreach enrolments created by this import were removed."`
 }
 
 type deleteImportBatchOutput struct {
@@ -94,26 +99,19 @@ func (s *Server) registerContactImport() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "importContacts", Method: http.MethodPost, Path: "/v1/contacts/import",
 		Summary: "Import contacts in bulk (beta)", Tags: []string{"contacts"},
-		Description: "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. " + contactImportBetaDescription,
-		Security:    []map[string][]string{{"bearer": {}}},
-		Extensions:  beta(),
+		Description:  "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. " + contactImportBetaDescription,
+		Security:     []map[string][]string{{"bearer": {}}},
+		MaxBodyBytes: maxContactImportBodyBytes,
+		Extensions:   beta(),
 	}, s.handleImportContacts)
 
 	huma.Register(s.API, huma.Operation{
 		OperationID: "deleteImportBatch", Method: http.MethodDelete, Path: "/v1/contacts/imports/{batch_id}",
 		Summary: "Reverse a contact import (beta)", Tags: []string{"contacts"},
-		Description: "Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. " + contactImportBetaDescription,
+		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. " + contactImportBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleDeleteImportBatch)
-}
-
-// importAttempt is what the idempotency guard stores and replays: the batch id
-// must survive a replay alongside the outcomes, or a retried caller would be
-// handed a batch id that addresses nothing when they try to reverse it.
-type importAttempt struct {
-	BatchID  string                          `json:"batch_id"`
-	Outcomes []identity.ContactImportOutcome `json:"outcomes"`
 }
 
 func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInput) (*importContactsOutput, error) {
@@ -123,6 +121,16 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 	}
 	if s.deps.ImportContacts == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "contact import is not available on this deployment")
+	}
+	if in.Body.Stage != "" && in.Body.AgentEmail == "" {
+		return nil, NewError(http.StatusBadRequest, "invalid_request", "stage requires agent_email")
+	}
+	var agentID string
+	if in.Body.AgentEmail != "" {
+		agentID, err = validateContactAddress(in.Body.AgentEmail)
+		if err != nil {
+			return nil, NewError(http.StatusBadRequest, "invalid_request", "agent_email must be a valid email address")
+		}
 	}
 	if len(in.Body.Contacts) > maxContactImportRows {
 		// Defence in depth: the schema already caps this, but the bound is what
@@ -176,53 +184,62 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 	// upload the file again. Replaying the first response — including its
 	// original batch_id, so the reversal still addresses the right rows —
 	// is what makes that retry safe.
-	_, imported, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
+	_, result, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/contacts/import", in.RawBody,
-		func() (int, importAttempt, error) {
+		func() (int, ContactImportResult, error) {
 			batchID := identity.NewImportBatchID()
-			outcomes, ierr := s.deps.ImportContacts(ctx, user.ID, batchID, accepted, merge)
-			if ierr != nil || len(outcomes) != len(accepted) {
-				return 0, importAttempt{}, NewError(http.StatusInternalServerError, "internal_error", "failed to import contacts")
+			var outcomes []identity.ContactImportOutcome
+			var ierr error
+			if agentID == "" {
+				outcomes, ierr = s.deps.ImportContacts(ctx, user.ID, batchID, accepted, merge)
+			} else {
+				if s.deps.ImportContactsWithOptions == nil {
+					return 0, ContactImportResult{}, NewError(http.StatusNotImplemented, "not_implemented", "contact enrollment is not available on this deployment")
+				}
+				outcomes, ierr = s.deps.ImportContactsWithOptions(ctx, user.ID, batchID, accepted,
+					identity.ContactImportOptions{Merge: merge, AgentID: agentID, Stage: in.Body.Stage})
 			}
-			return http.StatusOK, importAttempt{BatchID: batchID, Outcomes: outcomes}, nil
+			if errors.Is(ierr, identity.ErrAgentNotFound) {
+				return 0, ContactImportResult{}, NewError(http.StatusNotFound, "not_found", "agent not found")
+			}
+			if ierr != nil || len(outcomes) != len(accepted) {
+				return 0, ContactImportResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to import contacts")
+			}
+
+			items := make([]ContactImportItemResult, len(in.Body.Contacts))
+			for i, pre := range prevalidated {
+				if pre != nil {
+					items[i] = *pre
+				}
+			}
+			for n, outcome := range outcomes {
+				i := acceptedIndex[n]
+				items[i] = ContactImportItemResult{
+					Index: i, Address: outcome.Address, Status: outcome.Status,
+					Code: outcome.Code, Message: outcome.Message, Enrolled: outcome.Enrolled,
+				}
+			}
+			// Suppression is part of the response contract, so compute it before
+			// completing the idempotency record. Replays must return these exact
+			// flags even if consent state changes later.
+			s.markSuppressedImportRows(ctx, user.ID, agentID, items)
+			complete := ContactImportResult{BatchID: batchID, Results: items}
+			for _, item := range items {
+				switch item.Status {
+				case identity.ImportStatusCreated:
+					complete.Created++
+				case identity.ImportStatusUpdated:
+					complete.Updated++
+				case identity.ImportStatusSkipped:
+					complete.Skipped++
+				default:
+					complete.Failed++
+				}
+			}
+			return http.StatusOK, complete, nil
 		})
 	if err != nil {
 		return nil, err
-	}
-	batchID, outcomes := imported.BatchID, imported.Outcomes
-
-	items := make([]ContactImportItemResult, len(in.Body.Contacts))
-	for i, pre := range prevalidated {
-		if pre != nil {
-			items[i] = *pre
-		}
-	}
-	for n, outcome := range outcomes {
-		i := acceptedIndex[n]
-		items[i] = ContactImportItemResult{
-			Index: i, Address: outcome.Address, Status: outcome.Status,
-			Code: outcome.Code, Message: outcome.Message,
-		}
-	}
-
-	// Mark suppressed addresses AFTER the write. They are recorded like any
-	// other contact — dropping them would make the import count disagree with
-	// the file the user uploaded — but flagged so the reason they cannot be
-	// mailed is visible at import time rather than at first send.
-	s.markSuppressedImportRows(ctx, user.ID, items)
-
-	result := ContactImportResult{BatchID: batchID, Results: items}
-	for _, item := range items {
-		switch item.Status {
-		case identity.ImportStatusCreated:
-			result.Created++
-		case identity.ImportStatusUpdated:
-			result.Updated++
-		case identity.ImportStatusSkipped:
-			result.Skipped++
-		default:
-			result.Failed++
-		}
 	}
 	logImportOutcome(user.ID, result)
 	return &importContactsOutput{Body: result}, nil
@@ -272,8 +289,11 @@ func logImportOutcome(userID string, r ContactImportResult) {
 // written, and losing an advisory flag is not worth failing an otherwise
 // successful import over. Sends remain blocked regardless — this flag is
 // informational, never the enforcement point.
-func (s *Server) markSuppressedImportRows(ctx context.Context, userID string, items []ContactImportItemResult) {
-	if s.deps.SuppressedAddresses == nil {
+func (s *Server) markSuppressedImportRows(ctx context.Context, userID, agentID string, items []ContactImportItemResult) {
+	if agentID == "" && s.deps.SuppressedAddresses == nil {
+		return
+	}
+	if agentID != "" && s.deps.EffectiveSuppressions == nil {
 		return
 	}
 	var addresses []string
@@ -285,7 +305,13 @@ func (s *Server) markSuppressedImportRows(ctx context.Context, userID string, it
 	if len(addresses) == 0 {
 		return
 	}
-	blocked, err := s.deps.SuppressedAddresses(ctx, userID, addresses)
+	var blocked []string
+	var err error
+	if agentID == "" {
+		blocked, err = s.deps.SuppressedAddresses(ctx, userID, addresses)
+	} else {
+		blocked, err = s.deps.EffectiveSuppressions(ctx, userID, agentID, addresses)
+	}
 	if err != nil || len(blocked) == 0 {
 		return
 	}
@@ -319,7 +345,7 @@ func (s *Server) handleDeleteImportBatch(ctx context.Context, in *deleteImportBa
 	if s.deps.DeleteImportBatch == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "contact import is not available on this deployment")
 	}
-	deleted, retained, err := s.deps.DeleteImportBatch(ctx, user.ID, in.BatchID)
+	deleted, retained, engagementsDeleted, err := s.deps.DeleteImportBatch(ctx, user.ID, in.BatchID)
 	if errors.Is(err, identity.ErrImportBatchNotFound) {
 		// Absent, already reversed, and another account's batch are the same
 		// answer, so this cannot be used to probe for other tenants' imports.
@@ -331,5 +357,6 @@ func (s *Server) handleDeleteImportBatch(ctx context.Context, in *deleteImportBa
 	return &deleteImportBatchOutput{Body: DeleteImportBatchResult{
 		Deleted: true, BatchID: in.BatchID,
 		ContactsDeleted: deleted, ContactsRetained: retained,
+		EngagementsDeleted: engagementsDeleted,
 	}}, nil
 }

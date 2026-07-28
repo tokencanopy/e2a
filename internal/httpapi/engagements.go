@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -41,8 +44,8 @@ type ContactEngagementView struct {
 	FirstOutboundAt    *time.Time `json:"first_outbound_at" doc:"Server-owned."`
 	LastOutboundAt     *time.Time `json:"last_outbound_at" doc:"Server-owned. Include it in the due query (last_outbound_before) so a lost client state-write cannot cause a duplicate send."`
 	LastInboundAt      *time.Time `json:"last_inbound_at" doc:"Server-owned."`
-	OutboundCount      int        `json:"outbound_count" doc:"Server-owned."`
-	InboundCount       int        `json:"inbound_count" doc:"Server-owned."`
+	OutboundCount      int        `json:"outbound_count" doc:"Successfully submitted outbound messages since enrollment. Queue failures and pre-enrollment history are excluded. Server-owned."`
+	InboundCount       int        `json:"inbound_count" doc:"DMARC-authenticated inbound messages delivered since enrollment. Spoofed, held, blocked, and pre-enrollment messages are excluded. Server-owned."`
 	LastConversationID string     `json:"last_conversation_id,omitempty" doc:"Server-owned."`
 
 	// Embedded rather than referenced: an agent-scoped caller is barred from
@@ -84,6 +87,20 @@ func engagementView(e identity.ContactEngagement) ContactEngagementView {
 	}
 }
 
+// engagementETag validates the fields an agent may write plus updated_at.
+// Message-activity hooks also move updated_at, so an automation loop cannot
+// unknowingly overwrite outreach state based on an older activity snapshot.
+func engagementETag(e identity.ContactEngagement) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%d", e.AgentEmail, e.Address, e.Stage, e.UpdatedAt.UnixNano())
+	if e.NextActionAt != nil {
+		fmt.Fprintf(h, "\x00%d", e.NextActionAt.UnixNano())
+	}
+	encoded, _ := json.Marshal(e.Metadata)
+	h.Write(encoded)
+	return `"` + hex.EncodeToString(h.Sum(nil)[:16]) + `"`
+}
+
 type engagementsCursor struct {
 	CreatedAt  time.Time `json:"c"`
 	ID         string    `json:"i"`
@@ -121,6 +138,7 @@ type UpsertEngagementRequest struct {
 type upsertEngagementInput struct {
 	Email   string `path:"email"`
 	Address string `path:"address"`
+	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412."`
 	Body    UpsertEngagementRequest
 	RawBody []byte
 }
@@ -128,6 +146,7 @@ type upsertEngagementInput struct {
 type upsertEngagementOutput struct {
 	Status   int
 	Location string `header:"Location"`
+	ETag     string `header:"ETag"`
 	Body     ContactEngagementView
 }
 
@@ -138,6 +157,7 @@ type getEngagementInput struct {
 
 type getEngagementOutput struct {
 	CacheControl string `header:"Cache-Control"`
+	ETag         string `header:"ETag"`
 	Body         ContactEngagementView
 }
 
@@ -158,6 +178,18 @@ type deleteEngagementOutput struct {
 }
 
 func (s *Server) registerEngagements() {
+	createdEngagement := s.jsonResponse(reflect.TypeOf(ContactEngagementView{}), "ContactEngagementView",
+		"Created — the contact was newly enrolled in this agent's outreach.")
+	createdEngagement.Headers = map[string]*huma.Param{
+		"ETag": {
+			Description: "Opaque revision token for a later If-Match update.",
+			Schema:      &huma.Schema{Type: "string"},
+		},
+		"Location": {
+			Description: "Canonical URL of the newly created engagement.",
+			Schema:      &huma.Schema{Type: "string", Format: "uri-reference"},
+		},
+	}
 	huma.Register(s.API, huma.Operation{
 		OperationID: "listEngagements", Method: http.MethodGet, Path: "/v1/agents/{email}/contacts",
 		Summary: "List an agent's outreach (beta)", Tags: []string{"contacts"},
@@ -169,7 +201,7 @@ func (s *Server) registerEngagements() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "getEngagement", Method: http.MethodGet, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Get one outreach record (beta)", Tags: []string{"contacts"},
-		Description: "Fetches this agent's relationship with one contact. Agent-scoped credentials may read their own agent. " + engagementBetaDescription,
+		Description: "Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. " + engagementBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleGetEngagement)
@@ -177,7 +209,7 @@ func (s *Server) registerEngagements() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "upsertEngagement", Method: http.MethodPut, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Enrol or update outreach state (beta)", Tags: []string{"contacts"},
-		Description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
+		Description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		// The handler emits 201 on create and 200 on update, which Huma cannot
 		// infer from a single DefaultStatus. Undeclared, a spec-generated client
@@ -185,8 +217,7 @@ func (s *Server) registerEngagements() {
 		// enrolment — the most common call. Re-adds `default`, which a custom
 		// Responses map otherwise suppresses.
 		Responses: map[string]*huma.Response{
-			"201": s.jsonResponse(reflect.TypeOf(ContactEngagementView{}), "ContactEngagementView",
-				"Created — the contact was newly enrolled in this agent's outreach."),
+			"201":     createdEngagement,
 			"default": s.errorEnvelopeResponse(),
 		},
 		Extensions: beta(),
@@ -331,7 +362,7 @@ func (s *Server) handleGetEngagement(ctx context.Context, in *getEngagementInput
 	if err != nil {
 		return nil, err
 	}
-	return &getEngagementOutput{CacheControl: "no-store", Body: engagementView(e)}, nil
+	return &getEngagementOutput{CacheControl: "no-store", ETag: engagementETag(e), Body: engagementView(e)}, nil
 }
 
 func (s *Server) loadEngagement(ctx context.Context, userID, agentID, rawAddress string) (identity.ContactEngagement, error) {
@@ -378,12 +409,45 @@ func (s *Server) handleUpsertEngagement(ctx context.Context, in *upsertEngagemen
 		next = &v
 	}
 
-	e, created, err := s.deps.UpsertEngagement(ctx, p.User.ID, ag.ID, address,
-		in.Body.Stage, next, in.Body.Metadata)
+	var e identity.ContactEngagement
+	var created bool
+	if in.IfMatch != "" {
+		current, loadErr := s.loadEngagement(ctx, p.User.ID, ag.ID, address)
+		if loadErr != nil {
+			var apiErr *ErrorEnvelope
+			if errors.As(loadErr, &apiErr) && apiErr.status == http.StatusNotFound {
+				return nil, NewError(http.StatusPreconditionFailed, "precondition_failed",
+					"the outreach record does not exist; omit If-Match to enrol it")
+			}
+			return nil, loadErr
+		}
+		if !etagMatches(in.IfMatch, engagementETag(current)) {
+			return nil, NewError(http.StatusPreconditionFailed, "precondition_failed",
+				"the outreach record was modified by another request; re-read it and retry")
+		}
+		if s.deps.UpdateEngagementIfUnchanged == nil {
+			return nil, NewError(http.StatusNotImplemented, "not_implemented",
+				"conditional outreach updates are not available on this deployment")
+		}
+		e, err = s.deps.UpdateEngagementIfUnchanged(ctx, p.User.ID, ag.ID, address,
+			in.Body.Stage, next, in.Body.Metadata, current.UpdatedAt)
+	} else {
+		e, created, err = s.deps.UpsertEngagement(ctx, p.User.ID, ag.ID, address,
+			in.Body.Stage, next, in.Body.Metadata)
+	}
+	if errors.Is(err, identity.ErrContactLimitReached) {
+		return nil, NewError(http.StatusBadRequest, "contact_limit_reached",
+			"the account is at its contact limit")
+	}
+	if errors.Is(err, identity.ErrEngagementNotFound) ||
+		errors.Is(err, identity.ErrEngagementPreconditionFailed) {
+		return nil, NewError(http.StatusPreconditionFailed, "precondition_failed",
+			"the outreach record was modified by another request; re-read it and retry")
+	}
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to save outreach state")
 	}
-	out := &upsertEngagementOutput{Status: http.StatusOK, Body: engagementView(e)}
+	out := &upsertEngagementOutput{Status: http.StatusOK, ETag: engagementETag(e), Body: engagementView(e)}
 	if created {
 		out.Status = http.StatusCreated
 		out.Location = "/v1/agents/" + url.PathEscape(ag.ID) + "/contacts/" + url.PathEscape(e.Address)

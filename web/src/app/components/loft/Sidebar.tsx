@@ -9,7 +9,7 @@ import { useUnreadCount } from "../hooks/useUnreadCount";
 import { ThemeToggle } from "./ThemeToggle";
 import { TokenCanopyGlyph } from "./TokenCanopyBadge";
 
-type IconKey = "plus" | "grid" | "clock" | "globe" | "key" | "settings" | "msg" | "shield" | "card" | "doc" | "trash";
+type IconKey = "plus" | "grid" | "user" | "clock" | "globe" | "key" | "settings" | "msg" | "shield" | "card" | "doc" | "trash";
 
 const ICONS: Record<IconKey, ReactNode> = {
   plus: (
@@ -24,6 +24,12 @@ const ICONS: Record<IconKey, ReactNode> = {
       <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
       <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
       <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  user: (
+    <>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4.5 21a7.5 7.5 0 0115 0" />
     </>
   ),
   clock: (
@@ -115,6 +121,12 @@ const NAV_ITEMS: NavItem[] = [
     href: "/reviews",
     label: "Pending",
     icon: "clock",
+    matchPrefix: true,
+  },
+  {
+    href: "/contacts",
+    label: "Contacts",
+    icon: "user",
     matchPrefix: true,
   },
   {

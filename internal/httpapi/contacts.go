@@ -146,7 +146,7 @@ type UpdateContactRequest struct {
 
 type updateContactInput struct {
 	Address string `path:"address"`
-	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta."`
+	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412."`
 	Body    UpdateContactRequest
 }
 
@@ -453,25 +453,32 @@ func (s *Server) handleUpdateContact(ctx context.Context, in *updateContactInput
 	if err != nil {
 		return nil, err
 	}
-	// Optimistic concurrency: an If-Match that no longer reflects the stored
-	// row means someone else wrote in between, so reject rather than clobber.
-	//
-	// KNOWN GAP (beta): this compare-then-write is not atomic. Two writers
-	// holding the same valid ETag can both pass here and both write, with the
-	// later one winning silently. It reliably catches a stale read — the
-	// common case — but is not a serialization guarantee. Closing it means
-	// pushing the expected updated_at into the UPDATE's WHERE clause and
-	// distinguishing "no rows because gone" from "no rows because stale";
-	// tracked as a pre-stable follow-up rather than done here so the change
-	// gets its own tested slice.
+	// Reject an already-stale read early for a useful response, then carry the
+	// same version into the UPDATE predicate below. The second check is the
+	// load-bearing one: it closes a write that lands between this read and the
+	// database update.
 	if in.IfMatch != "" && !etagMatches(in.IfMatch, contactETag(current)) {
-		return nil, NewError(http.StatusPreconditionFailed, "conflict",
+		return nil, NewError(http.StatusPreconditionFailed, "precondition_failed",
 			"the contact was modified by another request; re-read it and retry")
 	}
 
-	updated, err := s.deps.UpdateContact(ctx, user.ID, current.Address, in.Body.DisplayName, in.Body.Metadata)
+	var updated identity.Contact
+	if in.IfMatch != "" {
+		if s.deps.UpdateContactIfUnchanged == nil {
+			return nil, NewError(http.StatusNotImplemented, "not_implemented", "conditional contact updates are not available on this deployment")
+		}
+		updated, err = s.deps.UpdateContactIfUnchanged(ctx, user.ID, current.Address,
+			in.Body.DisplayName, in.Body.Metadata, current.UpdatedAt)
+	} else {
+		updated, err = s.deps.UpdateContact(ctx, user.ID, current.Address,
+			in.Body.DisplayName, in.Body.Metadata)
+	}
 	if errors.Is(err, identity.ErrContactNotFound) {
 		return nil, NewError(http.StatusNotFound, "contact_not_found", "contact not found")
+	}
+	if errors.Is(err, identity.ErrContactPreconditionFailed) {
+		return nil, NewError(http.StatusPreconditionFailed, "precondition_failed",
+			"the contact was modified by another request; re-read it and retry")
 	}
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to update contact")

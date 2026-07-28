@@ -1,4 +1,4 @@
--- 081_contacts_max.sql
+-- 082_contacts_max.sql
 --
 -- Per-account contact cap. Mirrors max_templates (050) and max_webhooks (024):
 -- a plain column on account_limits so a specific account can be raised without

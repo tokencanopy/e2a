@@ -142,6 +142,28 @@ func newContactsServer(t *testing.T, mutate func(*Deps, *contactFixture)) *httpt
 			if metadata != nil {
 				c.Metadata = metadata
 			}
+			c.UpdatedAt = c.UpdatedAt.Add(time.Second)
+			fixture.rows[k] = c
+			return c, nil
+		},
+		UpdateContactIfUnchanged: func(_ context.Context, userID, address string, displayName *string, metadata map[string]any, expected time.Time) (identity.Contact, error) {
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			k := fixture.key(userID, address)
+			c, ok := fixture.rows[k]
+			if !ok {
+				return identity.Contact{}, identity.ErrContactNotFound
+			}
+			if !c.UpdatedAt.Equal(expected) {
+				return identity.Contact{}, identity.ErrContactPreconditionFailed
+			}
+			if displayName != nil {
+				c.DisplayName = *displayName
+			}
+			if metadata != nil {
+				c.Metadata = metadata
+			}
+			c.UpdatedAt = c.UpdatedAt.Add(time.Second)
 			fixture.rows[k] = c
 			return c, nil
 		},
@@ -207,7 +229,7 @@ func newContactsServer(t *testing.T, mutate func(*Deps, *contactFixture)) *httpt
 			}
 			return outcomes, nil
 		},
-		DeleteImportBatch: func(_ context.Context, userID, batchID string) (int, int, error) {
+		DeleteImportBatch: func(_ context.Context, userID, batchID string) (int, int, int, error) {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			var keys []string
@@ -217,14 +239,17 @@ func newContactsServer(t *testing.T, mutate func(*Deps, *contactFixture)) *httpt
 				}
 			}
 			if len(keys) == 0 {
-				return 0, 0, identity.ErrImportBatchNotFound
+				return 0, 0, 0, identity.ErrImportBatchNotFound
 			}
 			for _, k := range keys {
 				delete(fixture.rows, k)
 			}
-			return len(keys), 0, nil
+			return len(keys), 0, 0, nil
 		},
 		CursorSecret: "contacts-test-secret",
+	}
+	deps.ImportContactsWithOptions = func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, options identity.ContactImportOptions) ([]identity.ContactImportOutcome, error) {
+		return deps.ImportContacts(ctx, userID, batchID, rows, options.Merge)
 	}
 	if mutate != nil {
 		mutate(&deps, fixture)
@@ -653,6 +678,33 @@ func TestPatchContactHonorsIfMatch(t *testing.T) {
 	code, final := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
 	if code != http.StatusOK || final["display_name"] != "First writer" {
 		t.Errorf("display_name = %v; the stale write must not have landed", final["display_name"])
+	}
+}
+
+// TestPatchContactRejectsAWriteThatRacesAfterTheETagRead covers the narrow
+// compare/write window: the first handler read sees a valid ETag, then another
+// transaction wins before the conditional UPDATE.
+func TestPatchContactRejectsAWriteThatRacesAfterTheETagRead(t *testing.T) {
+	srv := newContactsServer(t, func(d *Deps, _ *contactFixture) {
+		d.UpdateContactIfUnchanged = func(context.Context, string, string, *string, map[string]any, time.Time) (identity.Contact, error) {
+			return identity.Contact{}, identity.ErrContactPreconditionFailed
+		}
+	})
+	seedContact(t, srv, "partner@etag-race.vc", "Original")
+	const path = "/v1/contacts/partner%40etag-race.vc"
+
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET = %d", code)
+	}
+	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "Losing writer"},
+		map[string]string{"If-Match": headers.Get("ETag")})
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("racing PATCH = %d %v, want 412", code, body)
+	}
+	if errCode(body) != "precondition_failed" {
+		t.Errorf("error=%v, want precondition_failed", body)
 	}
 }
 

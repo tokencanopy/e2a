@@ -28,12 +28,13 @@ class ContactImportItemResult(BaseModel):
     """ # noqa: E501
     address: Optional[StrictStr] = Field(default=None, description="Canonicalized address. Absent when the row could not be parsed.")
     code: Optional[StrictStr] = Field(default=None, description="Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached.")
+    enrolled: Optional[StrictBool] = Field(default=None, description="True when this import created the optional per-agent outreach enrolment for this row. False means no agent was requested or the enrolment already existed.")
     index: StrictInt = Field(description="Zero-based position of this row in the submitted contacts array.")
     message: Optional[StrictStr] = Field(default=None, description="Human-readable explanation for a skipped or failed row.")
     status: StrictStr = Field(description="Outcome for this row. Known values: created, updated, skipped, failed.")
     suppressed: Optional[StrictBool] = Field(default=None, description="True when this address is on a suppression list. The contact is still recorded — suppression is surfaced here so the import count stays honest rather than silently smaller — but sends to it will be refused.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["address", "code", "index", "message", "status", "suppressed"]
+    __properties: ClassVar[List[str]] = ["address", "code", "enrolled", "index", "message", "status", "suppressed"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -95,6 +96,7 @@ class ContactImportItemResult(BaseModel):
         _obj = cls.model_validate({
             "address": obj.get("address"),
             "code": obj.get("code"),
+            "enrolled": obj.get("enrolled"),
             "index": obj.get("index"),
             "message": obj.get("message"),
             "status": obj.get("status"),

@@ -28,10 +28,11 @@ class DeleteImportBatchResult(BaseModel):
     """ # noqa: E501
     batch_id: StrictStr
     contacts_deleted: StrictInt = Field(description="How many contacts this reversal removed.")
-    contacts_retained: StrictInt = Field(description="How many contacts from this batch were deliberately kept because their provenance had moved on.")
+    contacts_retained: StrictInt = Field(description="How many contacts from this batch were deliberately kept because they have correspondence history.")
     deleted: StrictBool
+    engagements_deleted: StrictInt = Field(description="How many per-agent outreach enrolments created by this import were removed.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["batch_id", "contacts_deleted", "contacts_retained", "deleted"]
+    __properties: ClassVar[List[str]] = ["batch_id", "contacts_deleted", "contacts_retained", "deleted", "engagements_deleted"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -94,7 +95,8 @@ class DeleteImportBatchResult(BaseModel):
             "batch_id": obj.get("batch_id"),
             "contacts_deleted": obj.get("contacts_deleted"),
             "contacts_retained": obj.get("contacts_retained"),
-            "deleted": obj.get("deleted")
+            "deleted": obj.get("deleted"),
+            "engagements_deleted": obj.get("engagements_deleted")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

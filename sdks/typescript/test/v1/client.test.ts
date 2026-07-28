@@ -626,6 +626,16 @@ describe("E2AClient", () => {
   // these pin that it is URL-encoded on the wire and that the SDK supplies the
   // ?confirm=DELETE guard the raw API requires.
 
+  it("contacts.list exposes both creation-time filters", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    const createdAfter = new Date("2026-07-01T00:00:00Z");
+    const createdBefore = new Date("2026-07-31T00:00:00Z");
+    await client.contacts.list({ createdAfter, createdBefore }).toArray({ limit: 50 });
+    const { url } = lastCall();
+    expect(url).toContain("created_after=2026-07-01T00%3A00%3A00.000Z");
+    expect(url).toContain("created_before=2026-07-31T00%3A00%3A00.000Z");
+  });
+
   it("contacts.get URL-encodes the address in the path", async () => {
     globalThis.fetch = mockFetch(200, {
       address: "partner@fund.vc", display_name: "A. Partner",
@@ -642,15 +652,58 @@ describe("E2AClient", () => {
     expect(c.importBatchId).toBe("imp_1");
   });
 
+  it("contacts exposes ETags and sends If-Match on conditional writes", async () => {
+    const wire = {
+      address: "partner@fund.vc", display_name: "A. Partner", metadata: {},
+      source: "manual", created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    };
+    globalThis.fetch = mockFetch(200, wire, { etag: '"contact-v1"' });
+    const versioned = await client.contacts.getWithETag("partner@fund.vc");
+    expect(versioned.data.address).toBe("partner@fund.vc");
+    expect(versioned.etag).toBe('"contact-v1"');
+
+    globalThis.fetch = mockFetch(200, { ...wire, display_name: "Renamed" });
+    await client.contacts.update(
+      "partner@fund.vc",
+      { displayName: "Renamed" },
+      { ifMatch: versioned.etag },
+    );
+    expect(lastCall().headers["If-Match"]).toBe('"contact-v1"');
+  });
+
+  it("outreach exposes ETags and sends If-Match on conditional writes", async () => {
+    const wire = {
+      agent_email: "raise@example.com", address: "partner@fund.vc", stage: "touch1",
+      metadata: {}, replied: false, suppressed: false, outbound_count: 0,
+      inbound_count: 0, contact: { address: "partner@fund.vc", display_name: "", metadata: {} },
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    };
+    globalThis.fetch = mockFetch(200, wire, { etag: '"outreach-v1"' });
+    const versioned = await client.contacts.getOutreachWithETag("raise@example.com", "partner@fund.vc");
+    expect(versioned.etag).toBe('"outreach-v1"');
+
+    globalThis.fetch = mockFetch(200, { ...wire, stage: "touch2" });
+    await client.contacts.setOutreach(
+      "raise@example.com", "partner@fund.vc", { stage: "touch2" },
+      { ifMatch: versioned.etag },
+    );
+    expect(lastCall().headers["If-Match"]).toBe('"outreach-v1"');
+  });
+
   it("contacts.create POSTs the body and returns the canonicalized address", async () => {
     globalThis.fetch = mockFetch(201, {
       address: "partner@fund.vc", display_name: "A. Partner", metadata: {},
       source: "manual",
       created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
     });
-    const c = await client.contacts.create({ address: "A. Partner <Partner@Fund.VC>", displayName: "A. Partner" });
+    const c = await client.contacts.create(
+      { address: "A. Partner <Partner@Fund.VC>", displayName: "A. Partner" },
+      { idempotencyKey: "contact:partner" },
+    );
     const { url, init } = lastCall();
     expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe("contact:partner");
     expect(url).toContain("/v1/contacts");
     expect(JSON.parse(init.body as string)).toEqual({
       address: "A. Partner <Partner@Fund.VC>", display_name: "A. Partner",
@@ -694,14 +747,27 @@ describe("E2AClient", () => {
     const res = await client.contacts.import({
       contacts: [{ address: "ok@fund.vc" }, { address: "nope" }],
     });
-    const { url, init } = lastCall();
+    const { url, init, headers } = lastCall();
     expect(init.method).toBe("POST");
     expect(url).toContain("/v1/contacts/import");
+    expect(headers["Idempotency-Key"]).toBeTruthy();
     expect(res.batchId).toBe("imp_9");
     // A suppressed row is still reported as created — marked, never dropped.
     expect(res.results[0].status).toBe("created");
     expect(res.results[0].suppressed).toBe(true);
     expect(res.results[1].code).toBe("invalid_recipient");
+  });
+
+  it("contacts.import preserves a caller key for restart-safe replay", async () => {
+    globalThis.fetch = mockFetch(200, {
+      batch_id: "imp_replay", created: 0, updated: 0, skipped: 1, failed: 0,
+      results: [{ index: 0, address: "ok@fund.vc", status: "skipped" }],
+    });
+    await client.contacts.import(
+      { contacts: [{ address: "ok@fund.vc" }] },
+      { idempotencyKey: "contacts:upload:sha256" },
+    );
+    expect(lastCall().headers["Idempotency-Key"]).toBe("contacts:upload:sha256");
   });
 
   it("contacts.deleteImport reverses a batch with the confirm guard", async () => {

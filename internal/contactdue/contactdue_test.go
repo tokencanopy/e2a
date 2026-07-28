@@ -6,25 +6,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
 
 // capturingPublisher records what the sweep emitted, so assertions are about
 // the wake-ups an agent would actually receive rather than about which store
 // method was called.
 type capturingPublisher struct {
-	got []identity.DueEngagement
-	err error
+	got   []identity.DueEngagement
+	err   error
+	store *identity.Store
 }
 
-func (p *capturingPublisher) PublishContactDue(_ context.Context, d identity.DueEngagement) error {
+func (p *capturingPublisher) PublishDueBatch(ctx context.Context, now time.Time, limit int) (int, error) {
 	if p.err != nil {
-		return p.err
+		return 1, p.err
 	}
-	p.got = append(p.got, d)
-	return nil
+	due, err := p.store.ClaimDueEngagements(ctx, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	p.got = append(p.got, due...)
+	return len(due), nil
 }
 
 func (p *capturingPublisher) addresses() []string {
@@ -84,8 +91,8 @@ func TestSweepPublishesDueWakeUps(t *testing.T) {
 		t.Fatalf("arm: %v", err)
 	}
 
-	pub := &capturingPublisher{}
-	n, err := contactdue.NewSweeper(store, pub, nil).Sweep(ctx)
+	pub := &capturingPublisher{store: store}
+	n, err := contactdue.NewSweeper(pub, nil).Sweep(ctx)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -113,7 +120,7 @@ func TestSweepFiresOncePerSchedule(t *testing.T) {
 	user, agent := liveAgent(t, store, "once")
 	armPastDue(t, store, user.ID, agent, "partner@once.vc")
 
-	sweeper := contactdue.NewSweeper(store, &capturingPublisher{}, nil)
+	sweeper := contactdue.NewSweeper(&capturingPublisher{store: store}, nil)
 	if n, err := sweeper.Sweep(ctx); err != nil || n != 1 {
 		t.Fatalf("first sweep = %d err=%v, want 1", n, err)
 	}
@@ -139,8 +146,8 @@ func TestSweepSkipsSuppressedAndTrashed(t *testing.T) {
 		t.Fatalf("suppress: %v", err)
 	}
 
-	pub := &capturingPublisher{}
-	if _, err := contactdue.NewSweeper(store, pub, nil).Sweep(ctx); err != nil {
+	pub := &capturingPublisher{store: store}
+	if _, err := contactdue.NewSweeper(pub, nil).Sweep(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if got := pub.addresses(); len(got) != 1 || got[0] != "ok@guards.vc" {
@@ -152,8 +159,8 @@ func TestSweepSkipsSuppressedAndTrashed(t *testing.T) {
 	if err := store.SoftDeleteAgent(ctx, agent, user.ID); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
-	pub2 := &capturingPublisher{}
-	if _, err := contactdue.NewSweeper(store, pub2, nil).Sweep(ctx); err != nil {
+	pub2 := &capturingPublisher{store: store}
+	if _, err := contactdue.NewSweeper(pub2, nil).Sweep(ctx); err != nil {
 		t.Fatalf("sweep after trash: %v", err)
 	}
 	if len(pub2.got) != 0 {
@@ -161,9 +168,10 @@ func TestSweepSkipsSuppressedAndTrashed(t *testing.T) {
 	}
 }
 
-// TestSweepContinuesPastAPublishFailure pins that one unreachable subscriber
-// does not stop every other agent being woken.
-func TestSweepContinuesPastAPublishFailure(t *testing.T) {
+// TestSweepRetriesAnAtomicPublishFailure pins that a database/outbox failure
+// does not consume the schedule. Subscriber delivery failures happen after
+// this transaction and are retried independently by the webhook pipeline.
+func TestSweepRetriesAnAtomicPublishFailure(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
@@ -171,19 +179,83 @@ func TestSweepContinuesPastAPublishFailure(t *testing.T) {
 	armPastDue(t, store, user.ID, agent, "a@resilient.vc")
 	armPastDue(t, store, user.ID, agent, "b@resilient.vc")
 
-	pub := &capturingPublisher{err: errors.New("subscriber unreachable")}
-	n, err := contactdue.NewSweeper(store, pub, nil).Sweep(ctx)
-	if err != nil {
-		t.Fatalf("a failing publisher aborted the sweep: %v", err)
+	pub := &capturingPublisher{store: store, err: errors.New("outbox unavailable")}
+	n, err := contactdue.NewSweeper(pub, nil).Sweep(ctx)
+	if err == nil {
+		t.Fatal("atomic publish failure was swallowed; River would not retry")
 	}
 	if n != 0 {
-		t.Errorf("published = %d, want 0 when every publish fails", n)
+		t.Errorf("published = %d, want 0 after rollback", n)
 	}
-	// The claim already consumed the schedule, so the cost is a missed wake-up
-	// rather than a duplicate one — the deliberately safer direction.
-	pub2 := &capturingPublisher{}
-	if n, err := contactdue.NewSweeper(store, pub2, nil).Sweep(ctx); err != nil || n != 0 {
-		t.Errorf("re-sweep = %d err=%v; a consumed schedule must not re-fire", n, err)
+	pub2 := &capturingPublisher{store: store}
+	if n, err := contactdue.NewSweeper(pub2, nil).Sweep(ctx); err != nil || n != 2 {
+		t.Errorf("re-sweep = %d err=%v, want both schedules after rollback", n, err)
+	}
+}
+
+type failingTxOutbox struct{ err error }
+
+func (f failingTxOutbox) PublishTx(context.Context, pgx.Tx, webhookpub.Event) error {
+	return f.err
+}
+
+// TestAtomicOutboxPublisherRollsBackClaimOnOutboxFailure proves the exact
+// schedule-to-outbox boundary. A failed durable write must leave the schedule
+// claimable, including across a process crash or River retry.
+func TestAtomicOutboxPublisherRollsBackClaimOnOutboxFailure(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := liveAgent(t, store, "atomicfail")
+	armPastDue(t, store, user.ID, agent, "partner@atomicfail.vc")
+
+	publisher := contactdue.NewOutboxPublisher(pool, store,
+		failingTxOutbox{err: errors.New("write webhook event")})
+	attempted, err := publisher.PublishDueBatch(ctx, time.Now().UTC(), 200)
+	if err == nil || attempted != 1 {
+		t.Fatalf("publish attempted=%d err=%v, want 1 and error", attempted, err)
+	}
+
+	due, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 200)
+	if err != nil {
+		t.Fatalf("claim after rollback: %v", err)
+	}
+	if len(due) != 1 || due[0].Address != "partner@atomicfail.vc" {
+		t.Errorf("due after rollback=%v, want the original schedule", due)
+	}
+}
+
+// TestAtomicOutboxPublisherCommitsEventAndClaimTogether drives the production
+// outbox implementation and then verifies both sides of the invariant.
+func TestAtomicOutboxPublisherCommitsEventAndClaimTogether(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, agent := liveAgent(t, store, "atomicsuccess")
+	armPastDue(t, store, user.ID, agent, "partner@atomicsuccess.vc")
+
+	outbox := webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true))
+	publisher := contactdue.NewOutboxPublisher(pool, store, outbox)
+	published, err := publisher.PublishDueBatch(ctx, time.Now().UTC(), 200)
+	if err != nil || published != 1 {
+		t.Fatalf("publish=%d err=%v, want 1", published, err)
+	}
+
+	var eventType, eventAgent string
+	if err := pool.QueryRow(ctx,
+		`SELECT type, agent_id FROM webhook_events WHERE user_id = $1`,
+		user.ID).Scan(&eventType, &eventAgent); err != nil {
+		t.Fatalf("load durable event: %v", err)
+	}
+	if eventType != webhookpub.EventContactDue || eventAgent != agent {
+		t.Errorf("durable event type=%q agent=%q", eventType, eventAgent)
+	}
+	due, err := store.ClaimDueEngagements(ctx, time.Now().UTC(), 200)
+	if err != nil {
+		t.Fatalf("claim after commit: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("committed schedule remained claimable: %+v", due)
 	}
 }
 
@@ -206,7 +278,7 @@ func TestSweepReportsMetrics(t *testing.T) {
 	armPastDue(t, store, user.ID, agent, "partner@metrics.vc")
 
 	m := &countingMetrics{}
-	if _, err := contactdue.NewSweeper(store, &capturingPublisher{}, m).Sweep(ctx); err != nil {
+	if _, err := contactdue.NewSweeper(&capturingPublisher{store: store}, m).Sweep(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if m.published != 1 {
@@ -217,9 +289,8 @@ func TestSweepReportsMetrics(t *testing.T) {
 	}
 }
 
-// TestSweepReportsFailedPublishes pins that a failed wake-up is counted
-// separately. It is the more important of the two: the schedule has already
-// been consumed, so nothing retries and the miss is permanent.
+// TestSweepReportsFailedPublishes pins that a rolled-back batch is observable
+// while still returning an error to River for retry.
 func TestSweepReportsFailedPublishes(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
@@ -228,9 +299,9 @@ func TestSweepReportsFailedPublishes(t *testing.T) {
 	armPastDue(t, store, user.ID, agent, "partner@metricsfail.vc")
 
 	m := &countingMetrics{}
-	pub := &capturingPublisher{err: errors.New("subscriber unreachable")}
-	if _, err := contactdue.NewSweeper(store, pub, m).Sweep(ctx); err != nil {
-		t.Fatalf("sweep: %v", err)
+	pub := &capturingPublisher{store: store, err: errors.New("outbox unavailable")}
+	if _, err := contactdue.NewSweeper(pub, m).Sweep(ctx); err == nil {
+		t.Fatal("sweep error was swallowed")
 	}
 	if m.failed != 1 {
 		t.Errorf("failed metric = %d, want 1 — a permanently missed wake-up went unreported", m.failed)

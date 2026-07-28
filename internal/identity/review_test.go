@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
@@ -90,6 +91,50 @@ func TestInboundReview_HeldExcludedFromInbox(t *testing.T) {
 	}
 	if !inboxIDs(t, store, ctx, agentID)[heldID] {
 		t.Errorf("approved message should now appear in the inbox")
+	}
+}
+
+func TestInboundReviewApprovalAtomicallyAdvancesAuthenticatedEngagement(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	userID, agentID := seedReviewAgent(t, store, ctx, "held-contact.example.com")
+	const contact = "partner@fund.vc"
+	enroll(t, store, userID, agentID, contact, "touch1")
+	if _, err := store.RecordOutboundActivity(ctx, userID, agentID, contact, "conv_intro", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("RecordOutboundActivity: %v", err)
+	}
+
+	exp := time.Now().Add(time.Hour)
+	msg, err := store.CreateInboundMessageAuthenticated(
+		ctx, "", agentID,
+		identity.InboundAuth{
+			HeaderFrom:   contact,
+			EnvelopeFrom: contact,
+			Authentication: &emailauth.Authentication{
+				DMARC: emailauth.DMARCResult{Status: emailauth.StatusPass},
+			},
+		},
+		agentID, "", "Re: intro", "conv_intro", "unread", []byte("Subject: Re: intro\r\n\r\nyes"),
+		false, "", []string{agentID}, nil, nil,
+		identity.InboundScreening{
+			Status: identity.MessageStatusPendingReview, ScanAction: "review",
+			ReviewReason: identity.ReviewReasonInboundScan, ApprovalExpiresAt: &exp,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateInboundMessageAuthenticated: %v", err)
+	}
+
+	if err := store.ApproveInboundReview(ctx, msg.ID, agentID, userID); err != nil {
+		t.Fatalf("ApproveInboundReview: %v", err)
+	}
+	got, err := store.GetEngagement(ctx, userID, agentID, contact)
+	if err != nil {
+		t.Fatalf("GetEngagement: %v", err)
+	}
+	if got.LastInboundAt == nil || !got.Replied() || got.InboundCount != 1 {
+		t.Fatalf("approved authenticated reply did not advance engagement atomically: %+v", got)
 	}
 }
 

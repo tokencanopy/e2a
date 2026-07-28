@@ -47,6 +47,7 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "starter_template_not_found", Status: "404", Family: "not_found"},
 	{Code: "gone", Status: "410", Family: "not_found"},
 	{Code: "conflict", Status: "409", Family: "state"},
+	{Code: "precondition_failed", Status: "412", Family: "state"},
 	{Code: "agent_taken", Status: "409", Family: "state"},
 	{Code: "domain_taken", Status: "409", Family: "state"},
 	{Code: "alias_taken", Status: "409", Family: "state"},

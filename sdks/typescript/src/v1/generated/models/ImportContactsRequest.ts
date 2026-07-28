@@ -15,6 +15,10 @@ import { HttpFile } from '../http/http.js';
 
 export class ImportContactsRequest {
     /**
+    * Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved.
+    */
+    'agentEmail'?: string;
+    /**
     * The rows to import. At most 1000 per request; paginate client-side for larger lists.
     */
     'contacts': Array<ContactImportRow> | null;
@@ -22,12 +26,22 @@ export class ImportContactsRequest {
     * What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.
     */
     'onConflict'?: ImportContactsRequestOnConflictEnum;
+    /**
+    * Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement\'s stage.
+    */
+    'stage'?: string;
 
     static readonly discriminator: string | undefined = undefined;
 
     static readonly mapping: {[index: string]: string} | undefined = undefined;
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
+        {
+            "name": "agentEmail",
+            "baseName": "agent_email",
+            "type": "string",
+            "format": ""
+        },
         {
             "name": "contacts",
             "baseName": "contacts",
@@ -38,6 +52,12 @@ export class ImportContactsRequest {
             "name": "onConflict",
             "baseName": "on_conflict",
             "type": "ImportContactsRequestOnConflictEnum",
+            "format": ""
+        },
+        {
+            "name": "stage",
+            "baseName": "stage",
+            "type": "string",
             "format": ""
         }    ];
 

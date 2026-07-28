@@ -94,6 +94,30 @@ func newEngagementsServer(t *testing.T, mutate func(*Deps, *engagementFixture)) 
 			fixture.rows[k] = e
 			return e, !exists, nil
 		},
+		UpdateEngagementIfUnchanged: func(_ context.Context, userID, agentID, address string, stage *string, next **time.Time, metadata map[string]any, expected time.Time) (identity.ContactEngagement, error) {
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			k := fixture.key(userID, agentID, address)
+			e, ok := fixture.rows[k]
+			if !ok {
+				return identity.ContactEngagement{}, identity.ErrEngagementNotFound
+			}
+			if !e.UpdatedAt.Equal(expected) {
+				return identity.ContactEngagement{}, identity.ErrEngagementPreconditionFailed
+			}
+			if stage != nil {
+				e.Stage = *stage
+			}
+			if next != nil {
+				e.NextActionAt = *next
+			}
+			if metadata != nil {
+				e.Metadata = metadata
+			}
+			e.UpdatedAt = e.UpdatedAt.Add(time.Second)
+			fixture.rows[k] = e
+			return e, nil
+		},
 		GetEngagement: func(_ context.Context, userID, agentID, address string) (identity.ContactEngagement, error) {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
@@ -279,6 +303,59 @@ func TestEnrollReturns201ThenUpdatesWith200(t *testing.T) {
 	}
 	if body["stage"] != "touch2" {
 		t.Errorf("stage = %v, want touch2", body["stage"])
+	}
+}
+
+// TestEngagementUpdateHonorsIfMatch pins optimistic concurrency on the
+// agent-owned outreach state. Two automation loops can race on the same
+// contact; the stale loop must receive 412 instead of silently moving the
+// newer loop's stage or schedule backwards.
+func TestEngagementUpdateHonorsIfMatch(t *testing.T) {
+	srv := newEngagementsServer(t, nil)
+	path := raisePath + "/partner%40fund.vc"
+	enrollVia(t, srv, "account", "partner@fund.vc", map[string]any{"stage": "touch1"})
+
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	if code != http.StatusOK || headers.Get("ETag") == "" {
+		t.Fatalf("GET = %d ETag=%q; want 200 with ETag", code, headers.Get("ETag"))
+	}
+	etag := headers.Get("ETag")
+
+	code, body, updatedHeaders := sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "touch2"}, map[string]string{"If-Match": etag})
+	if code != http.StatusOK {
+		t.Fatalf("PUT with current ETag = %d %v; want 200", code, body)
+	}
+	if updatedHeaders.Get("ETag") == "" || updatedHeaders.Get("ETag") == etag {
+		t.Errorf("PUT ETag = %q; want a new validator", updatedHeaders.Get("ETag"))
+	}
+
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "stale"}, map[string]string{"If-Match": etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PUT with stale ETag = %d %v; want 412 precondition_failed", code, body)
+	}
+}
+
+// TestEngagementUpdateRejectsARaceAfterTheETagRead covers the narrower
+// read/check/write window. The conditional store method simulates a competing
+// write that lands after the handler accepted the ETag.
+func TestEngagementUpdateRejectsARaceAfterTheETagRead(t *testing.T) {
+	srv := newEngagementsServer(t, func(d *Deps, _ *engagementFixture) {
+		d.UpdateEngagementIfUnchanged = func(context.Context, string, string, string, *string, **time.Time, map[string]any, time.Time) (identity.ContactEngagement, error) {
+			return identity.ContactEngagement{}, identity.ErrEngagementPreconditionFailed
+		}
+	})
+	path := raisePath + "/race%40fund.vc"
+	enrollVia(t, srv, "account", "race@fund.vc", map[string]any{"stage": "touch1"})
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET = %d", code)
+	}
+	code, body, _ := sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "loser"}, map[string]string{"If-Match": headers.Get("ETag")})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("racing PUT = %d %v; want 412 precondition_failed", code, body)
 	}
 }
 

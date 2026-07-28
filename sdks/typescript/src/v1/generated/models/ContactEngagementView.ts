@@ -23,7 +23,7 @@ export class ContactEngagementView {
     */
     'firstOutboundAt': Date | null;
     /**
-    * Server-owned.
+    * DMARC-authenticated inbound messages delivered since enrollment. Spoofed, held, blocked, and pre-enrollment messages are excluded. Server-owned.
     */
     'inboundCount': number;
     /**
@@ -47,7 +47,7 @@ export class ContactEngagementView {
     */
     'nextActionAt': Date | null;
     /**
-    * Server-owned.
+    * Successfully submitted outbound messages since enrollment. Queue failures and pre-enrollment history are excluded. Server-owned.
     */
     'outboundCount': number;
     /**

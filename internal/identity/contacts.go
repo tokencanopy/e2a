@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Contact-layer sentinel errors. Handlers map these to their HTTP envelopes;
@@ -20,15 +21,18 @@ var (
 	// ErrContactExists is returned when creating an address the account
 	// already holds. Callers that want upsert semantics use UpsertContact.
 	ErrContactExists = errors.New("contact already exists")
-	// ErrImportBatchNotFound means no contacts remain that were created by
-	// that batch — absent, already reversed, or another account's.
+	// ErrImportBatchNotFound means no durable receipt exists for that batch —
+	// absent, already reversed, or another account's.
 	ErrImportBatchNotFound = errors.New("import batch not found")
 	// ErrContactLimitReached means the account is at its contact cap.
 	ErrContactLimitReached = errors.New("contact limit reached")
+	// ErrContactPreconditionFailed means a conditional write named an older
+	// contact version. The row still exists, but the caller must re-read it.
+	ErrContactPreconditionFailed = errors.New("contact precondition failed")
 )
 
 // DefaultMaxContacts is the per-account contact cap when account_limits has no
-// row or no explicit value. See migration 081 for why this number.
+// row or no explicit value. See migration 082 for why this number.
 const DefaultMaxContacts = 10000
 
 // ContactSource records how a contact first entered the account. It is
@@ -94,6 +98,41 @@ func scanContact(row pgx.Row) (Contact, error) {
 	return c, nil
 }
 
+// contactExecutor is the shared query surface of pgxpool.Pool and pgx.Tx used
+// by contact-cap helpers.
+type contactExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// lockContactCapacity serializes every path that may create a contact for one
+// account. A count predicate alone is only snapshot-safe: two transactions can
+// both observe the final free slot. The transaction-scoped lock closes that
+// write-skew window without blocking other accounts or readers.
+func lockContactCapacity(ctx context.Context, tx pgx.Tx, userID string) error {
+	_, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"contact-cap:"+userID)
+	return err
+}
+
+func maxContactsForUser(ctx context.Context, exec contactExecutor, userID string) (int, error) {
+	var n *int
+	err := exec.QueryRow(ctx,
+		`SELECT max_contacts FROM account_limits WHERE user_id = $1`, userID,
+	).Scan(&n)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DefaultMaxContacts, nil
+		}
+		return 0, err
+	}
+	if n == nil {
+		return DefaultMaxContacts, nil
+	}
+	return *n, nil
+}
+
 // CreateContact inserts a new contact. address is canonicalized with
 // NormalizeMailboxAddress — the same key suppression lookups use — so a
 // display-name form ("Jane Doe <jane@fund.vc>") and the bare address collapse
@@ -111,14 +150,19 @@ func (s *Store) CreateContact(ctx context.Context, userID, address, displayName 
 	if importBatchID != "" {
 		batch = &importBatchID
 	}
-	// The cap is enforced INSIDE the insert rather than as a count-then-insert:
-	// two concurrent creates at the boundary would both pass a prior check and
-	// both land. The subquery counts within the same statement's snapshot.
-	max, err := s.MaxContactsForUser(ctx, userID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Contact{}, err
 	}
-	row := s.pool.QueryRow(ctx,
+	defer tx.Rollback(ctx)
+	if err := lockContactCapacity(ctx, tx, userID); err != nil {
+		return Contact{}, err
+	}
+	max, err := maxContactsForUser(ctx, tx, userID)
+	if err != nil {
+		return Contact{}, err
+	}
+	row := tx.QueryRow(ctx,
 		`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
 		 SELECT $1, $2, $3, $4, $5, $6, $7
 		  WHERE (SELECT count(*) FROM contacts WHERE user_id = $2) < $8
@@ -131,7 +175,7 @@ func (s *Store) CreateContact(ctx context.Context, userID, address, displayName 
 		// "at the cap" (the WHERE filtered the insert out). They are different
 		// errors to the caller, so disambiguate rather than guess.
 		var exists bool
-		if qerr := s.pool.QueryRow(ctx,
+		if qerr := tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM contacts WHERE user_id = $1 AND address = $2)`,
 			userID, address).Scan(&exists); qerr != nil {
 			return Contact{}, qerr
@@ -142,6 +186,9 @@ func (s *Store) CreateContact(ctx context.Context, userID, address, displayName 
 		return Contact{}, ErrContactLimitReached
 	}
 	if err != nil {
+		return Contact{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return Contact{}, err
 	}
 	return c, nil
@@ -199,6 +246,18 @@ func (s *Store) ListContacts(ctx context.Context, userID string, f ContactFilter
 // It deliberately cannot change address, source, or import_batch_id — address
 // is the identity, and the other two are provenance.
 func (s *Store) UpdateContact(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (Contact, error) {
+	return s.updateContact(ctx, userID, address, displayName, metadata, nil)
+}
+
+// UpdateContactIfUnchanged performs the same partial update only when
+// updated_at still equals expectedUpdatedAt. Keeping the predicate in SQL
+// closes the read/check/write race that an HTTP-only ETag comparison cannot.
+func (s *Store) UpdateContactIfUnchanged(ctx context.Context, userID, address string, displayName *string, metadata map[string]any, expectedUpdatedAt time.Time) (Contact, error) {
+	return s.updateContact(ctx, userID, address, displayName, metadata, &expectedUpdatedAt)
+}
+
+func (s *Store) updateContact(ctx context.Context, userID, address string, displayName *string, metadata map[string]any, expectedUpdatedAt *time.Time) (Contact, error) {
+	address = NormalizeMailboxAddress(address)
 	var encoded []byte
 	if metadata != nil {
 		var err error
@@ -212,10 +271,20 @@ func (s *Store) UpdateContact(ctx context.Context, userID, address string, displ
 		        metadata     = COALESCE($4::jsonb, metadata),
 		        updated_at   = now()
 		  WHERE user_id = $1 AND address = $2
+		    AND ($5::timestamptz IS NULL OR updated_at = $5)
 		  RETURNING `+contactColumns,
-		userID, NormalizeMailboxAddress(address), displayName, encoded)
+		userID, address, displayName, encoded, expectedUpdatedAt)
 	c, err := scanContact(row)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if qerr := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM contacts WHERE user_id = $1 AND address = $2)`,
+			userID, address).Scan(&exists); qerr != nil {
+			return Contact{}, qerr
+		}
+		if exists && expectedUpdatedAt != nil {
+			return Contact{}, ErrContactPreconditionFailed
+		}
 		return Contact{}, ErrContactNotFound
 	}
 	return c, err
@@ -240,20 +309,7 @@ func (s *Store) DeleteContact(ctx context.Context, userID, address string) (bool
 // MaxContactsForUser resolves the account's contact cap, falling back to the
 // default when the account has no limits row or no explicit value.
 func (s *Store) MaxContactsForUser(ctx context.Context, userID string) (int, error) {
-	var n *int
-	err := s.pool.QueryRow(ctx,
-		`SELECT max_contacts FROM account_limits WHERE user_id = $1`, userID,
-	).Scan(&n)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return DefaultMaxContacts, nil
-		}
-		return 0, err
-	}
-	if n == nil {
-		return DefaultMaxContacts, nil
-	}
-	return *n, nil
+	return maxContactsForUser(ctx, s.pool, userID)
 }
 
 // nullableTime renders a zero time.Time as SQL NULL so a filter left unset is
@@ -279,11 +335,20 @@ type ContactImportRow struct {
 // row gets exactly one outcome, so a caller can reconcile its spreadsheet
 // line-by-line rather than diffing counts.
 type ContactImportOutcome struct {
-	Index   int
-	Address string
-	Status  string // created | updated | skipped | failed
-	Code    string
-	Message string
+	Index    int
+	Address  string
+	Status   string // created | updated | skipped | failed
+	Code     string
+	Message  string
+	Enrolled bool // this batch created the optional per-agent engagement
+}
+
+// ContactImportOptions controls conflict behavior and optional per-agent
+// enrollment. Stage initializes only a newly created engagement.
+type ContactImportOptions struct {
+	Merge   bool
+	AgentID string
+	Stage   string
 }
 
 // Import outcome statuses.
@@ -309,19 +374,47 @@ func NewImportBatchID() string { return "imp_" + generateID() }
 // and must not disturb any state hanging off it. merge=false skips existing
 // rows entirely.
 func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows []ContactImportRow, merge bool) ([]ContactImportOutcome, error) {
+	return s.ImportContactsWithOptions(ctx, userID, batchID, rows, ContactImportOptions{Merge: merge})
+}
+
+// ImportContactsWithOptions applies a contact batch and, when AgentID is set,
+// enrolls every valid resolved contact with that live owned agent in the same
+// transaction. Existing engagement state is preserved.
+func (s *Store) ImportContactsWithOptions(ctx context.Context, userID, batchID string, rows []ContactImportRow, options ContactImportOptions) ([]ContactImportOutcome, error) {
 	outcomes := make([]ContactImportOutcome, len(rows))
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	agentID := NormalizeEmail(options.AgentID)
+	if agentID != "" {
+		var lockedAgent string
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM agent_identities
+			  WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+			  FOR KEY SHARE`,
+			agentID, userID).Scan(&lockedAgent); errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAgentNotFound
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	if err := lockContactCapacity(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO contact_import_batches (user_id, id) VALUES ($1, $2)`,
+		userID, batchID); err != nil {
+		return nil, err
+	}
 
 	// Cap headroom for this batch. Import stays partial-success: a 1000-row
 	// upload against 400 free slots fills those 400 and fails the rest
 	// individually, rather than rejecting everything. Rejecting the batch would
 	// contradict the per-row model the endpoint commits to, and would leave the
 	// caller unable to see which lines they could keep.
-	max, err := s.MaxContactsForUser(ctx, userID)
+	max, err := maxContactsForUser(ctx, tx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -398,9 +491,9 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 			}
 		}
 
-		var stored string
+		var contactID, stored string
 		var inserted bool
-		if merge {
+		if options.Merge {
 			err = tx.QueryRow(ctx,
 				`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
 				      VALUES ($1, $2, $3, $4, $5, 'import', $6)
@@ -408,35 +501,54 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 				    SET display_name = COALESCE($8, contacts.display_name),
 				        metadata     = COALESCE($7::jsonb, contacts.metadata),
 				        updated_at   = now()
-				  RETURNING address, (xmax = 0)`,
+				  RETURNING id, address, (xmax = 0)`,
 				NewContactID(), userID, address, insertName, insertMetadata, batchID, encoded, row.DisplayName).
-				Scan(&stored, &inserted)
+				Scan(&contactID, &stored, &inserted)
 		} else {
 			err = tx.QueryRow(ctx,
 				`INSERT INTO contacts (id, user_id, address, display_name, metadata, source, import_batch_id)
 				      VALUES ($1, $2, $3, $4, $5, 'import', $6)
 				 ON CONFLICT (user_id, address) DO NOTHING
-				  RETURNING address, true`,
+				  RETURNING id, address, true`,
 				NewContactID(), userID, address, insertName, insertMetadata, batchID).
-				Scan(&stored, &inserted)
+				Scan(&contactID, &stored, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
+				if err := tx.QueryRow(ctx,
+					`SELECT id, address FROM contacts WHERE user_id = $1 AND address = $2`,
+					userID, address).Scan(&contactID, &stored); err != nil {
+					return nil, err
+				}
 				outcomes[i] = ContactImportOutcome{
 					Index: i, Address: address, Status: ImportStatusSkipped,
 					Code: "already_exists", Message: "contact already exists and on_conflict is skip",
 				}
-				continue
+				err = nil
 			}
 		}
 		if err != nil {
 			return nil, err
 		}
 
-		status := ImportStatusUpdated
-		if inserted {
-			status = ImportStatusCreated
-			headroom--
+		if outcomes[i].Status == "" {
+			status := ImportStatusUpdated
+			if inserted {
+				status = ImportStatusCreated
+				headroom--
+			}
+			outcomes[i] = ContactImportOutcome{Index: i, Address: stored, Status: status}
 		}
-		outcomes[i] = ContactImportOutcome{Index: i, Address: stored, Status: status}
+		if agentID != "" {
+			tag, err := tx.Exec(ctx,
+				`INSERT INTO contact_engagements
+				     (id, user_id, contact_id, agent_id, address, stage, metadata, import_batch_id)
+				  VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7)
+				  ON CONFLICT (user_id, agent_id, contact_id) DO NOTHING`,
+				NewEngagementID(), userID, contactID, agentID, stored, options.Stage, batchID)
+			if err != nil {
+				return nil, err
+			}
+			outcomes[i].Enrolled = tag.RowsAffected() == 1
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -452,43 +564,73 @@ func (s *Store) ImportContacts(ctx context.Context, userID, batchID string, rows
 // it). A contact whose provenance moved, or that a later merge re-pointed, is
 // retained — reversing an upload must not delete a record the user has since
 // built history on.
-func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (deleted int, retained int, err error) {
-	var total int
-	if err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM contacts WHERE user_id = $1 AND import_batch_id = $2`,
-		userID, batchID).Scan(&total); err != nil {
-		return 0, 0, err
+func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (deleted int, retained int, engagementsDeleted int, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-	if total == 0 {
-		return 0, 0, ErrImportBatchNotFound
+	defer tx.Rollback(ctx)
+
+	var locked string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM contact_import_batches
+		  WHERE user_id = $1 AND id = $2
+		  FOR UPDATE`,
+		userID, batchID).Scan(&locked); errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, 0, ErrImportBatchNotFound
+	} else if err != nil {
+		return 0, 0, 0, err
 	}
-	// Contacts this account has actually corresponded with are RETAINED, not
-	// deleted. Reversing an upload is an undo for a mistaken import, not a
-	// licence to destroy a record someone has since built history on — and
-	// because the reversal is addressed by batch id, the caller cannot tell
-	// which rows those are. The counts in the receipt are how they find out.
-	//
-	// History is checked against messages rather than any engagement table so
-	// this holds regardless of whether outreach state exists: a contact is
-	// "corresponded with" if the account has sent to that address or received
-	// from it.
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM contacts c
-		  WHERE c.user_id = $1
-		    AND c.import_batch_id = $2
-		    AND NOT EXISTS (
-		          SELECT 1
-		            FROM messages m
-		            JOIN agent_identities a ON a.id = m.agent_id AND a.user_id = c.user_id
-		           WHERE lower(m.sender) = c.address
-		              OR EXISTS (
-		                   SELECT 1 FROM unnest(m.to_recipients) AS r
-		                    WHERE lower(r) = c.address)
-		    )`,
+
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM contact_engagements
+		  WHERE user_id = $1 AND import_batch_id = $2`,
 		userID, batchID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	deleted = int(tag.RowsAffected())
-	return deleted, total - deleted, nil
+	engagementsDeleted = int(tag.RowsAffected())
+
+	var total int
+	err = tx.QueryRow(ctx,
+		`WITH target AS MATERIALIZED (
+		     SELECT c.id, c.user_id, c.address
+		       FROM contacts c
+		      WHERE c.user_id = $1 AND c.import_batch_id = $2
+		 ),
+		 doomed AS MATERIALIZED (
+		     SELECT c.id
+		       FROM target c
+		      WHERE NOT EXISTS (
+		            SELECT 1
+		              FROM messages m
+		              JOIN agent_identities a
+		                ON a.id = m.agent_id AND a.user_id = c.user_id
+		             WHERE lower(m.sender) = c.address
+		                OR EXISTS (
+		                     SELECT 1 FROM unnest(m.to_recipients) AS r
+		                      WHERE lower(r) = c.address)
+		      )
+		 ),
+		 removed AS (
+		     DELETE FROM contacts c
+		      USING doomed d
+		      WHERE c.id = d.id
+		  RETURNING c.id
+		 )
+		 SELECT (SELECT count(*) FROM target),
+		        (SELECT count(*) FROM removed)`,
+		userID, batchID).Scan(&total, &deleted)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM contact_import_batches WHERE user_id = $1 AND id = $2`,
+		userID, batchID); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	return deleted, total - deleted, engagementsDeleted, nil
 }

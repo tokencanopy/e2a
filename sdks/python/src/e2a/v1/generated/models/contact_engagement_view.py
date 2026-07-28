@@ -33,13 +33,13 @@ class ContactEngagementView(BaseModel):
     contact: EmbeddedContactView
     created_at: datetime
     first_outbound_at: Optional[datetime] = Field(description="Server-owned.")
-    inbound_count: StrictInt = Field(description="Server-owned.")
+    inbound_count: StrictInt = Field(description="DMARC-authenticated inbound messages delivered since enrollment. Spoofed, held, blocked, and pre-enrollment messages are excluded. Server-owned.")
     last_conversation_id: Optional[StrictStr] = Field(default=None, description="Server-owned.")
     last_inbound_at: Optional[datetime] = Field(description="Server-owned.")
     last_outbound_at: Optional[datetime] = Field(description="Server-owned. Include it in the due query (last_outbound_before) so a lost client state-write cannot cause a duplicate send.")
     metadata: Dict[str, Any] = Field(description="Caller-owned key/value data scoped to this relationship. Opaque to e2a.")
     next_action_at: Optional[datetime] = Field(description="When the caller wants to act next. e2a does not act on it; it drives the outreach query and the contact.due wake-up.")
-    outbound_count: StrictInt = Field(description="Server-owned.")
+    outbound_count: StrictInt = Field(description="Successfully submitted outbound messages since enrollment. Queue failures and pre-enrollment history are excluded. Server-owned.")
     replied: StrictBool = Field(description="Whether this contact has answered since outreach began — computed as last_inbound_at > first_outbound_at, so it means 'replied to us' rather than 'has ever written'. Server-owned.")
     stage: StrictStr = Field(description="Caller-defined outreach stage. Opaque to e2a — there is no server-side state machine, and any string is valid.")
     suppressed: StrictBool = Field(description="Whether sends to this address are blocked, by an account-wide or agent-scoped suppression. Server-owned; reflects the same state the send path enforces.")

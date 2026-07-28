@@ -1,6 +1,9 @@
 # Contacts and outreach state
 
-Status: **draft** — design only, nothing implemented.
+Status: **implemented (beta)**. The post-implementation review and corrections
+are recorded in
+[`2026-07-27-contacts-review-hardening.md`](2026-07-27-contacts-review-hardening.md);
+where the documents differ, the hardening decision is authoritative.
 Date: 2026-07-24
 Surface: `/v1/contacts`, `/v1/agents/{email}/contacts`, `contact.due` webhook event.
 Stability: **beta** on every operation (see §3.4).
@@ -346,16 +349,16 @@ dimension. Ignored when `agent_email` is absent.
 
 Decisions and why:
 
-- **Synchronous, capped at 1,000 items / 1 MB.** Marketing platforms go async
+- **Synchronous, capped at 1,000 items / 20 MiB.** Marketing platforms go async
   (202 + a job id, tens of thousands per request) because they serve bulk
   mailing lists. Our N is hundreds. Sync skips the entire job + status-polling +
   partial-progress surface. Over the cap → **413** `payload_too_large`; client
   paginates. Going async later adds an endpoint without changing this one.
 - **JSON in the API; CSV parsed at the edge.** Server-side CSV means column
   mapping, encoding detection (spreadsheet BOM, latin-1), and quoting edge cases
-  in a mail gateway. CLI does `e2a contacts import investors.csv --map
-  email=Email`; the dashboard parses in-browser and gets a column-preview UI for
-  free.
+  in a mail gateway. CLI auto-detects `email`/`name` and exposes
+  `--email-column` / `--name-column`; the dashboard parses in-browser and
+  provides a column-preview UI.
 - **Per-item results, never all-or-nothing.** Row 37 malformed → 499 land.
 - **`Idempotency-Key`** reusing `internal/httpapi/idempotency.go` (today
   sends-only; this extends a known shape) so a retry after timeout can't double-create.
@@ -437,7 +440,7 @@ only honest posture for investor email.
 | Agent hard-deleted (purged) | Engagements purged in the same janitor sweep as the agent. |
 | Agent recreated at the same address | Inherits suppressions (consent, by design) but **no engagements** — they were purged. Prevents a resurrected campaign firing touch 4 at investors it never contacted. |
 | Agent restored from trash with past-due engagements | Backlog is not push-fired; `notified_next_action_at` is set on restore so the agent pulls it via `?next_action_before=now` (Q1 secondary). |
-| Derived counters drift | Janitor reconciliation corrects and emits a metric. |
+| Derived counters drift | Counts are computed from message history on read, so no mutable counter can drift. |
 | Inbound from an unknown address | Auto-creates a contact with `source='inbound'` — **only if** the address already has an engagement with that agent. Otherwise no contact is created; inbound mail from strangers must not silently populate a contact list. |
 | Concurrent `PATCH` on the same contact | `ETag` / `If-Match` → 412. |
 | Import over cap | 413 `payload_too_large`. |
@@ -627,10 +630,10 @@ rejection — one fat row must not sink 499 good ones.
 These are deliberately generous and easy to raise later; lowering a shipped cap
 is breaking, so start where we are unlikely to need to tighten.
 
-**Q3 — Does import enroll by default?** Currently `agent_email` is optional and
-enrollment is opt-in. Alternative: require it, on the theory that a contact with
-no engagement is inert. Leaning opt-in — import-then-enroll is a real workflow
-when the list is split across agents.
+**Q3 — RESOLVED. Import enrollment is opt-in.** `agent_email` is optional;
+when present, every valid resolved row is enrolled transactionally and `stage`
+initializes only a newly created engagement. Re-import never resets existing
+outreach state. This preserves the import-then-distribute workflow.
 
 **Q4 — RESOLVED. `contact.due`, opening a `contact.` namespace.**
 
@@ -761,7 +764,7 @@ Account-level — `requireAccountScope` (agent-scoped credential → **403 `forb
 | `PATCH` | `/v1/contacts/{address}` | 200 `ContactView` | 400, 404, 412 |
 | `DELETE` | `/v1/contacts/{address}?confirm=DELETE` | 200 `{deleted:true,address}` | 400 (missing confirm), 404 |
 | `POST` | `/v1/contacts/import` | 200 `ContactImportResult` | 400, **413 `payload_too_large`** |
-| `DELETE` | `/v1/contacts/imports/{batch_id}?confirm=DELETE` | 200 `{deleted:true,batch_id,contacts_deleted,contacts_retained}` | 400, 404 `import_batch_not_found` |
+| `DELETE` | `/v1/contacts/imports/{batch_id}?confirm=DELETE` | 200 `{deleted:true,batch_id,contacts_deleted,contacts_retained,engagements_deleted}` | 400, 404 `import_batch_not_found` |
 
 `GET /v1/contacts` filters: `source`, `import_batch_id`, `created_after`, `created_before`.
 `POST /v1/contacts` and `POST /v1/contacts/import` accept `Idempotency-Key`.
@@ -912,7 +915,7 @@ These are the behavioral contract. Each maps to a test in §6.
 
 ## 10. Amendment (2026-07-26): stop materializing the message counters
 
-Status: **proposed** — reverses part of §3.2. Not implemented.
+Status: **implemented** — reverses part of §3.2.
 
 ### What §3.2 decided, and what it got wrong
 

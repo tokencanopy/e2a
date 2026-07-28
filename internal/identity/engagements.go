@@ -14,6 +14,11 @@ import (
 // account's", so the surface cannot be used to probe.
 var ErrEngagementNotFound = errors.New("engagement not found")
 
+// ErrEngagementPreconditionFailed means a conditional update named an older
+// engagement version. It is distinct from not-found so the API can return 412
+// without exposing another tenant's records.
+var ErrEngagementPreconditionFailed = errors.New("engagement precondition failed")
+
 // ContactEngagement is one agent's relationship with one contact: what stage
 // the outreach is at, when to act next, and what has actually happened on the
 // wire.
@@ -95,12 +100,23 @@ const engagementColumns = `
 	  WHERE m.agent_id = ce.agent_id
 	    AND m.direction = 'outbound'
 	    AND m.deleted_at IS NULL
+	    AND m.created_at >= ce.created_at
+	    -- A queue acceptance is not a send. Count only messages the terminal
+	    -- path has recorded as provider/local accepted, matching the activity
+	    -- hook that owns first/last_outbound_at.
+	    AND m.delivery_status IN ('sent', 'deferred', 'delivered', 'bounced', 'complained')
 	    AND EXISTS (SELECT 1 FROM unnest(m.to_recipients) AS r
 	                 WHERE lower(r) = ce.address)) AS outbound_count,
 	(SELECT count(*) FROM messages m
 	  WHERE m.agent_id = ce.agent_id
 	    AND m.direction = 'inbound'
 	    AND m.deleted_at IS NULL
+	    AND m.created_at >= ce.created_at
+	    -- The From mailbox is attacker-controlled unless DMARC authenticates
+	    -- its domain. Held/blocked messages also have not reached the agent.
+	    -- Keep this projection identical to the RecordInboundActivity gate.
+	    AND m.authentication #>> '{dmarc,status}' = 'pass'
+	    AND m.status IN ('sent', 'review_approved', 'review_expired_approved')
 	    AND lower(m.sender) = ce.address) AS inbound_count,
 	ce.last_conversation_id,
 	(asup.address IS NOT NULL OR sup.address IS NOT NULL) AS suppressed,
@@ -166,14 +182,37 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 		return ContactEngagement{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	var lockedAgent string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM agent_identities
+		  WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+		  FOR KEY SHARE`,
+		agentID, userID).Scan(&lockedAgent); errors.Is(err, pgx.ErrNoRows) {
+		return ContactEngagement{}, false, ErrAgentNotFound
+	} else if err != nil {
+		return ContactEngagement{}, false, err
+	}
+	if err := lockContactCapacity(ctx, tx, userID); err != nil {
+		return ContactEngagement{}, false, err
+	}
+	max, err := maxContactsForUser(ctx, tx, userID)
+	if err != nil {
+		return ContactEngagement{}, false, err
+	}
 
 	var contactID string
 	err = tx.QueryRow(ctx,
 		`INSERT INTO contacts (id, user_id, address, display_name, metadata, source)
-		      VALUES ($1, $2, $3, '', '{}'::jsonb, 'manual')
+		      SELECT $1, $2, $3, '', '{}'::jsonb, 'manual'
+		       WHERE EXISTS (
+		                 SELECT 1 FROM contacts WHERE user_id = $2 AND address = $3)
+		          OR (SELECT count(*) FROM contacts WHERE user_id = $2) < $4
 		 ON CONFLICT (user_id, address) DO UPDATE SET updated_at = contacts.updated_at
 		  RETURNING id`,
-		NewContactID(), userID, address).Scan(&contactID)
+		NewContactID(), userID, address, max).Scan(&contactID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ContactEngagement{}, false, ErrContactLimitReached
+	}
 	if err != nil {
 		return ContactEngagement{}, false, err
 	}
@@ -216,6 +255,60 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 	return e, created, err
 }
 
+// UpdateEngagementIfUnchanged updates only the agent-owned fields of an
+// existing engagement when updated_at still equals expectedUpdatedAt. The
+// version check is in the UPDATE predicate, closing the race between an HTTP
+// If-Match comparison and the persistence write.
+func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any, expectedUpdatedAt time.Time) (ContactEngagement, error) {
+	agentID = NormalizeEmail(agentID)
+	address = NormalizeMailboxAddress(address)
+
+	var encoded []byte
+	var err error
+	if metadata != nil {
+		if encoded, err = json.Marshal(metadata); err != nil {
+			return ContactEngagement{}, err
+		}
+	}
+	var nextVal *time.Time
+	var nextSet bool
+	if nextActionAt != nil {
+		nextSet = true
+		nextVal = *nextActionAt
+	}
+
+	row := s.pool.QueryRow(ctx,
+		`WITH updated AS (
+			UPDATE contact_engagements
+			   SET stage          = COALESCE($4, stage),
+			       next_action_at = CASE WHEN $5 THEN $6 ELSE next_action_at END,
+			       metadata       = COALESCE($7::jsonb, metadata),
+			       updated_at     = now()
+			 WHERE user_id = $1 AND agent_id = $2 AND address = $3
+			   AND updated_at = $8
+			 RETURNING id
+		)
+		SELECT `+engagementColumns+engagementFrom+`
+		 WHERE ce.id = (SELECT id FROM updated)`,
+		userID, agentID, address, stage, nextSet, nextVal, encoded, expectedUpdatedAt)
+	e, err := scanEngagement(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if qerr := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (
+				SELECT 1 FROM contact_engagements
+				 WHERE user_id = $1 AND agent_id = $2 AND address = $3
+			)`, userID, agentID, address).Scan(&exists); qerr != nil {
+			return ContactEngagement{}, qerr
+		}
+		if exists {
+			return ContactEngagement{}, ErrEngagementPreconditionFailed
+		}
+		return ContactEngagement{}, ErrEngagementNotFound
+	}
+	return e, err
+}
+
 // GetEngagement loads one engagement scoped to (account, agent, address).
 func (s *Store) GetEngagement(ctx context.Context, userID, agentID, address string) (ContactEngagement, error) {
 	row := s.pool.QueryRow(ctx,
@@ -243,7 +336,7 @@ func (s *Store) ListEngagements(ctx context.Context, userID, agentID string, f E
 		    AND ce.agent_id = $2
 		    AND ($3 = '' OR ce.stage = $3)
 		    AND ($4::timestamptz IS NULL OR (ce.next_action_at IS NOT NULL AND ce.next_action_at <= $4))
-		    AND ($5::timestamptz IS NULL OR (ce.last_outbound_at IS NOT NULL AND ce.last_outbound_at <= $5))
+		    AND ($5::timestamptz IS NULL OR ce.last_outbound_at IS NULL OR ce.last_outbound_at <= $5)
 		    AND ($6::bool IS NULL OR
 		         (ce.last_inbound_at IS NOT NULL
 		          AND ce.first_outbound_at IS NOT NULL
@@ -311,7 +404,17 @@ func (s *Store) DeleteEngagement(ctx context.Context, userID, agentID, address s
 // Returns whether a row was updated, so callers can distinguish "no engagement"
 // from a failure.
 func (s *Store) RecordOutboundActivity(ctx context.Context, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
-	tag, err := s.pool.Exec(ctx,
+	return recordOutboundActivity(ctx, s.pool, userID, agentID, address, conversationID, at)
+}
+
+// RecordOutboundActivityTx is the transaction-aware form used by the terminal
+// outbound path so a successful send and its outreach timestamp cannot diverge.
+func (s *Store) RecordOutboundActivityTx(ctx context.Context, tx pgx.Tx, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	return recordOutboundActivity(ctx, tx, userID, agentID, address, conversationID, at)
+}
+
+func recordOutboundActivity(ctx context.Context, exec contactExecutor, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	tag, err := exec.Exec(ctx,
 		`UPDATE contact_engagements
 		    SET first_outbound_at    = LEAST(COALESCE(first_outbound_at, $4), $4),
 		        last_outbound_at     = GREATEST(COALESCE(last_outbound_at, $4), $4),
@@ -334,7 +437,17 @@ func (s *Store) RecordOutboundActivity(ctx context.Context, userID, agentID, add
 // before any outbound simply does not count as a reply — which is correct, and
 // is why this can be a blind update rather than needing to inspect state.
 func (s *Store) RecordInboundActivity(ctx context.Context, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
-	tag, err := s.pool.Exec(ctx,
+	return recordInboundActivity(ctx, s.pool, userID, agentID, address, conversationID, at)
+}
+
+// RecordInboundActivityTx is the transaction-aware form used by SMTP intake so
+// an authenticated delivered reply and its outreach state commit together.
+func (s *Store) RecordInboundActivityTx(ctx context.Context, tx pgx.Tx, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	return recordInboundActivity(ctx, tx, userID, agentID, address, conversationID, at)
+}
+
+func recordInboundActivity(ctx context.Context, exec contactExecutor, userID, agentID, address, conversationID string, at time.Time) (bool, error) {
+	tag, err := exec.Exec(ctx,
 		`UPDATE contact_engagements
 		    SET last_inbound_at      = GREATEST(COALESCE(last_inbound_at, $4), $4),
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
@@ -350,6 +463,7 @@ func (s *Store) RecordInboundActivity(ctx context.Context, userID, agentID, addr
 // DueEngagement is one engagement whose next_action_at has passed and which has
 // not yet been notified for that value.
 type DueEngagement struct {
+	EngagementID       string
 	UserID             string
 	AgentEmail         string
 	Address            string
@@ -378,14 +492,35 @@ type DueEngagement struct {
 // Both are joins rather than stored flags, so they cannot go stale relative to
 // the state the send path enforces.
 func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit int) ([]DueEngagement, error) {
-	rows, err := s.pool.Query(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	out, err := s.ClaimDueEngagementsTx(ctx, tx, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ClaimDueEngagementsTx is the transaction-aware form used by contactdue so
+// advancing notified_next_action_at and inserting the durable outbox event can
+// commit or roll back together.
+func (s *Store) ClaimDueEngagementsTx(ctx context.Context, tx pgx.Tx, now time.Time, limit int) ([]DueEngagement, error) {
+	rows, err := tx.Query(ctx,
 		`UPDATE contact_engagements ce
 		    SET notified_next_action_at = ce.next_action_at,
 		        updated_at = now()
 		  WHERE ce.id IN (
 		        SELECT c.id
 		          FROM contact_engagements c
-		          JOIN agent_identities a ON a.id = c.agent_id AND a.deleted_at IS NULL
+		          JOIN agent_identities a ON a.id = c.agent_id
+		                                 AND a.user_id = c.user_id
+		                                 AND a.deleted_at IS NULL
 		         WHERE c.next_action_at IS NOT NULL
 		           AND c.next_action_at <= $1
 		           AND c.notified_next_action_at IS DISTINCT FROM c.next_action_at
@@ -399,7 +534,7 @@ func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit in
 		         LIMIT $2
 		         FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING ce.user_id, ce.agent_id, ce.address, ce.stage, ce.next_action_at,
+		  RETURNING ce.id, ce.user_id, ce.agent_id, ce.address, ce.stage, ce.next_action_at,
 		            ce.last_outbound_at,
 		            -- Computed, not stored (design §10). contact.due publishes
 		            -- outbound_count and a webhook payload is a harder contract
@@ -409,6 +544,8 @@ func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit in
 		              WHERE m.agent_id = ce.agent_id
 		                AND m.direction = 'outbound'
 		                AND m.deleted_at IS NULL
+		                AND m.created_at >= ce.created_at
+		                AND m.delivery_status IN ('sent', 'deferred', 'delivered', 'bounced', 'complained')
 		                AND EXISTS (SELECT 1 FROM unnest(m.to_recipients) AS r
 		                             WHERE lower(r) = ce.address)),
 		            ce.last_conversation_id,
@@ -426,7 +563,7 @@ func (s *Store) ClaimDueEngagements(ctx context.Context, now time.Time, limit in
 	for rows.Next() {
 		var d DueEngagement
 		var meta []byte
-		if err := rows.Scan(&d.UserID, &d.AgentEmail, &d.Address, &d.Stage, &d.NextActionAt,
+		if err := rows.Scan(&d.EngagementID, &d.UserID, &d.AgentEmail, &d.Address, &d.Stage, &d.NextActionAt,
 			&d.LastOutboundAt, &d.OutboundCount, &d.LastConversationID, &d.Replied,
 			&d.DisplayName, &meta); err != nil {
 			return nil, err

@@ -21,18 +21,22 @@ func TestContactDepsAreWired(t *testing.T) {
 	deps := apiserver.BuildDeps(p)
 
 	for name, wired := range map[string]bool{
-		"CreateContact":       deps.CreateContact != nil,
-		"GetContact":          deps.GetContact != nil,
-		"ListContacts":        deps.ListContacts != nil,
-		"UpdateContact":       deps.UpdateContact != nil,
-		"DeleteContact":       deps.DeleteContact != nil,
-		"ImportContacts":      deps.ImportContacts != nil,
-		"DeleteImportBatch":   deps.DeleteImportBatch != nil,
-		"SuppressedAddresses": deps.SuppressedAddresses != nil,
-		"UpsertEngagement":    deps.UpsertEngagement != nil,
-		"GetEngagement":       deps.GetEngagement != nil,
-		"ListEngagements":     deps.ListEngagements != nil,
-		"DeleteEngagement":    deps.DeleteEngagement != nil,
+		"CreateContact":               deps.CreateContact != nil,
+		"GetContact":                  deps.GetContact != nil,
+		"ListContacts":                deps.ListContacts != nil,
+		"UpdateContact":               deps.UpdateContact != nil,
+		"UpdateContactIfUnchanged":    deps.UpdateContactIfUnchanged != nil,
+		"DeleteContact":               deps.DeleteContact != nil,
+		"ImportContacts":              deps.ImportContacts != nil,
+		"ImportContactsWithOptions":   deps.ImportContactsWithOptions != nil,
+		"DeleteImportBatch":           deps.DeleteImportBatch != nil,
+		"SuppressedAddresses":         deps.SuppressedAddresses != nil,
+		"EffectiveSuppressions":       deps.EffectiveSuppressions != nil,
+		"UpsertEngagement":            deps.UpsertEngagement != nil,
+		"UpdateEngagementIfUnchanged": deps.UpdateEngagementIfUnchanged != nil,
+		"GetEngagement":               deps.GetEngagement != nil,
+		"ListEngagements":             deps.ListEngagements != nil,
+		"DeleteEngagement":            deps.DeleteEngagement != nil,
 	} {
 		if !wired {
 			t.Errorf("Deps.%s is nil — the endpoint would return 501 not_implemented in the real binary", name)

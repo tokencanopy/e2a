@@ -28,10 +28,12 @@ class ImportContactsRequest(BaseModel):
     """
     ImportContactsRequest
     """ # noqa: E501
+    agent_email: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved.")
     contacts: Optional[Annotated[List[ContactImportRow], Field(min_length=1, max_length=1000)]] = Field(description="The rows to import. At most 1000 per request; paginate client-side for larger lists.")
     on_conflict: Optional[StrictStr] = Field(default='merge', description="What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.")
+    stage: Optional[Annotated[str, Field(strict=True, max_length=128)]] = Field(default=None, description="Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["contacts", "on_conflict"]
+    __properties: ClassVar[List[str]] = ["agent_email", "contacts", "on_conflict", "stage"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -103,8 +105,10 @@ class ImportContactsRequest(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
+            "agent_email": obj.get("agent_email"),
             "contacts": [ContactImportRow.from_dict(_item) for _item in obj["contacts"]] if obj.get("contacts") is not None else None,
-            "on_conflict": obj.get("on_conflict") if obj.get("on_conflict") is not None else 'merge'
+            "on_conflict": obj.get("on_conflict") if obj.get("on_conflict") is not None else 'merge',
+            "stage": obj.get("stage")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

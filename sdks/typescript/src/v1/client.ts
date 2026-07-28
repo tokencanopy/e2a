@@ -528,12 +528,25 @@ class TemplatesResource {
 class ContactsResource {
   constructor(private readonly api: PromiseContactsApi) {}
   /** List the people this account corresponds with, newest first. Optionally
-   *  narrow by provenance (`source`) or to one upload (`importBatchId`). */
-  list(params: { source?: string; importBatchId?: string; limit?: number } = {}): AutoPager<ContactView> {
+   *  narrow by provenance, upload, or creation-time window. */
+  list(params: {
+    source?: string;
+    importBatchId?: string;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    limit?: number;
+  } = {}): AutoPager<ContactView> {
     // Cursor-paginated: the AutoPager walks next_cursor to completion.
     return new AutoPager(async (cursor) => {
       const page = await call(() =>
-        this.api.listContacts(params.source, params.importBatchId, undefined, undefined, cursor, params.limit));
+        this.api.listContacts(
+          params.source,
+          params.importBatchId,
+          params.createdAfter,
+          params.createdBefore,
+          cursor,
+          params.limit,
+        ));
       return { items: page.items ?? [], next_cursor: page.nextCursor };
     });
   }
@@ -542,15 +555,26 @@ class ContactsResource {
   get(address: string): Promise<ContactView> {
     return call(() => this.api.getContact(address));
   }
+  /** Fetch one contact together with the current optimistic-concurrency
+   *  validator. Pass `etag` back as `ifMatch` on update to reject a stale
+   *  editor instead of silently overwriting a newer change. */
+  async getWithETag(address: string): Promise<{ data: ContactView; etag?: string }> {
+    const response = await call(() => this.api.getContactWithHttpInfo(address));
+    return { data: response.data, etag: response.headers.etag ?? response.headers.ETag };
+  }
   /** Create one contact. The address is canonicalized, so creating the same
    *  person twice (in any form) is a 409 rather than a duplicate row. */
-  create(body: CreateContactRequest): Promise<ContactView> {
-    return call(() => this.api.createContact(body));
+  create(body: CreateContactRequest, opts: RequestOptions = {}): Promise<ContactView> {
+    return call(() => this.api.createContact(body, opts.idempotencyKey));
   }
   /** Partial update; omitted fields are left unchanged, so editing the name
    *  never erases metadata. Address and provenance are immutable. */
-  update(address: string, patch: UpdateContactRequest): Promise<ContactView> {
-    return call(() => this.api.updateContact(address, patch));
+  update(
+    address: string,
+    patch: UpdateContactRequest,
+    opts: { ifMatch?: string } = {},
+  ): Promise<ContactView> {
+    return call(() => this.api.updateContact(address, patch, opts.ifMatch));
   }
   delete(address: string): Promise<DeleteContactResult> {
     // The typed .delete() call is itself the confirmation; the SDK supplies the
@@ -561,10 +585,10 @@ class ContactsResource {
    *  result, so one bad line never rejects the upload. Import is inert — it
    *  records identity and sends nothing. Rows omitting a field keep the stored
    *  value, so a narrower re-upload does not erase columns it no longer carries. */
-  import(body: ImportContactsRequest): Promise<ContactImportResult> {
-    return call(() => this.api.importContacts(body));
+  import(body: ImportContactsRequest, opts: RequestOptions = {}): Promise<ContactImportResult> {
+    return call(() => this.api.importContacts(body, opts.idempotencyKey));
   }
-  /** Reverse an import, removing the contacts it created. */
+  /** Reverse an import, removing untouched contacts and agent enrolments it created. */
   deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
     return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
   }
@@ -613,12 +637,26 @@ class ContactsResource {
   getOutreach(email: string, address: string): Promise<ContactEngagementView> {
     return call(() => this.api.getEngagement(email, address));
   }
+  /** Fetch one outreach record with its current validator for a guarded
+   *  read-modify-write loop. */
+  async getOutreachWithETag(
+    email: string,
+    address: string,
+  ): Promise<{ data: ContactEngagementView; etag?: string }> {
+    const response = await call(() => this.api.getEngagementWithHttpInfo(email, address));
+    return { data: response.data, etag: response.headers.etag ?? response.headers.ETag };
+  }
 
   /** Enrol a contact in an agent's outreach, or update the agent-owned fields.
    *  Omitted fields are left unchanged, so advancing the stage after a send
    *  does not disturb the schedule. */
-  setOutreach(email: string, address: string, body: UpsertEngagementRequest): Promise<ContactEngagementView> {
-    return call(() => this.api.upsertEngagement(email, address, body));
+  setOutreach(
+    email: string,
+    address: string,
+    body: UpsertEngagementRequest,
+    opts: { ifMatch?: string } = {},
+  ): Promise<ContactEngagementView> {
+    return call(() => this.api.upsertEngagement(email, address, body, opts.ifMatch));
   }
 
   /** Un-enrol a contact from an agent's outreach. The contact itself survives,

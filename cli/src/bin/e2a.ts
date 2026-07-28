@@ -22,6 +22,11 @@ import { messagesList, messagesGet, messagesLifecycle } from "../commands/messag
 import { agentsList, agentsCreate, agentsGet } from "../commands/agents.js";
 import { protectionGet, protectionSet } from "../commands/protection.js";
 import { keysCreate, keysList, keysDelete } from "../commands/keys.js";
+import {
+  contactsList, contactsGet, contactsCreate, contactsUpdate, contactsDelete,
+  contactsImport, contactsDeleteImport, outreachList, outreachGet, outreachSet,
+  outreachDelete,
+} from "../commands/contacts.js";
 import { EXIT, exitCodeForAPIError } from "../exit.js";
 import { E2AError } from "@e2a/sdk/v1";
 import { createRequire } from "module";
@@ -58,6 +63,39 @@ Usage:
         --outbound-review on|off   off = sends go out unheld (gate=flag, scan=off)
         --inbound-review on|off    off = inbound delivered unheld
         --suppress-notifications on|off   silence or enable hold-review emails
+  e2a contacts list [options]        List account contacts
+        --source import|manual|inbound   Filter by provenance
+        --import-batch <id>          Filter to one upload
+        --created-after <ISO>        Added at or after timestamp
+        --created-before <ISO>       Added before timestamp
+        --limit <n> --json           Bound output; JSON emits NDJSON
+  e2a contacts get <address>         Show one contact
+  e2a contacts create <address>      Create one contact
+        --idempotency-key <key>      Replay a timed-out create safely
+  e2a contacts update <address>      Update --name/--clear-name and/or --metadata
+        --if-match <etag>            Reject a stale edit
+  e2a contacts delete <address>      Delete identity (suppression survives)
+  e2a contacts import <csv>          Preview or import an RFC 4180 CSV
+        --email-column <name>        Address column (default: email)
+        --name-column <name>         Display-name column (default: name if present)
+        --agent <email> --stage <s>  Enroll valid rows with an agent
+        --on-conflict merge|skip     Existing-contact behavior (default: merge)
+        --idempotency-key <key>       Replay the same upload safely after restart
+        --dry-run                    Parse and preview without writing
+  e2a contacts imports delete <id>   Reverse an import batch
+  e2a contacts outreach list         List one agent's outreach
+        --agent <email>              Inbox (or config agent_email)
+        --stage <s>                  Exact opaque stage
+        --replied true|false         Reply-state filter
+        --suppressed true|false      Sendability filter
+        --next-action-before <ISO>   Due before timestamp
+        --last-outbound-before <ISO> Never contacted or stale before timestamp
+        --limit <n> --json           Bound output; JSON emits NDJSON
+  e2a contacts outreach get <address>
+  e2a contacts outreach set <address>
+        --stage <s>|--clear-stage --next-action <ISO|clear> --metadata <json>
+        --if-match <etag>            Reject stale outreach state
+  e2a contacts outreach delete <address>
   e2a send [options]                Send an email as the agent
         --to <email>               Recipient (repeatable)
         --subject <s>              Subject line
@@ -151,7 +189,10 @@ function hasFlag(args: string[], flag: string): boolean {
 // Flags that take no value. Everything else starting with "--" consumes the
 // next token, which getPositionals must skip to find bare arguments like a
 // message id.
-const BOOLEAN_FLAGS = new Set(["--json", "--text", "--once", "--help", "--version"]);
+const BOOLEAN_FLAGS = new Set([
+  "--json", "--text", "--once", "--dry-run", "--help", "--version",
+  "--clear-name", "--clear-stage",
+]);
 
 function getPositionals(args: string[], exactCount?: number, usage?: string): string[] {
   const positionals: string[] = [];
@@ -375,6 +416,127 @@ async function main() {
         await keysDelete(getPositionals(rest, 1, "usage: e2a keys delete <key-id>")[0]);
       } else {
         process.stderr.write("Usage: e2a keys [create [--agent <inbox>]|list|delete <id>]\n");
+        process.exit(EXIT.USAGE);
+      }
+      break;
+    }
+    case "contacts": {
+      const sub = args[0];
+      const rest = args.slice(1);
+      if (sub === "list") {
+        checkFlags(rest, [
+          "--source", "--import-batch", "--created-after", "--created-before", "--limit", "--json",
+        ]);
+        getPositionals(rest, 0, "usage: e2a contacts list [options]");
+        await contactsList({
+          source: getFlagChecked(rest, "--source"),
+          importBatch: getFlagChecked(rest, "--import-batch"),
+          createdAfter: getFlagChecked(rest, "--created-after"),
+          createdBefore: getFlagChecked(rest, "--created-before"),
+          limit: getFlagChecked(rest, "--limit"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "get") {
+        checkFlags(rest, ["--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a contacts get <address> [--json]");
+        await contactsGet(address, { json: hasFlag(rest, "--json") });
+      } else if (sub === "create") {
+        checkFlags(rest, ["--name", "--metadata", "--idempotency-key", "--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a contacts create <address> [options]");
+        await contactsCreate(address, {
+          name: getFlagChecked(rest, "--name"),
+          metadata: getFlagChecked(rest, "--metadata"),
+          idempotencyKey: getFlagChecked(rest, "--idempotency-key"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "update") {
+        checkFlags(rest, ["--name", "--clear-name", "--metadata", "--if-match", "--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a contacts update <address> [options]");
+        await contactsUpdate(address, {
+          name: getFlagChecked(rest, "--name"),
+          clearName: hasFlag(rest, "--clear-name"),
+          metadata: getFlagChecked(rest, "--metadata"),
+          ifMatch: getFlagChecked(rest, "--if-match"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "delete") {
+        checkFlags(rest, ["--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a contacts delete <address> [--json]");
+        await contactsDelete(address, { json: hasFlag(rest, "--json") });
+      } else if (sub === "import") {
+        checkFlags(rest, [
+          "--email-column", "--name-column", "--agent", "--stage",
+          "--on-conflict", "--idempotency-key", "--dry-run", "--json",
+        ]);
+        const [path] = getPositionals(rest, 1, "usage: e2a contacts import <csv> [options]");
+        await contactsImport(path, {
+          emailColumn: getFlagChecked(rest, "--email-column"),
+          nameColumn: getFlagChecked(rest, "--name-column"),
+          agent: getFlagChecked(rest, "--agent"),
+          stage: getFlagChecked(rest, "--stage"),
+          onConflict: getFlagChecked(rest, "--on-conflict"),
+          idempotencyKey: getFlagChecked(rest, "--idempotency-key"),
+          dryRun: hasFlag(rest, "--dry-run"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "imports" && rest[0] === "delete") {
+        const tail = rest.slice(1);
+        checkFlags(tail, ["--json"]);
+        const [batch] = getPositionals(tail, 1, "usage: e2a contacts imports delete <batch-id>");
+        await contactsDeleteImport(batch, { json: hasFlag(tail, "--json") });
+      } else if (sub === "outreach") {
+        const action = rest[0];
+        const tail = rest.slice(1);
+        if (action === "list") {
+          checkFlags(tail, [
+            "--agent", "--stage", "--replied", "--suppressed",
+            "--next-action-before", "--last-outbound-before", "--limit", "--json",
+          ]);
+          getPositionals(tail, 0, "usage: e2a contacts outreach list [options]");
+          await outreachList({
+            agent: getFlagChecked(tail, "--agent"),
+            stage: getFlagChecked(tail, "--stage"),
+            replied: getFlagChecked(tail, "--replied"),
+            suppressed: getFlagChecked(tail, "--suppressed"),
+            nextActionBefore: getFlagChecked(tail, "--next-action-before"),
+            lastOutboundBefore: getFlagChecked(tail, "--last-outbound-before"),
+            limit: getFlagChecked(tail, "--limit"),
+            json: hasFlag(tail, "--json"),
+          });
+        } else if (action === "get") {
+          checkFlags(tail, ["--agent", "--json"]);
+          const [address] = getPositionals(tail, 1, "usage: e2a contacts outreach get <address>");
+          await outreachGet(address, {
+            agent: getFlagChecked(tail, "--agent"),
+            json: hasFlag(tail, "--json"),
+          });
+        } else if (action === "set") {
+          checkFlags(tail, [
+            "--agent", "--stage", "--clear-stage", "--next-action", "--metadata", "--if-match", "--json",
+          ]);
+          const [address] = getPositionals(tail, 1, "usage: e2a contacts outreach set <address> [options]");
+          await outreachSet(address, {
+            agent: getFlagChecked(tail, "--agent"),
+            stage: getFlagChecked(tail, "--stage"),
+            clearStage: hasFlag(tail, "--clear-stage"),
+            nextAction: getFlagChecked(tail, "--next-action"),
+            metadata: getFlagChecked(tail, "--metadata"),
+            ifMatch: getFlagChecked(tail, "--if-match"),
+            json: hasFlag(tail, "--json"),
+          });
+        } else if (action === "delete") {
+          checkFlags(tail, ["--agent", "--json"]);
+          const [address] = getPositionals(tail, 1, "usage: e2a contacts outreach delete <address>");
+          await outreachDelete(address, {
+            agent: getFlagChecked(tail, "--agent"),
+            json: hasFlag(tail, "--json"),
+          });
+        } else {
+          process.stderr.write("Usage: e2a contacts outreach [list|get <address>|set <address>|delete <address>]\n");
+          process.exit(EXIT.USAGE);
+        }
+      } else {
+        process.stderr.write("Usage: e2a contacts [list|get|create|update|delete|import|imports delete|outreach]\n");
         process.exit(EXIT.USAGE);
       }
       break;

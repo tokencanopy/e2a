@@ -287,27 +287,31 @@ type Deps struct {
 	// engagement resource, so nothing here is agent-bound. All of these are
 	// reachable only from account-scoped credentials — an agent credential
 	// reading every contact the account owns would be a scope escalation.
-	CreateContact func(ctx context.Context, userID, address, displayName string, metadata map[string]any, source, importBatchID string) (identity.Contact, error)
-	GetContact    func(ctx context.Context, userID, address string) (identity.Contact, error)
-	ListContacts  func(ctx context.Context, userID string, f identity.ContactFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.Contact, error)
-	UpdateContact func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
-	DeleteContact func(ctx context.Context, userID, address string) (bool, error)
+	CreateContact            func(ctx context.Context, userID, address, displayName string, metadata map[string]any, source, importBatchID string) (identity.Contact, error)
+	GetContact               func(ctx context.Context, userID, address string) (identity.Contact, error)
+	ListContacts             func(ctx context.Context, userID string, f identity.ContactFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.Contact, error)
+	UpdateContact            func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
+	UpdateContactIfUnchanged func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any, expectedUpdatedAt time.Time) (identity.Contact, error)
+	DeleteContact            func(ctx context.Context, userID, address string) (bool, error)
 	// Bulk import. ImportContacts applies one batch in a single transaction and
 	// returns a per-row outcome, so a malformed row fails alone rather than
 	// rejecting the upload. SuppressedAddresses lets the handler MARK rows the
 	// account has already blocked without dropping them — the count a user sees
 	// stays honest.
-	ImportContacts      func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error)
-	DeleteImportBatch   func(ctx context.Context, userID, batchID string) (deleted int, retained int, err error)
-	SuppressedAddresses func(ctx context.Context, userID string, addresses []string) ([]string, error)
+	ImportContacts            func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error)
+	ImportContactsWithOptions func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, options identity.ContactImportOptions) ([]identity.ContactImportOutcome, error)
+	DeleteImportBatch         func(ctx context.Context, userID, batchID string) (deleted int, retained int, engagementsDeleted int, err error)
+	SuppressedAddresses       func(ctx context.Context, userID string, addresses []string) ([]string, error)
+	EffectiveSuppressions     func(ctx context.Context, userID, agentID string, addresses []string) ([]string, error)
 	// Per-agent outreach state. Unlike the contact capabilities above, these are
 	// reachable by an AGENT-scoped credential acting as itself — the agent runs
 	// its own outreach loop. Consent stays out of reach: suppression is only
 	// ever read through a join here.
-	UpsertEngagement func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any) (identity.ContactEngagement, bool, error)
-	GetEngagement    func(ctx context.Context, userID, agentID, address string) (identity.ContactEngagement, error)
-	ListEngagements  func(ctx context.Context, userID, agentID string, f identity.EngagementFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ContactEngagement, error)
-	DeleteEngagement func(ctx context.Context, userID, agentID, address string) (bool, error)
+	UpsertEngagement            func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any) (identity.ContactEngagement, bool, error)
+	UpdateEngagementIfUnchanged func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any, expectedUpdatedAt time.Time) (identity.ContactEngagement, error)
+	GetEngagement               func(ctx context.Context, userID, agentID, address string) (identity.ContactEngagement, error)
+	ListEngagements             func(ctx context.Context, userID, agentID string, f identity.EngagementFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ContactEngagement, error)
+	DeleteEngagement            func(ctx context.Context, userID, agentID, address string) (bool, error)
 	// Public managed-unsubscribe capabilities. Resolve accepts only a token hash;
 	// the write capability accepts only the exact scope returned by that lookup,
 	// so the unauthenticated route cannot choose an account, agent, or recipient.

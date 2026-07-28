@@ -3,6 +3,8 @@ package identity_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,6 +194,39 @@ func TestUpdateContactPreservesOmittedFields(t *testing.T) {
 	}
 }
 
+// TestUpdateContactIfUnchangedRejectsAStaleVersion proves optimistic
+// concurrency is enforced by the write itself. A compare in the HTTP handler
+// is not enough: another writer can commit after that read and before UPDATE.
+func TestUpdateContactIfUnchangedRejectsAStaleVersion(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "contactetag")
+
+	original, err := store.CreateContact(ctx, user.ID, "partner@etag.vc", "Original",
+		nil, identity.ContactSourceManual, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	currentName := "Current"
+	if _, err := store.UpdateContact(ctx, user.ID, original.Address, &currentName, nil); err != nil {
+		t.Fatalf("concurrent update: %v", err)
+	}
+
+	staleName := "Stale overwrite"
+	if _, err := store.UpdateContactIfUnchanged(ctx, user.ID, original.Address,
+		&staleName, nil, original.UpdatedAt); !errors.Is(err, identity.ErrContactPreconditionFailed) {
+		t.Fatalf("stale conditional update err=%v, want ErrContactPreconditionFailed", err)
+	}
+	got, err := store.GetContactByAddress(ctx, user.ID, original.Address)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DisplayName != currentName {
+		t.Errorf("display_name=%q, want %q; stale writer overwrote the winner", got.DisplayName, currentName)
+	}
+}
+
 // TestDeleteContactLeavesSuppressionIntact pins design §8.6 invariant 5:
 // removing a contact must never resurrect sendability for that address.
 func TestDeleteContactLeavesSuppressionIntact(t *testing.T) {
@@ -374,6 +409,69 @@ func TestImportContactsSkipsIntraBatchDuplicates(t *testing.T) {
 	}
 }
 
+// TestImportContactsCanEnrollCreatedAndExistingRows makes bulk import a usable
+// outreach entry point. Both a new row and an already-existing skipped row are
+// enrolled atomically; existing engagement state is never reset.
+func TestImportContactsCanEnrollCreatedAndExistingRows(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "importenroll")
+	domain := "importenroll.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	agent := "raise@" + domain
+	if _, err := store.CreateAgent(ctx, agent, domain, "", "", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if _, err := store.CreateContact(ctx, user.ID, "existing@enroll.vc", "Existing",
+		nil, identity.ContactSourceManual, ""); err != nil {
+		t.Fatalf("create existing: %v", err)
+	}
+
+	stage := "prospect"
+	out, err := store.ImportContactsWithOptions(ctx, user.ID, "imp_enroll",
+		[]identity.ContactImportRow{
+			{Address: "new@enroll.vc"},
+			{Address: "existing@enroll.vc"},
+		},
+		identity.ContactImportOptions{Merge: false, AgentID: agent, Stage: stage})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if out[0].Status != identity.ImportStatusCreated || out[1].Status != identity.ImportStatusSkipped {
+		t.Fatalf("outcomes=%+v", out)
+	}
+	for _, address := range []string{"new@enroll.vc", "existing@enroll.vc"} {
+		engagement, err := store.GetEngagement(ctx, user.ID, agent, address)
+		if err != nil {
+			t.Fatalf("get engagement %s: %v", address, err)
+		}
+		if engagement.Stage != stage {
+			t.Errorf("%s stage=%q, want %q", address, engagement.Stage, stage)
+		}
+	}
+
+	advanced := "contacted"
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, agent, "existing@enroll.vc",
+		&advanced, nil, nil); err != nil {
+		t.Fatalf("advance existing: %v", err)
+	}
+	if _, err := store.ImportContactsWithOptions(ctx, user.ID, "imp_enroll_again",
+		[]identity.ContactImportRow{{Address: "existing@enroll.vc"}},
+		identity.ContactImportOptions{Merge: true, AgentID: agent, Stage: stage}); err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	engagement, err := store.GetEngagement(ctx, user.ID, agent, "existing@enroll.vc")
+	if err != nil {
+		t.Fatalf("get re-imported engagement: %v", err)
+	}
+	if engagement.Stage != advanced {
+		t.Errorf("re-import reset existing stage to %q, want %q", engagement.Stage, advanced)
+	}
+}
+
 // TestDeleteImportBatchIsTenantScoped pins that a batch id from one account is
 // meaningless in another, and reports not-found rather than deleting nothing
 // silently.
@@ -390,14 +488,14 @@ func TestDeleteImportBatchIsTenantScoped(t *testing.T) {
 		t.Fatalf("alice import: %v", err)
 	}
 
-	if _, _, err := store.DeleteImportBatch(ctx, bob.ID, "imp_shared"); !errors.Is(err, identity.ErrImportBatchNotFound) {
+	if _, _, _, err := store.DeleteImportBatch(ctx, bob.ID, "imp_shared"); !errors.Is(err, identity.ErrImportBatchNotFound) {
 		t.Errorf("bob reversal err = %v, want ErrImportBatchNotFound", err)
 	}
 	if _, err := store.GetContactByAddress(ctx, alice.ID, "partner@impiso.vc"); err != nil {
 		t.Errorf("alice's contact removed by bob's reversal: %v", err)
 	}
 
-	deleted, _, err := store.DeleteImportBatch(ctx, alice.ID, "imp_shared")
+	deleted, _, _, err := store.DeleteImportBatch(ctx, alice.ID, "imp_shared")
 	if err != nil || deleted != 1 {
 		t.Errorf("alice reversal deleted=%d err=%v, want 1", deleted, err)
 	}
@@ -499,7 +597,7 @@ func TestDeleteImportBatchRetainsContactsWithHistory(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	deleted, retained, err := store.DeleteImportBatch(ctx, user.ID, "imp_retain")
+	deleted, retained, _, err := store.DeleteImportBatch(ctx, user.ID, "imp_retain")
 	if err != nil {
 		t.Fatalf("reverse: %v", err)
 	}
@@ -512,6 +610,55 @@ func TestDeleteImportBatchRetainsContactsWithHistory(t *testing.T) {
 	}
 	if _, err := store.GetContactByAddress(ctx, user.ID, untouched); !errors.Is(err, identity.ErrContactNotFound) {
 		t.Errorf("an untouched imported contact survived the reversal: %v", err)
+	}
+}
+
+// TestDeleteImportBatchReversesEnrollmentOnExistingContact pins that an import
+// is a durable, reversible operation even when it creates no contact rows.
+// This is the subtle case that a receipt inferred only from contacts loses.
+func TestDeleteImportBatchReversesEnrollmentOnExistingContact(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "enrollundo")
+	if _, err := store.ClaimOrCreateDomain(ctx, "enrollundo.example.com", user.ID); err != nil {
+		t.Fatalf("claim domain: %v", err)
+	}
+	const agent = "raise@enrollundo.example.com"
+	if _, err := store.CreateAgent(ctx, agent, "enrollundo.example.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if _, err := store.CreateContact(ctx, user.ID, "existing@fund.vc", "", nil, "manual", ""); err != nil {
+		t.Fatalf("create contact: %v", err)
+	}
+
+	outcomes, err := store.ImportContactsWithOptions(ctx, user.ID, "imp_enroll_only",
+		[]identity.ContactImportRow{{Address: "existing@fund.vc"}},
+		identity.ContactImportOptions{Merge: true, AgentID: agent, Stage: "new"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Enrolled {
+		t.Fatalf("outcomes = %#v; want newly enrolled", outcomes)
+	}
+
+	deleted, retained, engagementsDeleted, err := store.DeleteImportBatch(ctx, user.ID, "imp_enroll_only")
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if deleted != 0 || retained != 0 || engagementsDeleted != 1 {
+		t.Fatalf("receipt = contacts %d/%d engagements %d; want 0/0/1",
+			deleted, retained, engagementsDeleted)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, "existing@fund.vc"); err != nil {
+		t.Errorf("existing contact removed: %v", err)
+	}
+	if _, err := store.GetEngagement(ctx, user.ID, agent, "existing@fund.vc"); !errors.Is(err, identity.ErrEngagementNotFound) {
+		t.Errorf("import-created engagement survived reversal: %v", err)
+	}
+	if _, _, _, err := store.DeleteImportBatch(ctx, user.ID, "imp_enroll_only"); !errors.Is(err, identity.ErrImportBatchNotFound) {
+		t.Errorf("second reversal err = %v, want ErrImportBatchNotFound", err)
 	}
 }
 
@@ -573,5 +720,63 @@ func TestContactCapIsEnforcedAndImportStaysPartial(t *testing.T) {
 	}
 	if out[0].Status != identity.ImportStatusUpdated {
 		t.Errorf("re-import of an existing contact at the cap = %+v, want updated", out[0])
+	}
+}
+
+// TestContactCapHoldsUnderConcurrentCreates proves the cap is a database
+// invariant rather than a best-effort snapshot check. Every writer starts
+// together at a one-contact account; exactly one may commit.
+func TestContactCapHoldsUnderConcurrentCreates(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newContactOwner(t, store, "caprace")
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO account_limits (user_id, max_agents, max_domains, max_messages_month, max_storage_bytes, max_contacts)
+		      VALUES ($1, 10, 10, 1000, 1073741824, 1)
+		 ON CONFLICT (user_id) DO UPDATE SET max_contacts = 1`, user.ID); err != nil {
+		t.Fatalf("set cap: %v", err)
+	}
+
+	const writers = 12
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var ready sync.WaitGroup
+	ready.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			ready.Done()
+			<-start
+			_, err := store.CreateContact(ctx, user.ID,
+				fmt.Sprintf("writer-%02d@caprace.vc", i), "", nil,
+				identity.ContactSourceManual, "")
+			errs <- err
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+
+	var created, limited int
+	for i := 0; i < writers; i++ {
+		switch err := <-errs; {
+		case err == nil:
+			created++
+		case errors.Is(err, identity.ErrContactLimitReached):
+			limited++
+		default:
+			t.Fatalf("concurrent create returned %v", err)
+		}
+	}
+	if created != 1 || limited != writers-1 {
+		t.Errorf("created=%d limited=%d, want 1 and %d", created, limited, writers-1)
+	}
+	var stored int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM contacts WHERE user_id = $1`, user.ID).Scan(&stored); err != nil {
+		t.Fatalf("count contacts: %v", err)
+	}
+	if stored != 1 {
+		t.Errorf("stored %d contacts at a cap of 1", stored)
 	}
 }

@@ -4,14 +4,18 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/smtp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
 
 // TestContactOutreachLoopE2E automates the journey the whole contacts feature
@@ -138,5 +142,118 @@ func TestContactOutreachIgnoresUnenrolledRecipientsE2E(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("a send to an un-enrolled address created %d engagement(s)", len(rows))
+	}
+}
+
+// TestContactDueWebhookE2E crosses every production boundary in the scheduled
+// wake-up path: HTTP enrollment → due claim → atomic durable outbox → webhook
+// fan-out → signed network delivery. A second sweep proves one schedule emits
+// once rather than waking an agent repeatedly every five minutes.
+func TestContactDueWebhookE2E(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ts := testutil.TestServer(t, pool)
+	receiver := testutil.SubscriberReceiver(t)
+	_, key, agent := setupSubscriberOwner(t, ts, "contact-due", false)
+	wh := registerWebhook(t, ts, agent.UserID, receiver.Server.URL+"/due",
+		[]string{webhookpub.EventContactDue}, identity.WebhookFilters{})
+
+	const (
+		contact = "partner@due.vc"
+		blocked = "blocked@due.vc"
+	)
+	// Import and enrollment happen atomically. This is the dashboard/CLI bulk
+	// workflow, not a test-only store shortcut.
+	status, body := authedJSON(t, "POST", ts.HTTPServer.URL+"/v1/contacts/import",
+		key.PlaintextKey, fmt.Sprintf(
+			`{"contacts":[{"address":"%s","display_name":"A. Partner","metadata":{"fund":"Example"}},{"address":"%s","display_name":"Asked to stop"}],"agent_email":"%s","stage":"follow-up"}`,
+			contact, blocked, agent.EmailAddress()))
+	if status != http.StatusOK || !strings.Contains(string(body), `"created":2`) {
+		t.Fatalf("import+enrol status=%d body=%s", status, body)
+	}
+
+	// A never-contacted row must satisfy last_outbound_before; SQL NULL is the
+	// first-touch state, not an exclusion from the follow-up query.
+	status, body = authedJSON(t, "GET", fmt.Sprintf(
+		"%s/v1/agents/%s/contacts?last_outbound_before=%s",
+		ts.HTTPServer.URL, agent.EmailAddress(), time.Now().UTC().Format(time.RFC3339)),
+		key.PlaintextKey, "")
+	if status != http.StatusOK || !strings.Contains(string(body), contact) {
+		t.Fatalf("first-touch query status=%d body=%s", status, body)
+	}
+
+	// Consent is managed through its real account API. A due schedule may
+	// remain for auditability, but it must neither appear in a mailable query
+	// nor emit a wake-up.
+	status, body = authedJSON(t, "POST",
+		fmt.Sprintf("%s/v1/agents/%s/suppressions", ts.HTTPServer.URL, agent.EmailAddress()),
+		key.PlaintextKey, fmt.Sprintf(`{"address":"%s","reason":"asked to stop"}`, blocked))
+	if status != http.StatusOK {
+		t.Fatalf("suppress status=%d body=%s", status, body)
+	}
+	status, body = authedJSON(t, "GET", fmt.Sprintf(
+		"%s/v1/agents/%s/contacts?suppressed=false",
+		ts.HTTPServer.URL, agent.EmailAddress()), key.PlaintextKey, "")
+	if status != http.StatusOK || strings.Contains(string(body), blocked) {
+		t.Fatalf("mailable query status=%d still contains suppressed contact: %s", status, body)
+	}
+
+	// Add the schedule without sending stage again. The import-owned stage must
+	// survive this partial update.
+	status, body = authedJSON(t, "PUT",
+		fmt.Sprintf("%s/v1/agents/%s/contacts/%s", ts.HTTPServer.URL, agent.EmailAddress(), contact),
+		key.PlaintextKey,
+		`{"next_action_at":"2020-01-01T00:00:00Z","metadata":{"sequence":"seed"}}`)
+	if status != http.StatusOK || !strings.Contains(string(body), `"stage":"follow-up"`) {
+		t.Fatalf("schedule status=%d body=%s", status, body)
+	}
+	status, body = authedJSON(t, "PUT",
+		fmt.Sprintf("%s/v1/agents/%s/contacts/%s", ts.HTTPServer.URL, agent.EmailAddress(), blocked),
+		key.PlaintextKey, `{"next_action_at":"2020-01-01T00:00:00Z"}`)
+	if status != http.StatusOK {
+		t.Fatalf("suppressed schedule status=%d body=%s", status, body)
+	}
+
+	publisher := contactdue.NewOutboxPublisher(pool, ts.Store,
+		webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)))
+	published, err := contactdue.NewSweeper(publisher, nil).Sweep(context.Background())
+	if err != nil || published != 1 {
+		t.Fatalf("due sweep published=%d err=%v, want 1", published, err)
+	}
+	tick(t, ts)
+
+	got := receiver.WaitFor(t, 2*time.Second, func(c []testutil.SubscriberCaptured) bool {
+		return len(c) == 1
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d contact.due deliveries, want 1", len(got))
+	}
+	capture := got[0]
+	if capture.URL != "/due" || capture.Envelope["type"] != webhookpub.EventContactDue {
+		t.Errorf("delivery path=%q type=%v", capture.URL, capture.Envelope["type"])
+	}
+	if !verifyHMACv1(t, capture.Headers, capture.RawBody, wh.SigningSecret) {
+		t.Errorf("contact.due HMAC verification failed: %q", capture.Headers.Get("X-E2A-Signature"))
+	}
+	data, _ := capture.Envelope["data"].(map[string]any)
+	if data["agent_email"] != agent.EmailAddress() || data["address"] != contact ||
+		data["stage"] != "follow-up" || data["replied"] != false {
+		pretty, _ := json.Marshal(capture.Envelope)
+		t.Errorf("contact.due payload missing outreach context: %s", pretty)
+	}
+	embedded, _ := data["contact"].(map[string]any)
+	if embedded["address"] != contact {
+		t.Errorf("embedded contact = %v", embedded)
+	}
+
+	receiver.Reset()
+	published, err = contactdue.NewSweeper(publisher, nil).Sweep(context.Background())
+	if err != nil || published != 0 {
+		t.Fatalf("second due sweep published=%d err=%v, want 0", published, err)
+	}
+	tick(t, ts)
+	if duplicate := receiver.WaitFor(t, 150*time.Millisecond, func(c []testutil.SubscriberCaptured) bool {
+		return len(c) > 0
+	}); len(duplicate) != 0 {
+		t.Errorf("same schedule delivered %d duplicate contact.due event(s)", len(duplicate))
 	}
 }

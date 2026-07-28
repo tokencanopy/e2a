@@ -1400,11 +1400,13 @@ async def test_contacts_create_posts_body_and_returns_canonical_address(httpx_mo
     )
     async with _client() as c:
         contact = await c.contacts.create(
-            {"address": "A. Partner <Partner@Fund.VC>", "display_name": "A. Partner"}
+            {"address": "A. Partner <Partner@Fund.VC>", "display_name": "A. Partner"},
+            idempotency_key="contact:partner",
         )
     assert contact.address == "partner@fund.vc"
     req = httpx_mock.get_requests()[-1]
     assert req.method == "POST"
+    assert req.headers["Idempotency-Key"] == "contact:partner"
     assert json.loads(req.content)["address"] == "A. Partner <Partner@Fund.VC>"
 
 
@@ -1468,6 +1470,27 @@ async def test_contacts_import_returns_per_row_results(httpx_mock):
     req = httpx_mock.get_requests()[-1]
     assert req.method == "POST"
     assert "/v1/contacts/import" in str(req.url)
+    assert req.headers["Idempotency-Key"]
+
+
+@pytest.mark.anyio
+async def test_contacts_import_preserves_caller_idempotency_key(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "batch_id": "imp_replay",
+            "created": 0,
+            "updated": 0,
+            "skipped": 1,
+            "failed": 0,
+            "results": [{"index": 0, "address": "ok@fund.vc", "status": "skipped"}],
+        }
+    )
+    async with _client() as c:
+        await c.contacts.import_(
+            {"contacts": [{"address": "ok@fund.vc"}]},
+            idempotency_key="contacts:upload:sha256",
+        )
+    assert httpx_mock.get_requests()[-1].headers["Idempotency-Key"] == "contacts:upload:sha256"
 
 
 @pytest.mark.anyio
@@ -1478,11 +1501,13 @@ async def test_contacts_delete_import_reverses_a_batch(httpx_mock):
             "batch_id": "imp_9",
             "contacts_deleted": 2,
             "contacts_retained": 0,
+            "engagements_deleted": 1,
         }
     )
     async with _client() as c:
         result = await c.contacts.delete_import("imp_9")
     assert result.contacts_deleted == 2
+    assert result.engagements_deleted == 1
     req = httpx_mock.get_requests()[-1]
     assert req.method == "DELETE"
     assert "/v1/contacts/imports/imp_9" in str(req.url)
@@ -1521,3 +1546,60 @@ async def test_contacts_list_auto_pages(httpx_mock):
         items = await c.contacts.list().to_list(limit=50)
     assert [i.address for i in items] == ["a@x.vc", "b@x.vc"]
     assert "cursor=cur_2" in str(httpx_mock.get_requests()[-1].url)
+
+
+@pytest.mark.anyio
+async def test_contacts_list_exposes_creation_time_filters(httpx_mock):
+    httpx_mock.add_response(json={"items": [], "next_cursor": None})
+    async with _client() as c:
+        await c.contacts.list(
+            created_after=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            created_before=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        ).to_list(limit=50)
+    url = str(httpx_mock.get_requests()[-1].url)
+    assert "created_after=2026-07-01T00%3A00%3A00" in url
+    assert "created_before=2026-07-31T00%3A00%3A00" in url
+
+
+@pytest.mark.anyio
+async def test_contacts_exposes_etag_and_sends_if_match(httpx_mock):
+    contact = {
+        "address": "partner@fund.vc", "display_name": "A. Partner",
+        "metadata": {}, "source": "manual",
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+    }
+    httpx_mock.add_response(json=contact, headers={"ETag": '"contact-v1"'})
+    httpx_mock.add_response(json={**contact, "display_name": "Renamed"})
+    async with _client() as c:
+        item, etag = await c.contacts.get_with_etag("partner@fund.vc")
+        assert item.address == "partner@fund.vc"
+        assert etag == '"contact-v1"'
+        await c.contacts.update(
+            "partner@fund.vc", {"display_name": "Renamed"}, if_match=etag,
+        )
+    assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"contact-v1"'
+
+
+@pytest.mark.anyio
+async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
+    engagement = {
+        "agent_email": "raise@example.com", "address": "partner@fund.vc",
+        "stage": "touch1", "metadata": {}, "replied": False,
+        "suppressed": False, "outbound_count": 0, "inbound_count": 0,
+        "contact": {"address": "partner@fund.vc", "display_name": "", "metadata": {}},
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+    }
+    httpx_mock.add_response(json=engagement, headers={"ETag": '"outreach-v1"'})
+    httpx_mock.add_response(json={**engagement, "stage": "touch2"})
+    async with _client() as c:
+        item, etag = await c.contacts.get_outreach_with_etag(
+            "raise@example.com", "partner@fund.vc",
+        )
+        assert item.stage == "touch1"
+        await c.contacts.set_outreach(
+            "raise@example.com", "partner@fund.vc",
+            {"stage": "touch2"}, if_match=etag,
+        )
+    assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"outreach-v1"'

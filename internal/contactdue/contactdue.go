@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
-	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
 )
 
@@ -35,15 +34,11 @@ const SweepInterval = 5 * time.Minute
 // subscriber in a single burst.
 const Batch = 200
 
-// Claimer atomically claims due engagements and marks them notified, so a
-// retried or concurrent sweep cannot wake an agent twice for one schedule.
-type Claimer interface {
-	ClaimDueEngagements(ctx context.Context, now time.Time, limit int) ([]identity.DueEngagement, error)
-}
-
-// Publisher emits the wake-up for one claimed engagement.
-type Publisher interface {
-	PublishContactDue(ctx context.Context, d identity.DueEngagement) error
+// BatchPublisher claims schedules and persists their durable events atomically.
+// attempted is the number of schedules affected by a failed transaction (zero
+// when the failure happened before the claim).
+type BatchPublisher interface {
+	PublishDueBatch(ctx context.Context, now time.Time, limit int) (attempted int, err error)
 }
 
 // Metrics reports sweep outcomes. Separate from the janitor's row-deletion
@@ -61,47 +56,38 @@ func (noopMetrics) ContactDueFailed(int)    {}
 // Sweeper is the unit of work. Exported and directly callable so an integration
 // test can drive a real sweep without waiting on a periodic schedule.
 type Sweeper struct {
-	claimer   Claimer
-	publisher Publisher
+	publisher BatchPublisher
 	metrics   Metrics
 	now       func() time.Time
 }
 
 // NewSweeper builds the sweeper. metrics may be nil.
-func NewSweeper(c Claimer, p Publisher, m Metrics) *Sweeper {
+func NewSweeper(p BatchPublisher, m Metrics) *Sweeper {
 	if m == nil {
 		m = noopMetrics{}
 	}
-	return &Sweeper{claimer: c, publisher: p, metrics: m, now: func() time.Time { return time.Now().UTC() }}
+	return &Sweeper{publisher: p, metrics: m, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// Sweep claims one batch of due engagements and publishes a wake-up for each.
-//
-// A publish failure is counted and logged but does not abort the batch: one
-// unreachable subscriber must not stop every other agent being woken. The claim
-// has already marked the schedule notified, so a failure costs at most one
-// missed wake-up rather than a duplicate — the safer direction, since a
-// duplicate event invites a duplicate email to a real person.
+// Sweep atomically claims one batch and writes its wake-ups to the durable
+// outbox. Subscriber delivery is decoupled per event after commit, so one
+// unreachable endpoint cannot block the batch. A database/outbox error aborts
+// the transaction and is returned to River for retry.
 func (s *Sweeper) Sweep(ctx context.Context) (published int, err error) {
-	due, err := s.claimer.ClaimDueEngagements(ctx, s.now(), Batch)
+	attempted, err := s.publisher.PublishDueBatch(ctx, s.now(), Batch)
 	if err != nil {
+		failed := attempted
+		if failed == 0 {
+			failed = 1
+		}
+		s.metrics.ContactDueFailed(failed)
+		log.Printf("[contact.due] atomic publish failed attempted=%d: %v", attempted, err)
 		return 0, err
 	}
-	var failed int
-	for _, d := range due {
-		if perr := s.publisher.PublishContactDue(ctx, d); perr != nil {
-			failed++
-			log.Printf("[contact.due] publish failed agent=%s address=%s: %v", d.AgentEmail, d.Address, perr)
-			continue
-		}
-		published++
-	}
+	published = attempted
 	if published > 0 {
 		s.metrics.ContactDuePublished(published)
 		log.Printf("[contact.due] published %d wake-up(s)", published)
-	}
-	if failed > 0 {
-		s.metrics.ContactDueFailed(failed)
 	}
 	return published, nil
 }

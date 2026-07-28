@@ -10,6 +10,25 @@ import (
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
+// newEngagementOwner provisions the live agents used by the engagement tests.
+// Upsert intentionally locks the owning agent row so a concurrent permanent
+// delete cannot commit an orphaned engagement.
+func newEngagementOwner(t *testing.T, store *identity.Store, tag string) *identity.User {
+	t.Helper()
+	ctx := context.Background()
+	user := newContactOwner(t, store, tag)
+	if _, err := store.ClaimOrCreateDomain(ctx, "e.com", user.ID); err != nil {
+		t.Fatalf("claim engagement test domain: %v", err)
+	}
+	for _, address := range []string{"raise@e.com", "support@e.com"} {
+		if _, err := store.CreateAgent(ctx, address, "e.com", "",
+			"https://example.com/webhook", "", user.ID); err != nil {
+			t.Fatalf("create engagement test agent %s: %v", address, err)
+		}
+	}
+	return user
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 // enroll is a terse helper for tests that only need an engagement to exist.
@@ -31,7 +50,7 @@ func TestUpsertEngagementLeavesOmittedFieldsAlone(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engupsert")
+	user := newEngagementOwner(t, store, "engupsert")
 
 	due := time.Now().Add(5 * 24 * time.Hour).UTC().Truncate(time.Second)
 	stage := "touch1"
@@ -82,6 +101,114 @@ func TestUpsertEngagementLeavesOmittedFieldsAlone(t *testing.T) {
 	}
 }
 
+func TestEngagementCountsOnlyDeliveredAuthenticatedActivitySinceEnrollment(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	userID, agentID := seedReviewAgent(t, store, ctx, "eng-counts.example.com")
+	engagement := enroll(t, store, userID, agentID, "partner@fund.vc", "touch1")
+
+	insert := func(id, direction, status, deliveryStatus, authStatus string, at time.Time) {
+		t.Helper()
+		var authentication any
+		if authStatus != "" {
+			authentication = `{"dmarc":{"status":"` + authStatus + `"}}`
+		}
+		_, err := pool.Exec(ctx, `
+			INSERT INTO messages
+			       (id, agent_id, direction, sender, to_recipients, status,
+			        delivery_status, authentication, created_at)
+			VALUES ($1, $2, $3, 'partner@fund.vc', ARRAY['partner@fund.vc'],
+			        $4, NULLIF($5, ''), $6::jsonb, $7)`,
+			id, agentID, direction, status, deliveryStatus, authentication, at)
+		if err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+
+	before := engagement.CreatedAt.Add(-time.Hour)
+	after := engagement.CreatedAt.Add(time.Second)
+	insert("msg_pre_out", "outbound", identity.MessageStatusSent, "sent", "", before)
+	insert("msg_accepted", "outbound", identity.MessageStatusSent, "accepted", "", after)
+	insert("msg_failed", "outbound", identity.MessageStatusSent, "failed", "", after)
+	insert("msg_sent", "outbound", identity.MessageStatusSent, "sent", "", after)
+	insert("msg_pre_in", "inbound", identity.MessageStatusSent, "", "pass", before)
+	insert("msg_spoofed", "inbound", identity.MessageStatusSent, "", "fail", after)
+	insert("msg_held", "inbound", identity.MessageStatusPendingReview, "", "pass", after)
+	insert("msg_delivered", "inbound", identity.MessageStatusSent, "", "pass", after)
+
+	got, err := store.GetEngagement(ctx, userID, agentID, "partner@fund.vc")
+	if err != nil {
+		t.Fatalf("GetEngagement: %v", err)
+	}
+	if got.OutboundCount != 1 || got.InboundCount != 1 {
+		t.Fatalf("counts = outbound:%d inbound:%d, want 1/1; queued, failed, spoofed, held, and pre-enrollment messages must not count",
+			got.OutboundCount, got.InboundCount)
+	}
+}
+
+// TestUpdateEngagementIfUnchangedIsAtomic pins the persistence half of
+// If-Match. A handler-side read/compare is not enough: another writer can land
+// after that comparison and before the UPDATE. The expected updated_at must be
+// part of the SQL predicate so the stale write loses with a typed error.
+func TestUpdateEngagementIfUnchangedIsAtomic(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "engetag")
+
+	original := enroll(t, store, user.ID, "raise@e.com", "partner@etag.vc", "touch1")
+	winner := "touch2"
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, "raise@e.com",
+		"partner@etag.vc", &winner, nil, nil); err != nil {
+		t.Fatalf("winning update: %v", err)
+	}
+
+	loser := "stale-write"
+	if _, err := store.UpdateEngagementIfUnchanged(ctx, user.ID, "raise@e.com",
+		"partner@etag.vc", &loser, nil, nil, original.UpdatedAt); !errors.Is(err, identity.ErrEngagementPreconditionFailed) {
+		t.Fatalf("stale conditional update err=%v, want ErrEngagementPreconditionFailed", err)
+	}
+	got, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@etag.vc")
+	if err != nil {
+		t.Fatalf("get after stale write: %v", err)
+	}
+	if got.Stage != winner {
+		t.Errorf("stage = %q, want winning value %q", got.Stage, winner)
+	}
+}
+
+// TestUpsertEngagementCannotBypassContactCap pins that enrollment and manual
+// contact creation share one account limit. An engagement may create a missing
+// contact for convenience, but it is not a back door around the safety cap.
+func TestUpsertEngagementCannotBypassContactCap(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "engcap")
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO account_limits (user_id, max_agents, max_domains, max_messages_month, max_storage_bytes, max_contacts)
+		      VALUES ($1, 10, 10, 1000, 1073741824, 1)
+		 ON CONFLICT (user_id) DO UPDATE SET max_contacts = 1`, user.ID); err != nil {
+		t.Fatalf("set cap: %v", err)
+	}
+	if _, err := store.CreateContact(ctx, user.ID, "existing@cap.vc", "", nil,
+		identity.ContactSourceManual, ""); err != nil {
+		t.Fatalf("fill cap: %v", err)
+	}
+
+	stage := "new"
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, "raise@e.com",
+		"new@cap.vc", &stage, nil, nil); !errors.Is(err, identity.ErrContactLimitReached) {
+		t.Fatalf("upsert missing contact at cap err=%v, want ErrContactLimitReached", err)
+	}
+	if _, _, err := store.UpsertEngagement(ctx, user.ID, "raise@e.com",
+		"existing@cap.vc", &stage, nil, nil); err != nil {
+		t.Fatalf("enroll existing contact at cap: %v", err)
+	}
+}
+
 // TestEngagementsAreIndependentPerAgent is the reason engagements exist as a
 // separate table. The same human worked by two agents must have two independent
 // states — if these collided, one agent advancing its stage would corrupt the
@@ -90,7 +217,7 @@ func TestEngagementsAreIndependentPerAgent(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engmulti")
+	user := newEngagementOwner(t, store, "engmulti")
 
 	enroll(t, store, user.ID, "raise@e.com", "partner@multi.vc", "touch3")
 	enroll(t, store, user.ID, "support@e.com", "partner@multi.vc", "new")
@@ -119,7 +246,7 @@ func TestEngagementSuppressionIsPerAgent(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engsupp")
+	user := newEngagementOwner(t, store, "engsupp")
 
 	// Real agents: AddAgentSuppression enforces live ownership, and this
 	// behaviour is too load-bearing to leave behind a skip.
@@ -170,7 +297,7 @@ func TestListEngagementsAnswersTheOutreachQuery(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engquery")
+	user := newEngagementOwner(t, store, "engquery")
 	const agent = "raise@e.com"
 
 	past := time.Now().Add(-24 * time.Hour).UTC()
@@ -222,13 +349,56 @@ func TestListEngagementsAnswersTheOutreachQuery(t *testing.T) {
 	}
 }
 
+// TestListEngagementsLastOutboundBeforeIncludesNeverContacted pins the
+// first-touch half of the recommended outreach query. SQL NULL means "we have
+// never sent", which is older than every cutoff for this product filter; it
+// must not silently remove brand-new prospects from the work queue.
+func TestListEngagementsLastOutboundBeforeIncludesNeverContacted(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "engfirsttouch")
+	const agent = "raise@e.com"
+
+	enroll(t, store, user.ID, agent, "never@q.vc", "new")
+	enroll(t, store, user.ID, agent, "old@q.vc", "follow-up")
+	enroll(t, store, user.ID, agent, "recent@q.vc", "follow-up")
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, agent, "old@q.vc", "conv_old",
+		cutoff.Add(-time.Hour)); err != nil {
+		t.Fatalf("record old outbound: %v", err)
+	}
+	if _, err := store.RecordOutboundActivity(ctx, user.ID, agent, "recent@q.vc", "conv_recent",
+		cutoff.Add(time.Hour)); err != nil {
+		t.Fatalf("record recent outbound: %v", err)
+	}
+
+	got, err := store.ListEngagements(ctx, user.ID, agent, identity.EngagementFilter{
+		LastOutboundBefore: cutoff,
+	}, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	addrs := make(map[string]bool, len(got))
+	for _, e := range got {
+		addrs[e.Address] = true
+	}
+	if !addrs["never@q.vc"] || !addrs["old@q.vc"] {
+		t.Errorf("last_outbound_before omitted eligible contacts: %v", addrs)
+	}
+	if addrs["recent@q.vc"] {
+		t.Errorf("last_outbound_before returned newer outreach: %v", addrs)
+	}
+}
+
 // TestListEngagementsIsScopedToOneAgent pins that an agent's outreach listing
 // cannot see a sibling agent's engagements.
 func TestListEngagementsIsScopedToOneAgent(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engscope")
+	user := newEngagementOwner(t, store, "engscope")
 
 	enroll(t, store, user.ID, "raise@e.com", "a@scope.vc", "touch1")
 	enroll(t, store, user.ID, "support@e.com", "b@scope.vc", "new")
@@ -254,7 +424,7 @@ func TestDeleteEngagementLeavesContactAndConsent(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "engdel")
+	user := newEngagementOwner(t, store, "engdel")
 
 	enroll(t, store, user.ID, "raise@e.com", "partner@del.vc", "touch1")
 	if _, err := store.AddSuppression(ctx, user.ID, "partner@del.vc", "bounced", "manual", ""); err != nil {
@@ -288,7 +458,7 @@ func TestRecordActivityNeverCreatesAnEngagement(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "actcreate")
+	user := newEngagementOwner(t, store, "actcreate")
 	now := time.Now().UTC()
 
 	updated, err := store.RecordOutboundActivity(ctx, user.ID, "raise@e.com", "stranger@act.vc", "conv-1", now)
@@ -317,7 +487,7 @@ func TestRecordOutboundPinsFirstContact(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "actfirst")
+	user := newEngagementOwner(t, store, "actfirst")
 	enroll(t, store, user.ID, "raise@e.com", "partner@act.vc", "touch1")
 
 	first := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
@@ -362,7 +532,7 @@ func TestRecordActivityIgnoresOutOfOrderTimestamps(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "actorder")
+	user := newEngagementOwner(t, store, "actorder")
 	enroll(t, store, user.ID, "raise@e.com", "partner@order.vc", "touch1")
 
 	recent := time.Now().UTC().Truncate(time.Second)
@@ -390,7 +560,7 @@ func TestRecordActivityIsScopedPerAgent(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "actscope")
+	user := newEngagementOwner(t, store, "actscope")
 	enroll(t, store, user.ID, "raise@e.com", "partner@scope.vc", "touch1")
 	enroll(t, store, user.ID, "support@e.com", "partner@scope.vc", "new")
 
@@ -422,7 +592,7 @@ func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "purgepath")
+	user := newEngagementOwner(t, store, "purgepath")
 
 	if _, err := store.ClaimOrCreateDomain(ctx, "purgepath.example.com", user.ID); err != nil {
 		t.Fatalf("claim domain: %v", err)
@@ -469,6 +639,29 @@ func TestPurgeDeletedAgentsRemovesEngagements(t *testing.T) {
 	}
 	if len(blocked) != 1 {
 		t.Errorf("suppression lookup = %v — consent must survive agent deletion", blocked)
+	}
+}
+
+// TestDeleteAgentRemovesEngagements drives the immediate permanent-delete path
+// (distinct from trash expiry). Recreating the same address must start with no
+// operational outreach state.
+func TestDeleteAgentRemovesEngagements(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "deletepath")
+	const agent = "raise@e.com"
+	enroll(t, store, user.ID, agent, "partner@deletepath.vc", "touch3")
+
+	if _, err := store.DeleteAgent(ctx, agent, user.ID); err != nil {
+		t.Fatalf("delete agent: %v", err)
+	}
+	if _, err := store.CreateAgent(ctx, agent, "e.com", "",
+		"https://example.com/webhook", "", user.ID); err != nil {
+		t.Fatalf("recreate agent: %v", err)
+	}
+	if _, err := store.GetEngagement(ctx, user.ID, agent, "partner@deletepath.vc"); !errors.Is(err, identity.ErrEngagementNotFound) {
+		t.Errorf("recreated agent inherited deleted outreach state: %v", err)
 	}
 }
 
@@ -566,13 +759,23 @@ func TestClaimDueEngagementsSkipsTrashedAgents(t *testing.T) {
 		t.Errorf("a trashed agent emitted %d due-event(s) — deletion must stop outreach at once", len(due))
 	}
 
-	// Restoring the agent brings its outreach back.
+	// Restoring makes the outreach pull-visible again, but acknowledges past
+	// schedules so a long-trashed inbox does not emit a wake-up thundering herd.
 	if err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	due, err = store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)
-	if err != nil || len(due) != 1 {
-		t.Errorf("restored agent claim = %d err=%v, want 1", len(due), err)
+	if err != nil || len(due) != 0 {
+		t.Errorf("restored agent claim = %d err=%v, want 0 (no historical wake-up backlog)", len(due), err)
+	}
+	visible, err := store.ListEngagements(ctx, user.ID, agent, identity.EngagementFilter{
+		NextActionBefore: time.Now().UTC(),
+	}, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("list restored outreach: %v", err)
+	}
+	if len(visible) != 1 || visible[0].Address != "partner@duetrash.vc" {
+		t.Errorf("restored pull query = %+v, want the due engagement", visible)
 	}
 }
 
@@ -637,7 +840,7 @@ func TestRecordOutboundConvergesOnEarliestSend(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	user := newContactOwner(t, store, "earliest")
+	user := newEngagementOwner(t, store, "earliest")
 	enroll(t, store, user.ID, "raise@e.com", "partner@earliest.vc", "touch1")
 
 	early := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)

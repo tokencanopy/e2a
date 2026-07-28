@@ -20,6 +20,7 @@ import { registerEventTools } from "../src/tools/events.js";
 import { registerTemplateTools } from "../src/tools/templates.js";
 import { registerApiKeyTools } from "../src/tools/apikeys.js";
 import { registerLegacyTools } from "../src/tools/legacy.js";
+import { registerContactTools } from "../src/tools/contacts.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -104,6 +105,19 @@ function makeStubClient(
     })),
     listAgents: vi.fn(async () => ({ items: [{ email: "bot@example.com" }], next_cursor: undefined })),
     restoreAgent: vi.fn(async (addr?: string) => ({ email: addr ?? "bot@example.com" })),
+    listContacts: vi.fn(async () => ({ items: [{ address: "partner@fund.vc", displayName: "A. Partner" }], next_cursor: undefined })),
+    getContact: vi.fn(async (address: string) => ({ address, displayName: "A. Partner" })),
+    getContactWithETag: vi.fn(async (address: string) => ({ data: { address, displayName: "A. Partner" }, etag: '"contact-v1"' })),
+    createContact: vi.fn(async (body: Record<string, unknown>) => body),
+    updateContact: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
+    deleteContact: vi.fn(async (address: string) => ({ deleted: true, address })),
+    importContacts: vi.fn(async () => ({ batchId: "imp_1", created: 1, updated: 0, skipped: 0, failed: 0, results: [] })),
+    deleteContactImport: vi.fn(async (batchId: string) => ({ deleted: true, batchId, contactsDeleted: 1, contactsRetained: 0 })),
+    listOutreach: vi.fn(async () => ({ items: [{ address: "partner@fund.vc", stage: "prospect" }], next_cursor: undefined })),
+    getOutreach: vi.fn(async (address: string) => ({ address, stage: "prospect" })),
+    getOutreachWithETag: vi.fn(async (address: string) => ({ data: { address, stage: "prospect" }, etag: '"outreach-v1"' })),
+    setOutreach: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
+    deleteOutreach: vi.fn(async (address: string) => ({ deleted: true, address })),
     listAllAgents: vi.fn(async () => [{ email: "bot@example.com" }]),
     // whoami → client.whoami() returns an AccountView (the authenticated
     // account identity), NOT an agent record. No default-agent resolution.
@@ -434,7 +448,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(60);
+    expect(frozenToolNames).toHaveLength(71);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -462,9 +476,10 @@ describe("e2a MCP server", () => {
     registerEventTools(recorder, stub);
     registerTemplateTools(recorder, stub);
     registerApiKeyTools(recorder, stub);
+    registerContactTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(60);
+    expect(names).toHaveLength(71);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -473,25 +488,25 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
-    expect(RUNTIME_TOOLS.size).toBe(16);
-    expect(ADMIN_TOOLS.size).toBe(44);
-    expect(toolNamesForScope("account").size).toBe(60);
+    expect(RUNTIME_TOOLS.size).toBe(20);
+    expect(ADMIN_TOOLS.size).toBe(51);
+    expect(toolNamesForScope("account").size).toBe(71);
   });
 
-  it("account scope exposes all 60 canonical and compatibility tools", async () => {
+  it("account scope exposes all 71 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(60);
+    expect(tools).toHaveLength(71);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
     }
   });
 
-  it("agent scope exposes 14 canonical runtime tools plus two runtime aliases", async () => {
+  it("agent scope exposes runtime inbox and outreach tools", async () => {
     const ag = await connect(makeStubClient({ scope: "agent" }));
     const names = new Set((await ag.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(16);
+    expect(names.size).toBe(20);
     // Runtime tools present: an agent can send and read its own mailbox, but
     // account review discovery and decisions stay with the account owner.
     for (const n of [
@@ -499,6 +514,8 @@ describe("e2a MCP server", () => {
       "get_attachment", "update_message_labels", "list_conversations",
       "get_conversation", "send_message", "reply_to_message", "forward_message",
       "restore_message", "delete_message", "send_email", "get_attachment_data",
+      "list_outreach_contacts", "get_outreach_contact", "set_outreach_contact",
+      "delete_outreach_contact",
     ]) {
       expect(names.has(n), `runtime tool ${n} should be visible to agent scope`).toBe(true);
     }
@@ -523,6 +540,95 @@ describe("e2a MCP server", () => {
     for (const name of REVIEW_ALIASES) {
       expect(names.has(name), `review alias ${name} must be hidden from agent scope`).toBe(false);
     }
+  });
+
+  it("list_outreach_contacts maps the safe follow-up filters and page cursor", async () => {
+    await client.callTool({
+      name: "list_outreach_contacts",
+      arguments: {
+        email: "raise@example.com",
+        replied: false,
+        suppressed: false,
+        next_action_before: "2026-07-28T00:00:00.000Z",
+        last_outbound_before: "2026-07-21T00:00:00.000Z",
+        limit: 25,
+        cursor: "cur_1",
+      },
+    });
+    expect(stub.listOutreach).toHaveBeenCalledWith({
+      replied: false,
+      suppressed: false,
+      nextActionBefore: new Date("2026-07-28T00:00:00.000Z"),
+      lastOutboundBefore: new Date("2026-07-21T00:00:00.000Z"),
+      limit: 25,
+      cursor: "cur_1",
+    }, "raise@example.com");
+  });
+
+  it("list_contacts maps creation-time filters", async () => {
+    await client.callTool({
+      name: "list_contacts",
+      arguments: {
+        created_after: "2026-07-01T00:00:00.000Z",
+        created_before: "2026-08-01T00:00:00.000Z",
+      },
+    });
+    expect(stub.listContacts).toHaveBeenCalledWith({
+      createdAfter: new Date("2026-07-01T00:00:00.000Z"),
+      createdBefore: new Date("2026-08-01T00:00:00.000Z"),
+    });
+  });
+
+  it("create_contact forwards a retry key", async () => {
+    await client.callTool({
+      name: "create_contact",
+      arguments: {
+        address: "partner@fund.vc",
+        display_name: "A. Partner",
+        idempotency_key: "contact:partner",
+      },
+    });
+    expect(stub.createContact).toHaveBeenCalledWith({
+      address: "partner@fund.vc",
+      displayName: "A. Partner",
+    }, "contact:partner");
+  });
+
+  it("set_outreach_contact forwards If-Match for a guarded agent loop", async () => {
+    await client.callTool({
+      name: "set_outreach_contact",
+      arguments: {
+        email: "raise@example.com",
+        address: "partner@fund.vc",
+        stage: "touch2",
+        if_match: '"outreach-v1"',
+      },
+    });
+    expect(stub.setOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { stage: "touch2" },
+      "raise@example.com",
+      '"outreach-v1"',
+    );
+  });
+
+  it("import_contacts maps enrollment without inventing a send action", async () => {
+    await client.callTool({
+      name: "import_contacts",
+      arguments: {
+        contacts: [{ address: "partner@fund.vc", display_name: "A. Partner" }],
+        on_conflict: "skip",
+        agent_email: "raise@example.com",
+        stage: "prospect",
+        idempotency_key: "contacts:upload:sha256",
+      },
+    });
+    expect(stub.importContacts).toHaveBeenCalledWith({
+      contacts: [{ address: "partner@fund.vc", displayName: "A. Partner" }],
+      onConflict: "skip",
+      agentEmail: "raise@example.com",
+      stage: "prospect",
+    }, "contacts:upload:sha256");
   });
 
   it("agent scope cannot call a hidden admin tool (errors + handler never runs)", async () => {
@@ -562,7 +668,7 @@ describe("e2a MCP server", () => {
   // ── §6a tool annotations (#2) ───────────────────────────────────────
 
   it("every tool carries MCP annotations with the correct hints", async () => {
-    const { tools } = await client.listTools(); // account scope → all 60
+    const { tools } = await client.listTools(); // account scope → full surface
     const byName = new Map(tools.map((t) => [t.name, t.annotations ?? {}]));
 
     // Every tool has an annotations object.

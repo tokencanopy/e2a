@@ -28,6 +28,12 @@ export const AGENT_PROMPTS = {
     prompt:
       "Help me connect a custom domain to e2a using https://api.e2a.dev/mcp",
   },
+  contacts: {
+    blurb:
+      "Your coding agent can import contacts, enroll them with an inbox, and manage outreach headlessly over MCP.",
+    prompt:
+      "Help me set up e2a contacts and outreach using https://api.e2a.dev/mcp",
+  },
 } as const;
 
 export type AgentPromptCardProps = {

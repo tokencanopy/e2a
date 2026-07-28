@@ -748,7 +748,7 @@ export class PromiseContactsApi {
     }
 
     /**
-     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Reverse a contact import (beta)
      * @param batchId
      * @param confirm Must be the literal DELETE — this action is irreversible.
@@ -760,7 +760,7 @@ export class PromiseContactsApi {
     }
 
     /**
-     * Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Reverse a contact import (beta)
      * @param batchId
      * @param confirm Must be the literal DELETE — this action is irreversible.
@@ -794,7 +794,7 @@ export class PromiseContactsApi {
     }
 
     /**
-     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Fetches this agent\'s relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
      * Get one outreach record (beta)
      * @param email
      * @param address
@@ -806,7 +806,7 @@ export class PromiseContactsApi {
     }
 
     /**
-     * Fetches this agent\'s relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Fetches this agent\'s relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
      * Get one outreach record (beta)
      * @param email
      * @param address
@@ -914,7 +914,7 @@ export class PromiseContactsApi {
      * Update a contact (beta)
      * @param address
      * @param updateContactRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present it must match the contact\&#39;s current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
+     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
      */
     public updateContactWithHttpInfo(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactView>> {
         const observableOptions = wrapOptions(_options);
@@ -927,7 +927,7 @@ export class PromiseContactsApi {
      * Update a contact (beta)
      * @param address
      * @param updateContactRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present it must match the contact\&#39;s current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta.
+     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
      */
     public updateContact(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<ContactView> {
         const observableOptions = wrapOptions(_options);
@@ -936,28 +936,30 @@ export class PromiseContactsApi {
     }
 
     /**
-     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
      * Enrol or update outreach state (beta)
      * @param email
      * @param address
      * @param upsertEngagementRequest
+     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
      */
-    public upsertEngagementWithHttpInfo(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
+    public upsertEngagementWithHttpInfo(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.upsertEngagementWithHttpInfo(email, address, upsertEngagementRequest, observableOptions);
+        const result = this.api.upsertEngagementWithHttpInfo(email, address, upsertEngagementRequest, ifMatch, observableOptions);
         return result.toPromise();
     }
 
     /**
-     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
      * Enrol or update outreach state (beta)
      * @param email
      * @param address
      * @param upsertEngagementRequest
+     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
      */
-    public upsertEngagement(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, _options?: PromiseConfigurationOptions): Promise<ContactEngagementView> {
+    public upsertEngagement(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, ifMatch?: string, _options?: PromiseConfigurationOptions): Promise<ContactEngagementView> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.upsertEngagement(email, address, upsertEngagementRequest, observableOptions);
+        const result = this.api.upsertEngagement(email, address, upsertEngagementRequest, ifMatch, observableOptions);
         return result.toPromise();
     }
 

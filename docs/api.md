@@ -132,6 +132,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
+| `precondition_failed` | 412 | The resource changed since the supplied `If-Match` value was read. Fetch the latest representation and retry the edit deliberately. |
 | `domain_not_registered` | 400 | Create-agent on a domain the account has not registered. |
 | `domain_has_agents` | 400 | Domain delete blocked while agents exist on it — **including agents in the trash**, which keep their addresses for the 30-day restore window and do not appear in `list_agents`. The message names which kind is blocking and how many; purge trashed ones with `?confirm=DELETE&permanent=true`. |
 | `domain_not_verified` | 400 / 403 | Domain verification pending — 400 on create-agent, 403 on send paths. |

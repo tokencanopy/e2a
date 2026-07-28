@@ -1708,6 +1708,11 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 			return err
 		}
 		messagesDeleted = msgTag.RowsAffected()
+		// Operational outreach state dies with a permanent agent deletion.
+		// Suppressions deliberately survive: consent outlives the inbox.
+		if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, agentID); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, agentID)
 		return err
 	})
@@ -1757,6 +1762,22 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE agent_identities SET deleted_at = NULL WHERE id = $1`, agentID); err != nil {
+			return err
+		}
+		// Past-due outreach remains visible to the agent's pull query, but a
+		// restore must not enqueue every wake-up that accumulated while the
+		// inbox was intentionally inactive. A later reschedule changes
+		// next_action_at and naturally re-arms contact.due.
+		if _, err := tx.Exec(ctx,
+			`UPDATE contact_engagements
+			    SET notified_next_action_at = next_action_at,
+			        updated_at = now()
+			  WHERE user_id = $1
+			    AND agent_id = $2
+			    AND next_action_at IS NOT NULL
+			    AND next_action_at <= now()
+			    AND notified_next_action_at IS DISTINCT FROM next_action_at`,
+			userID, agentID); err != nil {
 			return err
 		}
 		// Give back the trash time to pending holds on the agent's LIVE

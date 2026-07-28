@@ -22,6 +22,10 @@ export class ContactImportItemResult {
     */
     'code'?: string;
     /**
+    * True when this import created the optional per-agent outreach enrolment for this row. False means no agent was requested or the enrolment already existed.
+    */
+    'enrolled'?: boolean;
+    /**
     * Zero-based position of this row in the submitted contacts array.
     */
     'index': number;
@@ -53,6 +57,12 @@ export class ContactImportItemResult {
             "name": "code",
             "baseName": "code",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "enrolled",
+            "baseName": "enrolled",
+            "type": "boolean",
             "format": ""
         },
         {

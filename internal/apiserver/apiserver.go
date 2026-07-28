@@ -207,19 +207,23 @@ func BuildDeps(p Params) httpapi.Deps {
 		ListAgentSuppressions:  p.Store.ListAgentSuppressions,
 		RemoveAgentSuppression: p.Store.RemoveAgentSuppression,
 
-		CreateContact: p.Store.CreateContact,
-		GetContact:    p.Store.GetContactByAddress,
-		ListContacts:  p.Store.ListContacts,
-		UpdateContact: p.Store.UpdateContact,
-		DeleteContact: p.Store.DeleteContact,
+		CreateContact:            p.Store.CreateContact,
+		GetContact:               p.Store.GetContactByAddress,
+		ListContacts:             p.Store.ListContacts,
+		UpdateContact:            p.Store.UpdateContact,
+		UpdateContactIfUnchanged: p.Store.UpdateContactIfUnchanged,
+		DeleteContact:            p.Store.DeleteContact,
 
-		UpsertEngagement: p.Store.UpsertEngagement,
-		GetEngagement:    p.Store.GetEngagement,
-		ListEngagements:  p.Store.ListEngagements,
-		DeleteEngagement: p.Store.DeleteEngagement,
+		UpsertEngagement:            p.Store.UpsertEngagement,
+		UpdateEngagementIfUnchanged: p.Store.UpdateEngagementIfUnchanged,
+		GetEngagement:               p.Store.GetEngagement,
+		ListEngagements:             p.Store.ListEngagements,
+		DeleteEngagement:            p.Store.DeleteEngagement,
 
-		ImportContacts:    p.Store.ImportContacts,
-		DeleteImportBatch: p.Store.DeleteImportBatch,
+		ImportContacts:            p.Store.ImportContacts,
+		ImportContactsWithOptions: p.Store.ImportContactsWithOptions,
+		DeleteImportBatch:         p.Store.DeleteImportBatch,
+		EffectiveSuppressions:     p.Store.EffectiveSuppressions,
 		// Account-wide suppression view for import marking: agentID is empty so
 		// this asks only "has the account blocked this address", which is the
 		// right scope for an import that is not yet bound to a sending agent.

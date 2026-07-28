@@ -278,6 +278,27 @@ func (s *Store) transitionReview(ctx context.Context, messageID, agentID, newSta
 		if tag.RowsAffected() == 0 {
 			return ErrNotPendingReview
 		}
+		if newStatus == MessageStatusReviewApproved || newStatus == MessageStatusReviewExpiredApproved {
+			// Releasing an authenticated hold is the moment it reaches the agent,
+			// so advance outreach state in the same transaction as the review
+			// transition. Rejections remain invisible and cannot manufacture a
+			// reply. The authentication predicate mirrors SMTP intake.
+			if _, err = tx.Exec(ctx, `
+				UPDATE contact_engagements ce
+				   SET last_inbound_at = GREATEST(COALESCE(ce.last_inbound_at, m.created_at), m.created_at),
+				       last_conversation_id = COALESCE(NULLIF(m.conversation_id, ''), ce.last_conversation_id),
+				       updated_at = now()
+				  FROM messages m
+				  JOIN agent_identities ai ON ai.id = m.agent_id
+				 WHERE m.id = $1
+				   AND m.authentication #>> '{dmarc,status}' = 'pass'
+				   AND ce.user_id = ai.user_id
+				   AND ce.agent_id = m.agent_id
+				   AND ce.address = lower(COALESCE(m.header_from, m.sender))`,
+				messageID); err != nil {
+				return err
+			}
+		}
 		transition, err = messagelifecycle.AppendTx(ctx, tx, messagelifecycle.AppendInput{
 			MessageID: messageID, DedupeKey: "review:resolution", Direction: "inbound",
 			ReasonCode: reason, Evidence: map[string]any{"review_resolution": newStatus}, OccurredAt: time.Now(),

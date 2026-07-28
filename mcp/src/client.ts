@@ -46,6 +46,16 @@ import type {
   DeleteApiKeyResult,
   Page,
   PageMessageLifecycleTransition,
+  ContactView,
+  ContactEngagementView,
+  ContactImportResult,
+  CreateContactRequest,
+  UpdateContactRequest,
+  ImportContactsRequest,
+  UpsertEngagementRequest,
+  DeleteContactResult,
+  DeleteImportBatchResult,
+  DeleteEngagementResult,
 } from "@e2a/sdk/v1";
 import type { McpConfig } from "./config.js";
 import type { Scope } from "./tools/tiers.js";
@@ -157,6 +167,87 @@ export class McpClient {
 
   restoreAgent(explicitAddress?: string): Promise<AgentView> {
     return this.sdk.agents.restore(this.resolveAddress(explicitAddress));
+  }
+
+  // ── Contacts and outreach (beta) ───────────────────────────────
+
+  listContacts(params: {
+    source?: string;
+    importBatchId?: string;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<Page<ContactView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.contacts.list(rest).page(cursor);
+  }
+
+  getContact(address: string): Promise<ContactView> {
+    return this.sdk.contacts.get(address);
+  }
+
+  getContactWithETag(address: string): Promise<{ data: ContactView; etag?: string }> {
+    return this.sdk.contacts.getWithETag(address);
+  }
+
+  createContact(body: CreateContactRequest, idempotencyKey?: string): Promise<ContactView> {
+    return this.sdk.contacts.create(body, { idempotencyKey });
+  }
+
+  updateContact(address: string, patch: UpdateContactRequest, ifMatch?: string): Promise<ContactView> {
+    return this.sdk.contacts.update(address, patch, { ifMatch });
+  }
+
+  deleteContact(address: string): Promise<DeleteContactResult> {
+    return this.sdk.contacts.delete(address);
+  }
+
+  importContacts(body: ImportContactsRequest, idempotencyKey?: string): Promise<ContactImportResult> {
+    return this.sdk.contacts.import(body, { idempotencyKey });
+  }
+
+  deleteContactImport(batchId: string): Promise<DeleteImportBatchResult> {
+    return this.sdk.contacts.deleteImport(batchId);
+  }
+
+  listOutreach(params: {
+    stage?: string;
+    replied?: boolean;
+    suppressed?: boolean;
+    nextActionBefore?: Date;
+    lastOutboundBefore?: Date;
+    cursor?: string;
+    limit?: number;
+  } = {}, explicitAddress?: string): Promise<Page<ContactEngagementView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.contacts.outreach(this.resolveAddress(explicitAddress), rest).page(cursor);
+  }
+
+  getOutreach(address: string, explicitAddress?: string): Promise<ContactEngagementView> {
+    return this.sdk.contacts.getOutreach(this.resolveAddress(explicitAddress), address);
+  }
+
+  getOutreachWithETag(
+    address: string,
+    explicitAddress?: string,
+  ): Promise<{ data: ContactEngagementView; etag?: string }> {
+    return this.sdk.contacts.getOutreachWithETag(this.resolveAddress(explicitAddress), address);
+  }
+
+  setOutreach(
+    address: string,
+    body: UpsertEngagementRequest,
+    explicitAddress?: string,
+    ifMatch?: string,
+  ): Promise<ContactEngagementView> {
+    return this.sdk.contacts.setOutreach(
+      this.resolveAddress(explicitAddress), address, body, { ifMatch },
+    );
+  }
+
+  deleteOutreach(address: string, explicitAddress?: string): Promise<DeleteEngagementResult> {
+    return this.sdk.contacts.deleteOutreach(this.resolveAddress(explicitAddress), address);
   }
 
   // ── Messages ────────────────────────────────────────────────────
