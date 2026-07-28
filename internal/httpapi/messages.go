@@ -77,7 +77,7 @@ type MessageView struct {
 	// send_at and retained afterwards (it records the scheduled instant and is not
 	// cleared once the send fires); omitted for immediate sends and all inbound
 	// rows. delivery_status stays 'accepted' while scheduled.
-	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."`
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."`
 	// Flagged + FlagReason carry the beta inbound ingestion verdict: true when
 	// the agent's inbound-policy gate flagged this message on arrival while still
 	// delivering it. Polling agents need this signal because no review item is
@@ -282,7 +282,7 @@ type MessageSummaryView struct {
 	// Outbound-only and present only when a future send_at was set — omitted
 	// otherwise — so a list consumer can distinguish a scheduled send from an
 	// ordinary queued one without a per-message drill-down.
-	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."`
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."`
 	// Flagged + FlagReason are the beta inbound ingestion verdict. They remain in
 	// list projections so polling agents can identify delivered flag outcomes
 	// without a per-message drill-down.

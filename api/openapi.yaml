@@ -2222,9 +2222,10 @@ components:
           maxLength: 320
           type: string
         send_at:
-          description: "Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Cancel by moving the message to trash; restoring it before send_at re-arms it."
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Cancel by moving the message to trash; restoring it before send_at re-arms it."
           format: date-time
           type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
@@ -2751,9 +2752,10 @@ components:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
         scheduled_at:
-          description: Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as "not before"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows.
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."
           format: date-time
           type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -2885,9 +2887,10 @@ components:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
         scheduled_at:
-          description: "Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
           format: date-time
           type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -3619,9 +3622,10 @@ components:
           maxLength: 320
           type: string
         send_at:
-          description: "Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Cancel by moving the message to trash; restoring it before send_at re-arms it."
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Cancel by moving the message to trash; restoring it before send_at re-arms it."
           format: date-time
           type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
@@ -3786,9 +3790,10 @@ components:
           maxLength: 320
           type: string
         send_at:
-          description: "Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Cancel a scheduled send by moving the message to trash; restoring it before send_at re-arms it."
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Cancel a scheduled send by moving the message to trash; restoring it before send_at re-arms it."
           format: date-time
           type: string
+          x-stability-level: beta
         subject:
           description: Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).
           maxLength: 2000
@@ -3840,15 +3845,18 @@ components:
           description: Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id.
           type: string
         scheduled_at:
-          description: "Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
+          description: "Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it."
           format: date-time
           type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used. Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
         status:
-          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code."
+          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code."
           type: string
+          x-experimental-values:
+            - scheduled
       required:
         - status
         - message_id
@@ -5736,7 +5744,7 @@ paths:
       tags:
         - messages
     post:
-      description: "Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
+      description: "Beta: scheduled sending may change before it is declared stable. Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
       operationId: sendMessage
       parameters:
         - in: path
@@ -6071,7 +6079,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}/forward:
     post:
-      description: "Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: forwardMessage
       parameters:
         - in: path
@@ -6252,7 +6260,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/messages/{id}/reply:
     post:
-      description: "Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: replyToMessage
       parameters:
         - in: path

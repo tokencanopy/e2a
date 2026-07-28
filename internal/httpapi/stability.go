@@ -252,6 +252,17 @@ func (s *Server) applyEvolutionStance() {
 	for _, schema := range []string{"SendEmailRequest", "ReplyRequest", "ForwardRequest"} {
 		markProperty(schemas, schema, "unsubscribe", extStabilityLevel, stabilityBeta)
 	}
+	// Scheduled sending is a beta capability nested inside otherwise-stable
+	// message operations and views. Keep the operations and containing schemas
+	// stable while marking the request/response properties and the scheduled
+	// status discriminator value machine-readably.
+	for _, schema := range []string{"SendEmailRequest", "ReplyRequest", "ForwardRequest"} {
+		markProperty(schemas, schema, "send_at", extStabilityLevel, stabilityBeta)
+	}
+	for _, schema := range []string{"MessageSummaryView", "MessageView", "SendResultView"} {
+		markProperty(schemas, schema, "scheduled_at", extStabilityLevel, stabilityBeta)
+	}
+	markProperty(schemas, "SendResultView", "status", extExperimentalValues, []string{"scheduled"})
 	// Message lifecycle is a beta capability embedded as an optional field in
 	// otherwise-stable event payloads. Mark only the property: the existing
 	// event types, payload schemas, envelope, and delivery semantics remain GA.

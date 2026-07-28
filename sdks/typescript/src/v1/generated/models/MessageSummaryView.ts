@@ -52,7 +52,7 @@ export class MessageSummaryView {
     */
     'reviewStatus'?: string;
     /**
-    * Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows.
+    * Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows.
     */
     'scheduledAt'?: Date;
     /**

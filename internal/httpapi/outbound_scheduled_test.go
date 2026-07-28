@@ -137,7 +137,13 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 	for operationID, schemaName := range requestSchemas {
 		operation := specOperation(t, doc, operationID)
 		description, _ := operation["description"].(string)
-		requireContractText(t, operationID, description, "status=scheduled")
+		requireContractText(t, operationID, strings.ToLower(description),
+			"beta: scheduled sending",
+			"status=scheduled",
+		)
+		if operation["x-stability-level"] != nil {
+			t.Errorf("%s must remain a stable operation; only its scheduled-send fields and value are beta", operationID)
+		}
 
 		acceptedDescription := specResponseDescription(t, operation, "202")
 		requireContractText(t, operationID+" 202", acceptedDescription,
@@ -162,9 +168,14 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 		sendAt, _ := schemaProps(t, doc, schemaName)["send_at"].(map[string]any)
 		sendAtDescription, _ := sendAt["description"].(string)
 		requireContractText(t, schemaName+".send_at", strings.ToLower(sendAtDescription),
+			"beta:",
+			"may change before it is declared stable",
 			"own address",
 			"400 invalid_request",
 		)
+		if sendAt["x-stability-level"] != "beta" {
+			t.Errorf("%s.send_at must carry canonical x-stability-level: beta", schemaName)
+		}
 
 		badRequestDescription := specResponseDescription(t, operation, "400")
 		requireContractText(t, operationID+" 400", strings.ToLower(badRequestDescription),
@@ -172,5 +183,28 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 			"own address",
 			"not held for review",
 		)
+	}
+
+	for _, schemaName := range []string{"MessageSummaryView", "MessageView", "SendResultView"} {
+		scheduledAt, _ := schemaProps(t, doc, schemaName)["scheduled_at"].(map[string]any)
+		description, _ := scheduledAt["description"].(string)
+		requireContractText(t, schemaName+".scheduled_at", strings.ToLower(description),
+			"beta:",
+			"may change before it is declared stable",
+		)
+		if scheduledAt["x-stability-level"] != "beta" {
+			t.Errorf("%s.scheduled_at must carry canonical x-stability-level: beta", schemaName)
+		}
+	}
+
+	status, _ := schemaProps(t, doc, "SendResultView")["status"].(map[string]any)
+	statusDescription, _ := status["description"].(string)
+	requireContractText(t, "SendResultView.status", strings.ToLower(statusDescription),
+		"scheduled is beta",
+		"may change before it is declared stable",
+	)
+	experimentalValues, _ := status["x-experimental-values"].([]any)
+	if len(experimentalValues) != 1 || experimentalValues[0] != "scheduled" {
+		t.Errorf("SendResultView.status x-experimental-values = %v, want [scheduled]", experimentalValues)
 	}
 }

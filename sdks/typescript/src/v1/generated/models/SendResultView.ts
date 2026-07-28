@@ -25,7 +25,7 @@ export class SendResultView {
     */
     'providerMessageId'?: string;
     /**
-    * Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it.
+    * Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Cancel a scheduled send by moving the message to trash — reversible: restoring it before the send time re-arms it.
     */
     'scheduledAt'?: Date;
     /**
@@ -33,7 +33,7 @@ export class SendResultView {
     */
     'sentAs'?: string;
     /**
-    * Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code.
+    * Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code.
     */
     'status': string;
 
