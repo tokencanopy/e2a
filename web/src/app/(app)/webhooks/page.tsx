@@ -6,6 +6,7 @@ import {
   AgentPromptCard,
   AGENT_PROMPTS,
 } from "../../components/AgentPromptCard";
+import { describeScope, type WebhookView } from "../../../lib/webhooks";
 
 // /webhooks owns the user's webhook lifecycle — create, reveal
 // the one-time signing secret, rotate it, delete. In the /v1 redesign
@@ -30,54 +31,6 @@ const inlineCodeStyle: React.CSSProperties = {
   color: "var(--fg)",
   whiteSpace: "nowrap",
 };
-
-// WebhookView (GET /v1/webhooks → { items: [...] }). GET never
-// returns `signing_secret` — it's only present on create / rotate
-// responses, which we surface once in the reveal banner.
-type WebhookView = {
-  id: string;
-  url: string;
-  description?: string;
-  events?: string[] | null;
-  enabled: boolean;
-  created_at: string;
-  last_delivered_at?: string;
-  signing_secret?: string;
-  previous_secret_expires_at?: string;
-  filters?: WebhookFiltersView | null;
-};
-
-// Mirrors WebhookFiltersView (api/openapi.yaml). An absent or empty filter
-// object means the subscription is UNSCOPED — it receives events for every
-// agent on the account, not just a chosen few. That distinction is invisible
-// unless the UI says so, which is why the row renders scope explicitly.
-type WebhookFiltersView = {
-  agent_emails?: string[] | null;
-  conversation_ids?: string[] | null;
-  labels?: string[] | null;
-};
-
-// Summarize a subscription's scope for the table. The unscoped case is a
-// distinct variant rather than an empty string so the caller is forced to
-// handle it deliberately — and renders it as a warning, not as ordinary text.
-function describeScope(
-  filters?: WebhookFiltersView | null,
-): { scoped: false } | { scoped: true; parts: string[] } {
-  const parts: string[] = [];
-  const agents = filters?.agent_emails ?? [];
-  const conversations = filters?.conversation_ids ?? [];
-  const labels = filters?.labels ?? [];
-
-  if (agents.length > 0) parts.push(agents.join(", "));
-  if (conversations.length > 0) {
-    parts.push(
-      `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}`,
-    );
-  }
-  if (labels.length > 0) parts.push(`labels: ${labels.join(", ")}`);
-
-  return parts.length > 0 ? { scoped: true, parts } : { scoped: false };
-}
 
 // The curated set of common event types shown in the create picker. The
 // server's CreateWebhookRequest.events enum (api/openapi.yaml) accepts more
