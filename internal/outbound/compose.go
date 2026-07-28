@@ -10,6 +10,7 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // NOTE: Message-ID is intentionally omitted from composed messages.
@@ -128,6 +129,9 @@ func ComposeMultipartMessage(from string, to []string, cc []string, subject, tex
 // If no attachments are provided, falls back to ComposeMultipartMessage.
 // See ComposeMessage for replyToMsgID / references semantics.
 func ComposeMessageWithAttachments(from string, to []string, cc []string, subject, textBody, htmlBody, replyToMsgID string, references []string, fromDomain, replyTo, conversationID string, attachments []Attachment) ([]byte, error) {
+	if err := ValidateAttachmentFilenames(attachments); err != nil {
+		return nil, err
+	}
 	// Defense-in-depth header-injection guard: reject any attachment
 	// whose user-supplied Filename or ContentType contains CR or LF.
 	// fmt.Sprintf("%q", ...) escapes Filename safely, but ContentType
@@ -194,7 +198,7 @@ func ComposeMessageWithAttachments(from string, to []string, cc []string, subjec
 	for _, att := range attachments {
 		buf.WriteString("--" + mixedBoundary + "\r\n")
 		buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
-		buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=%q\r\n", att.Filename))
+		buf.WriteString(contentDispositionHeaderPrefix + attachmentDisposition(att.Filename) + "\r\n")
 		buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
 
 		// att.Data is already base64-encoded from the API request
@@ -346,6 +350,75 @@ func writeBodyPart(buf *strings.Builder, contentType, body string) {
 	buf.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n\r\n")
 	buf.WriteString(encoded)
 	buf.WriteString("\r\n")
+}
+
+const contentDispositionHeaderPrefix = "Content-Disposition: "
+
+// attachmentDisposition renders the Content-Disposition header value for an
+// attachment filename.
+//
+// MIME parameter values are ASCII-only. A non-ASCII filename must be
+// encoded per RFC 2231 as filename*=utf-8”<percent-encoded>, otherwise the
+// raw UTF-8 bytes land in a header field — an 8-bit value in a place that
+// only permits 7-bit, which receivers are free to mangle or reject.
+// mime.FormatMediaType applies that encoding, and quotes or escapes values
+// that merely contain specials, so it handles both cases.
+//
+// It returns "" for a value it cannot represent at all; fall back to the
+// historical quoted form rather than emitting a part with no disposition,
+// which would change how the attachment is presented. Callers have already
+// rejected CR/LF in the filename, so the fallback cannot inject headers.
+//
+// Pure-ASCII names keep the historical %q form so the common case stays
+// byte-identical on the wire. FormatMediaType would emit them unquoted —
+// equally valid, but a gratuitous change to every message with an
+// attachment when only the non-ASCII case is broken.
+//
+// A long encoded value uses RFC 2231 continuation parameters. Percent-encoding
+// can triple the wire size, so a filename within the API's byte cap can still
+// make a single filename*= parameter exceed SMTP's 998-octet line limit.
+// Continuations keep each parameter on a short foldable line and reconstruct
+// byte-for-byte.
+func attachmentDisposition(filename string) string {
+	var disposition string
+	nonASCII := strings.IndexFunc(filename, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
+	if nonASCII {
+		if d := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); d != "" {
+			disposition = d
+		}
+	}
+	if disposition == "" {
+		disposition = fmt.Sprintf("attachment; filename=%q", filename)
+	}
+	if len(contentDispositionHeaderPrefix)+len(disposition) <= maxLineOctets {
+		return disposition
+	}
+	return continuedAttachmentDisposition(filename)
+}
+
+func continuedAttachmentDisposition(filename string) string {
+	const bytesPerSegment = 20
+	const upperhex = "0123456789ABCDEF"
+
+	var disposition strings.Builder
+	disposition.Grow(len(filename)*3 + len(filename)/bytesPerSegment*20)
+	disposition.WriteString("attachment")
+
+	for segment, offset := 0, 0; offset < len(filename); segment++ {
+		end := min(offset+bytesPerSegment, len(filename))
+		disposition.WriteString(";\r\n filename*")
+		disposition.WriteString(fmt.Sprintf("%d*=", segment))
+		if segment == 0 {
+			disposition.WriteString("utf-8''")
+		}
+		for _, b := range []byte(filename[offset:end]) {
+			disposition.WriteByte('%')
+			disposition.WriteByte(upperhex[b>>4])
+			disposition.WriteByte(upperhex[b&0x0f])
+		}
+		offset = end
+	}
+	return disposition.String()
 }
 
 func headerWriter(buf *strings.Builder) func(string, string) {

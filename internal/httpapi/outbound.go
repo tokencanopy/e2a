@@ -748,6 +748,11 @@ func validateAttachments(atts []outbound.Attachment) *ErrorEnvelope {
 		if name == "" {
 			name = fmt.Sprintf("#%d", i)
 		}
+		if len(att.Filename) > outbound.MaxAttachmentFilenameBytes {
+			return NewError(http.StatusBadRequest, "invalid_attachment",
+				fmt.Sprintf("attachment %q filename is too long — %d bytes, limit is %d",
+					name, len(att.Filename), outbound.MaxAttachmentFilenameBytes))
+		}
 		clean := strings.Map(func(r rune) rune {
 			if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
 				return -1

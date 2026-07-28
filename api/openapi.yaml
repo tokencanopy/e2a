@@ -347,6 +347,7 @@ components:
             - base64-encoded-content
           type: string
         filename:
+          description: Attachment filename. Maximum 1024 UTF-8 bytes; longer names are rejected as invalid_attachment.
           examples:
             - report.pdf
           type: string
