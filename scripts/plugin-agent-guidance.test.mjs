@@ -35,6 +35,17 @@ test("the e2a skill description is quoted YAML", async () => {
   assert.match(source, /^description: "(?:[^"\\]|\\.)*"$/m);
 });
 
+test("the e2a skill teaches concise multipart email composition", async () => {
+  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
+
+  assert.match(source, /### Compose before sending/);
+  assert.match(source, /Lead with the outcome, decision, request, or blocker/i);
+  assert.match(source, /120[–-]180 words/);
+  assert.match(source, /complete plain-text body/i);
+  assert.match(source, /equivalent `html` body/i);
+  assert.match(source, /message can be understood in ten seconds/i);
+});
+
 test("the e2a skill bootstraps and verifies an MCP connection", async () => {
   const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
   const bootstrap = source.match(

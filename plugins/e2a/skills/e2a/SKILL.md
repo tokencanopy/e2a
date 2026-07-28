@@ -1,12 +1,12 @@
 ---
 name: e2a
-description: "Use when operating e2a (email for AI agents) over its MCP tools — sending or receiving email, replying in-thread, managing agents and custom domains, or working with attachments — OR when integrating e2a into your own software or service with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers send_message vs reply_to_message threading, multi-agent disambiguation, the custom-domain DNS flow, programmatic integration, and common gotchas."
-version: 20
+description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
+version: 21
 ---
 
 # Using e2a
 
-<!-- version: 20 -->
+<!-- version: 21 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -95,9 +95,45 @@ opt-in; never enable it merely because an inbox was created.
 
 For attachment bytes, use `get_attachment` with a 0-based index. It returns the attachment's metadata plus a short-lived `download_url`; pass `inline: true` to get base64 `data` inline for small files. Indexes are stable within a message.
 
+### Compose before sending
+
+Write for a busy recipient scanning on a phone.
+
+1. Lead with the outcome, decision, request, or blocker in one sentence.
+2. Include only information that changes understanding or action.
+3. Use short labeled sections and bullets when the message has more than one point.
+4. Put any required decision or action in its own line.
+5. Link the primary artifact once; leave exhaustive logs and test inventories in the linked artifact.
+
+For a status update, prefer this shape:
+
+```text
+Outcome: <one sentence>
+
+Shipped
+- <material change>
+- <material change>
+
+Verified
+- <highest-signal evidence>
+
+Blocker / decision
+- <specific ask or owner>
+
+Next: <one sentence>
+
+Artifact: <URL>
+```
+
+Omit empty sections. Default to 120–180 words and no more than five bullets. Use one idea per bullet and one or two sentences per paragraph. Do not narrate the work chronologically, repeat the same status in prose and bullets, or paste implementation details that do not affect readiness, risk, or a decision.
+
+Always provide a complete plain-text body. Also provide an equivalent `html` body when the email has sections, bullets, or links; plain text alone is fine for a one- or two-sentence reply. Keep HTML email-safe: use simple `<p>`, `<strong>`, `<ul>`, `<li>`, and `<a>` elements; avoid scripts, images, tables, custom fonts, and elaborate CSS. Make links descriptive and clickable. Preserve the same facts, order, and links in both bodies.
+
+Before sending, verify that the first sentence states what changed or what is needed, any blocker or decision is unmistakable, the message can be understood in ten seconds, and the plain-text and HTML bodies agree.
+
 ### Send a new email
 
-1. `send_message` with `to`, `subject`, `text`.
+1. Compose the message using the guidance above, then call `send_message` with `to`, `subject`, `text`, and `html` when appropriate.
 2. Check the response:
    - `status: sent` — done.
    - `status: accepted` — also success, not a maybe. The send was durably persisted and queued for submission (async pipeline). Do NOT re-send. The terminal outcome (delivered or failed) arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`/`list_messages`.
