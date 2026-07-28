@@ -193,7 +193,7 @@ e2a send --to alice@example.com --subject "Hi" --body "Plain-text body." \
 e2a send --to alice@example.com --subject "Hi" --html-file body.html \
   --attach report.pdf --conversation-id conv_123 --idempotency-key <uuid>
 e2a send --to alice@example.com --subject "Tomorrow" --body "Later." \
-  --send-at 2026-08-01T09:00:00-07:00
+  --send-at "<future-rfc3339>"
 e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 ```
 

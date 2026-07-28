@@ -343,7 +343,7 @@ func (s *Server) registerOutbound() {
 	// render the standard ErrorEnvelope — branch on error.code.
 	badRequest400 := func() *huma.Response {
 		return s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
-			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).")
+			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).")
 	}
 	huma.Register(s.API, huma.Operation{
 		OperationID: "sendMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages",

@@ -170,6 +170,7 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 		requireContractText(t, operationID+" 400", strings.ToLower(badRequestDescription),
 			"send_at",
 			"own address",
+			"not held for review",
 		)
 	}
 }

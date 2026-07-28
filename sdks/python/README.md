@@ -196,7 +196,7 @@ result is success, not a reason to retry; even with `wait="sent"` it returns
 immediately rather than holding the HTTP request until the future time:
 
 ```python
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 result = await client.messages.send(
     "sender@example.com",
@@ -204,7 +204,7 @@ result = await client.messages.send(
         "to": ["recipient@example.net"],
         "subject": "Tomorrow's update",
         "text": "Hello later",
-        "send_at": datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc),
+        "send_at": datetime.now(timezone.utc) + timedelta(days=1),
     },
     wait="sent",
 )

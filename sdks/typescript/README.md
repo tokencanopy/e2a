@@ -156,11 +156,12 @@ not a reason to retry; even with `wait: "sent"` it returns immediately rather
 than holding the HTTP request until the future time:
 
 ```typescript
+const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
 const res = await client.messages.send(address, {
   to: ["alice@example.com"],
   subject: "Tomorrow's update",
   text: "Hello later",
-  sendAt: new Date("2026-08-01T09:00:00-07:00"),
+  sendAt: tomorrow,
 }, { wait: "sent" });
 if (res.status === "scheduled") console.log(res.scheduledAt);
 ```

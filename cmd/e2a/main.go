@@ -627,14 +627,7 @@ func main() {
 	// future fire month). Over-cap → refuse terminally; a transient lookup error
 	// fails open so a glitch never drops a legitimate send.
 	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
-		err := enforcer.CheckMessageSend(ctx, userID)
-		if err == nil {
-			return false, nil
-		}
-		if _, ok := err.(*limits.LimitExceededError); ok {
-			return true, nil
-		}
-		return false, err
+		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
 	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
@@ -929,4 +922,18 @@ func main() {
 	// River drain is bounded by the same shutdownCtx, so this returns by the
 	// deadline regardless.
 	<-riverDone
+}
+
+// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
+// fire-time concern for scheduled messages. The message is already persisted,
+// so a later storage-cap breach must not cancel it; only the monthly message
+// cap for the month in which it fires is terminal.
+func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if limitErr, ok := limits.IsLimitExceeded(err); ok {
+		return limitErr.Resource == "messages_month", nil
+	}
+	return false, err
 }
