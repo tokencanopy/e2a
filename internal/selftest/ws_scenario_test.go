@@ -25,13 +25,15 @@ import (
 // and DELETE …/messages/{id} (recorded into deleted, so tests can pin the
 // scenario's residue cleanup against the actual response shape).
 type wsStubState struct {
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	connReady chan struct{} // closed once conn is safe for the POST handler
-	readyOnce sync.Once
-	deleted   []string
-	closeSeen chan struct{} // closed once the stub reads a normal-closure frame
-	closeOnce sync.Once
+	mu          sync.Mutex
+	conn        *websocket.Conn
+	connReady   chan struct{} // closed once conn is safe for the POST handler
+	readyOnce   sync.Once
+	postStarted chan struct{} // closed once POST /messages enters the handler
+	postOnce    sync.Once
+	deleted     []string
+	closeSeen   chan struct{} // closed once the stub reads a normal-closure frame
+	closeOnce   sync.Once
 }
 
 // noteCloseFrame records that the stub read the client's normal-closure frame.
@@ -77,8 +79,9 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 func wsStubWithRegistrationDelay(t *testing.T, registrationDelay time.Duration) (*httptest.Server, *wsStubState) {
 	t.Helper()
 	st := &wsStubState{
-		connReady: make(chan struct{}),
-		closeSeen: make(chan struct{}),
+		connReady:   make(chan struct{}),
+		postStarted: make(chan struct{}),
+		closeSeen:   make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -94,6 +97,12 @@ func wsStubWithRegistrationDelay(t *testing.T, registrationDelay time.Duration) 
 				return
 			}
 			if registrationDelay > 0 {
+				select {
+				case <-st.postStarted:
+				case <-time.After(2 * time.Second):
+					c.Close(websocket.StatusInternalError, "POST did not start")
+					return
+				}
 				time.Sleep(registrationDelay)
 			}
 			st.mu.Lock()
@@ -131,6 +140,7 @@ func wsStubWithRegistrationDelay(t *testing.T, registrationDelay time.Duration) 
 			st.mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/messages") && r.Method == http.MethodPost:
+			st.postOnce.Do(func() { close(st.postStarted) })
 			readyCtx, cancelReady := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancelReady()
 			select {
