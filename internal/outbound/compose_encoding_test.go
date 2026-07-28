@@ -234,6 +234,107 @@ func TestComposeLongAsciiLineRoundTrips(t *testing.T) {
 	}
 }
 
+func TestHasOverlongLine(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"empty", "", false},
+		{"exactly at the limit", strings.Repeat("a", maxLineOctets), false},
+		{"one octet over", strings.Repeat("a", maxLineOctets+1), true},
+		{"at the limit with CRLF", strings.Repeat("a", maxLineOctets) + "\r\n", false},
+		{"over the limit with CRLF", strings.Repeat("a", maxLineOctets+1) + "\r\n", true},
+		{"CR is discounted, not counted", strings.Repeat("a", maxLineOctets) + "\r\nshort", false},
+		{"many short lines", strings.Repeat("short\r\n", 1000), false},
+		{"long line in the middle", "ok\r\n" + strings.Repeat("a", 2000) + "\r\nok", true},
+		{"long line last, no trailing newline", "ok\r\n" + strings.Repeat("a", 2000), true},
+		{"bare LF endings still measured", "ok\n" + strings.Repeat("a", 2000) + "\nok", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasOverlongLine(tc.body); got != tc.want {
+				t.Errorf("hasOverlongLine = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Quoted-printable has escaping rules of its own beyond the 8-bit bytes
+// that trigger it: '=' is the escape character, and trailing whitespace
+// must be encoded so transports that strip it cannot alter the content.
+func TestEncodeBodyQuotedPrintableFidelity(t *testing.T) {
+	// The accent forces QP; everything else exercises QP's escaping.
+	body := "café\nequals = sign\ttab\ntrailing spaces   \nend"
+
+	encoding, encoded := encodeBody(body)
+	if encoding != "quoted-printable" {
+		t.Fatalf("encoding = %q, want quoted-printable", encoding)
+	}
+
+	// QP normalises bare LF to CRLF. That is the canonical wire form, and
+	// relaxed DKIM canonicalisation absorbs it — see compose_dkim_test.go.
+	want := strings.ReplaceAll(body, "\n", "\r\n")
+	if got := decodeQP(t, encoded); got != want {
+		t.Errorf("round trip = %q, want %q", got, want)
+	}
+
+	if !strings.Contains(encoded, "=20") {
+		t.Errorf("trailing space was not encoded, so a transport could strip it:\n%s", encoded)
+	}
+	// Soft wraps keep every emitted line comfortably inside the RFC 2045
+	// 76-octet guidance, which is what makes an MTA wrap unnecessary.
+	for i, line := range strings.Split(encoded, "\r\n") {
+		if len(line) > 76 {
+			t.Errorf("QP line %d is %d octets, want <= 76", i, len(line))
+		}
+	}
+}
+
+func TestComposeEmptyBodyIsWellFormed(t *testing.T) {
+	raw, err := ComposeMessage(
+		"agent@bot.example.com", []string{"alice@gmail.com"}, nil,
+		"Hello", "", "text/plain", "", nil, "relay.e2a.dev", "", "",
+	)
+	if err != nil {
+		t.Fatalf("ComposeMessage failed: %v", err)
+	}
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("empty-body message does not parse: %v", err)
+	}
+	if got := msg.Header.Get("Content-Transfer-Encoding"); got != "7bit" {
+		t.Errorf("Content-Transfer-Encoding = %q, want 7bit", got)
+	}
+	if got := splitBody(t, raw); got != "" {
+		t.Errorf("body = %q, want empty", got)
+	}
+}
+
+// Every body part must carry an explicit Content-Transfer-Encoding. A part
+// without one falls back to the RFC 2045 § 6.1 default of 7bit, which is
+// the exact defect this package was fixing.
+func TestEveryBodyPartDeclaresAnEncoding(t *testing.T) {
+	raw, err := ComposeMessageWithAttachments(
+		"agent@bot.example.com", []string{"alice@gmail.com"}, nil,
+		"Hello", nonASCIIBody, nonASCIIHTML, "", nil, "relay.e2a.dev", "", "",
+		[]Attachment{{Filename: "a.txt", ContentType: "text/plain", Data: "aGk="}},
+	)
+	if err != nil {
+		t.Fatalf("ComposeMessageWithAttachments failed: %v", err)
+	}
+
+	body := splitBody(t, raw)
+	contentTypes := strings.Count(body, "Content-Type: text/") + strings.Count(body, "Content-Type: application/")
+	encodings := strings.Count(body, "Content-Transfer-Encoding: ")
+	// text/plain, text/html and the attachment each declare one; the
+	// nested multipart/alternative container legitimately does not.
+	if encodings != 3 {
+		t.Errorf("got %d Content-Transfer-Encoding headers for %d leaf parts, want 3\n%s",
+			encodings, contentTypes, body)
+	}
+}
+
 func TestEncodeBody(t *testing.T) {
 	tests := []struct {
 		name     string
