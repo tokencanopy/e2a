@@ -58,6 +58,16 @@ beforeEach(() => {
           ),
       });
     }
+    if (url === `/v1/reviews/${remaining.id}/approve`) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({ status: "sent", message_id: remaining.id }),
+          ),
+      });
+    }
     if (url === `/v1/reviews/${remaining.id}`) {
       return Promise.resolve({
         ok: true,
@@ -107,42 +117,22 @@ it("still follows URL selection changes for deep links and browser navigation", 
   ).toBeInTheDocument();
 });
 
-it("keeps the row open when the superseded collapse commit lands after it", async () => {
+
+it("collapses optimistically when a hold is resolved, before the URL catches up", async () => {
   const user = userEvent.setup();
-  // Start from the settled post-resolution URL: the collapse to /reviews is
-  // what handleResolved issued, and it has not committed yet.
-  mockRouteSelectedId = "msg_resolved";
-  const { rerender } = render(<PendingPage />);
-
-  const row = await screen.findByRole("button", {
-    name: /Remaining pending review/,
-  });
-  await user.click(row);
-  await waitFor(() =>
-    expect(
-      screen.getByText("Open without requiring a refresh."),
-    ).toBeInTheDocument(),
-  );
-
-  // Next commits the queued navigations in order, so the earlier
-  // replace("/reviews") lands FIRST — a superseded echo, not a user action.
-  // Syncing from it would collapse the row and tear down its detail fetch.
-  mockRouteSelectedId = "";
-  rerender(<PendingPage />);
-  expect(
-    screen.getByText("Open without requiring a refresh."),
-  ).toBeInTheDocument();
-
-  // Our real target lands and the guard releases.
+  // Deep-linked straight onto the remaining row, URL already settled there.
   mockRouteSelectedId = "msg_remaining";
-  rerender(<PendingPage />);
-  expect(
-    screen.getByText("Open without requiring a refresh."),
-  ).toBeInTheDocument();
+  render(<PendingPage />);
 
-  // Once caught up, an external navigation collapses the accordion again.
-  mockRouteSelectedId = "";
-  rerender(<PendingPage />);
+  await screen.findByText("Open without requiring a refresh.");
+  await user.click(screen.getByRole("button", { name: /^Approve & send/ }));
+
+  // handleResolved clears the selection locally and asks the router for
+  // /reviews. useSearchParams still reports the old id for the length of the
+  // RSC round trip, so the panel must close off local state alone.
+  await waitFor(() =>
+    expect(replace).toHaveBeenCalledWith("/reviews", { scroll: false }),
+  );
   await waitFor(() =>
     expect(
       screen.queryByText("Open without requiring a refresh."),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { listDomains } from "../../components/onboarding/api";
 import { track } from "../../components/onboarding/analytics";
@@ -68,22 +68,12 @@ export default function GetStartedPage() {
   const [error, setError] = useState("");
   const [bootstrapping, setBootstrapping] = useState(true);
 
-  // The step our own last router.push/replace is heading for, or null when the
-  // URL is already caught up. Next's app router queues navigations and commits
-  // every one of them in order, so a navigation issued while an earlier one is
-  // still in flight renders an intermediate SUPERSEDED step — syncing from that
-  // echo would bounce the user back a screen before the real target lands.
-  const pendingStep = useRef<Step | null>(null);
-
   // Route state remains canonical for deep links and browser navigation, but
-  // forward interactions update locally first. Same-page router transitions
-  // can lag briefly; deriving the rendered step only from useSearchParams made
-  // a selected option appear inert until the URL commit completed.
+  // forward interactions update locally first. A same-page router.push does
+  // not commit until the router has fetched the route's RSC payload, so
+  // deriving the rendered step only from useSearchParams put a full network
+  // round trip between the click and the next step appearing.
   useEffect(() => {
-    if (pendingStep.current !== null) {
-      if (routeStep === pendingStep.current) pendingStep.current = null;
-      return;
-    }
     setStep(routeStep);
   }, [routeStep]);
 
@@ -92,12 +82,11 @@ export default function GetStartedPage() {
   // `push` is for user-driven forward steps so Back walks the funnel.
   const goToStep = useCallback(
     (next: Step, href: string, mode: "push" | "replace") => {
-      pendingStep.current = next === routeStep ? null : next;
       setStep(next);
       if (mode === "replace") router.replace(href);
       else router.push(href);
     },
-    [router, routeStep],
+    [router],
   );
 
   useEffect(() => {

@@ -67,27 +67,6 @@ it("advances immediately while its same-page URL push is pending", async () => {
   expect(await screen.findByText("Claude Code setup")).toBeInTheDocument();
 });
 
-it("ignores the superseded step when two pushes are queued back to back", async () => {
-  const { rerender } = render(<GetStartedPage />);
-
-  // choose -> address, then address -> shared_form before either commits.
-  fireEvent.click(await screen.findByText("Set up in the web UI"));
-  fireEvent.click(await screen.findByText("Shared e2a domain"));
-  expect(mockPush).toHaveBeenLastCalledWith("/get-started?step=shared_form");
-  expect(await screen.findByText("How it works")).toBeInTheDocument();
-
-  // The FIRST push commits — a superseded echo, not external navigation.
-  // Syncing from it would throw the user back to the address chooser.
-  mockStep = "address";
-  rerender(<GetStartedPage />);
-  expect(screen.queryByText("Shared e2a domain")).not.toBeInTheDocument();
-
-  // The real target lands and the form stays put.
-  mockStep = "shared_form";
-  rerender(<GetStartedPage />);
-  expect(await screen.findByText("How it works")).toBeInTheDocument();
-});
-
 it("stays on the chooser when Back is pressed before the forward push commits", async () => {
   // Non-trivial history so handleBackToChoose would otherwise take back().
   Object.defineProperty(window.history, "length", {
