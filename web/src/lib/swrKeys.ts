@@ -81,6 +81,19 @@ export const messageDetailKey = (id: string) =>
 export const messageLifecycleKey = (email: string, id: string) =>
   ["message-lifecycle", email, id] as const;
 
+// One webhook subscription (GET /v1/webhooks/{id}), for the detail page.
+export const webhookKey = (id: string) => ["webhook", id] as const;
+
+// The per-webhook delivery log (GET /v1/webhooks/{id}/deliveries). The status
+// slot is part of the key because the server filters server-side: switching
+// the filter is a different query, not a client-side narrowing of one cache
+// entry.
+export const webhookDeliveriesKey = (
+  id: string,
+  status: string,
+  cursor: string,
+) => ["webhook-deliveries", id, status, cursor] as const;
+
 // ── Invalidation helpers ─────────────────────────────────
 
 // After any agent mutation (create/update/delete/test) the agents
