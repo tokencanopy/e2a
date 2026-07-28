@@ -53,9 +53,9 @@ it("advances immediately while its same-page URL push is pending", async () => {
   expect(mockPush).toHaveBeenCalledWith("/get-started?step=address");
   expect(await screen.findByText("Shared e2a domain")).toBeInTheDocument();
 
-  // The pending push commits. Next's app router queues navigations and
-  // commits each in order, so our own target always lands before any later
-  // URL change — model that ordering rather than skipping over it.
+  // Let the pending push commit before modeling the unrelated URL change
+  // below. A later in-flight App Router navigation would supersede this one
+  // instead of committing both targets in order.
   mockStep = "address";
   rerender(<GetStartedPage />);
   expect(screen.getByText("Shared e2a domain")).toBeInTheDocument();
