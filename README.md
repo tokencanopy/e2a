@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.Mnexa-AI%2Fmcp-server.svg)](https://mcptoplist.com/server/io.github.Mnexa-AI%2Fmcp-server)
+
 <div align="center">
 
 <picture>
