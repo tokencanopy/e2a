@@ -77,8 +77,10 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	// Wire the real queue-first acceptance path, but deliberately do not start
 	// workers: contract scenarios can prove accepted/scheduled persistence and
 	// River enqueue semantics without submitting external email.
+	outboundSendStore := agent.NewOutboundSendStore(store, outbox, noopUsage)
+	store.SetScheduledSendFinalizer(outboundSendStore)
 	outboundJobs := outboundsend.NewJobs(
-		agent.NewOutboundSendStore(store, outbox, noopUsage),
+		outboundSendStore,
 		agent.NewOutboundDeliverer(sender),
 		pool,
 	)

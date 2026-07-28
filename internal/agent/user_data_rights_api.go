@@ -60,9 +60,9 @@ func (a *API) ExportUserDataCore(ctx context.Context, userID string) (*identity.
 // confirmation matches the pattern other destructive APIs use
 // (Stripe's account close, GitHub's repo delete).
 //
-// DeleteUserDataCore counts OAuth rows for the audit line, best-effort
-// notifies the external billing hook, then runs the cascading delete and
-// merges the counts. HTTP-free; serves DELETE /v1/account?confirm=DELETE.
+// DeleteUserDataCore counts OAuth rows for the audit line, runs the cascading
+// delete, then best-effort notifies the external billing hook and merges the
+// counts. HTTP-free; serves DELETE /v1/account?confirm=DELETE.
 func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User) (*identity.DeleteUserDataResult, error) {
 	// Count OAuth token rows BEFORE the DELETE so the audit report is correct
 	// (small benign race vs CASCADE accepted, per the original handler).
@@ -76,16 +76,18 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User) (*ide
 			oauthCounts.RefreshTokens = c.RefreshTokens
 		}
 	}
-	// Best-effort billing-hook notify BEFORE the cascade — never blocks the
-	// delete; a reconciler catches any orphan.
+	res, err := a.store.DeleteUserDataTx(ctx, user.ID, a.domainTeardownHook)
+	if err != nil {
+		return nil, err
+	}
+	// Notify only after the database deletion commits. In particular, a
+	// send_in_progress conflict must not cancel billing for an account that
+	// still exists. Hook failure never blocks the completed right-of-deletion;
+	// a reconciler catches any orphan.
 	if a.billingHookURL != "" {
 		if err := a.notifyBillingUserDeleted(ctx, user.ID); err != nil {
 			log.Printf("[api] billing-hook user-delete failed (continuing): user=%s err=%v", user.ID, err)
 		}
-	}
-	res, err := a.store.DeleteUserDataTx(ctx, user.ID, a.domainTeardownHook)
-	if err != nil {
-		return nil, err
 	}
 	res.OAuthAuthCodesDeleted = oauthCounts.AuthCodes
 	res.OAuthAccessTokensDeleted = oauthCounts.AccessTokens
@@ -95,8 +97,8 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User) (*ide
 }
 
 // notifyBillingUserDeleted HMAC-POSTs to the external billing hook so
-// the user's Stripe subscription gets canceled before the OSS cascade
-// removes the rest of their data. Caller already checked
+// the user's Stripe subscription gets canceled after the OSS cascade
+// commits. Caller already checked
 // a.billingHookURL is non-empty.
 //
 // Returns an error on transport / non-204 status, but the caller logs

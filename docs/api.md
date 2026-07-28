@@ -454,8 +454,11 @@ declared stable.
   UTC offset, can be at most 90 days ahead, and does not survive a review hold
   (approval sends immediately). A future direct loopback whose only recipient
   is the sending agent's own address returns `400 invalid_request` because
-  loopback is immediate. Trashing a scheduled message prevents submission;
-  restoring it before `scheduled_at` re-arms the existing job.
+  loopback is immediate. Trashing a scheduled message before provider
+  submission starts prevents submission; once submission has a fresh lease,
+  delete returns `409 send_in_progress` and must be retried.
+  Restoring it before `scheduled_at` re-arms the existing job; restoring at or
+  after `scheduled_at` restores the message but leaves the send canceled.
 - **`delivery_status`** on a message follows `accepted → sending → sent →
   delivered | deferred | bounced | complained | failed`. Note **`sent` ≠
   `delivered`**: `sent` means the upstream provider (SES) accepted the message,

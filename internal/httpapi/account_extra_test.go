@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 func TestExportUserData(t *testing.T) {
@@ -42,6 +45,26 @@ func TestDeleteAccountConfirmed(t *testing.T) {
 	code, _ := sendJSON(t, "DELETE", srv.URL+"/v1/account?confirm=DELETE", "good", nil)
 	if code != 200 {
 		t.Fatalf("want 200, got %d", code)
+	}
+}
+
+func TestDeleteAccountSendInProgress(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.DeleteUserData = func(context.Context, *identity.User) (*identity.DeleteUserDataResult, error) {
+			return nil, identity.ErrSendInProgress
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/account?confirm=DELETE", "good", nil)
+	if code != 409 || errCode(body) != "send_in_progress" {
+		t.Fatalf("want 409 send_in_progress, got %d %v", code, body)
+	}
+	response := New(Deps{}).API.OpenAPI().Paths["/v1/account"].Delete.Responses["409"]
+	if response == nil {
+		t.Fatal("deleteAccount does not declare a 409 response")
+	}
+	content := response.Content["application/json"]
+	if content == nil || content.Schema == nil || content.Schema.Ref != "#/components/schemas/ErrorEnvelope" {
+		t.Fatalf("deleteAccount 409 schema = %#v, want ErrorEnvelope", content)
 	}
 }
 

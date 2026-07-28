@@ -95,7 +95,9 @@ because that status can survive a worker crash or span River retry handling.
   delete) drains the same way. Every irreversible message/agent/account
   deletion cancels linked River send jobs in the same transaction; a failed
   cancellation rolls the delete back. Reversible soft deletion intentionally
-  retains the job so restore can re-arm a scheduled send.
+  retains the job so restore before `scheduled_at` can re-arm a scheduled
+  send. Restore at/after `scheduled_at` cancels the past-due job and restores
+  only the message/inbox.
 - **Delete forever**: `DELETE /v1/agents/{email}?permanent=true&confirm=DELETE`
   hard-deletes from either state (trash UI uses it on trashed inboxes; API
   callers keep a one-shot irreversible delete). A fresh provider-call lease on

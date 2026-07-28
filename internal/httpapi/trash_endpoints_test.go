@@ -211,6 +211,18 @@ func TestDeleteMessagePermanentSendInProgress(t *testing.T) {
 	}
 }
 
+func TestDeleteMessageSoftSendInProgress(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.DeleteMessage = func(ctx context.Context, messageID, agentID string) error {
+			return identity.ErrSendInProgress
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com/messages/msg_sending", "good", nil)
+	if code != 409 || errCode(body) != "send_in_progress" {
+		t.Fatalf("want 409 send_in_progress, got %d %v", code, body)
+	}
+}
+
 func TestRestoreMessage(t *testing.T) {
 	var c trashCalls
 	srv := testServer(t, withTrashDeps(&c), func(d *Deps) {

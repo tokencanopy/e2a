@@ -872,6 +872,27 @@ scenarios:
               delivery_status: accepted
               scheduled_at: "{future_rfc3339}"
 
+      - id: trash_scheduled_message
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
     cleanup:
       - id: delete_scheduled_agent_permanently
         action: request

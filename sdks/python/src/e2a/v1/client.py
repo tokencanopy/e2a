@@ -412,7 +412,9 @@ class AgentsResource:
         return await self._c._write_idempotent(lambda h: self._api.delete_agent(email, confirm="DELETE", _headers=h))
 
     async def restore(self, email: str) -> AgentView:
-        """Restore an agent from the 30-day trash. Account scope only."""
+        """Restore an agent from the 30-day trash. Scheduled messages restored
+        before scheduled_at re-arm; at/after scheduled_at they return live as
+        failed with submission canceled. Account scope only."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_agent(email, _headers=h)
         )
@@ -560,7 +562,9 @@ class MessagesResource:
         )
 
     async def restore(self, email: str, message_id: str) -> MessageView:
-        """Restore a soft-deleted message and resume its retention clock."""
+        """Restore a soft-deleted message. A scheduled message restored before
+        scheduled_at re-arms; at/after scheduled_at it returns live as failed
+        with submission canceled."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_message(email, message_id, _headers=h)
         )
@@ -595,11 +599,14 @@ class MessagesResource:
         unsubscribe handling; when given, it wins over any ``unsubscribe``
         already present in ``body``.
 
-        Pass ``wait="sent"`` for an optional bounded wait: the request is held
-        server-side until the asynchronously delivered message reaches a
-        terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed
-        state; on timeout the result stays ``status="accepted"``. Default: no
-        wait. Always branch on the result's ``status``, not the HTTP code.
+        Pass ``wait="sent"`` for an optional bounded wait on an immediate
+        send: the request is held server-side until the asynchronously
+        delivered message reaches a terminal-or-held state or at most 20
+        seconds elapse (currently ~15s), then returns the observed state; on
+        timeout the result stays ``status="accepted"``. A future ``send_at``
+        returns ``status="scheduled"`` immediately and does not wait for that
+        time. Default: no wait. Always branch on the result's ``status``, not
+        the HTTP code.
         """
         req = _coerce(SendEmailRequest, body)
         if unsubscribe is not None:

@@ -106,7 +106,7 @@ Usage:
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
         --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
                                    status=scheduled, sent "not before" then. Direct self-send is unsupported;
-                                   cancel by trashing it (restoring before send time re-arms it)
+                                   trash prevents submission; restore before send time re-arms, at/after leaves it canceled
         --idempotency-key <k>      Stable key so a retried invocation can't double-send
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON

@@ -949,10 +949,10 @@ func TestSendWorker_TrashLinearizesWithDurableClaim(t *testing.T) {
 	go func() { trashDone <- trashStore.SoftDeleteMessage(ctx, res.MessageID, ag.ID) }()
 	select {
 	case err := <-trashDone:
-		if err != nil {
+		if !errors.Is(err, identity.ErrSendInProgress) {
 			close(deliverer.release)
 			<-workDone
-			t.Fatalf("SoftDeleteMessage: %v", err)
+			t.Fatalf("SoftDeleteMessage during provider call = %v, want ErrSendInProgress", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		close(deliverer.release)
@@ -968,6 +968,9 @@ func TestSendWorker_TrashLinearizesWithDurableClaim(t *testing.T) {
 	close(deliverer.release)
 	if err := <-workDone; err != nil {
 		t.Fatalf("worker.Work: %v", err)
+	}
+	if err := trashStore.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
+		t.Fatalf("SoftDeleteMessage after provider call: %v", err)
 	}
 
 	var deliveryStatus, providerID string
@@ -1192,9 +1195,6 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	if payload, err := store.ClaimOutboundForSend(ctx, res.MessageID, 999); err != nil || payload == nil {
 		t.Fatalf("ClaimOutboundForSend = (%v, %v), want payload", payload, err)
 	}
-	if err := store.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
-		t.Fatalf("SoftDeleteMessage: %v", err)
-	}
 	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE messages SET send_claimed_at = now() - make_interval(secs => $2) WHERE id=$1`,
@@ -1202,6 +1202,9 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("backdate claim: %v", err)
+	}
+	if err := store.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
+		t.Fatalf("SoftDeleteMessage(stale claim): %v", err)
 	}
 	if err := store.PurgeMessage(ctx, res.MessageID, ag.ID); err != nil {
 		t.Fatalf("PurgeMessage(stale claim): %v", err)

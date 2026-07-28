@@ -608,6 +608,15 @@ def test_scheduled_send_scenario_is_self_cleaning_and_projection_complete():
             "scheduled_at": "{future_rfc3339}",
         }
     }
+    assert steps["trash_scheduled_message"]["expect"]["body_match"] == {
+        "deleted": True,
+        "id": "{scheduled_message_id}",
+    }
+    assert steps["restore_before_scheduled_at"]["expect"]["body_match"] == {
+        "id": "{scheduled_message_id}",
+        "delivery_status": "accepted",
+        "scheduled_at": "{future_rfc3339}",
+    }
     assert [step["id"] for step in scenario["cleanup"]] == [
         "delete_scheduled_agent_permanently"
     ]

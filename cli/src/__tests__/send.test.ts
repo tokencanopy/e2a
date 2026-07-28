@@ -152,6 +152,8 @@ describe("send/reply commands", () => {
     // Scheduled is a successful, intended acceptance: id printed, exit 0, note on stderr.
     expect(mockStdout).toHaveBeenCalledWith("msg_sched\n");
     expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("scheduled"));
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("restoring at or after"));
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("leaves the send canceled"));
     // The note renders the instant via toISOString() (millisecond precision).
     expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining(new Date(at).toISOString()));
     expect(process.exitCode).toBe(0);

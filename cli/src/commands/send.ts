@@ -152,7 +152,7 @@ function emitSendResult(result: SendResultView, json?: boolean): void {
     const when = result.scheduledAt ? new Date(result.scheduledAt).toISOString() : "the requested time";
     process.stderr.write(
       `NOTE: send accepted as "scheduled" — it will be submitted at ${when} (not before), not now. ` +
-        `Cancel it before then by moving message ${result.messageId} to trash (via the dashboard or the delete-message API); restoring it before ${when} re-arms the send.\n`,
+        `Cancel it before then by moving message ${result.messageId} to trash (via the dashboard or the delete-message API); restoring it before ${when} re-arms the send, while restoring at or after that time leaves the send canceled.\n`,
     );
   } else if (result.status === "failed") {
     process.stderr.write(

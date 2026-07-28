@@ -9,8 +9,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/usage"
+	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
 
 type recordingOutboundJobCanceller struct {
@@ -30,6 +33,14 @@ func linkTrashTestSendJob(t *testing.T, pool *pgxpool.Pool, messageID string, jo
 		messageID, jobID); err != nil {
 		t.Fatalf("link send job: %v", err)
 	}
+}
+
+func wireTrashScheduledFinalizer(store *identity.Store, pool *pgxpool.Pool) {
+	store.SetScheduledSendFinalizer(agent.NewOutboundSendStore(
+		store,
+		webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)),
+		usage.NewNoopUsageTracker(),
+	))
 }
 
 // trashTestSetup creates a user + verified domain + agent for trash tests.
@@ -59,6 +70,16 @@ func trashInbound(t *testing.T, store *identity.Store, agentID, recipient, subje
 		identity.InboundScreening{})
 	if err != nil {
 		t.Fatalf("CreateInboundMessage: %v", err)
+	}
+	return m
+}
+
+func trashOutbound(t *testing.T, store *identity.Store, agentID, subject string) *identity.Message {
+	t.Helper()
+	m, err := store.CreateOutboundMessage(context.Background(), agentID,
+		[]string{"recipient@example.com"}, nil, nil, subject, "send", "smtp", "", "", []byte("raw"))
+	if err != nil {
+		t.Fatalf("CreateOutboundMessage: %v", err)
 	}
 	return m
 }
@@ -182,11 +203,7 @@ func TestPurgeMessageCancelsLinkedSendJobTransactionally(t *testing.T) {
 	ctx := context.Background()
 	_, agentID := trashTestSetup(t, store, "purge-job")
 
-	message, err := store.CreateOutboundMessage(ctx, agentID, []string{"x@example.com"}, nil, nil,
-		"scheduled", "send", "", "", "", nil)
-	if err != nil {
-		t.Fatalf("CreateOutboundMessage: %v", err)
-	}
+	message := trashOutbound(t, store, agentID, "scheduled")
 	linkTrashTestSendJob(t, pool, message.ID, 101)
 
 	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
@@ -225,8 +242,15 @@ func TestPermanentAgentDeletionCancelsLinkedSendJobs(t *testing.T) {
 		store.SetOutboundJobCanceller(canceller)
 		ctx := context.Background()
 		userID, agentID := trashTestSetup(t, store, "delete-agent-job")
-		message := trashInbound(t, store, agentID, agentID, "scheduled")
+		message := trashOutbound(t, store, agentID, "scheduled")
+		historical := trashOutbound(t, store, agentID, "already sent")
 		linkTrashTestSendJob(t, pool, message.ID, 201)
+		linkTrashTestSendJob(t, pool, historical.ID, 299)
+		if _, err := pool.Exec(ctx,
+			`UPDATE messages SET delivery_status = 'sent' WHERE id = $1`,
+			historical.ID); err != nil {
+			t.Fatalf("mark historical message terminal: %v", err)
+		}
 
 		if _, err := store.DeleteAgent(ctx, agentID, userID); err != nil {
 			t.Fatalf("DeleteAgent: %v", err)
@@ -243,7 +267,7 @@ func TestPermanentAgentDeletionCancelsLinkedSendJobs(t *testing.T) {
 		store.SetOutboundJobCanceller(canceller)
 		ctx := context.Background()
 		userID, agentID := trashTestSetup(t, store, "purge-agent-job")
-		message := trashInbound(t, store, agentID, agentID, "scheduled")
+		message := trashOutbound(t, store, agentID, "scheduled")
 		linkTrashTestSendJob(t, pool, message.ID, 202)
 
 		if err := store.SoftDeleteAgent(ctx, agentID, userID); err != nil {
@@ -270,7 +294,7 @@ func TestDeleteExpiredMessagesCancelsLinkedSendJobs(t *testing.T) {
 	store.SetOutboundJobCanceller(canceller)
 	ctx := context.Background()
 	_, agentID := trashTestSetup(t, store, "expired-job")
-	message := trashInbound(t, store, agentID, agentID, "scheduled")
+	message := trashOutbound(t, store, agentID, "scheduled")
 	linkTrashTestSendJob(t, pool, message.ID, 301)
 	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("SoftDeleteMessage: %v", err)
@@ -286,6 +310,198 @@ func TestDeleteExpiredMessagesCancelsLinkedSendJobs(t *testing.T) {
 	}
 	if got := canceller.jobIDs; len(got) != 1 || got[0] != 301 {
 		t.Fatalf("cancelled jobs = %v, want [301]", got)
+	}
+}
+
+func TestRestoreMessageCancelsPastDueScheduledSend(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	wireTrashScheduledFinalizer(store, pool)
+	ctx := context.Background()
+	_, agentID := trashTestSetup(t, store, "restore-schedule")
+	message := trashOutbound(t, store, agentID, "scheduled")
+	linkTrashTestSendJob(t, pool, message.ID, 501)
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages SET scheduled_at = now() + interval '1 hour' WHERE id = $1`,
+		message.ID); err != nil {
+		t.Fatalf("set future schedule: %v", err)
+	}
+
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage(future): %v", err)
+	}
+	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("RestoreMessage(future): %v", err)
+	}
+	if len(canceller.jobIDs) != 0 {
+		t.Fatalf("future restore cancelled jobs %v", canceller.jobIDs)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages SET scheduled_at = now() - interval '1 second' WHERE id = $1`,
+		message.ID); err != nil {
+		t.Fatalf("set past schedule: %v", err)
+	}
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage(past): %v", err)
+	}
+	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("RestoreMessage(past): %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 501 {
+		t.Fatalf("cancelled jobs = %v, want [501]", got)
+	}
+	var deletedAt *time.Time
+	var deliveryStatus, reason string
+	if err := pool.QueryRow(ctx,
+		`SELECT deleted_at, delivery_status, COALESCE(delivery_failure_reason_code, '')
+		   FROM messages WHERE id = $1`,
+		message.ID).Scan(&deletedAt, &deliveryStatus, &reason); err != nil {
+		t.Fatalf("read restored message: %v", err)
+	}
+	if deletedAt != nil || deliveryStatus != "failed" || reason != "submission.cancelled" {
+		t.Fatalf("restored message = deleted_at %v status %q reason %q, want live/failed/submission.cancelled",
+			deletedAt, deliveryStatus, reason)
+	}
+	var failedEvents int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM webhook_events WHERE message_id = $1 AND type = 'email.failed'`,
+		message.ID).Scan(&failedEvents); err != nil {
+		t.Fatalf("count email.failed events: %v", err)
+	}
+	if failedEvents != 1 {
+		t.Fatalf("email.failed events = %d, want 1", failedEvents)
+	}
+}
+
+func TestRestoreMessageUsesCutoffAfterWaitingForRowLock(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	wireTrashScheduledFinalizer(store, pool)
+	ctx := context.Background()
+	_, agentID := trashTestSetup(t, store, "restore-cutoff-lock")
+	message := trashOutbound(t, store, agentID, "scheduled across lock")
+	linkTrashTestSendJob(t, pool, message.ID, 504)
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages SET scheduled_at = clock_timestamp() + interval '1 second' WHERE id = $1`,
+		message.ID); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage: %v", err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck
+	if _, err := blocker.Exec(ctx, `SELECT id FROM messages WHERE id = $1 FOR UPDATE`, message.ID); err != nil {
+		t.Fatalf("lock message: %v", err)
+	}
+
+	restoreDone := make(chan error, 1)
+	go func() {
+		restoreDone <- store.RestoreMessage(ctx, message.ID, agentID)
+	}()
+	time.Sleep(1100 * time.Millisecond)
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("release message lock: %v", err)
+	}
+	if err := <-restoreDone; err != nil {
+		t.Fatalf("RestoreMessage: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 504 {
+		t.Fatalf("cancelled jobs = %v, want [504]", got)
+	}
+}
+
+func TestRestoreMessagePreservesProviderAcceptEvidence(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	wireTrashScheduledFinalizer(store, pool)
+	ctx := context.Background()
+	_, agentID := trashTestSetup(t, store, "restore-provider-evidence")
+	message := trashOutbound(t, store, agentID, "provider accepted")
+	linkTrashTestSendJob(t, pool, message.ID, 505)
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages
+		    SET scheduled_at = clock_timestamp() - interval '1 second',
+		        provider_accepted_at = clock_timestamp(),
+		        provider_message_id = '<accepted@example.com>'
+		  WHERE id = $1`,
+		message.ID); err != nil {
+		t.Fatalf("set provider evidence: %v", err)
+	}
+	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("SoftDeleteMessage: %v", err)
+	}
+	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+		t.Fatalf("RestoreMessage: %v", err)
+	}
+
+	var status string
+	var sentEvents, failedEvents int
+	if err := pool.QueryRow(ctx,
+		`SELECT delivery_status,
+		        (SELECT count(*) FROM webhook_events WHERE message_id = $1 AND type = 'email.sent'),
+		        (SELECT count(*) FROM webhook_events WHERE message_id = $1 AND type = 'email.failed')
+		   FROM messages WHERE id = $1`,
+		message.ID).Scan(&status, &sentEvents, &failedEvents); err != nil {
+		t.Fatalf("read restored message: %v", err)
+	}
+	if status != "sent" || sentEvents != 1 || failedEvents != 0 {
+		t.Fatalf("provider evidence settled as status=%q sent_events=%d failed_events=%d; want sent/1/0",
+			status, sentEvents, failedEvents)
+	}
+}
+
+func TestRestoreAgentCancelsOnlyPastDueScheduledSends(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	wireTrashScheduledFinalizer(store, pool)
+	ctx := context.Background()
+	userID, agentID := trashTestSetup(t, store, "restore-agent-schedule")
+	past := trashOutbound(t, store, agentID, "past scheduled")
+	future := trashOutbound(t, store, agentID, "future scheduled")
+	linkTrashTestSendJob(t, pool, past.ID, 502)
+	linkTrashTestSendJob(t, pool, future.ID, 503)
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages
+		    SET scheduled_at = CASE id
+		          WHEN $1 THEN now() - interval '1 second'
+		          ELSE now() + interval '1 hour'
+		        END
+		  WHERE id = ANY($2)`,
+		past.ID, []string{past.ID, future.ID}); err != nil {
+		t.Fatalf("set schedules: %v", err)
+	}
+	if err := store.SoftDeleteAgent(ctx, agentID, userID); err != nil {
+		t.Fatalf("SoftDeleteAgent: %v", err)
+	}
+	if err := store.RestoreAgent(ctx, agentID, userID); err != nil {
+		t.Fatalf("RestoreAgent: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 502 {
+		t.Fatalf("cancelled jobs = %v, want [502]", got)
+	}
+	var pastStatus, futureStatus string
+	if err := pool.QueryRow(ctx, `SELECT delivery_status FROM messages WHERE id = $1`, past.ID).Scan(&pastStatus); err != nil {
+		t.Fatalf("read past status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT delivery_status FROM messages WHERE id = $1`, future.ID).Scan(&futureStatus); err != nil {
+		t.Fatalf("read future status: %v", err)
+	}
+	if pastStatus != "failed" || futureStatus != "accepted" {
+		t.Fatalf("statuses = past %q future %q, want failed/accepted", pastStatus, futureStatus)
 	}
 }
 

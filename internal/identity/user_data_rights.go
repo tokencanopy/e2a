@@ -346,11 +346,32 @@ func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainIn
 	}
 	agentRows.Close()
 
+	var sending bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM messages m
+			  JOIN agent_identities a ON a.id = m.agent_id
+			 WHERE a.user_id = $1
+			   AND m.delivery_status = 'sending'
+			   AND m.send_claimed_at > now() - make_interval(secs => $2)
+		)`,
+		userID, int64(OutboundSendClaimStaleWindow/time.Second),
+	).Scan(&sending); err != nil {
+		return nil, fmt.Errorf("delete: check active sends: %w", err)
+	}
+	if sending {
+		return nil, ErrSendInProgress
+	}
+
 	jobRows, err := tx.Query(ctx,
 		`SELECT m.send_job_id
 		   FROM messages m
 		   JOIN agent_identities a ON a.id = m.agent_id
 		  WHERE a.user_id = $1
+		    AND m.direction = 'outbound'
+		    AND m.delivery_status IN ('accepted', 'sending')
+		    AND m.send_job_id IS NOT NULL
 		  FOR UPDATE OF m`,
 		userID)
 	if err != nil {

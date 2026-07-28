@@ -73,7 +73,7 @@ const sendAtField = z
   .datetime({ offset: true })
   .optional()
   .describe(
-    'Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. If the message is not held for review, a future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Cancel a scheduled send with delete_message (move to trash) — reversible: restoring it before the send time re-arms it.',
+    'Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. If the message is not held for review, a future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.',
   );
 
 export function registerMessageTools(server: McpServer, client: McpClient): void {
@@ -494,7 +494,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "Restore a message from trash",
       annotations: { destructiveHint: false, idempotentHint: false },
       description:
-        "Restore a soft-deleted message before its trash-retention window expires. Time spent in trash does not consume the message's normal retention. Returns the restored message; a live message returns `not_in_trash`.",
+        "Restore a soft-deleted message before its trash-retention window expires. A scheduled message restored before `scheduled_at` re-arms; at/after `scheduled_at` it returns live as failed with submission canceled. Returns the restored message; a live message returns `not_in_trash`.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the trashed message to restore."),
         email: emailSelector,

@@ -172,6 +172,8 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 			"may change before it is declared stable",
 			"own address",
 			"400 invalid_request",
+			"restoring at or after",
+			"leaves the send canceled",
 		)
 		if sendAt["x-stability-level"] != "beta" {
 			t.Errorf("%s.send_at must carry canonical x-stability-level: beta", schemaName)
@@ -192,6 +194,12 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 			"beta:",
 			"may change before it is declared stable",
 		)
+		if schemaName != "MessageSummaryView" {
+			requireContractText(t, schemaName+".scheduled_at restore cutoff", strings.ToLower(description),
+				"restoring at or after",
+				"leaves the send canceled",
+			)
+		}
 		if scheduledAt["x-stability-level"] != "beta" {
 			t.Errorf("%s.scheduled_at must carry canonical x-stability-level: beta", schemaName)
 		}

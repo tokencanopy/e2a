@@ -135,6 +135,15 @@ it("keeps the scheduled-send scenario self-cleaning and projection-complete", ()
       scheduled_at: "{future_rfc3339}",
     },
   });
+  expect(steps.get("trash_scheduled_message")?.expect?.body_match).toEqual({
+    deleted: true,
+    id: "{scheduled_message_id}",
+  });
+  expect(steps.get("restore_before_scheduled_at")?.expect?.body_match).toEqual({
+    id: "{scheduled_message_id}",
+    delivery_status: "accepted",
+    scheduled_at: "{future_rfc3339}",
+  });
   expect(scenario!.cleanup?.map((step) => step.id)).toEqual([
     "delete_scheduled_agent_permanently",
   ]);

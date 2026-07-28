@@ -131,11 +131,13 @@ export interface RequestOptions {
 
 /** Per-call options for send/reply/forward. */
 export interface SendOptions extends RequestOptions {
-  /** Optional bounded wait: `wait: "sent"` holds the request server-side until
-   *  the message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then
-   *  returns the observed state; on timeout the result stays `status:
-   *  "accepted"`. Default: no wait. Always branch on the result's `status`,
-   *  not the HTTP code. */
+  /** Optional bounded wait for an immediate send: `wait: "sent"` holds the
+   *  request server-side until the message reaches a terminal-or-held state or
+   *  at most 20 seconds elapse (currently ~15s), then returns the observed
+   *  state; on timeout the result stays `status: "accepted"`. A future
+   *  `sendAt` returns `status: "scheduled"` immediately and does not wait for
+   *  that time. Default: no wait. Always branch on the result's `status`, not
+   *  the HTTP code. */
   wait?: "sent";
 }
 
@@ -321,7 +323,11 @@ class AgentsResource {
   delete(email: string, opts: { permanent?: boolean } = {}): Promise<DeleteAgentResult> {
     return call(() => this.api.deleteAgent(email, "DELETE", opts.permanent));
   }
-  /** Restore an agent from the 30-day trash. Account-scoped credentials only. */
+  /**
+   * Restore an agent from the 30-day trash. Scheduled messages restored before
+   * scheduled_at re-arm; at/after scheduled_at they return live as failed with
+   * submission canceled. Account-scoped credentials only.
+   */
   restore(email: string): Promise<AgentView> {
     return call(() => this.api.restoreAgent(email));
   }
@@ -410,7 +416,11 @@ class MessagesResource {
   delete(email: string, id: string, opts: { permanent?: boolean } = {}): Promise<DeleteMessageResult> {
     return call(() => this.api.deleteMessage(email, id, opts.permanent, "DELETE"));
   }
-  /** Restore a soft-deleted message and resume its retention clock. */
+  /**
+   * Restore a soft-deleted message. A scheduled message restored before
+   * scheduled_at re-arms; at/after scheduled_at it returns live as failed with
+   * submission canceled.
+   */
   restore(email: string, id: string): Promise<MessageView> {
     return call(() => this.api.restoreMessage(email, id));
   }

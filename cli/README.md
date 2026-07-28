@@ -210,8 +210,10 @@ declared stable**.
 A future schedule exits `0` with `status=scheduled`; it is durably queued, so
 do not retry. Direct self-send cannot be scheduled and returns a permanent
 request error unless a review hold takes precedence (held sends drop the
-schedule). Trashing the message prevents submission; restoring it before the
-send time re-arms it.
+schedule). Trashing the message before provider submission starts prevents
+submission (an in-flight submission returns `409 send_in_progress`); restoring it before the
+send time re-arms it, while restoring at or after that time restores the
+message but leaves the send canceled.
 
 ### `e2a messages`
 

@@ -412,6 +412,9 @@ describe("e2a MCP server", () => {
       expect(properties.send_at?.description, `${name}.send_at beta label`).toMatch(
         /beta:.*may change before.*stable/i,
       );
+      expect(properties.send_at?.description, `${name}.send_at restore cutoff`).toMatch(
+        /restoring at or after.*leaves the send canceled/i,
+      );
     }
   });
 

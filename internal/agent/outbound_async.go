@@ -267,6 +267,53 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 	return err
 }
 
+// FinalizeScheduledCancellationTx performs the canonical guarded terminal
+// transition for a scheduled message restored after its cutoff. Authoritative
+// provider-accept evidence wins and is settled as sent; otherwise the
+// cancellation becomes failed with a deterministic email.failed event.
+func (a *outboundSendStore) FinalizeScheduledCancellationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	messageID string,
+	jobID int64,
+	occurredAt time.Time,
+) error {
+	info, providerID, err := a.store.ResolveOutboundProviderAcceptedTx(ctx, tx, messageID)
+	if err != nil {
+		return err
+	}
+	if info != nil {
+		return a.finalizeSentTx(ctx, tx, info, jobID, 0, info.ProviderAcceptedAt, providerID)
+	}
+
+	const detail = "scheduled send canceled because it was restored after scheduled_at"
+	finfo, err := a.store.MarkOutboundFailedTx(ctx, tx, messageID, detail, delivery.FailureSourceLocal)
+	if err != nil {
+		return err
+	}
+	if finfo == nil {
+		// Provider evidence raced the guarded update, or another terminal
+		// transition already won. The reconciler will settle evidence-bearing
+		// rows; never overwrite them with a false failure.
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE messages SET delivery_failure_reason_code=$2 WHERE id=$1`,
+		messageID, string(messagelifecycle.ReasonSubmissionCancelled)); err != nil {
+		return err
+	}
+	transition, err := appendSubmissionTransition(
+		ctx, tx, messageID, jobID, 0, occurredAt,
+		messagelifecycle.ReasonSubmissionCancelled, finfo.Message.DeliveryDetail, "",
+	)
+	if err != nil {
+		return err
+	}
+	e := buildEmailFailedEventFromRow(finfo, finfo.Message.DeliveryDetail, transition)
+	e.ID = webhookpub.DeterministicEventID(messageID, webhookpub.EventEmailFailed)
+	return a.outbox.PublishTx(ctx, tx, e)
+}
+
 // MarkFailed is the guarded terminal write (async-send-contract §3.1): inside
 // one transaction it first checks for provider-accept evidence — an SNS
 // notification that proved the provider accepted this message's submission —
@@ -495,7 +542,7 @@ func NewOutboundDeliverer(sender *outbound.Sender) outboundsend.Deliverer {
 }
 
 func (d *outboundDeliverer) Deliver(ctx context.Context, j *outboundsend.SendJob) outboundsend.DeliverOutcome {
-	providerID, err := d.sender.SubmitOnce(j.MessageID, j.EnvelopeFrom, j.Recipients, j.RawMessage)
+	providerID, err := d.sender.SubmitOnceContext(ctx, j.MessageID, j.EnvelopeFrom, j.Recipients, j.RawMessage)
 	if err != nil {
 		// Classify (design §8): a definitely-permanent 5xx is terminal (JobCancel);
 		// a provider-connection failure (relay unreachable/misconfigured) is an

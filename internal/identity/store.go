@@ -538,6 +538,10 @@ type Store struct {
 	// message is permanently deleted. Soft deletion deliberately does not use
 	// it: restoring a trashed scheduled message before send_at must re-arm it.
 	outboundJobCanceller OutboundJobCanceller
+	// scheduledSendFinalizer records a late restore as a guarded terminal
+	// failure (or settles authoritative provider-accept evidence as sent) and
+	// publishes the matching terminal webhook in the caller's transaction.
+	scheduledSendFinalizer ScheduledSendFinalizer
 }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs
@@ -545,6 +549,13 @@ type Store struct {
 // message/agent/account deletion.
 type OutboundJobCanceller interface {
 	CancelTx(ctx context.Context, tx pgx.Tx, jobID int64) error
+}
+
+// ScheduledSendFinalizer owns the canonical terminal transition for a
+// scheduled send restored after its cutoff. It is implemented by the outbound
+// adapter so identity does not duplicate provider-evidence and webhook logic.
+type ScheduledSendFinalizer interface {
+	FinalizeScheduledCancellationTx(ctx context.Context, tx pgx.Tx, messageID string, jobID int64, occurredAt time.Time) error
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -563,6 +574,12 @@ func (s *Store) SetDKIMCipher(c *DKIMCipher) { s.dkimCipher = c }
 // shared River client before serving requests.
 func (s *Store) SetOutboundJobCanceller(c OutboundJobCanceller) {
 	s.outboundJobCanceller = c
+}
+
+// SetScheduledSendFinalizer wires the canonical outbound terminal transition
+// used when a scheduled message is restored after its cutoff.
+func (s *Store) SetScheduledSendFinalizer(f ScheduledSendFinalizer) {
+	s.scheduledSendFinalizer = f
 }
 
 func (s *Store) cancelOutboundJobIDsTx(ctx context.Context, tx pgx.Tx, jobIDs []int64) error {
@@ -593,6 +610,36 @@ func scanOutboundJobIDs(rows pgx.Rows) ([]int64, error) {
 		}
 	}
 	return jobIDs, rows.Err()
+}
+
+type pastDueScheduledJob struct {
+	messageID string
+	jobID     int64
+}
+
+func (s *Store) cancelPastDueScheduledJobsTx(ctx context.Context, tx pgx.Tx, jobs []pastDueScheduledJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	if s.scheduledSendFinalizer == nil {
+		return errors.New("identity: scheduled send finalizer is not configured")
+	}
+	jobIDs := make([]int64, len(jobs))
+	for i := range jobs {
+		jobIDs[i] = jobs[i].jobID
+	}
+	if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, job := range jobs {
+		if err := s.scheduledSendFinalizer.FinalizeScheduledCancellationTx(
+			ctx, tx, job.messageID, job.jobID, now,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sealDKIM encrypts a DKIM private key for storage when a cipher is configured,
@@ -1757,7 +1804,13 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 			return ErrSendInProgress
 		}
 		jobRows, err := tx.Query(ctx,
-			`SELECT send_job_id FROM messages WHERE agent_id = $1 FOR UPDATE`,
+			`SELECT send_job_id
+			   FROM messages
+			  WHERE agent_id = $1
+			    AND direction = 'outbound'
+			    AND delivery_status IN ('accepted', 'sending')
+			    AND send_job_id IS NOT NULL
+			  FOR UPDATE`,
 			agentID)
 		if err != nil {
 			return err
@@ -1826,6 +1879,51 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 		if deletedAt == nil {
 			return ErrNotInTrash
 		}
+		rows, err := tx.Query(ctx,
+			`SELECT id, send_job_id, scheduled_at
+			   FROM messages
+			  WHERE agent_id = $1
+			    AND deleted_at IS NULL
+			    AND direction = 'outbound'
+			    AND delivery_status = 'accepted'
+			    AND scheduled_at IS NOT NULL
+			    AND send_job_id IS NOT NULL
+			  FOR UPDATE`,
+			agentID)
+		if err != nil {
+			return err
+		}
+		type lockedSchedule struct {
+			job         pastDueScheduledJob
+			scheduledAt time.Time
+		}
+		var locked []lockedSchedule
+		for rows.Next() {
+			var schedule lockedSchedule
+			if err := rows.Scan(&schedule.job.messageID, &schedule.job.jobID, &schedule.scheduledAt); err != nil {
+				rows.Close()
+				return err
+			}
+			locked = append(locked, schedule)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		var cutoff time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&cutoff); err != nil {
+			return err
+		}
+		var pastDue []pastDueScheduledJob
+		for _, schedule := range locked {
+			if !schedule.scheduledAt.After(cutoff) {
+				pastDue = append(pastDue, schedule.job)
+			}
+		}
+		if err := s.cancelPastDueScheduledJobsTx(ctx, tx, pastDue); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE agent_identities SET deleted_at = NULL WHERE id = $1`, agentID); err != nil {
 			return err
@@ -1889,7 +1987,13 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 				return err
 			}
 			jobRows, err := tx.Query(ctx,
-				`SELECT send_job_id FROM messages WHERE agent_id = $1 FOR UPDATE`,
+				`SELECT send_job_id
+				   FROM messages
+				  WHERE agent_id = $1
+				    AND direction = 'outbound'
+				    AND delivery_status IN ('accepted', 'sending')
+				    AND send_job_id IS NOT NULL
+				  FOR UPDATE`,
 				id)
 			if err != nil {
 				return err
@@ -4159,7 +4263,10 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 		var deleted int64
 		err := s.WithTx(ctx, func(tx pgx.Tx) error {
 			rows, err := tx.Query(ctx,
-				`SELECT m.id, m.send_job_id
+				`SELECT m.id,
+				        CASE WHEN m.direction = 'outbound'
+				                   AND m.delivery_status IN ('accepted', 'sending')
+				             THEN m.send_job_id END
 				   FROM messages m
 				  WHERE m.deleted_at IS NOT NULL
 				    AND m.deleted_at <= now() - make_interval(secs => $2)
@@ -4220,8 +4327,12 @@ func (s *Store) SoftDeleteMessage(ctx context.Context, messageID, agentID string
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE messages SET deleted_at = now()
 		  WHERE id = $1 AND agent_id = $2 AND deleted_at IS NULL
-		    AND COALESCE(status, '') <> 'pending_review'`,
-		messageID, agentID,
+		    AND COALESCE(status, '') <> 'pending_review'
+		    AND NOT (
+		      COALESCE(delivery_status, '') = 'sending'
+		      AND COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+		    )`,
+		messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
 	)
 	if err != nil {
 		return err
@@ -4236,19 +4347,44 @@ func (s *Store) SoftDeleteMessage(ctx context.Context, messageID, agentID string
 // inbox. Returns ErrNotInTrash when the message exists but is live,
 // ErrMessageNotFound otherwise.
 func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE messages
-		    SET deleted_at = NULL
-		  WHERE id = $1 AND agent_id = $2 AND deleted_at IS NOT NULL`,
-		messageID, agentID,
-	)
-	if err != nil {
+	return s.WithTx(ctx, func(tx pgx.Tx) error {
+		var deletedAt *time.Time
+		var scheduledAt *time.Time
+		var deliveryStatus string
+		var sendJobID *int64
+		err := tx.QueryRow(ctx,
+			`SELECT deleted_at, scheduled_at,
+			        COALESCE(delivery_status, ''), send_job_id
+			   FROM messages
+			  WHERE id = $1 AND agent_id = $2
+			  FOR UPDATE`,
+			messageID, agentID,
+		).Scan(&deletedAt, &scheduledAt, &deliveryStatus, &sendJobID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMessageNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if deletedAt == nil {
+			return ErrNotInTrash
+		}
+		var cutoff time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&cutoff); err != nil {
+			return err
+		}
+		if scheduledAt != nil && !scheduledAt.After(cutoff) &&
+			deliveryStatus == "accepted" && sendJobID != nil {
+			if err := s.cancelPastDueScheduledJobsTx(ctx, tx, []pastDueScheduledJob{{
+				messageID: messageID,
+				jobID:     *sendJobID,
+			}}); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(ctx, `UPDATE messages SET deleted_at = NULL WHERE id = $1`, messageID)
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return s.classifyTrashMiss(ctx, messageID, agentID, false)
-	}
-	return nil
+	})
 }
 
 // PurgeMessage permanently deletes a message that is already in the trash
@@ -4281,7 +4417,7 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		if deletedAt == nil {
 			return ErrNotInTrash
 		}
-		if sendJobID != nil {
+		if sendJobID != nil && (deliveryStatus == "accepted" || deliveryStatus == "sending") {
 			if err := s.cancelOutboundJobIDsTx(ctx, tx, []int64{*sendJobID}); err != nil {
 				return err
 			}
@@ -4298,17 +4434,24 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 func (s *Store) classifyTrashMiss(ctx context.Context, messageID, agentID string, softDelete bool) error {
 	var deletedAt *time.Time
 	var status string
+	var deliveryStatus string
+	var activeSend bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT deleted_at, COALESCE(status, '') FROM messages
+		`SELECT deleted_at, COALESCE(status, ''), COALESCE(delivery_status, ''),
+		        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+		   FROM messages
 		  WHERE id = $1 AND agent_id = $2`,
-		messageID, agentID,
-	).Scan(&deletedAt, &status)
+		messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
+	).Scan(&deletedAt, &status, &deliveryStatus, &activeSend)
 	if err != nil {
 		return ErrMessageNotFound
 	}
 	if softDelete {
 		if deletedAt != nil {
 			return nil // already in the trash — idempotent
+		}
+		if deliveryStatus == "sending" && activeSend {
+			return ErrSendInProgress
 		}
 		if status == "pending_review" {
 			return ErrMessageHeld

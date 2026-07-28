@@ -278,6 +278,7 @@ func main() {
 		log.Printf("Outbound sending ramp enabled: %d→%d recipients over %d qualified days", cfg.SendingRamp.StartDaily, cfg.SendingRamp.TargetDaily, cfg.SendingRamp.RampDays)
 	}
 	outboundSendStore := agent.NewOutboundSendStore(store, webhookOutbox, usageTracker)
+	store.SetScheduledSendFinalizer(outboundSendStore)
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
 		agent.NewOutboundDeliverer(sender),
