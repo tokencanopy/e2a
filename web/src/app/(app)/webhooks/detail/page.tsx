@@ -16,7 +16,11 @@ import useSWR from "swr";
 import { Chip, Dot } from "@e2a/ui";
 import { PageShell } from "../../../components/loft/PageShell";
 import { getWebhook } from "../../../components/onboarding/api";
-import { describeScope } from "../../../../lib/webhooks";
+import {
+  classifyWebhookHealth,
+  describeScope,
+  HEALTH_LABEL,
+} from "../../../../lib/webhooks";
 import { webhookKey } from "../../../../lib/swrKeys";
 import { DeliveriesFeed } from "./DeliveriesFeed";
 
@@ -76,6 +80,7 @@ function WebhookDetailContent({ id }: { id: string }) {
   }
 
   const scope = describeScope(webhook.filters);
+  const health = classifyWebhookHealth(webhook, new Date());
 
   return (
     <PageShell
@@ -93,10 +98,18 @@ function WebhookDetailContent({ id }: { id: string }) {
       >
         <dl className="grid gap-4 md:grid-cols-3">
           <Field label="Status">
-            <Chip tone={webhook.enabled ? "success" : "warn"}>
-              <Dot tone={webhook.enabled ? "success" : "warn"} />
-              {webhook.enabled ? "enabled" : "disabled"}
+            <Chip tone={health.kind === "active" ? "success" : "warn"}>
+              <Dot tone={health.kind === "active" ? "success" : "warn"} />
+              {HEALTH_LABEL[health.kind]}
             </Chip>
+            {health.lastDeliveredAt ? (
+              <span
+                className="block font-mono text-[11px] mt-1.5"
+                style={{ color: "var(--fg-subtle)" }}
+              >
+                last delivery {health.lastDeliveredAt.toLocaleString()}
+              </span>
+            ) : null}
           </Field>
 
           <Field label="Events">

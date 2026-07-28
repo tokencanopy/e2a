@@ -7,7 +7,13 @@ import {
   AGENT_PROMPTS,
 } from "../../components/AgentPromptCard";
 import Link from "next/link";
-import { describeScope, type WebhookView } from "../../../lib/webhooks";
+import {
+  classifyWebhookHealth,
+  describeScope,
+  HEALTH_LABEL,
+  healthColor,
+  type WebhookView,
+} from "../../../lib/webhooks";
 
 // /webhooks owns the user's webhook lifecycle — create, reveal
 // the one-time signing secret, rotate it, delete. In the /v1 redesign
@@ -574,6 +580,7 @@ function WebhookRow({
 
   const busy = deleting || rotating;
   const scope = describeScope(webhook.filters);
+  const health = classifyWebhookHealth(webhook, new Date());
 
   return (
     <tr
@@ -616,14 +623,19 @@ function WebhookRow({
           </span>
         )}
       </td>
-      <td className="px-4 py-3 font-mono text-[12px]">
-        <span
-          style={{
-            color: webhook.enabled ? "var(--success)" : "var(--fg-subtle)",
-          }}
-        >
-          {webhook.enabled ? "enabled" : "disabled"}
+      {/* Status carries the health signal rather than just the enabled flag:
+          "enabled" alone is true of an endpoint that has silently never
+          delivered, or that e2a switched off. Derived from fields already on
+          this response — no per-row probe. */}
+      <td className="px-4 py-3 font-mono text-[11px]">
+        <span style={{ color: healthColor(health.kind) }}>
+          {HEALTH_LABEL[health.kind]}
         </span>
+        {health.lastDeliveredAt ? (
+          <span className="block" style={{ color: "var(--fg-subtle)" }}>
+            last {health.lastDeliveredAt.toLocaleDateString()}
+          </span>
+        ) : null}
       </td>
       <td
         className="px-4 py-3 font-mono text-[12px]"

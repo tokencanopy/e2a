@@ -1,4 +1,77 @@
-import { classifyDelivery, describeScope } from "./webhooks";
+import {
+  classifyDelivery,
+  classifyWebhookHealth,
+  describeScope,
+} from "./webhooks";
+
+describe("classifyWebhookHealth", () => {
+  const NOW = new Date("2026-07-27T12:00:00Z");
+  const base = {
+    id: "wh_1",
+    url: "https://x.test/hook",
+    enabled: true,
+    created_at: "2026-07-01T00:00:00Z",
+  };
+
+  // e2a disabling an endpoint on the user's behalf is the loudest thing this
+  // signal can say, and it is not the same fact as a user switching it off.
+  it("reports auto-disabled ahead of a plain disabled flag", () => {
+    expect(
+      classifyWebhookHealth(
+        { ...base, enabled: false, auto_disabled_at: "2026-07-20T00:00:00Z" },
+        NOW,
+      ).kind,
+    ).toBe("auto_disabled");
+  });
+
+  it("reports a user-disabled subscription", () => {
+    expect(classifyWebhookHealth({ ...base, enabled: false }, NOW).kind).toBe(
+      "disabled",
+    );
+  });
+
+  // A subscription that has never fired usually means the scope matches
+  // nothing, or nothing has happened yet — different from having gone quiet.
+  it("distinguishes never-delivered from stale", () => {
+    expect(classifyWebhookHealth(base, NOW).kind).toBe("never_delivered");
+  });
+
+  it("reports a subscription delivering inside the window as active", () => {
+    expect(
+      classifyWebhookHealth(
+        { ...base, last_delivered_at: "2026-07-26T12:00:00Z" },
+        NOW,
+      ).kind,
+    ).toBe("active");
+  });
+
+  it("reports a subscription quiet for longer than the window as stale", () => {
+    expect(
+      classifyWebhookHealth(
+        { ...base, last_delivered_at: "2026-07-10T12:00:00Z" },
+        NOW,
+      ).kind,
+    ).toBe("stale");
+  });
+
+  // 7 days exactly is still inside the window — the boundary should not flip
+  // a healthy endpoint to stale a moment early.
+  it("treats the window boundary as active", () => {
+    expect(
+      classifyWebhookHealth(
+        { ...base, last_delivered_at: "2026-07-20T12:00:00Z" },
+        NOW,
+      ).kind,
+    ).toBe("active");
+  });
+
+  it("treats an unparseable last_delivered_at as never delivered", () => {
+    expect(
+      classifyWebhookHealth({ ...base, last_delivered_at: "nonsense" }, NOW)
+        .kind,
+    ).toBe("never_delivered");
+  });
+});
 
 describe("classifyDelivery", () => {
   const NOW = new Date("2026-07-27T12:00:00Z");

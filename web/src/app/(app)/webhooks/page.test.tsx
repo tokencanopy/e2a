@@ -92,9 +92,68 @@ describe("Webhooks page", () => {
       expect(screen.getByText(webhook.url)).toBeInTheDocument();
     });
     expect(screen.getByText("email.received")).toBeInTheDocument();
-    expect(screen.getByText("enabled")).toBeInTheDocument();
+    // The Status column reports health, not the raw enabled flag: an enabled
+    // endpoint that has never delivered is not a healthy one. This fixture
+    // has no last_delivered_at.
+    expect(screen.getByText("never delivered")).toBeInTheDocument();
     // No secret column / value in the list view.
     expect(document.body.innerHTML).not.toContain("signing_secret");
+  });
+
+  // e2a switching an endpoint off is louder than the user doing it, and it is
+  // the state most likely to be silently losing events.
+  it("calls out an auto-disabled subscription", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              enabled: false,
+              auto_disabled_at: "2026-07-20T00:00:00Z",
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/auto-disabled/i)).toBeInTheDocument();
+    });
+  });
+
+  it("reports a subscription that has never delivered", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/never delivered/i)).toBeInTheDocument();
+    });
+  });
+
+  // Health is derived from fields already on the list response. If a future
+  // change starts probing per row, this catches it: N webhooks must still
+  // cost one request.
+  it("derives health without issuing a request per row", async () => {
+    const fetchMock = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            { ...webhook, id: "wh_a", url: "https://a.test/h" },
+            { ...webhook, id: "wh_b", url: "https://b.test/h" },
+            { ...webhook, id: "wh_c", url: "https://c.test/h" },
+          ],
+        }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText("https://c.test/h")).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("links each row to that webhook's detail page", async () => {

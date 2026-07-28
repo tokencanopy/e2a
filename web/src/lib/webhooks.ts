@@ -94,6 +94,91 @@ export function classifyDelivery(
   }
 }
 
+// How long a subscription can go without delivering before the list calls it
+// quiet. 7 days rather than 24h: a low-volume inbox can legitimately see no
+// traffic for a day, and a signal that cries wolf daily gets ignored.
+export const HEALTH_STALE_AFTER_DAYS = 7;
+
+// Health derived ONLY from fields already present on the webhook list
+// response. A real success rate needs a server-side rollup that does not
+// exist yet; probing the deliveries endpoint per row to synthesize one would
+// add a request per webhook on every render and poll — the same N+1 shape as
+// the per-agent unread probe. A weaker honest signal at zero cost beats an
+// expensive one.
+export type WebhookHealthKind =
+  | "auto_disabled"
+  | "disabled"
+  | "never_delivered"
+  | "stale"
+  | "active";
+
+export type WebhookHealth = {
+  kind: WebhookHealthKind;
+  lastDeliveredAt: Date | null;
+};
+
+export function classifyWebhookHealth(
+  webhook: Pick<
+    WebhookView,
+    "enabled" | "auto_disabled_at" | "last_delivered_at"
+  >,
+  now: Date,
+): WebhookHealth {
+  const parsed = webhook.last_delivered_at
+    ? new Date(webhook.last_delivered_at)
+    : null;
+  const lastDeliveredAt =
+    parsed !== null && !Number.isNaN(parsed.getTime()) ? parsed : null;
+
+  // Checked before `enabled`: e2a switching an endpoint off on the user's
+  // behalf is a different, louder fact than the user switching it off, and
+  // the auto-disabled row also has enabled=false.
+  if (webhook.auto_disabled_at) {
+    return { kind: "auto_disabled", lastDeliveredAt };
+  }
+  if (!webhook.enabled) {
+    return { kind: "disabled", lastDeliveredAt };
+  }
+  if (lastDeliveredAt === null) {
+    return { kind: "never_delivered", lastDeliveredAt };
+  }
+
+  const ageMs = now.getTime() - lastDeliveredAt.getTime();
+  const windowMs = HEALTH_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+  return {
+    kind: ageMs > windowMs ? "stale" : "active",
+    lastDeliveredAt,
+  };
+}
+
+// Label and tone live beside the classifier, not in each page: the list and
+// the detail view must not report the same state in different words. The
+// stale label is derived from the window constant so the two cannot drift.
+export const HEALTH_LABEL: Record<WebhookHealthKind, string> = {
+  auto_disabled: "auto-disabled",
+  disabled: "disabled",
+  never_delivered: "never delivered",
+  stale: `no deliveries in ${HEALTH_STALE_AFTER_DAYS}d`,
+  active: "delivering",
+};
+
+// CSS custom-property names, resolved by the consuming component.
+export function healthColor(kind: WebhookHealthKind): string {
+  switch (kind) {
+    case "active":
+      return "var(--success)";
+    // e2a turned this off on the user's behalf — the state most likely to be
+    // silently dropping events, so it gets the loudest tone.
+    case "auto_disabled":
+      return "var(--danger-strong)";
+    case "stale":
+    case "never_delivered":
+      return "var(--warn-strong)";
+    default:
+      return "var(--fg-subtle)";
+  }
+}
+
 export type WebhookScope =
   | { scoped: false }
   | { scoped: true; parts: string[] };
