@@ -122,6 +122,42 @@ func TestOversizedThreadingMessageIDIsOmitted(t *testing.T) {
 	}
 }
 
+func TestOversizedUnicodeReplyToIsEncodedAndFolded(t *testing.T) {
+	displayName := strings.Repeat("😀", 300)
+	replyTo := `"` + displayName + `" <a@b.test>`
+	raw, err := ComposeMessage(
+		"agent@bot.example.com",
+		[]string{"alice@example.test"},
+		nil,
+		"hello",
+		"body",
+		"text/plain",
+		"",
+		nil,
+		"relay.e2a.dev",
+		replyTo,
+		"",
+	)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if got := longestHeaderLine(t, raw); got > maxHeaderOctets {
+		t.Fatalf("longest header line = %d octets, exceeds the %d limit", got, maxHeaderOctets)
+	}
+
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	addr, err := mail.ParseAddress(msg.Header.Get("Reply-To"))
+	if err != nil {
+		t.Fatalf("parse Reply-To: %v", err)
+	}
+	if addr.Name != displayName || addr.Address != "a@b.test" {
+		t.Fatalf("Reply-To round trip = %#v, want name preserved at a@b.test", addr)
+	}
+}
+
 // Folding must be transparent: unfolding has to recover the exact value.
 func TestFoldedHeadersRoundTrip(t *testing.T) {
 	longSubject := strings.Repeat("これはとても長い件名です", 25)

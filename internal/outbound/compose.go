@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"mime/quotedprintable"
+	"net/mail"
 	"net/textproto"
 	"strings"
 	"time"
@@ -453,10 +454,38 @@ const foldTarget = 76
 
 func headerWriter(buf *strings.Builder) func(string, string) {
 	return func(key, value string) {
-		line := textproto.CanonicalMIMEHeaderKey(key) + ": " + sanitizeHeaderValue(value)
+		key = textproto.CanonicalMIMEHeaderKey(key)
+		value = sanitizeHeaderValue(value)
+		line := key + ": " + value
+		if len(line) > maxHeaderOctets {
+			value = encodeOversizedAddressHeader(key, value)
+			line = key + ": " + value
+		}
 		buf.WriteString(foldHeaderLine(line))
 		buf.WriteString("\r\n")
 	}
+}
+
+// encodeOversizedAddressHeader turns a long raw Unicode display name into
+// RFC 2047 encoded words. Encoded words introduce legal spaces between
+// indivisible chunks, giving foldHeaderLine safe break points without folding
+// inside a quoted string. Short address headers retain their existing wire
+// representation.
+func encodeOversizedAddressHeader(key, value string) string {
+	switch key {
+	case "From", "To", "Cc", "Reply-To":
+	default:
+		return value
+	}
+	addrs, err := mail.ParseAddressList(value)
+	if err != nil {
+		return value
+	}
+	encoded := make([]string, len(addrs))
+	for i, addr := range addrs {
+		encoded[i] = addr.String()
+	}
+	return strings.Join(encoded, ", ")
 }
 
 // foldHeaderLine breaks an over-length header field into continuation
