@@ -251,10 +251,10 @@ func (f *fakeDKIMLookup) GetDKIMKeyInternal(ctx context.Context, domain string) 
 	return f.get(ctx, domain)
 }
 
-// validTestMessage is an RFC 5322 message stub that the DKIM signer
-// will accept. From / Date / Message-ID headers are present (the
-// minimum set our signer covers). Body is short so signature
-// canonicalization is cheap to inspect when debugging a failure.
+// validTestMessage is an RFC 5322 message stub that the DKIM signer accepts.
+// It includes a composer-shaped Date (intentionally unsigned because SES
+// replaces it) and a Message-ID (signed when present). The body is short so
+// signature canonicalization is cheap to inspect when debugging a failure.
 const validTestMessage = "From: bot@example.com\r\n" +
 	"To: alice@elsewhere.test\r\n" +
 	"Subject: hi\r\n" +
