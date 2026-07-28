@@ -2,10 +2,16 @@ package outbound
 
 import (
 	"bytes"
+	"net/mail"
 	"strings"
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/dkim"
+)
+
+const (
+	sesDeliveryDate      = "Tue, 28 Jul 2026 05:00:00 +0000"
+	sesDeliveryMessageID = "<010f019fa635d175-0000@us-east-2.amazonses.com>"
 )
 
 // The production failure this reproduces, and the reason it needs both the
@@ -41,8 +47,8 @@ func sesDeliver(t *testing.T, raw []byte) []byte {
 	wrapped, _ := mtaHardWrap(t, normalised)
 	// SES replaces Date and assigns Message-ID. The composer deliberately sends
 	// no Message-ID, but it does send Date so non-SES relays receive valid mail.
-	delivered := replaceHeaderForDelivery(t, wrapped, "Date", "Tue, 28 Jul 2026 05:00:00 +0000")
-	return append([]byte("Message-ID: <010f019fa635d175-0000@us-east-2.amazonses.com>\r\n"), delivered...)
+	delivered := replaceHeaderForDelivery(t, wrapped, "Date", sesDeliveryDate)
+	return append([]byte("Message-ID: "+sesDeliveryMessageID+"\r\n"), delivered...)
 }
 
 func replaceHeaderForDelivery(t *testing.T, raw []byte, name, value string) []byte {
@@ -67,6 +73,48 @@ func replaceHeaderForDelivery(t *testing.T, raw []byte, name, value string) []by
 	out = append(out, replacement...)
 	out = append(out, raw[end:]...)
 	return out
+}
+
+func parsedHeaders(t *testing.T, raw []byte) mail.Header {
+	t.Helper()
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("parse message headers: %v", err)
+	}
+	return msg.Header
+}
+
+func TestSESDeliverAppliesModeledMutations(t *testing.T) {
+	const submittedDate = "Fri, 22 May 2026 12:00:00 +0000"
+	raw := []byte("From: bot@example.com\r\n" +
+		"To: alice@elsewhere.test\r\n" +
+		"Date: " + submittedDate + "\r\n\r\n" +
+		"first bare-LF line\n" + strings.Repeat("a", 1500) + "\nlast line\n")
+
+	delivered := sesDeliver(t, raw)
+	headers := parsedHeaders(t, delivered)
+	if got := headers.Get("Date"); got != sesDeliveryDate {
+		t.Errorf("delivered Date = %q, want SES value %q", got, sesDeliveryDate)
+	}
+	if got := headers.Get("Message-ID"); got != sesDeliveryMessageID {
+		t.Errorf("delivered Message-ID = %q, want SES value %q", got, sesDeliveryMessageID)
+	}
+
+	separator := bytes.Index(delivered, []byte("\r\n\r\n"))
+	if separator < 0 {
+		t.Fatal("delivered message has no header/body separator")
+	}
+	body := delivered[separator+4:]
+	for i, b := range body {
+		if b == '\n' && (i == 0 || body[i-1] != '\r') {
+			t.Fatalf("body still contains a bare LF at byte %d", i)
+		}
+	}
+	for i, line := range bytes.Split(body, []byte("\r\n")) {
+		if len(line) > maxLineOctets {
+			t.Errorf("delivered body line %d is %d octets, exceeds %d", i, len(line), maxLineOctets)
+		}
+	}
 }
 
 func TestSignatureSurvivesFullSESDelivery(t *testing.T) {
@@ -120,8 +168,12 @@ func TestSignatureSurvivesFullSESDelivery(t *testing.T) {
 
 			// Preconditions: both fixes must actually be in effect, so a
 			// pass cannot come from the mutations being inapplicable.
-			if bytes.Contains(bytes.ToLower(signed), []byte("message-id")) {
-				t.Fatal("composer emitted a Message-ID; the SES-stamp scenario no longer applies")
+			headers := parsedHeaders(t, signed)
+			if got := headers.Get("Message-ID"); got != "" {
+				t.Fatalf("composer emitted Message-ID %q; the SES-stamp scenario no longer applies", got)
+			}
+			if got := headers.Get("Date"); got == "" {
+				t.Fatal("composer emitted no Date for SES to replace")
 			}
 			if err := verifyDKIM(t, signed, kp); err != nil {
 				t.Fatalf("signature invalid before delivery: %v", err)
@@ -134,9 +186,9 @@ func TestSignatureSurvivesFullSESDelivery(t *testing.T) {
 	}
 }
 
-// Each half of the fix must be load-bearing. If either mutation stops
-// breaking an unprotected message, the test above has gone inert and
-// would keep passing through a regression.
+// The header/body hazards must demonstrably break an unprotected signature.
+// TestSESDeliverAppliesModeledMutations separately pins that sesDeliver invokes
+// every modeled transformation rather than silently becoming a no-op.
 func TestSESDeliveryMutationsAreLoadBearing(t *testing.T) {
 	kp, err := dkim.GenerateKeypair()
 	if err != nil {
