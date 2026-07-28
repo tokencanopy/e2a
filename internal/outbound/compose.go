@@ -10,6 +10,7 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // NOTE: Message-ID is intentionally omitted from composed messages.
@@ -194,7 +195,7 @@ func ComposeMessageWithAttachments(from string, to []string, cc []string, subjec
 	for _, att := range attachments {
 		buf.WriteString("--" + mixedBoundary + "\r\n")
 		buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
-		buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=%q\r\n", att.Filename))
+		buf.WriteString("Content-Disposition: " + attachmentDisposition(att.Filename) + "\r\n")
 		buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
 
 		// att.Data is already base64-encoded from the API request
@@ -346,6 +347,35 @@ func writeBodyPart(buf *strings.Builder, contentType, body string) {
 	buf.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n\r\n")
 	buf.WriteString(encoded)
 	buf.WriteString("\r\n")
+}
+
+// attachmentDisposition renders the Content-Disposition header value for an
+// attachment filename.
+//
+// MIME parameter values are ASCII-only. A non-ASCII filename must be
+// encoded per RFC 2231 as filename*=utf-8”<percent-encoded>, otherwise the
+// raw UTF-8 bytes land in a header field — an 8-bit value in a place that
+// only permits 7-bit, which receivers are free to mangle or reject.
+// mime.FormatMediaType applies that encoding, and quotes or escapes values
+// that merely contain specials, so it handles both cases.
+//
+// It returns "" for a value it cannot represent at all; fall back to the
+// historical quoted form rather than emitting a part with no disposition,
+// which would change how the attachment is presented. Callers have already
+// rejected CR/LF in the filename, so the fallback cannot inject headers.
+//
+// Pure-ASCII names keep the historical %q form so the common case stays
+// byte-identical on the wire. FormatMediaType would emit them unquoted —
+// equally valid, but a gratuitous change to every message with an
+// attachment when only the non-ASCII case is broken.
+func attachmentDisposition(filename string) string {
+	nonASCII := strings.IndexFunc(filename, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
+	if nonASCII {
+		if d := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); d != "" {
+			return d
+		}
+	}
+	return fmt.Sprintf("attachment; filename=%q", filename)
 }
 
 func headerWriter(buf *strings.Builder) func(string, string) {
