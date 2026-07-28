@@ -24,6 +24,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
@@ -409,6 +410,11 @@ func main() {
 		oauthPruner = oauthStorage
 	}
 	cleanupJanitor := janitor.New(store, deliveryStore, subscriberStore, webhookOutbox, oauthPruner, idempotencyStore, metrics)
+	// contact.due wake-up: its own River periodic on the maintenance lane, not
+	// part of the janitor. It is a scheduled product event with user-visible
+	// latency, not a prune, so it gets its own interval and metrics.
+	contactDueSweeper := contactdue.NewSweeper(store, contactdue.NewOutboxPublisher(outboxPublisher), metrics)
+	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 
 	if len(registrars) > 0 {

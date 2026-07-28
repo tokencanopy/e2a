@@ -605,6 +605,7 @@ describe("E2AClient", () => {
     ["agents", () => client.agents.list(), [{ email: "a@x.dev" }, { email: "b@x.dev" }], (r: { email: string }) => r.email],
     ["domains", () => client.domains.list(), [{ domain: "a.dev" }, { domain: "b.dev" }], (r: { domain: string }) => r.domain],
     ["webhooks", () => client.webhooks.list(), [{ id: "wh_1" }, { id: "wh_2" }], (r: { id: string }) => r.id],
+    ["contacts", () => client.contacts.list(), [{ address: "a@x.vc" }, { address: "b@x.vc" }], (r: { address: string }) => r.address],
     ["templates", () => client.templates.list(), [{ id: "t_1", name: "A" }, { id: "t_2", name: "B" }], (r: { id: string }) => r.id],
     ["templates.listStarters", () => client.templates.listStarters(), [{ alias: "welcome" }, { alias: "receipt" }], (r: { alias: string }) => r.alias],
     ["account.apiKeys", () => client.account.apiKeys.list(), [{ id: "key_1" }, { id: "key_2" }], (r: { id: string }) => r.id],
@@ -618,6 +619,148 @@ describe("E2AClient", () => {
     expect(items.map((it) => keyOf(it as never))).toEqual([keyOf(rows[0] as never), keyOf(rows[1] as never)]);
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("cursor=cur_2");
+  });
+
+  // ── Contacts (beta) ─────────────────────────────────────────────
+  // Contacts are account-level identity. The address is the resource key, so
+  // these pin that it is URL-encoded on the wire and that the SDK supplies the
+  // ?confirm=DELETE guard the raw API requires.
+
+  it("contacts.get URL-encodes the address in the path", async () => {
+    globalThis.fetch = mockFetch(200, {
+      address: "partner@fund.vc", display_name: "A. Partner",
+      metadata: { fund: "Example Capital" }, source: "import",
+      import_batch_id: "imp_1",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    const c = await client.contacts.get("partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("GET");
+    // The @ must not reach the path raw — this is the encoded-routing contract.
+    expect(url).toContain("/v1/contacts/partner%40fund.vc");
+    expect(c.displayName).toBe("A. Partner");
+    expect(c.importBatchId).toBe("imp_1");
+  });
+
+  it("contacts.create POSTs the body and returns the canonicalized address", async () => {
+    globalThis.fetch = mockFetch(201, {
+      address: "partner@fund.vc", display_name: "A. Partner", metadata: {},
+      source: "manual",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    const c = await client.contacts.create({ address: "A. Partner <Partner@Fund.VC>", displayName: "A. Partner" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(url).toContain("/v1/contacts");
+    expect(JSON.parse(init.body as string)).toEqual({
+      address: "A. Partner <Partner@Fund.VC>", display_name: "A. Partner",
+    });
+    expect(c.address).toBe("partner@fund.vc");
+  });
+
+  it("contacts.update PATCHes only the fields given, so metadata survives", async () => {
+    globalThis.fetch = mockFetch(200, {
+      address: "partner@fund.vc", display_name: "Renamed",
+      metadata: { fund: "Example Capital" }, source: "import",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-02T00:00:00Z",
+    });
+    const c = await client.contacts.update("partner@fund.vc", { displayName: "Renamed" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("PATCH");
+    expect(url).toContain("/v1/contacts/partner%40fund.vc");
+    // Only the caller's field reaches the wire — an omitted metadata key is
+    // what makes the server leave the stored value alone.
+    expect(JSON.parse(init.body as string)).toEqual({ display_name: "Renamed" });
+    expect(c.metadata).toEqual({ fund: "Example Capital" });
+  });
+
+  it("contacts.delete supplies confirm=DELETE so callers are not burdened", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true, address: "partner@fund.vc" });
+    const res = await client.contacts.delete("partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.deleted).toBe(true);
+  });
+
+  it("contacts.import returns per-row results including suppressed marking", async () => {
+    globalThis.fetch = mockFetch(200, {
+      batch_id: "imp_9", created: 1, updated: 0, skipped: 0, failed: 1,
+      results: [
+        { index: 0, address: "ok@fund.vc", status: "created", suppressed: true },
+        { index: 1, status: "failed", code: "invalid_recipient", message: "bad" },
+      ],
+    });
+    const res = await client.contacts.import({
+      contacts: [{ address: "ok@fund.vc" }, { address: "nope" }],
+    });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(url).toContain("/v1/contacts/import");
+    expect(res.batchId).toBe("imp_9");
+    // A suppressed row is still reported as created — marked, never dropped.
+    expect(res.results[0].status).toBe("created");
+    expect(res.results[0].suppressed).toBe(true);
+    expect(res.results[1].code).toBe("invalid_recipient");
+  });
+
+  it("contacts.deleteImport reverses a batch with the confirm guard", async () => {
+    globalThis.fetch = mockFetch(200, {
+      deleted: true, batch_id: "imp_9", contacts_deleted: 2, contacts_retained: 0,
+    });
+    const res = await client.contacts.deleteImport("imp_9");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("/v1/contacts/imports/imp_9");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.contactsDeleted).toBe(2);
+  });
+
+  it("contacts.outreach builds the follow-up sweep query", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    // AutoPager is an async iterable; draining it issues the request.
+    for await (const _ of client.contacts.outreach("raise@example.com", {
+      replied: false,
+      nextActionBefore: new Date("2026-07-29T09:00:00Z"),
+      lastOutboundBefore: new Date("2026-07-24T09:00:00Z"),
+    })) {
+      // no rows in this fixture
+    }
+    const { url } = lastCall();
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts");
+    expect(url).toContain("replied=false");
+    // last_outbound_before is what makes a lost state-write safe — without it a
+    // failed update can send the same person twice.
+    expect(url).toContain("last_outbound_before=");
+    expect(url).toContain("next_action_before=");
+  });
+
+  it("contacts.setOutreach PUTs only the fields given", async () => {
+    globalThis.fetch = mockFetch(200, {
+      agent_email: "raise@example.com", address: "partner@fund.vc",
+      stage: "touch2", next_action_at: null, metadata: {},
+      replied: false, suppressed: false,
+      first_outbound_at: null, last_outbound_at: null, last_inbound_at: null,
+      outbound_count: 0, inbound_count: 0,
+      contact: { address: "partner@fund.vc", display_name: "", metadata: {} },
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    await client.contacts.setOutreach("raise@example.com", "partner@fund.vc", { stage: "touch2" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("PUT");
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts/partner%40fund.vc");
+    // Only the caller's field reaches the wire — omitting next_action_at is
+    // what tells the server to leave the schedule alone.
+    expect(JSON.parse(init.body as string)).toEqual({ stage: "touch2" });
+  });
+
+  it("contacts.deleteOutreach un-enrols with the confirm guard", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true, address: "partner@fund.vc" });
+    const res = await client.contacts.deleteOutreach("raise@example.com", "partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.deleted).toBe(true);
   });
 
   // ── Templates (beta) ────────────────────────────────────────────

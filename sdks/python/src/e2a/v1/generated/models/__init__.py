@@ -26,12 +26,18 @@ from e2a.v1.generated.models.attachment import Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView
 from e2a.v1.generated.models.authentication import Authentication
+from e2a.v1.generated.models.contact_engagement_view import ContactEngagementView
+from e2a.v1.generated.models.contact_import_item_result import ContactImportItemResult
+from e2a.v1.generated.models.contact_import_result import ContactImportResult
+from e2a.v1.generated.models.contact_import_row import ContactImportRow
+from e2a.v1.generated.models.contact_view import ContactView
 from e2a.v1.generated.models.conversation_detail_view import ConversationDetailView
 from e2a.v1.generated.models.conversation_summary_view import ConversationSummaryView
 from e2a.v1.generated.models.create_api_key_request import CreateAPIKeyRequest
 from e2a.v1.generated.models.create_api_key_response import CreateAPIKeyResponse
 from e2a.v1.generated.models.create_agent_request import CreateAgentRequest
 from e2a.v1.generated.models.create_agent_suppression_request import CreateAgentSuppressionRequest
+from e2a.v1.generated.models.create_contact_request import CreateContactRequest
 from e2a.v1.generated.models.create_template_request import CreateTemplateRequest
 from e2a.v1.generated.models.create_webhook_request import CreateWebhookRequest
 from e2a.v1.generated.models.create_webhook_response import CreateWebhookResponse
@@ -40,7 +46,10 @@ from e2a.v1.generated.models.dmarc_result import DMARCResult
 from e2a.v1.generated.models.dns_record import DNSRecord
 from e2a.v1.generated.models.delete_agent_result import DeleteAgentResult
 from e2a.v1.generated.models.delete_api_key_result import DeleteApiKeyResult
+from e2a.v1.generated.models.delete_contact_result import DeleteContactResult
 from e2a.v1.generated.models.delete_domain_result import DeleteDomainResult
+from e2a.v1.generated.models.delete_engagement_result import DeleteEngagementResult
+from e2a.v1.generated.models.delete_import_batch_result import DeleteImportBatchResult
 from e2a.v1.generated.models.delete_message_result import DeleteMessageResult
 from e2a.v1.generated.models.delete_suppression_result import DeleteSuppressionResult
 from e2a.v1.generated.models.delete_template_result import DeleteTemplateResult
@@ -60,6 +69,7 @@ from e2a.v1.generated.models.email_delivered_data import EmailDeliveredData
 from e2a.v1.generated.models.email_failed_data import EmailFailedData
 from e2a.v1.generated.models.email_received_data import EmailReceivedData
 from e2a.v1.generated.models.email_sent_data import EmailSentData
+from e2a.v1.generated.models.embedded_contact_view import EmbeddedContactView
 from e2a.v1.generated.models.error_body import ErrorBody
 from e2a.v1.generated.models.error_envelope import ErrorEnvelope
 from e2a.v1.generated.models.event_envelope import EventEnvelope
@@ -67,6 +77,7 @@ from e2a.v1.generated.models.event_view import EventView
 from e2a.v1.generated.models.field_error import FieldError
 from e2a.v1.generated.models.forward_request import ForwardRequest
 from e2a.v1.generated.models.hold_reason_view import HoldReasonView
+from e2a.v1.generated.models.import_contacts_request import ImportContactsRequest
 from e2a.v1.generated.models.limit_exceeded_details import LimitExceededDetails
 from e2a.v1.generated.models.limit_exceeded_envelope import LimitExceededEnvelope
 from e2a.v1.generated.models.limit_exceeded_error_body import LimitExceededErrorBody
@@ -82,6 +93,8 @@ from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView
 from e2a.v1.generated.models.page_agent_view import PageAgentView
+from e2a.v1.generated.models.page_contact_engagement_view import PageContactEngagementView
+from e2a.v1.generated.models.page_contact_view import PageContactView
 from e2a.v1.generated.models.page_conversation_summary_view import PageConversationSummaryView
 from e2a.v1.generated.models.page_domain_view import PageDomainView
 from e2a.v1.generated.models.page_event_view import PageEventView
@@ -138,10 +151,12 @@ from e2a.v1.generated.models.threat_category_view import ThreatCategoryView
 from e2a.v1.generated.models.too_many_recipients_details import TooManyRecipientsDetails
 from e2a.v1.generated.models.unsubscribe_options import UnsubscribeOptions
 from e2a.v1.generated.models.update_agent_request import UpdateAgentRequest
+from e2a.v1.generated.models.update_contact_request import UpdateContactRequest
 from e2a.v1.generated.models.update_message_request import UpdateMessageRequest
 from e2a.v1.generated.models.update_message_result_view import UpdateMessageResultView
 from e2a.v1.generated.models.update_template_request import UpdateTemplateRequest
 from e2a.v1.generated.models.update_webhook_request import UpdateWebhookRequest
+from e2a.v1.generated.models.upsert_engagement_request import UpsertEngagementRequest
 from e2a.v1.generated.models.usage_event_entry import UsageEventEntry
 from e2a.v1.generated.models.user_export import UserExport
 from e2a.v1.generated.models.user_export_user import UserExportUser

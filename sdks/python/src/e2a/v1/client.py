@@ -26,6 +26,7 @@ from .generated.api.messages_api import MessagesApi
 from .generated.api.meta_api import MetaApi
 from .generated.api.reviews_api import ReviewsApi
 from .generated.api.templates_api import TemplatesApi
+from .generated.api.contacts_api import ContactsApi
 from .generated.api.webhooks_api import WebhooksApi
 from .generated.api_client import ApiClient
 from .generated.configuration import Configuration
@@ -80,6 +81,16 @@ from .generated.models import (
     ProtectionConfigView,
     ProtectionConfigRequest,
     CreateTemplateRequest,
+    ContactView,
+    CreateContactRequest,
+    UpdateContactRequest,
+    DeleteContactResult,
+    ImportContactsRequest,
+    ContactImportResult,
+    DeleteImportBatchResult,
+    ContactEngagementView,
+    UpsertEngagementRequest,
+    DeleteEngagementResult,
     UpdateAgentRequest,
     UpdateMessageRequest,
     UpdateMessageResultView,
@@ -267,6 +278,7 @@ class AsyncE2AClient:
         self.account = AccountResource(AccountApi(self._api_client), self)
         self.reviews = ReviewsResource(ReviewsApi(self._api_client), self)
         self.templates = TemplatesResource(TemplatesApi(self._api_client), self)
+        self.contacts = ContactsResource(ContactsApi(self._api_client), self)
         self._meta = MetaApi(self._api_client)
 
     # ── lifecycle ───────────────────────────────────────────────────
@@ -682,6 +694,145 @@ class ReviewsResource:
         req = _coerce(RejectRequest, body)
         return await self._c._write_unsafe(
             lambda h: self._api.reject_review(message_id, req, _headers=h)
+        )
+
+
+class ContactsResource:
+    """The people this account corresponds with (beta — shapes may change before
+    contacts are declared stable). Account scope only.
+
+    Contact identity is account-level on purpose: the same person may be worked
+    by more than one agent, and duplicating them per agent would make
+    "has anyone on our side already contacted this fund?" unanswerable."""
+
+    def __init__(self, api: ContactsApi, client: AsyncE2AClient) -> None:
+        self._api = api
+        self._c = client
+
+    def list(
+        self,
+        *,
+        source: Optional[str] = None,
+        import_batch_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> AutoPager[ContactView]:
+        """List contacts, newest first. Optionally narrow by provenance
+        (``source``) or to a single upload (``import_batch_id``)."""
+
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_contacts(
+                    source=source, import_batch_id=import_batch_id,
+                    cursor=cursor, limit=limit, _headers=h,
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def get(self, address: str) -> ContactView:
+        """Fetch one contact. ``address`` may be bare or a display-name form
+        ("A. Partner <partner@fund.vc>") — both resolve to the same contact."""
+        return await self._c._read(lambda h: self._api.get_contact(address, _headers=h))
+
+    async def create(self, body: Body) -> ContactView:
+        """Create one contact. The address is canonicalized, so creating the same
+        person twice in any form is a conflict rather than a duplicate row."""
+        req = _coerce(CreateContactRequest, body)
+        return await self._c._write_unsafe(lambda h: self._api.create_contact(req, _headers=h))
+
+    async def update(self, address: str, patch: Body) -> ContactView:
+        """Partial update; omitted fields are left unchanged, so editing the name
+        never erases metadata. Address and provenance are immutable."""
+        req = _coerce(UpdateContactRequest, patch)
+        return await self._c._write_idempotent(
+            lambda h: self._api.update_contact(address, req, _headers=h)
+        )
+
+    async def delete(self, address: str) -> DeleteContactResult:
+        """Remove a contact. Suppressions are untouched — consent outlives the
+        record, so this never makes a blocked address sendable again."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_contact(address, confirm="DELETE", _headers=h)
+        )
+
+    async def import_(self, body: Body) -> ContactImportResult:
+        """Import up to 1000 contacts in one request. Every submitted row gets its
+        own result, so one bad line never rejects the upload. Import is inert — it
+        records identity and sends nothing. A row that omits a field keeps the
+        stored value, so a narrower re-upload does not erase columns it no longer
+        carries."""
+        req = _coerce(ImportContactsRequest, body)
+        return await self._c._write_unsafe(lambda h: self._api.import_contacts(req, _headers=h))
+
+    async def delete_import(self, batch_id: str) -> DeleteImportBatchResult:
+        """Reverse an import, removing the contacts it created."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
+        )
+
+    # ── Per-agent outreach ───────────────────────────────────────────────────
+    # Engagements are one agent's relationship with a contact. Unlike the
+    # account-level methods above, an agent-scoped credential may drive these
+    # for its own agent — that is the outreach loop.
+
+    def outreach(
+        self,
+        email: str,
+        *,
+        stage: Optional[str] = None,
+        replied: Optional[bool] = None,
+        suppressed: Optional[bool] = None,
+        next_action_before: Optional[datetime] = None,
+        last_outbound_before: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> AutoPager[ContactEngagementView]:
+        """List the contacts an agent is working, with the reply and delivery
+        facts e2a derives from real message activity.
+
+        For a follow-up sweep pass ``replied=False`` together with BOTH
+        ``next_action_before`` and ``last_outbound_before``. ``last_outbound_at``
+        is server-maintained, so including it drops anyone just contacted even
+        if your own state write was lost — omit it and a failed write can send
+        the same person twice."""
+
+        def _flag(v: Optional[bool]) -> Optional[str]:
+            return None if v is None else ("true" if v else "false")
+
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_engagements(
+                    email, stage=stage, replied=_flag(replied),
+                    suppressed=_flag(suppressed),
+                    next_action_before=next_action_before,
+                    last_outbound_before=last_outbound_before,
+                    cursor=cursor, limit=limit, _headers=h,
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def get_outreach(self, email: str, address: str) -> ContactEngagementView:
+        """Fetch one agent's outreach record for a contact."""
+        return await self._c._read(lambda h: self._api.get_engagement(email, address, _headers=h))
+
+    async def set_outreach(self, email: str, address: str, body: Body) -> ContactEngagementView:
+        """Enrol a contact in an agent's outreach, or update the agent-owned
+        fields. Omitted fields are left unchanged, so advancing the stage after a
+        send does not disturb the schedule."""
+        req = _coerce(UpsertEngagementRequest, body)
+        return await self._c._write_idempotent(
+            lambda h: self._api.upsert_engagement(email, address, req, _headers=h)
+        )
+
+    async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
+        """Un-enrol a contact from an agent's outreach. The contact itself
+        survives, and suppressions are untouched — this is not consent."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)
         )
 
 

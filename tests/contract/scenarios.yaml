@@ -870,3 +870,248 @@ scenarios:
         auth_override: none
         expect:
           status: 401
+
+  - name: contacts_crud
+    description: >
+      Contact identity is account-level and keyed by the CANONICAL address.
+      The create here deliberately sends an RFC 5322 mailbox — the shape a
+      spreadsheet export produces — and every later step addresses the same
+      contact by its bare form, so an SDK that forwards the raw input or
+      mangles the encoded path fails here rather than in production.
+    steps:
+      - id: create
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: "A. Partner <Partner@Fund.VC>"
+          display_name: A. Partner
+          metadata:
+            fund: Example Capital
+        expect:
+          status: 201
+          body_contains:
+            - address
+            - source
+          body_match:
+            address: partner@fund.vc
+            display_name: A. Partner
+            source: manual
+
+      - id: duplicate_is_conflict
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: partner@fund.vc
+        expect:
+          status: 409
+
+      - id: get_by_bare_address
+        action: request
+        method: GET
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 200
+          body_match:
+            address: partner@fund.vc
+            display_name: A. Partner
+
+      - id: patch_keeps_metadata
+        action: request
+        method: PATCH
+        path: /v1/contacts/partner@fund.vc
+        body:
+          display_name: Renamed
+        expect:
+          status: 200
+          body_match:
+            display_name: Renamed
+            "metadata.fund": Example Capital
+
+      - id: list
+        action: request
+        method: GET
+        path: /v1/contacts
+        expect:
+          status: 200
+          body_contains:
+            - items
+            - next_cursor
+
+      - id: delete_requires_confirm
+        action: request
+        method: DELETE
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 422
+
+      - id: delete
+        action: request
+        method: DELETE
+        path: /v1/contacts/partner@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: gone
+        action: request
+        method: GET
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 404
+
+  - name: contacts_import
+    description: >
+      Bulk import returns a per-row outcome so one bad line never rejects the
+      upload. The batch mixes a valid row, an unparseable address, and a
+      case-variant duplicate of the first — each must be reported against its
+      own index, which is what lets a caller reconcile a spreadsheet line by
+      line. The reversal then removes only what the batch created.
+    steps:
+      - id: import
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts:
+            - address: "First <First@Imp.VC>"
+              display_name: First
+            - address: not-an-email
+            - address: FIRST@imp.vc
+        expect:
+          status: 200
+          body_contains:
+            - batch_id
+            - results
+          body_match:
+            created: 1
+            failed: 1
+            skipped: 1
+            "results[0].status": created
+            "results[0].address": first@imp.vc
+            "results[1].status": failed
+            "results[2].status": skipped
+            "results[2].code": duplicate_in_batch
+
+      - id: imported_contact_is_readable
+        action: request
+        method: GET
+        path: /v1/contacts/first@imp.vc
+        expect:
+          status: 200
+          body_match:
+            source: import
+
+      - id: filter_by_source
+        action: request
+        method: GET
+        path: /v1/contacts?source=import
+        expect:
+          status: 200
+          body_match:
+            "items[0].address": first@imp.vc
+
+      - id: empty_batch_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts: []
+        expect:
+          status: 422
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/first@imp.vc?confirm=DELETE
+        expect:
+          status: 200
+
+  - name: contact_outreach
+    description: >
+      Per-agent outreach state. Enrolment creates the contact if absent, a
+      partial update leaves the other agent-owned field alone (advancing a
+      stage must not clear the schedule), derived fields are server-owned and
+      rejected on write, and un-enrolling removes the outreach record while
+      the account-level contact survives.
+    setup:
+      - register_domain: outreach.test.dev
+      - verify_domain: outreach.test.dev
+      - register_agent:
+          email: raise@outreach.test.dev
+    steps:
+      - id: enrol
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          stage: touch1
+          next_action_at: "2026-08-01T09:00:00Z"
+        expect:
+          status: 201
+          body_contains:
+            - stage
+            - replied
+            - suppressed
+            - contact
+          body_match:
+            address: investor@fund.vc
+            stage: touch1
+            replied: false
+
+      - id: stage_only_update_keeps_schedule
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          stage: touch2
+        expect:
+          status: 200
+          body_contains:
+            - next_action_at
+          body_match:
+            stage: touch2
+
+      - id: derived_fields_are_server_owned
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          replied: true
+        expect:
+          status: 422
+
+      - id: outreach_query
+        action: request
+        method: GET
+        path: /v1/agents/raise@outreach.test.dev/contacts?replied=false
+        expect:
+          status: 200
+          body_match:
+            "items[0].address": investor@fund.vc
+            "items[0].stage": touch2
+
+      - id: unenrol
+        action: request
+        method: DELETE
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: contact_survives_unenrolment
+        action: request
+        method: GET
+        path: /v1/contacts/investor@fund.vc
+        expect:
+          status: 200
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/investor@fund.vc?confirm=DELETE
+        expect:
+          status: 200

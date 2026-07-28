@@ -427,6 +427,205 @@ components:
         - dkim
         - dmarc
       type: object
+    ContactEngagementView:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        agent_email:
+          type: string
+        contact:
+          $ref: "#/components/schemas/EmbeddedContactView"
+        created_at:
+          format: date-time
+          type: string
+        first_outbound_at:
+          description: Server-owned.
+          format: date-time
+          type:
+            - string
+            - "null"
+        inbound_count:
+          description: Server-owned.
+          format: int64
+          type: integer
+        last_conversation_id:
+          description: Server-owned.
+          type: string
+        last_inbound_at:
+          description: Server-owned.
+          format: date-time
+          type:
+            - string
+            - "null"
+        last_outbound_at:
+          description: Server-owned. Include it in the due query (last_outbound_before) so a lost client state-write cannot cause a duplicate send.
+          format: date-time
+          type:
+            - string
+            - "null"
+        metadata:
+          additionalProperties: {}
+          description: Caller-owned key/value data scoped to this relationship. Opaque to e2a.
+          type: object
+        next_action_at:
+          description: When the caller wants to act next. e2a does not act on it; it drives the outreach query and the contact.due wake-up.
+          format: date-time
+          type:
+            - string
+            - "null"
+        outbound_count:
+          description: Server-owned.
+          format: int64
+          type: integer
+        replied:
+          description: Whether this contact has answered since outreach began — computed as last_inbound_at > first_outbound_at, so it means 'replied to us' rather than 'has ever written'. Server-owned.
+          type: boolean
+        stage:
+          description: Caller-defined outreach stage. Opaque to e2a — there is no server-side state machine, and any string is valid.
+          type: string
+        suppressed:
+          description: Whether sends to this address are blocked, by an account-wide or agent-scoped suppression. Server-owned; reflects the same state the send path enforces.
+          type: boolean
+        suppression_reason:
+          description: Free-text detail recorded with the block, when present.
+          type: string
+        suppression_source:
+          description: "Why the block exists, when suppressed. Open set; tolerate unknown values. Known values: unsubscribe, manual, bounce, complaint."
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - agent_email
+        - address
+        - stage
+        - next_action_at
+        - metadata
+        - replied
+        - suppressed
+        - first_outbound_at
+        - last_outbound_at
+        - last_inbound_at
+        - outbound_count
+        - inbound_count
+        - contact
+        - created_at
+        - updated_at
+      type: object
+      x-stability-level: beta
+    ContactImportItemResult:
+      additionalProperties: true
+      properties:
+        address:
+          description: Canonicalized address. Absent when the row could not be parsed.
+          type: string
+        code:
+          description: "Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached."
+          type: string
+        index:
+          description: Zero-based position of this row in the submitted contacts array.
+          format: int64
+          type: integer
+        message:
+          description: Human-readable explanation for a skipped or failed row.
+          type: string
+        status:
+          description: "Outcome for this row. Known values: created, updated, skipped, failed."
+          type: string
+        suppressed:
+          description: True when this address is on a suppression list. The contact is still recorded — suppression is surfaced here so the import count stays honest rather than silently smaller — but sends to it will be refused.
+          type: boolean
+      required:
+        - index
+        - status
+      type: object
+      x-stability-level: beta
+    ContactImportResult:
+      additionalProperties: true
+      properties:
+        batch_id:
+          description: Identifier for this import. Pass it to DELETE /v1/contacts/imports/{batch_id} to reverse the upload, or as a filter on the contacts list.
+          type: string
+        created:
+          format: int64
+          type: integer
+        failed:
+          format: int64
+          type: integer
+        results:
+          description: One entry per submitted row, in request order.
+          items:
+            $ref: "#/components/schemas/ContactImportItemResult"
+          type: array
+        skipped:
+          format: int64
+          type: integer
+        updated:
+          format: int64
+          type: integer
+      required:
+        - batch_id
+        - created
+        - updated
+        - skipped
+        - failed
+        - results
+      type: object
+      x-stability-level: beta
+    ContactImportRow:
+      additionalProperties: false
+      properties:
+        address:
+          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>").
+          maxLength: 320
+          type: string
+        display_name:
+          description: Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
+          maxLength: 320
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: Optional caller-owned key/value data, opaque to e2a. Flat objects only; the same per-contact bounds apply, and a row that exceeds them fails on its own without affecting the rest of the batch.
+          type: object
+      required:
+        - address
+      type: object
+      x-stability-level: beta
+    ContactView:
+      additionalProperties: true
+      properties:
+        address:
+          description: "Canonical (normalized) email address. This is the resource key: a display-name form such as \"A. Partner <partner@fund.vc>\" and the bare address resolve to the same contact."
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        display_name:
+          description: Human-readable name. May be empty.
+          type: string
+        import_batch_id:
+          description: The import that created this contact, when source is import. Absent otherwise.
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: Caller-owned key/value data. e2a never interprets it. Flat objects only; see the field bounds in the API docs.
+          type: object
+        source:
+          description: "How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound."
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - address
+        - display_name
+        - metadata
+        - source
+        - created_at
+        - updated_at
+      type: object
+      x-stability-level: beta
     ConversationDetailView:
       additionalProperties: true
       properties:
@@ -602,6 +801,25 @@ components:
         - address
       type: object
       x-stability-level: beta
+    CreateContactRequest:
+      additionalProperties: false
+      properties:
+        address:
+          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>"); it is stored canonicalized. At most 320 Unicode code points.
+          maxLength: 320
+          type: string
+        display_name:
+          description: Optional human-readable name.
+          maxLength: 320
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: Optional caller-owned key/value data, opaque to e2a. Flat objects only.
+          type: object
+      required:
+        - address
+      type: object
+      x-stability-level: beta
     CreateTemplateRequest:
       additionalProperties: false
       properties:
@@ -631,7 +849,7 @@ components:
         description:
           type: string
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -649,6 +867,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -658,6 +877,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
@@ -681,7 +901,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -692,6 +912,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
@@ -857,6 +1078,20 @@ components:
         - deleted
         - id
       type: object
+    DeleteContactResult:
+      additionalProperties: true
+      properties:
+        address:
+          description: The canonical address that was removed.
+          type: string
+        deleted:
+          description: Always true; the operation is a no-op-safe confirmation.
+          type: boolean
+      required:
+        - deleted
+        - address
+      type: object
+      x-stability-level: beta
     DeleteDomainResult:
       additionalProperties: true
       properties:
@@ -870,6 +1105,40 @@ components:
         - deleted
         - domain
       type: object
+    DeleteEngagementResult:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        deleted:
+          type: boolean
+      required:
+        - deleted
+        - address
+      type: object
+      x-stability-level: beta
+    DeleteImportBatchResult:
+      additionalProperties: true
+      properties:
+        batch_id:
+          type: string
+        contacts_deleted:
+          description: How many contacts this reversal removed.
+          format: int64
+          type: integer
+        contacts_retained:
+          description: How many contacts from this batch were deliberately kept because their provenance had moved on.
+          format: int64
+          type: integer
+        deleted:
+          type: boolean
+      required:
+        - deleted
+        - batch_id
+        - contacts_deleted
+        - contacts_retained
+      type: object
+      x-stability-level: beta
     DeleteMessageResult:
       additionalProperties: true
       properties:
@@ -1452,11 +1721,27 @@ components:
         - subject
         - message_type
       type: object
+    EmbeddedContactView:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        display_name:
+          type: string
+        metadata:
+          additionalProperties: {}
+          type: object
+      required:
+        - address
+        - display_name
+        - metadata
+      type: object
+      x-stability-level: beta
     ErrorBody:
       additionalProperties: true
       properties:
         code:
-          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, template_not_found, starter_template_not_found, gone, conflict, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
+          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
           type: string
           x-e2a-error-contracts:
             address_in_trash:
@@ -1494,6 +1779,16 @@ components:
               retryable: false
               statuses:
                 - 409
+            contact_limit_reached:
+              family: capacity
+              retryable: false
+              statuses:
+                - 400
+            contact_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             domain_has_agents:
               family: state
               retryable: false
@@ -1515,6 +1810,11 @@ components:
               retryable: false
               statuses:
                 - 409
+            engagement_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             error:
               family: server
               retryable: false
@@ -1545,6 +1845,11 @@ components:
               retryable: false
               statuses:
                 - 422
+            import_batch_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             inbound_mx_check_failed:
               family: availability
               retryable: true
@@ -1946,6 +2251,29 @@ components:
         - type
         - code
         - summary
+      type: object
+      x-stability-level: beta
+    ImportContactsRequest:
+      additionalProperties: false
+      properties:
+        contacts:
+          description: The rows to import. At most 1000 per request; paginate client-side for larger lists.
+          items:
+            $ref: "#/components/schemas/ContactImportRow"
+          maxItems: 1000
+          minItems: 1
+          type:
+            - array
+            - "null"
+        on_conflict:
+          default: merge
+          description: What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.
+          enum:
+            - merge
+            - skip
+          type: string
+      required:
+        - contacts
       type: object
       x-stability-level: beta
     LimitExceededDetails:
@@ -2639,6 +2967,38 @@ components:
         - items
         - next_cursor
       type: object
+    PageContactEngagementView:
+      additionalProperties: true
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/ContactEngagementView"
+          type: array
+        next_cursor:
+          type:
+            - string
+            - "null"
+      required:
+        - items
+        - next_cursor
+      type: object
+      x-stability-level: beta
+    PageContactView:
+      additionalProperties: true
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/ContactView"
+          type: array
+        next_cursor:
+          type:
+            - string
+            - "null"
+      required:
+        - items
+        - next_cursor
+      type: object
+      x-stability-level: beta
     PageConversationSummaryView:
       additionalProperties: true
       properties:
@@ -3706,6 +4066,7 @@ components:
             - email.flagged
             - email.blocked
             - email.review_requested
+            - contact.due
           type: string
       type: object
     TestWebhookResponse:
@@ -3766,6 +4127,19 @@ components:
           maxLength: 200
           type: string
       type: object
+    UpdateContactRequest:
+      additionalProperties: false
+      properties:
+        display_name:
+          description: Replace the display name. Omit to leave unchanged.
+          maxLength: 320
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: Replace the metadata object wholesale. Omit to leave unchanged.
+          type: object
+      type: object
+      x-stability-level: beta
     UpdateMessageRequest:
       additionalProperties: false
       properties:
@@ -3816,7 +4190,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -3834,6 +4208,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -3843,12 +4218,32 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
           description: When present, must be a non-empty webhook delivery URL; omit to leave the URL unchanged.
           type: string
       type: object
+    UpsertEngagementRequest:
+      additionalProperties: false
+      properties:
+        metadata:
+          additionalProperties: {}
+          description: Replace the relationship metadata. Omit to leave unchanged.
+          type: object
+        next_action_at:
+          description: Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.
+          format: date-time
+          type:
+            - string
+            - "null"
+        stage:
+          description: Set the outreach stage. Omit to leave unchanged.
+          maxLength: 128
+          type: string
+      type: object
+      x-stability-level: beta
     UsageEventEntry:
       additionalProperties: true
       properties:
@@ -4099,7 +4494,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -4110,6 +4505,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
@@ -4752,6 +5148,254 @@ paths:
       summary: Update an agent
       tags:
         - agents
+  /v1/agents/{email}/contacts:
+    get:
+      description: "Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: listEngagements
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - description: Only engagements at this exact stage.
+          explode: false
+          in: query
+          name: stage
+          schema:
+            description: Only engagements at this exact stage.
+            type: string
+        - description: Filter on whether the contact has answered since outreach began. Omit for both.
+          explode: false
+          in: query
+          name: replied
+          schema:
+            description: Filter on whether the contact has answered since outreach began. Omit for both.
+            enum:
+              - "true"
+              - "false"
+            type: string
+        - description: Filter on whether sends are blocked. Omit for both.
+          explode: false
+          in: query
+          name: suppressed
+          schema:
+            description: Filter on whether sends are blocked. Omit for both.
+            enum:
+              - "true"
+              - "false"
+            type: string
+        - description: Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+          explode: false
+          in: query
+          name: next_action_before
+          schema:
+            description: Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+            format: date-time
+            type: string
+        - description: "Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client's own state write was lost — without it, a failed write can cause a duplicate send."
+          explode: false
+          in: query
+          name: last_outbound_before
+          schema:
+            description: "Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client's own state write was lost — without it, a failed write can cause a duplicate send."
+            format: date-time
+            type: string
+        - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+            type: string
+        - description: Maximum number of items to return (1-100).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            description: Maximum number of items to return (1-100).
+            format: int64
+            maximum: 100
+            minimum: 1
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageContactEngagementView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: List an agent's outreach (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/agents/{email}/contacts/{address}:
+    delete:
+      description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable."
+      operationId: deleteEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEngagementResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Un-enrol a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    get:
+      description: "Fetches this agent's relationship with one contact. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: getEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get one outreach record (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    put:
+      description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: upsertEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertEngagementRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: OK
+          headers:
+            Location:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: Created — the contact was newly enrolled in this agent's outreach.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error — the standard envelope; branch on error.code.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Enrol or update outreach state (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
   /v1/agents/{email}/conversations:
     get:
       description: List an agent's conversation threads (derived from messages.conversation_id).
@@ -6026,6 +6670,354 @@ paths:
       summary: Send a test email to the agent's own address
       tags:
         - agents
+  /v1/contacts:
+    get:
+      description: "Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: listContacts
+      parameters:
+        - description: "Filter by provenance. Known values: import, manual, inbound."
+          explode: false
+          in: query
+          name: source
+          schema:
+            description: "Filter by provenance. Known values: import, manual, inbound."
+            type: string
+        - description: Filter to the contacts created by one import.
+          explode: false
+          in: query
+          name: import_batch_id
+          schema:
+            description: Filter to the contacts created by one import.
+            type: string
+        - description: Only contacts created strictly after this instant (RFC 3339).
+          explode: false
+          in: query
+          name: created_after
+          schema:
+            description: Only contacts created strictly after this instant (RFC 3339).
+            format: date-time
+            type: string
+        - description: Only contacts created strictly before this instant (RFC 3339).
+          explode: false
+          in: query
+          name: created_before
+          schema:
+            description: Only contacts created strictly before this instant (RFC 3339).
+            format: date-time
+            type: string
+        - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+            type: string
+        - description: Maximum number of items to return (1-100).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            description: Maximum number of items to return (1-100).
+            format: int64
+            maximum: 100
+            minimum: 1
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageContactView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: List contacts (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    post:
+      description: "Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: createContact
+      parameters:
+        - description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContactRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: Created
+          headers:
+            Location:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Create a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/import:
+    post:
+      description: "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      operationId: importContacts
+      parameters:
+        - description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportContactsRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactImportResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Import contacts in bulk (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/imports/{batch_id}:
+    delete:
+      description: "Removes the contacts an import created. Requires ?confirm=DELETE. Only contacts still attributed to this batch are removed; any whose provenance has moved on are retained and counted separately. Suppressions are never affected. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      operationId: deleteImportBatch
+      parameters:
+        - in: path
+          name: batch_id
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteImportBatchResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Reverse a contact import (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/{address}:
+    delete:
+      description: "Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: deleteContact
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteContactResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Delete a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    get:
+      description: "Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: getContact
+      parameters:
+        - description: The contact's email address, URL-encoded.
+          in: path
+          name: address
+          required: true
+          schema:
+            description: The contact's email address, URL-encoded.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    patch:
+      description: "Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: updateContact
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: "Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta."
+          in: header
+          name: If-Match
+          schema:
+            description: "Optional ETag from a prior read. When present it must match the contact's current ETag or the write is rejected with 412. Beta limitation: the comparison and the write are not yet a single atomic operation, so two writers racing with the same valid ETag can both be accepted; the check reliably rejects a stale read but is not a hard serialization guarantee. This will be tightened to a conditional write before contacts leave beta."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContactRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: OK
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Update a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
   /v1/domains:
     get:
       description: List the domains owned by the authenticated account, newest first, with cursor pagination.

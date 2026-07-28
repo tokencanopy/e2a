@@ -691,6 +691,29 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// the message transaction.
 	srv.writeProtectionEvents(ctx, messageID, screenRes.Events)
 
+	// Update contact-engagement counters for this sender, best-effort and OUTSIDE
+	// the message transaction — same rationale as the metering above: nothing
+	// about outreach bookkeeping may block or reject real inbound mail, and a
+	// failed statement inside the tx would abort the persist. The update is
+	// idempotent (GREATEST), so a repeat or an out-of-order arrival converges.
+	//
+	// Update-only: this never creates an engagement, so a stranger writing in
+	// does not silently appear in anyone's outreach list. And because `replied`
+	// is computed as last_inbound_at > first_outbound_at, mail that arrives
+	// before any outbound correctly does not count as a reply.
+	//
+	// Unauthenticated senders and screened messages do not count as replies. Sender
+	// authentication is mandatory because the From header is spoofable — a sender
+	// could claim any identity (e.g. MAIL FROM anything, From: victim@example.com)
+	// and falsely mark the agent as having replied to that contact. Held/blocked
+	// messages never reached the agent, so they must not update the engagement record.
+	if agent.UserID != "" && headerFrom != "" && authentication.Passed() && !screenRes.Hold && !screenRes.Blocked() {
+		if _, rerr := srv.store.RecordInboundActivity(ctx, agent.UserID, agent.ID,
+			headerFrom, conversationID, time.Now().UTC()); rerr != nil {
+			log.Printf("[contacts] outreach reply counters not updated for %s: %v", messageID, rerr)
+		}
+	}
+
 	slug, _, _ := strings.Cut(rcpt, "@")
 
 	log.Printf("[mail:%s] dir=inbound from_domain=%s to=%s slug=%s conv_id=%s subject_len=%d verified=%t",

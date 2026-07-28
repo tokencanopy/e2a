@@ -127,11 +127,11 @@ func TestClaimSendAttempt_ConcurrentOnlyOneAcquires(t *testing.T) {
 
 	const N = 20
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		acquired  int
-		inflight  int
-		otherCnt  int
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		acquired int
+		inflight int
+		otherCnt int
 	)
 	wg.Add(N)
 	for i := 0; i < N; i++ {

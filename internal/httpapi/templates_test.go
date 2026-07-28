@@ -96,9 +96,9 @@ func TestCreateTemplateReservedSyntax(t *testing.T) {
 	srv := testServer(t)
 	// Reserved Mustache structural syntax in each part is rejected at create.
 	for part, payload := range map[string]map[string]any{
-		"subject":   {"name": "T", "subject": "{{#x}}", "text": "B"},
-		"text":      {"name": "T", "subject": "S", "text": "{{>partial}}"},
-		"html": {"name": "T", "subject": "S", "text": "B", "html": "{{!comment}}"},
+		"subject": {"name": "T", "subject": "{{#x}}", "text": "B"},
+		"text":    {"name": "T", "subject": "S", "text": "{{>partial}}"},
+		"html":    {"name": "T", "subject": "S", "text": "B", "html": "{{!comment}}"},
 	} {
 		code, body := postJSON(t, srv.URL+"/v1/templates", "good", payload)
 		if code != 400 || errCode(body) != "invalid_template" {
@@ -284,9 +284,9 @@ func TestTemplatesUnauthorized(t *testing.T) {
 func TestValidateTemplateValid(t *testing.T) {
 	srv := testServer(t)
 	code, body := postJSON(t, srv.URL+"/v1/templates/validate", "good", map[string]any{
-		"subject":   "Hi {{name}}",
-		"text":      "Plan: {{plan.tier}} & co",
-		"html": "<p>{{html}} / {{{html}}}</p>",
+		"subject": "Hi {{name}}",
+		"text":    "Plan: {{plan.tier}} & co",
+		"html":    "<p>{{html}} / {{{html}}}</p>",
 		"test_data": map[string]any{
 			"name": "Alice", "plan": map[string]any{"tier": "pro"}, "html": "<b>x</b>",
 		},

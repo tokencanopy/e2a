@@ -153,6 +153,7 @@ func (a *outboundSendStore) ReleaseSend(ctx context.Context, messageID string, j
 }
 
 func (a *outboundSendStore) MarkSent(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, providerMessageID, sentAs string) error {
+	var sent *identity.OutboundSentInfo
 	if err := a.store.WithTx(ctx, func(tx pgx.Tx) error {
 		info, err := a.store.MarkOutboundSentTx(ctx, tx, messageID, providerMessageID)
 		if err != nil {
@@ -161,11 +162,52 @@ func (a *outboundSendStore) MarkSent(ctx context.Context, messageID string, jobI
 		if info == nil {
 			return nil
 		}
+		sent = info
 		return a.finalizeSentTx(ctx, tx, info, jobID, attempt, occurredAt, providerMessageID)
 	}); err != nil {
 		return err
 	}
+	a.recordOutreachSend(ctx, sent, occurredAt)
 	return nil
+}
+
+// recordOutreachSend updates the contact-engagement counters after a send has
+// been durably recorded.
+//
+// DELIBERATELY OUTSIDE THE TERMINAL TRANSACTION AND NON-FATAL. Unlike metering
+// — which is accounting and must roll the transaction back rather than
+// undercount — these are convenience timestamps. Failing a real,
+// already-submitted send because a bookkeeping row would not update is strictly
+// worse than letting the next send correct it, and doing it inside the
+// transaction would mean a failed statement aborts the whole terminal commit.
+//
+// The timestamps are idempotent (LEAST/GREATEST), so a repeated or
+// out-of-order update converges rather than compounding.
+//
+// It updates only an engagement that already exists: an agent sends mail for
+// many reasons, and auto-enrolling every recipient would fill the outreach list
+// with people nobody is running a campaign against.
+func (a *outboundSendStore) recordOutreachSend(ctx context.Context, info *identity.OutboundSentInfo, occurredAt time.Time) {
+	if info == nil || info.Message == nil || a.store == nil {
+		return
+	}
+	// Recipients come from ToRecipients, NOT Message.Recipient: the terminal
+	// path populates the array and leaves the scalar empty, so keying off the
+	// scalar silently matched nothing. One send to several people advances each
+	// of their engagements.
+	for _, rcpt := range info.Message.ToRecipients {
+		if rcpt == "" {
+			continue
+		}
+		if _, err := a.store.RecordOutboundActivity(ctx, info.UserID, info.Message.AgentID,
+			rcpt, info.Message.ConversationID, occurredAt); err != nil {
+			// Best-effort by design. The counters this used to guard are now
+			// computed from messages at read time (design §10), so a failure
+			// here costs at most a stale timestamp, not a wrong count.
+			log.Printf("[contacts] outreach send counters not updated for %s -> %s: %v",
+				info.Message.ID, rcpt, err)
+		}
+	}
 }
 
 // FinalizeProviderAcceptedTx is the delivery-feedback crash-window bridge. It

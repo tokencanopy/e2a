@@ -20,6 +20,7 @@ import {
   PromiseAccountApi,
   PromiseReviewsApi,
   PromiseTemplatesApi,
+  PromiseContactsApi,
   PromiseMetaApi,
 } from "./generated/types/PromiseAPI.js";
 import type {
@@ -74,6 +75,16 @@ import type {
   DeploymentInfoView,
   ReviewView,
   TemplateView,
+  ContactView,
+  CreateContactRequest,
+  UpdateContactRequest,
+  DeleteContactResult,
+  ImportContactsRequest,
+  ContactImportResult,
+  DeleteImportBatchResult,
+  ContactEngagementView,
+  UpsertEngagementRequest,
+  DeleteEngagementResult,
   TemplateSummaryView,
   CreateTemplateRequest,
   UpdateTemplateRequest,
@@ -193,6 +204,7 @@ export class E2AClient {
   readonly account: AccountResource;
   readonly reviews: ReviewsResource;
   readonly templates: TemplatesResource;
+  readonly contacts: ContactsResource;
   private readonly meta: PromiseMetaApi;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -232,6 +244,7 @@ export class E2AClient {
     this.account = new AccountResource(new PromiseAccountApi(config));
     this.reviews = new ReviewsResource(new PromiseReviewsApi(config));
     this.templates = new TemplatesResource(new PromiseTemplatesApi(config));
+    this.contacts = new ContactsResource(new PromiseContactsApi(config));
     this.meta = new PromiseMetaApi(config);
   }
 
@@ -509,6 +522,109 @@ class TemplatesResource {
    *  read-only masters — copy one with `create({ fromStarter: alias })`. */
   getStarter(alias: string): Promise<StarterTemplateDetailView> {
     return call(() => this.api.getStarterTemplate(alias));
+  }
+}
+
+class ContactsResource {
+  constructor(private readonly api: PromiseContactsApi) {}
+  /** List the people this account corresponds with, newest first. Optionally
+   *  narrow by provenance (`source`) or to one upload (`importBatchId`). */
+  list(params: { source?: string; importBatchId?: string; limit?: number } = {}): AutoPager<ContactView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
+    return new AutoPager(async (cursor) => {
+      const page = await call(() =>
+        this.api.listContacts(params.source, params.importBatchId, undefined, undefined, cursor, params.limit));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+  /** Fetch one contact. `address` may be a bare address or a display-name form
+   *  ("A. Partner <partner@fund.vc>") — both resolve to the same contact. */
+  get(address: string): Promise<ContactView> {
+    return call(() => this.api.getContact(address));
+  }
+  /** Create one contact. The address is canonicalized, so creating the same
+   *  person twice (in any form) is a 409 rather than a duplicate row. */
+  create(body: CreateContactRequest): Promise<ContactView> {
+    return call(() => this.api.createContact(body));
+  }
+  /** Partial update; omitted fields are left unchanged, so editing the name
+   *  never erases metadata. Address and provenance are immutable. */
+  update(address: string, patch: UpdateContactRequest): Promise<ContactView> {
+    return call(() => this.api.updateContact(address, patch));
+  }
+  delete(address: string): Promise<DeleteContactResult> {
+    // The typed .delete() call is itself the confirmation; the SDK supplies the
+    // ?confirm=DELETE guard the raw API requires.
+    return call(() => this.api.deleteContact(address, "DELETE"));
+  }
+  /** Import up to 1000 contacts in one request. Every submitted row gets its own
+   *  result, so one bad line never rejects the upload. Import is inert — it
+   *  records identity and sends nothing. Rows omitting a field keep the stored
+   *  value, so a narrower re-upload does not erase columns it no longer carries. */
+  import(body: ImportContactsRequest): Promise<ContactImportResult> {
+    return call(() => this.api.importContacts(body));
+  }
+  /** Reverse an import, removing the contacts it created. */
+  deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
+    return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
+  }
+
+  // ── Per-agent outreach ────────────────────────────────────────────────────
+  // Engagements are one agent's relationship with a contact. Unlike the
+  // account-level methods above, an agent-scoped credential may drive these for
+  // its own agent — that is the outreach loop.
+
+  /** List the contacts an agent is working, with the reply and delivery facts
+   *  e2a derives from real message activity.
+   *
+   *  For a follow-up sweep pass `replied: false` together with BOTH
+   *  `nextActionBefore` and `lastOutboundBefore`. `lastOutboundAt` is
+   *  server-maintained, so including it drops anyone just contacted even if
+   *  your own state write was lost — omit it and a failed write can send twice. */
+  outreach(
+    email: string,
+    params: {
+      stage?: string;
+      replied?: boolean;
+      suppressed?: boolean;
+      nextActionBefore?: Date;
+      lastOutboundBefore?: Date;
+      limit?: number;
+    } = {},
+  ): AutoPager<ContactEngagementView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
+    return new AutoPager(async (cursor) => {
+      const page = await call(() =>
+        this.api.listEngagements(
+          email,
+          params.stage,
+          params.replied === undefined ? undefined : (params.replied ? "true" : "false"),
+          params.suppressed === undefined ? undefined : (params.suppressed ? "true" : "false"),
+          params.nextActionBefore,
+          params.lastOutboundBefore,
+          cursor,
+          params.limit,
+        ));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+
+  /** Fetch one agent's outreach record for a contact. */
+  getOutreach(email: string, address: string): Promise<ContactEngagementView> {
+    return call(() => this.api.getEngagement(email, address));
+  }
+
+  /** Enrol a contact in an agent's outreach, or update the agent-owned fields.
+   *  Omitted fields are left unchanged, so advancing the stage after a send
+   *  does not disturb the schedule. */
+  setOutreach(email: string, address: string, body: UpsertEngagementRequest): Promise<ContactEngagementView> {
+    return call(() => this.api.upsertEngagement(email, address, body));
+  }
+
+  /** Un-enrol a contact from an agent's outreach. The contact itself survives,
+   *  and suppressions are untouched — this is not consent. */
+  deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
+    return call(() => this.api.deleteEngagement(email, address, "DELETE"));
   }
 }
 

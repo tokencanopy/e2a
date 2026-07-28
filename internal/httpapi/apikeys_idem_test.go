@@ -29,8 +29,8 @@ import (
 // in-transaction CompleteTx is a harmless no-op instead of corrupting the
 // cached row.
 type bodyAwareIdem struct {
-	mu       sync.Mutex
-	cached   map[string]struct {
+	mu     sync.Mutex
+	cached map[string]struct {
 		hash string
 		resp idempotency.CachedResponse
 	}

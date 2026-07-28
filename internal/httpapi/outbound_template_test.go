@@ -94,9 +94,9 @@ func TestSendTemplateIDAndAliasMutuallyExclusive(t *testing.T) {
 func TestSendTemplateExclusiveWithLiteralContent(t *testing.T) {
 	srv := testServer(t)
 	for name, extra := range map[string]map[string]any{
-		"subject":   {"subject": "literal"},
-		"text":      {"text": "literal"},
-		"html": {"html": "<p>literal</p>"},
+		"subject": {"subject": "literal"},
+		"text":    {"text": "literal"},
+		"html":    {"html": "<p>literal</p>"},
 	} {
 		payload := map[string]any{"to": []string{"alice@x.com"}, "template_id": "tmpl_1"}
 		for k, v := range extra {
@@ -272,9 +272,9 @@ func TestValidatePreviewMatchesSendRender(t *testing.T) {
 	delivered := lastDeliveredReq()
 
 	for part, got := range map[string]string{
-		"subject":   delivered.Subject,
-		"text":      delivered.Body,
-		"html": delivered.HTMLBody,
+		"subject": delivered.Subject,
+		"text":    delivered.Body,
+		"html":    delivered.HTMLBody,
 	} {
 		want, _ := preview[part].(string)
 		if got != want {

@@ -11,12 +11,18 @@ export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
 export * from '../models/AttachmentView.js';
 export * from '../models/Authentication.js';
+export * from '../models/ContactEngagementView.js';
+export * from '../models/ContactImportItemResult.js';
+export * from '../models/ContactImportResult.js';
+export * from '../models/ContactImportRow.js';
+export * from '../models/ContactView.js';
 export * from '../models/ConversationDetailView.js';
 export * from '../models/ConversationSummaryView.js';
 export * from '../models/CreateAPIKeyRequest.js';
 export * from '../models/CreateAPIKeyResponse.js';
 export * from '../models/CreateAgentRequest.js';
 export * from '../models/CreateAgentSuppressionRequest.js';
+export * from '../models/CreateContactRequest.js';
 export * from '../models/CreateTemplateRequest.js';
 export * from '../models/CreateWebhookRequest.js';
 export * from '../models/CreateWebhookResponse.js';
@@ -25,7 +31,10 @@ export * from '../models/DMARCResult.js';
 export * from '../models/DNSRecord.js';
 export * from '../models/DeleteAgentResult.js';
 export * from '../models/DeleteApiKeyResult.js';
+export * from '../models/DeleteContactResult.js';
 export * from '../models/DeleteDomainResult.js';
+export * from '../models/DeleteEngagementResult.js';
+export * from '../models/DeleteImportBatchResult.js';
 export * from '../models/DeleteMessageResult.js';
 export * from '../models/DeleteSuppressionResult.js';
 export * from '../models/DeleteTemplateResult.js';
@@ -45,6 +54,7 @@ export * from '../models/EmailDeliveredData.js';
 export * from '../models/EmailFailedData.js';
 export * from '../models/EmailReceivedData.js';
 export * from '../models/EmailSentData.js';
+export * from '../models/EmbeddedContactView.js';
 export * from '../models/ErrorBody.js';
 export * from '../models/ErrorEnvelope.js';
 export * from '../models/EventEnvelope.js';
@@ -52,6 +62,7 @@ export * from '../models/EventView.js';
 export * from '../models/FieldError.js';
 export * from '../models/ForwardRequest.js';
 export * from '../models/HoldReasonView.js';
+export * from '../models/ImportContactsRequest.js';
 export * from '../models/LimitExceededDetails.js';
 export * from '../models/LimitExceededEnvelope.js';
 export * from '../models/LimitExceededErrorBody.js';
@@ -67,6 +78,8 @@ export * from '../models/OAuthConnectionEntry.js';
 export * from '../models/PageAPIKeyView.js';
 export * from '../models/PageAgentSuppressionView.js';
 export * from '../models/PageAgentView.js';
+export * from '../models/PageContactEngagementView.js';
+export * from '../models/PageContactView.js';
 export * from '../models/PageConversationSummaryView.js';
 export * from '../models/PageDomainView.js';
 export * from '../models/PageEventView.js';
@@ -123,10 +136,12 @@ export * from '../models/ThreatCategoryView.js';
 export * from '../models/TooManyRecipientsDetails.js';
 export * from '../models/UnsubscribeOptions.js';
 export * from '../models/UpdateAgentRequest.js';
+export * from '../models/UpdateContactRequest.js';
 export * from '../models/UpdateMessageRequest.js';
 export * from '../models/UpdateMessageResultView.js';
 export * from '../models/UpdateTemplateRequest.js';
 export * from '../models/UpdateWebhookRequest.js';
+export * from '../models/UpsertEngagementRequest.js';
 export * from '../models/UsageEventEntry.js';
 export * from '../models/UserExport.js';
 export * from '../models/UserExportUser.js';
@@ -152,12 +167,18 @@ import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { Authentication } from '../models/Authentication.js';
+import { ContactEngagementView } from '../models/ContactEngagementView.js';
+import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
+import { ContactImportResult } from '../models/ContactImportResult.js';
+import { ContactImportRow } from '../models/ContactImportRow.js';
+import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
 import { CreateAPIKeyRequest   , CreateAPIKeyRequestScopeEnum   } from '../models/CreateAPIKeyRequest.js';
 import { CreateAPIKeyResponse } from '../models/CreateAPIKeyResponse.js';
 import { CreateAgentRequest } from '../models/CreateAgentRequest.js';
 import { CreateAgentSuppressionRequest } from '../models/CreateAgentSuppressionRequest.js';
+import { CreateContactRequest } from '../models/CreateContactRequest.js';
 import { CreateTemplateRequest } from '../models/CreateTemplateRequest.js';
 import { CreateWebhookRequest , CreateWebhookRequestEventsEnum     } from '../models/CreateWebhookRequest.js';
 import { CreateWebhookResponse } from '../models/CreateWebhookResponse.js';
@@ -166,7 +187,10 @@ import { DMARCResult } from '../models/DMARCResult.js';
 import { DNSRecord } from '../models/DNSRecord.js';
 import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
+import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteEngagementResult } from '../models/DeleteEngagementResult.js';
+import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
 import { DeleteTemplateResult } from '../models/DeleteTemplateResult.js';
@@ -186,6 +210,7 @@ import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
 import { EmailFailedData } from '../models/EmailFailedData.js';
 import { EmailReceivedData } from '../models/EmailReceivedData.js';
 import { EmailSentData } from '../models/EmailSentData.js';
+import { EmbeddedContactView } from '../models/EmbeddedContactView.js';
 import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
@@ -193,6 +218,7 @@ import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
+import { ImportContactsRequest , ImportContactsRequestOnConflictEnum   } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
 import { LimitExceededEnvelope } from '../models/LimitExceededEnvelope.js';
 import { LimitExceededErrorBody, LimitExceededErrorBodyCodeEnum      } from '../models/LimitExceededErrorBody.js';
@@ -208,6 +234,8 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
+import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
 import { PageEventView } from '../models/PageEventView.js';
@@ -264,10 +292,12 @@ import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions, UnsubscribeOptionsModeEnum   } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
+import { UpdateContactRequest } from '../models/UpdateContactRequest.js';
 import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
 import { UpdateWebhookRequest  , UpdateWebhookRequestEventsEnum     } from '../models/UpdateWebhookRequest.js';
+import { UpsertEngagementRequest } from '../models/UpsertEngagementRequest.js';
 import { UsageEventEntry } from '../models/UsageEventEntry.js';
 import { UserExport } from '../models/UserExport.js';
 import { UserExportUser } from '../models/UserExportUser.js';
@@ -300,6 +330,7 @@ let enumsMap: Set<string> = new Set<string>([
     "DMARCResultPolicyEnum",
     "DMARCResultStatusEnum",
     "EmailBouncedDataBounceTypeEnum",
+    "ImportContactsRequestOnConflictEnum",
     "LimitExceededErrorBodyCodeEnum",
     "MessageLifecycleTransitionDirectionEnum",
     "MessageLifecycleTransitionOutcomeEnum",
@@ -333,12 +364,18 @@ let typeMap: {[index: string]: any} = {
     "AttachmentMetaView": AttachmentMetaView,
     "AttachmentView": AttachmentView,
     "Authentication": Authentication,
+    "ContactEngagementView": ContactEngagementView,
+    "ContactImportItemResult": ContactImportItemResult,
+    "ContactImportResult": ContactImportResult,
+    "ContactImportRow": ContactImportRow,
+    "ContactView": ContactView,
     "ConversationDetailView": ConversationDetailView,
     "ConversationSummaryView": ConversationSummaryView,
     "CreateAPIKeyRequest": CreateAPIKeyRequest,
     "CreateAPIKeyResponse": CreateAPIKeyResponse,
     "CreateAgentRequest": CreateAgentRequest,
     "CreateAgentSuppressionRequest": CreateAgentSuppressionRequest,
+    "CreateContactRequest": CreateContactRequest,
     "CreateTemplateRequest": CreateTemplateRequest,
     "CreateWebhookRequest": CreateWebhookRequest,
     "CreateWebhookResponse": CreateWebhookResponse,
@@ -347,7 +384,10 @@ let typeMap: {[index: string]: any} = {
     "DNSRecord": DNSRecord,
     "DeleteAgentResult": DeleteAgentResult,
     "DeleteApiKeyResult": DeleteApiKeyResult,
+    "DeleteContactResult": DeleteContactResult,
     "DeleteDomainResult": DeleteDomainResult,
+    "DeleteEngagementResult": DeleteEngagementResult,
+    "DeleteImportBatchResult": DeleteImportBatchResult,
     "DeleteMessageResult": DeleteMessageResult,
     "DeleteSuppressionResult": DeleteSuppressionResult,
     "DeleteTemplateResult": DeleteTemplateResult,
@@ -367,6 +407,7 @@ let typeMap: {[index: string]: any} = {
     "EmailFailedData": EmailFailedData,
     "EmailReceivedData": EmailReceivedData,
     "EmailSentData": EmailSentData,
+    "EmbeddedContactView": EmbeddedContactView,
     "ErrorBody": ErrorBody,
     "ErrorEnvelope": ErrorEnvelope,
     "EventEnvelope": EventEnvelope,
@@ -374,6 +415,7 @@ let typeMap: {[index: string]: any} = {
     "FieldError": FieldError,
     "ForwardRequest": ForwardRequest,
     "HoldReasonView": HoldReasonView,
+    "ImportContactsRequest": ImportContactsRequest,
     "LimitExceededDetails": LimitExceededDetails,
     "LimitExceededEnvelope": LimitExceededEnvelope,
     "LimitExceededErrorBody": LimitExceededErrorBody,
@@ -389,6 +431,8 @@ let typeMap: {[index: string]: any} = {
     "PageAPIKeyView": PageAPIKeyView,
     "PageAgentSuppressionView": PageAgentSuppressionView,
     "PageAgentView": PageAgentView,
+    "PageContactEngagementView": PageContactEngagementView,
+    "PageContactView": PageContactView,
     "PageConversationSummaryView": PageConversationSummaryView,
     "PageDomainView": PageDomainView,
     "PageEventView": PageEventView,
@@ -445,10 +489,12 @@ let typeMap: {[index: string]: any} = {
     "TooManyRecipientsDetails": TooManyRecipientsDetails,
     "UnsubscribeOptions": UnsubscribeOptions,
     "UpdateAgentRequest": UpdateAgentRequest,
+    "UpdateContactRequest": UpdateContactRequest,
     "UpdateMessageRequest": UpdateMessageRequest,
     "UpdateMessageResultView": UpdateMessageResultView,
     "UpdateTemplateRequest": UpdateTemplateRequest,
     "UpdateWebhookRequest": UpdateWebhookRequest,
+    "UpsertEngagementRequest": UpsertEngagementRequest,
     "UsageEventEntry": UsageEventEntry,
     "UserExport": UserExport,
     "UserExportUser": UserExportUser,

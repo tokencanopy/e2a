@@ -55,6 +55,12 @@ type Metrics interface {
 	// table in {"webhook_events", "webhook_subscriber_deliveries", "webhook_deliveries", "messages", "user_sessions", "oauth"}.
 	JanitorRowsDeleted(table string, count int)
 
+	// ContactDuePublished / ContactDueFailed count outreach wake-ups by
+	// outcome. A failed publish means the agent was not woken for a schedule
+	// that has already been consumed, so it will not retry.
+	ContactDuePublished(count int)
+	ContactDueFailed(count int)
+
 	// NotifyMissed is incremented when the 1-second fallback poll
 	// finds work that LISTEN/NOTIFY didn't wake us for. A non-zero
 	// rate indicates reconnect churn or a dropped notification.
@@ -200,6 +206,8 @@ func (NoOp) OutboxEventsNoMatch(string)     {}
 func (NoOp) OutboxFailures(string)          {}
 func (NoOp) RedeliverRequests(string)       {}
 func (NoOp) JanitorRowsDeleted(string, int) {}
+func (NoOp) ContactDuePublished(int)        {}
+func (NoOp) ContactDueFailed(int)           {}
 func (NoOp) NotifyMissed()                  {}
 func (NoOp) SetPublisherLag(float64)        {}
 
@@ -266,6 +274,22 @@ func (l *Log) JanitorRowsDeleted(table string, count int) {
 		return // skip noise when nothing was cleaned
 	}
 	log.Printf("[metrics] event=janitor.delete table=%s count=%d", table, count)
+}
+
+func (l *Log) ContactDuePublished(count int) {
+	if count == 0 {
+		return
+	}
+	log.Printf("[metrics] event=contact.due outcome=published count=%d", count)
+}
+
+func (l *Log) ContactDueFailed(count int) {
+	if count == 0 {
+		return
+	}
+	// Loud: a failed publish means an agent was not woken for a schedule that
+	// has already been consumed, so nothing will retry it.
+	log.Printf("[metrics] event=contact.due outcome=failed count=%d", count)
 }
 
 func (l *Log) NotifyMissed() {

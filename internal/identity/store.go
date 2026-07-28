@@ -1804,6 +1804,22 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 			if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, id); err != nil {
 				return err
 			}
+			// Outreach state dies with the agent, in the SAME transaction.
+			//
+			// contact_engagements deliberately has no FK to agent_identities (it
+			// mirrors agent_suppressions), so nothing cascades this for us — and
+			// because agent_id IS the agent's email address, anything left behind
+			// would be inherited by a recreated agent at that address. That agent
+			// would wake up holding last campaign's stage and a past-due schedule
+			// and mail investors it never contacted.
+			//
+			// Suppressions are deliberately NOT deleted here: consent has to
+			// survive deletion and recreation. That asymmetry — operational state
+			// dies, consent persists — is the reason this is an explicit delete
+			// rather than a cascade.
+			if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, id); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, id); err != nil {
 				return err
 			}
