@@ -409,6 +409,9 @@ describe("e2a MCP server", () => {
       expect(properties.send_at?.description, `${name}.send_at description`).toMatch(
         /own address.*400 invalid_request/i,
       );
+      expect(properties.send_at?.description, `${name}.send_at beta label`).toMatch(
+        /beta:.*may change before.*stable/i,
+      );
     }
   });
 

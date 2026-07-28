@@ -26,7 +26,7 @@ export class MessageSummaryView {
     'deliveredTo': string;
     'deliveryDetail'?: string;
     /**
-    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy \'queued\' is superseded by \'accepted\'.)
+    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy \'queued\' is superseded by \'accepted\'.)
     */
     'deliveryStatus'?: string;
     'direction': MessageSummaryViewDirectionEnum;

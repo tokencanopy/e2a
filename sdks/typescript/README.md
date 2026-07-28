@@ -151,6 +151,7 @@ const res = await client.messages.send(address, body, { wait: "sent" });
 if (res.status === "sent") { /* delivered to the relay */ }
 ```
 
+Scheduled sending is **beta and may change before it is declared stable**.
 Schedule a send by passing a `Date`. The durable `scheduled` result is success,
 not a reason to retry; even with `wait: "sent"` it returns immediately rather
 than holding the HTTP request until the future time:

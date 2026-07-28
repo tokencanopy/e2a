@@ -156,6 +156,9 @@ shows the set your scope allows, with per-tool descriptions.
 
 ### Messages
 
+Scheduled sending via `send_at` / `scheduled_at` is **beta and may change
+before it is declared stable**.
+
 | Tool | Description |
 | --- | --- |
 | `send_message` | Send a new email. Immediate queueing returns `status: accepted`; future `send_at` returns `status: scheduled` plus `scheduled_at`; a review hold returns `status: pending_review`. All three are durable success outcomes — do not re-send. |

@@ -73,7 +73,7 @@ const sendAtField = z
   .datetime({ offset: true })
   .optional()
   .describe(
-    'Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. If the message is not held for review, a future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Cancel a scheduled send with delete_message (move to trash) — reversible: restoring it before the send time re-arms it.',
+    'Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. If the message is not held for review, a future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Cancel a scheduled send with delete_message (move to trash) — reversible: restoring it before the send time re-arms it.',
   );
 
 export function registerMessageTools(server: McpServer, client: McpClient): void {

@@ -8,6 +8,7 @@ import {
   hasBareFlag,
   checkFlags,
   getConversationId,
+  USAGE,
 } from "../bin/e2a.js";
 
 describe("hasBareFlag", () => {
@@ -230,6 +231,12 @@ describe("-h / -v as subcommand flags (FIX 2)", () => {
   it("does NOT match -h/-v when they are the VALUE of a value-taking flag", () => {
     expect(hasBareFlag(["--subject", "-h"], "-h")).toBe(false);
     expect(hasBareFlag(["--body", "-v"], "-v")).toBe(false);
+  });
+});
+
+describe("scheduled send help", () => {
+  it("labels --send-at as beta", () => {
+    expect(USAGE).toMatch(/--send-at[\s\S]*beta[\s\S]*may change before stable/i);
   });
 });
 

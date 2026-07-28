@@ -360,6 +360,9 @@ export interface ListMessagesParams {
   deleted?: boolean;
 }
 
+/** Message operations. Scheduled sending through `sendAt` and the resulting
+ * `scheduledAt` / `status: "scheduled"` fields is beta and may change before
+ * it is declared stable. Managed unsubscribe is independently beta. */
 class MessagesResource {
   constructor(private readonly api: PromiseMessagesApi) {}
 

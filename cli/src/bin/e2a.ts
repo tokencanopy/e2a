@@ -34,7 +34,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
 
-const USAGE = `e2a — email for AI agents
+export const USAGE = `e2a — email for AI agents
 
 Scriptable primitives for agent harnesses (send/reply/messages/whoami, with a
 stable exit-code contract) plus login and real-time listen. Interactive
@@ -104,7 +104,7 @@ Usage:
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
         --conversation-id <id>     Thread id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
-        --send-at <rfc3339>        Schedule the send for a future RFC 3339 time with an explicit UTC offset;
+        --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
                                    status=scheduled, sent "not before" then. Direct self-send is unsupported;
                                    cancel by trashing it (restoring before send time re-arms it)
         --idempotency-key <k>      Stable key so a retried invocation can't double-send

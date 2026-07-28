@@ -191,6 +191,7 @@ if result.status == "sent":
 Always branch on the result's `status`, not the HTTP code — a timeout is not
 a failure, the message is still queued for delivery.
 
+Scheduled sending is **beta and may change before it is declared stable**.
 Schedule a send with a timezone-aware `datetime`. The durable `scheduled`
 result is success, not a reason to retry; even with `wait="sent"` it returns
 immediately rather than holding the HTTP request until the future time:

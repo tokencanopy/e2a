@@ -65,7 +65,7 @@ type MessageView struct {
 	// DeliveryStatus is the outbound delivery rollup (migration 031:
 	// 'sent', 'delivered', 'bounced', …) — the worst recipient status by
 	// precedence. Outbound-only; omitted on inbound messages.
-	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"`
+	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"`
 	// DeliveryDetail is the human-readable diagnostic for the delivery
 	// rollup (e.g. bounce sub-type / SMTP response). Outbound-only.
 	DeliveryDetail string `json:"delivery_detail,omitempty"`
@@ -274,7 +274,7 @@ type MessageSummaryView struct {
 	WebhookError  string `json:"webhook_error,omitempty"`
 	// DeliveryStatus / DeliveryDetail / SentAs are the outbound delivery
 	// rollup (migration 031). Outbound-only; omitted on inbound rows.
-	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"`
+	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"`
 	DeliveryDetail string `json:"delivery_detail,omitempty"`
 	SentAs         string `json:"sent_as,omitempty" doc:"From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."`
 	// ScheduledAt mirrors MessageView.ScheduledAt on list rows (migration 084):

@@ -197,6 +197,16 @@ func TestSpecDocumentsScheduledSendContract(t *testing.T) {
 		}
 	}
 
+	for _, schemaName := range []string{"MessageSummaryView", "MessageView"} {
+		deliveryStatus, _ := schemaProps(t, doc, schemaName)["delivery_status"].(map[string]any)
+		description, _ := deliveryStatus["description"].(string)
+		requireContractText(t, schemaName+".delivery_status", strings.ToLower(description),
+			"future scheduled_at",
+			"remains accepted",
+			"sendresultview.status",
+		)
+	}
+
 	status, _ := schemaProps(t, doc, "SendResultView")["status"].(map[string]any)
 	statusDescription, _ := status["description"].(string)
 	requireContractText(t, "SendResultView.status", strings.ToLower(statusDescription),

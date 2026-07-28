@@ -205,6 +205,8 @@ offset, at most 90 days ahead), `--idempotency-key`, `--agent`, `--json`
 `--conversation-id` (alias `--conversation`) — `reply` infers these from the
 message being replied to and rejects them as unknown flags.
 
+Scheduled sending via `--send-at` is **beta and may change before it is
+declared stable**.
 A future schedule exits `0` with `status=scheduled`; it is durably queued, so
 do not retry. Direct self-send cannot be scheduled and returns a permanent
 request error unless a review hold takes precedence (held sends drop the

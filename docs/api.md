@@ -461,6 +461,9 @@ declared stable.
   `delivered`**: `sent` means the upstream provider (SES) accepted the message,
   not that the recipient's server did. Delivery/bounce/complaint are per-recipient
   async outcomes reported later via SNS and the corresponding webhook events.
+  While a future `scheduled_at` is pending, `delivery_status` remains
+  `accepted`; `scheduled` is the send-result `status`, not a
+  `delivery_status` value.
 - `GET …/messages/{id}` — fetch one message (inbound or outbound), including the
   raw message and structured inbound authentication evidence. Reading an unread
   inbound message flips it to `read`. A soft-deleted message remains readable by
