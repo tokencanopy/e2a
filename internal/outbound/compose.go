@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/textproto"
 	"strings"
 	"time"
@@ -56,8 +58,11 @@ func ComposeMessage(from string, to []string, cc []string, subject, body, conten
 	}
 	writeHeader("Subject", mime.QEncoding.Encode("utf-8", subject))
 	writeHeader("Date", time.Now().UTC().Format(time.RFC1123Z))
+	encoding, encodedBody := encodeBody(body)
+
 	writeHeader("MIME-Version", "1.0")
 	writeHeader("Content-Type", contentType+"; charset=utf-8")
+	writeHeader("Content-Transfer-Encoding", encoding)
 
 	writeThreadingHeaders(writeHeader, replyToMsgID, references)
 	if conversationID != "" {
@@ -65,7 +70,7 @@ func ComposeMessage(from string, to []string, cc []string, subject, body, conten
 	}
 
 	buf.WriteString("\r\n")
-	buf.WriteString(body)
+	buf.WriteString(encodedBody)
 
 	return []byte(buf.String()), nil
 }
@@ -107,15 +112,11 @@ func ComposeMultipartMessage(from string, to []string, cc []string, subject, tex
 
 	// text/plain part
 	buf.WriteString("--" + boundary + "\r\n")
-	buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-	buf.WriteString(textBody)
-	buf.WriteString("\r\n")
+	writeBodyPart(&buf, "text/plain", textBody)
 
 	// text/html part
 	buf.WriteString("--" + boundary + "\r\n")
-	buf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-	buf.WriteString(htmlBody)
-	buf.WriteString("\r\n")
+	writeBodyPart(&buf, "text/html", htmlBody)
 
 	// closing boundary
 	buf.WriteString("--" + boundary + "--\r\n")
@@ -178,21 +179,15 @@ func ComposeMessageWithAttachments(from string, to []string, cc []string, subjec
 		buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=%q\r\n\r\n", altBoundary))
 
 		buf.WriteString("--" + altBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		buf.WriteString(textBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/plain", textBody)
 
 		buf.WriteString("--" + altBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		buf.WriteString(htmlBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/html", htmlBody)
 
 		buf.WriteString("--" + altBoundary + "--\r\n")
 	} else {
 		buf.WriteString("--" + mixedBoundary + "\r\n")
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		buf.WriteString(textBody)
-		buf.WriteString("\r\n")
+		writeBodyPart(&buf, "text/plain", textBody)
 	}
 
 	// Attachment parts
@@ -243,6 +238,58 @@ func writeThreadingHeaders(writeHeader func(string, string), replyToMsgID string
 	} else if replyToMsgID != "" {
 		writeHeader("References", replyToMsgID)
 	}
+}
+
+// encodeBody picks the Content-Transfer-Encoding for one body part and
+// returns the encoding name alongside the body encoded for that value.
+//
+// RFC 2045 § 6.1 makes "7bit" the default when no Content-Transfer-Encoding
+// header is present, so writing a UTF-8 body raw and omitting the header —
+// which is what this package used to do — declares 7bit while delivering
+// 8-bit bytes. Receivers treat that as malformed: SpamAssassin scores it
+// CTE_8BIT_MISMATCH (+1.0), because a broken transfer encoding is a common
+// bulk-mailer tell. A single em dash in an otherwise clean message was
+// enough to trigger it.
+//
+// Pure-ASCII bodies stay 7bit and byte-identical, so the common path is
+// unchanged. Anything else becomes quoted-printable, which keeps the text
+// human-readable on the wire, needs no 8BITMIME support from the relay, and
+// is already decoded on the receive side by internal/mailparse.
+func encodeBody(body string) (encoding, encoded string) {
+	if isASCII(body) {
+		return "7bit", body
+	}
+	var buf strings.Builder
+	w := quotedprintable.NewWriter(&buf)
+	if _, err := io.WriteString(w, body); err != nil {
+		return "8bit", body
+	}
+	if err := w.Close(); err != nil {
+		return "8bit", body
+	}
+	return "quoted-printable", buf.String()
+}
+
+// isASCII reports whether s is entirely 7-bit. Checked bytewise rather than
+// by rune: the question is what goes on the wire, and any multi-byte UTF-8
+// sequence has the high bit set on every byte.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// writeBodyPart writes one MIME part's Content-Type, Content-Transfer-Encoding
+// and encoded body, using the encoding encodeBody selected for it.
+func writeBodyPart(buf *strings.Builder, contentType, body string) {
+	encoding, encoded := encodeBody(body)
+	buf.WriteString("Content-Type: " + contentType + "; charset=utf-8\r\n")
+	buf.WriteString("Content-Transfer-Encoding: " + encoding + "\r\n\r\n")
+	buf.WriteString(encoded)
+	buf.WriteString("\r\n")
 }
 
 func headerWriter(buf *strings.Builder) func(string, string) {
