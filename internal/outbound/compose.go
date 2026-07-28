@@ -233,15 +233,39 @@ func DecodeAttachmentData(data string) ([]byte, error) {
 // References header falls back to a single id (legacy behavior); use a
 // non-empty references slice for any reply that may reach a recipient who
 // did not see the immediate parent (multi-party / agent-mediated threads).
+// A remote ID too long to fit on a legal header line is omitted rather than
+// making the entire reply invalid at the next strict SMTP hop.
 func writeThreadingHeaders(writeHeader func(string, string), replyToMsgID string, references []string) {
+	if !threadingMessageIDFitsLine(replyToMsgID) {
+		replyToMsgID = ""
+	}
 	if replyToMsgID != "" {
 		writeHeader("In-Reply-To", replyToMsgID)
 	}
-	if len(references) > 0 {
-		writeHeader("References", strings.Join(references, " "))
+	safeReferences := make([]string, 0, len(references))
+	for _, id := range references {
+		if threadingMessageIDFitsLine(id) {
+			safeReferences = append(safeReferences, id)
+		}
+	}
+	if len(safeReferences) > 0 {
+		writeHeader("References", strings.Join(safeReferences, " "))
 	} else if replyToMsgID != "" {
 		writeHeader("References", replyToMsgID)
 	}
+}
+
+// maxHeaderOctets is the RFC 5322 § 2.1.1 line limit, excluding CRLF.
+// SMTP (RFC 5321 § 4.5.3.1.6) allows 1000 including CRLF, so a header
+// line longer than this can be rejected outright by a strict relay.
+const maxHeaderOctets = 998
+
+// A Message-ID is an indivisible token: inserting a fold inside it would
+// change the identifier. Inbound IDs are remote input and have no published
+// length bound, so omit an ID that cannot fit on an In-Reply-To line. The
+// References prefix is shorter, making this conservative for both fields.
+func threadingMessageIDFitsLine(id string) bool {
+	return id != "" && len("In-Reply-To: ")+len(id) <= maxHeaderOctets
 }
 
 // encodeBody picks the Content-Transfer-Encoding for one body part and
@@ -420,11 +444,6 @@ func continuedAttachmentDisposition(filename string) string {
 	}
 	return disposition.String()
 }
-
-// maxHeaderOctets is the RFC 5322 § 2.1.1 line limit, excluding CRLF.
-// SMTP (RFC 5321 § 4.5.3.1.6) allows 1000 including CRLF, so a header
-// line longer than this can be rejected outright by a strict relay.
-const maxHeaderOctets = 998
 
 // foldTarget is the length a folded header aims for. RFC 5322 § 2.1.1
 // recommends 78 including CRLF; a fold is only triggered by exceeding

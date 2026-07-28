@@ -87,6 +87,41 @@ func TestComposedHeadersRespectTheLineLimit(t *testing.T) {
 	}
 }
 
+func TestOversizedThreadingMessageIDIsOmitted(t *testing.T) {
+	oversized := "<" + strings.Repeat("x", 1200) + "@example.test>"
+	valid := "<valid@example.test>"
+	raw, err := ComposeMessage(
+		"agent@bot.example.com",
+		[]string{"alice@example.test"},
+		nil,
+		"Re: hi",
+		"body",
+		"text/plain",
+		oversized,
+		[]string{valid, oversized},
+		"relay.e2a.dev",
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if got := longestHeaderLine(t, raw); got > maxHeaderOctets {
+		t.Fatalf("longest header line = %d octets, exceeds the %d limit", got, maxHeaderOctets)
+	}
+
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := msg.Header.Get("In-Reply-To"); got != "" {
+		t.Errorf("In-Reply-To retained oversized Message-ID: %q", got)
+	}
+	if got := msg.Header.Get("References"); got != valid {
+		t.Errorf("References = %q, want only %q", got, valid)
+	}
+}
+
 // Folding must be transparent: unfolding has to recover the exact value.
 func TestFoldedHeadersRoundTrip(t *testing.T) {
 	longSubject := strings.Repeat("これはとても長い件名です", 25)
