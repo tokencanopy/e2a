@@ -16,10 +16,12 @@ import (
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
+	"github.com/tokencanopy/e2a/internal/webhookpub"
 	"github.com/tokencanopy/e2a/internal/ws"
 )
 
@@ -70,6 +72,22 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	}, time.Minute)
 	subscriberStore := webhook.NewSubscriberStore(pool)
 	idempotencyStore := idempotency.NewStore(pool)
+	outbox := webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true))
+
+	// Wire the real queue-first acceptance path, but deliberately do not start
+	// workers: contract scenarios can prove accepted/scheduled persistence and
+	// River enqueue semantics without submitting external email.
+	outboundJobs := outboundsend.NewJobs(
+		agent.NewOutboundSendStore(store, outbox, noopUsage),
+		agent.NewOutboundDeliverer(sender),
+		pool,
+	)
+	jobsClient, err := jobs.New(pool, jobs.Config{OutboundWorkers: 1}, outboundJobs)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	outboundJobs.SetEnqueuer(jobsClient)
 
 	router := mux.NewRouter()
 	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
@@ -77,6 +95,8 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	api.SetEnforcer(enforcer)
 	api.SetUsageStore(usageStore)
 	api.SetSubscriberStore(subscriberStore)
+	api.SetOutbox(outbox)
+	api.SetOutboundEnqueuer(outboundJobs)
 	api.RegisterRoutes(router)
 
 	wsHub := ws.NewHub()
