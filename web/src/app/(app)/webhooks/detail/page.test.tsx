@@ -312,6 +312,28 @@ describe("webhook detail page", () => {
     });
   });
 
+  // A 500 is not a 404. Telling someone their id is wrong when the server is
+  // broken sends them to debug the address bar instead of the outage.
+  it("distinguishes a server error from a missing webhook", async () => {
+    searchParams = new URLSearchParams("id=wh_1");
+    respond({
+      webhook: () =>
+        Promise.resolve({
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve("boom"),
+        }),
+    });
+
+    render(<WebhookDetailPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't load that webhook/i)).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/couldn't find that webhook/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("explains a missing id parameter rather than fetching", async () => {
     searchParams = new URLSearchParams();
     respond({});

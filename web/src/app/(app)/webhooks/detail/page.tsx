@@ -15,7 +15,7 @@ import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import { Chip, Dot } from "@e2a/ui";
 import { PageShell } from "../../../components/loft/PageShell";
-import { getWebhook } from "../../../components/onboarding/api";
+import { ApiError, getWebhook } from "../../../components/onboarding/api";
 import {
   classifyWebhookHealth,
   describeScope,
@@ -66,11 +66,27 @@ function WebhookDetailContent({ id }: { id: string }) {
     );
   }
 
-  // The id comes from a user-editable query string, and delivery rows outlive
-  // the subscription they belong to — so a missing webhook is an ordinary
-  // state, not an exception. Render it as a dead end with a way back rather
-  // than an empty page frame.
-  if (error || !webhook) {
+  // A missing webhook and a broken server are different problems and must not
+  // share a message: the id comes from a user-editable query string and
+  // delivery rows outlive their subscription, so 404 is an ordinary state —
+  // but reporting "not found" for a 500 sends the reader to debug the address
+  // bar instead of the outage.
+  if (error) {
+    const notFound = error instanceof ApiError && error.status === 404;
+    return notFound ? (
+      <DetailMessage
+        title="Couldn't find that webhook"
+        body="It may have been deleted, or the id in the address bar may be wrong."
+      />
+    ) : (
+      <DetailMessage
+        title="Couldn't load that webhook"
+        body="Something went wrong fetching it. Try again in a moment."
+      />
+    );
+  }
+
+  if (!webhook) {
     return (
       <DetailMessage
         title="Couldn't find that webhook"
