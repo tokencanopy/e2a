@@ -364,6 +364,9 @@ func (s *Sender) compose(agent *identity.AgentIdentity, req SendRequest) (*compo
 		}
 		req.Body, req.HTMLBody = appendUnsubscribeFooter(req.Body, req.HTMLBody, agent.EmailAddress(), req.Unsubscribe.URL)
 	}
+	if err := ValidateAttachmentFilenames(req.Attachments); err != nil {
+		return nil, err
+	}
 	if total := ComposedSize(req.Subject, req.Body, req.HTMLBody, req.Attachments); total > MaxComposedMessageBytes {
 		return nil, &ComposedSizeError{ActualBytes: total, MaxBytes: MaxComposedMessageBytes}
 	}

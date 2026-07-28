@@ -129,6 +129,9 @@ func ComposeMultipartMessage(from string, to []string, cc []string, subject, tex
 // If no attachments are provided, falls back to ComposeMultipartMessage.
 // See ComposeMessage for replyToMsgID / references semantics.
 func ComposeMessageWithAttachments(from string, to []string, cc []string, subject, textBody, htmlBody, replyToMsgID string, references []string, fromDomain, replyTo, conversationID string, attachments []Attachment) ([]byte, error) {
+	if err := ValidateAttachmentFilenames(attachments); err != nil {
+		return nil, err
+	}
 	// Defense-in-depth header-injection guard: reject any attachment
 	// whose user-supplied Filename or ContentType contains CR or LF.
 	// fmt.Sprintf("%q", ...) escapes Filename safely, but ContentType

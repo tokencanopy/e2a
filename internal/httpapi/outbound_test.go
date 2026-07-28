@@ -255,6 +255,8 @@ func TestValidateAttachments(t *testing.T) {
 	}{
 		{"empty", nil, ""},
 		{"ok", []outbound.Attachment{{Filename: "a", Data: b64(1024)}}, ""},
+		{"filename-at-limit", []outbound.Attachment{{Filename: strings.Repeat("x", outbound.MaxAttachmentFilenameBytes), Data: b64(4)}}, ""},
+		{"filename-over", []outbound.Attachment{{Filename: strings.Repeat("x", outbound.MaxAttachmentFilenameBytes+1), Data: b64(4)}}, "invalid_attachment"},
 		{"per-attachment-over", []outbound.Attachment{{Filename: "a", Data: b64(maxAttachmentBytes + 1)}}, "payload_too_large"},
 		{"per-attachment-at-limit", []outbound.Attachment{{Filename: "a", Data: b64(maxAttachmentBytes)}}, ""},
 		{"total-over", []outbound.Attachment{

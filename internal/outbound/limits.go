@@ -16,6 +16,27 @@ import (
 // content. Over → 413 payload_too_large at the API edge.
 const MaxComposedMessageBytes = 10 * 1024 * 1024
 
+// MaxAttachmentFilenameBytes bounds user-controlled MIME parameter expansion.
+// RFC 2231 percent-encoding can triple the filename's byte length; without a
+// separate bound, a small attachment with a multi-megabyte filename can pass
+// decoded-content limits and force disproportionately large allocations during
+// composition.
+const MaxAttachmentFilenameBytes = 1024
+
+// ValidateAttachmentFilenames applies the shared composition-time filename
+// bound before any RFC 2231 encoding or MIME allocation takes place.
+func ValidateAttachmentFilenames(atts []Attachment) error {
+	for i, att := range atts {
+		if len(att.Filename) > MaxAttachmentFilenameBytes {
+			return &ValidationError{Message: fmt.Sprintf(
+				"attachment %d filename is %d bytes; maximum is %d bytes",
+				i, len(att.Filename), MaxAttachmentFilenameBytes,
+			)}
+		}
+	}
+	return nil
+}
+
 // ComposedSizeError reports the final, post-feature-composition size. It is
 // distinct from ordinary request validation so API layers can preserve the
 // canonical 413 payload_too_large contract.

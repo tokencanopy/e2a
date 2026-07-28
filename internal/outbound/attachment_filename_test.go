@@ -76,6 +76,17 @@ func TestAttachmentFilenameRFC2231EncodingRespectsLineLimit(t *testing.T) {
 	}
 }
 
+func TestAttachmentFilenameSizeIsBoundedBeforeComposition(t *testing.T) {
+	_, err := ComposeMessageWithAttachments(
+		"agent@bot.example.com", []string{"alice@gmail.com"}, nil,
+		"Hello", "body", "", "", nil, "relay.e2a.dev", "", "",
+		[]Attachment{{Filename: strings.Repeat("x", MaxAttachmentFilenameBytes+1), ContentType: "application/pdf", Data: "aGk="}},
+	)
+	if err == nil {
+		t.Fatal("oversized filename was composed; want a bounded validation error")
+	}
+}
+
 // Values containing MIME specials must stay parseable rather than
 // terminating the parameter list early.
 func TestAttachmentFilenameWithSpecialsStaysParseable(t *testing.T) {
