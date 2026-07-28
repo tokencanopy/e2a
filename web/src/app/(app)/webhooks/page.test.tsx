@@ -156,6 +156,24 @@ describe("Webhooks page", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  // A bare URL doesn't read as a control. The row needs a signposted action
+  // for the per-endpoint view, not just a clickable identifier.
+  it("offers an explicit action into the per-webhook view", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    const action = screen.getByRole("link", { name: /deliveries/i });
+    expect(action).toHaveAttribute(
+      "href",
+      "/webhooks/detail?id=wh_default0001",
+    );
+  });
+
   it("links each row to that webhook's detail page", async () => {
     global.fetch = makeFetchMock({
       "/v1/webhooks": () => jsonResp({ items: [webhook] }),

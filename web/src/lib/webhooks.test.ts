@@ -145,14 +145,14 @@ describe("classifyDelivery", () => {
     });
   });
 
-  // The status field is an open set. `scheduled` is not hypothetical: the
-  // redeliver endpoint's own description says a fanned-out redelivery lands
-  // as "scheduled". Anything unrecognized must surface as unknown with the
-  // server's string preserved — never silently bucketed as success.
+  // The OpenAPI schema declares status an open set ("tolerate unknown
+  // values"), even though migration 026's CHECK currently pins the column to
+  // pending/delivered/failed. Forward-compat: whatever a future value is, it
+  // must surface verbatim rather than being bucketed as success.
   it("classifies an unrecognized status as unknown, preserving the raw value", () => {
-    expect(classifyDelivery({ ...base, status: "scheduled" }, NOW)).toEqual({
+    expect(classifyDelivery({ ...base, status: "deferred" }, NOW)).toEqual({
       kind: "unknown",
-      raw: "scheduled",
+      raw: "deferred",
     });
   });
 

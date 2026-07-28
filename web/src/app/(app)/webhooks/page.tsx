@@ -684,7 +684,19 @@ function WebhookRow({
             </button>
           </span>
         ) : (
-          <span className="inline-flex gap-1">
+          <span className="inline-flex gap-1 items-center">
+            {/* The primary read action, signposted rather than hidden behind
+                the URL: a bare endpoint address doesn't read as a control. */}
+            <Link
+              href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
+              className="px-2 py-1 text-[11px] transition hover:underline whitespace-nowrap"
+              style={{
+                color: "var(--accent-strong)",
+                textDecoration: "none",
+              }}
+            >
+              Deliveries <span aria-hidden>→</span>
+            </Link>
             <button
               onClick={handleRotate}
               disabled={busy}

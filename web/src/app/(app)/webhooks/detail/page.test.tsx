@@ -220,7 +220,7 @@ describe("webhook detail page", () => {
       respond({
         deliveries: () =>
           okJson({
-            items: [{ ...delivery, status: "scheduled", type: "some.future.event" }],
+            items: [{ ...delivery, status: "deferred", type: "some.future.event" }],
             next_cursor: null,
           }),
       });
@@ -229,7 +229,7 @@ describe("webhook detail page", () => {
       await waitFor(() => {
         expect(screen.getByText("some.future.event")).toBeInTheDocument();
       });
-      expect(screen.getByText("scheduled")).toBeInTheDocument();
+      expect(screen.getByText("deferred")).toBeInTheDocument();
       expect(screen.queryByText("delivered")).not.toBeInTheDocument();
     });
 

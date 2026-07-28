@@ -59,9 +59,13 @@ export type WebhookDeliveryView = {
 // retry worker reschedules was not observable in that run; see the design
 // doc's open questions.)
 //
-// `unknown` exists because status is an open set (the redeliver endpoint
-// documents a `scheduled` value absent from the deliveries enum); it fails
-// closed, never collapsing an unrecognized status into success.
+// `unknown` exists because the OpenAPI schema declares status an open set
+// ("tolerate unknown values"). Today a delivery row cannot actually hold
+// anything else — migration 026's CHECK pins the column to
+// pending/delivered/failed — so this branch is forward-compat only. It fails
+// closed regardless: an unrecognized status is never collapsed into success.
+// (Note: the `scheduled` status in the redeliver docs belongs to the
+// *redelivery response*, not to a delivery row. Don't cite it here.)
 export type DeliveryStateKind =
   | "delivered"
   | "failed"
