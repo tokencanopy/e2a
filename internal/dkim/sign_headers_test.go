@@ -106,6 +106,105 @@ func TestSign_SurvivesDownstreamMessageIDInjection(t *testing.T) {
 	}
 }
 
+// Message-ID is the header SES actually adds, but nothing about the bug
+// was specific to it: ANY candidate header absent at signing time and
+// added downstream would have broken the signature the same way. This
+// generalises the regression across the whole candidate list so a future
+// relay that stamps, say, Reply-To cannot reintroduce it.
+func TestSign_AnyAbsentCandidateMayBeAddedDownstream(t *testing.T) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	// Plausible downstream values per header. From is excluded: it is
+	// always present and always signed.
+	added := map[string]string{
+		"To":                    "alice@elsewhere.test",
+		"Cc":                    "bob@elsewhere.test",
+		"Subject":               "stamped subject",
+		"Date":                  "Sat, 23 May 2026 12:00:00 +0000",
+		"Message-ID":            "<ses@us-east-2.amazonses.com>",
+		"In-Reply-To":           "<parent@example.com>",
+		"References":            "<a@example.com> <b@example.com>",
+		"MIME-Version":          "1.0",
+		"Content-Type":          "text/plain; charset=utf-8",
+		"Reply-To":              "noreply@example.com",
+		"List-Unsubscribe":      "<https://example.com/u/x>",
+		"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+	}
+
+	for _, header := range signedHeaderCandidates {
+		if header == "From" {
+			continue
+		}
+		value, ok := added[header]
+		if !ok {
+			t.Fatalf("candidate %q has no downstream value in this test — add one", header)
+		}
+
+		t.Run(header, func(t *testing.T) {
+			// Minimal message carrying only From, so `header` is absent.
+			msg := "From: bot@example.com\r\n\r\nbody text\r\n"
+
+			signed, err := Sign([]byte(msg), "example.com", kp.Selector, kp.PrivateKeyDER)
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			if h := signedHTag(t, signed); hasHeader(h, strings.ToLower(header)) {
+				t.Fatalf("h= covers absent header %q: %v", header, h)
+			}
+
+			delivered := append([]byte(header+": "+value+"\r\n"), signed...)
+			v := verifySigned(t, delivered, "example.com", kp.Selector, kp.PublicKeyDNS)
+			if len(v) != 1 {
+				t.Fatalf("expected 1 verification, got %d", len(v))
+			}
+			if v[0].Err != nil {
+				t.Errorf("signature broke when a relay added %q: %v", header, v[0].Err)
+			}
+		})
+	}
+}
+
+// The mirror of the above: a header that IS present must genuinely be
+// protected. Without this, narrowing h= could degrade into signing
+// nothing meaningful while every test still passed.
+func TestSign_TamperingWithASignedHeaderIsDetected(t *testing.T) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	signed, err := Sign([]byte(composerShapedMessage), "example.com", kp.Selector, kp.PrivateKeyDER)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		from string
+		to   string
+	}{
+		{"subject rewritten", "Subject: hello", "Subject: you have won"},
+		{"recipient rewritten", "To: alice@elsewhere.test", "To: mallory@evil.test"},
+		{"body rewritten", "hi there", "send money"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tampered := bytes.Replace(signed, []byte(tc.from), []byte(tc.to), 1)
+			if bytes.Equal(tampered, signed) {
+				t.Fatalf("tamper target %q not found — test is inert", tc.from)
+			}
+			v := verifySigned(t, tampered, "example.com", kp.Selector, kp.PublicKeyDNS)
+			if len(v) == 1 && v[0].Err == nil {
+				t.Errorf("tampering with %s went undetected", tc.name)
+			}
+		})
+	}
+}
+
 func TestSign_OmitsAbsentHeadersFromH(t *testing.T) {
 	kp, err := GenerateKeypair()
 	if err != nil {
