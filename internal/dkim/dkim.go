@@ -126,6 +126,24 @@ var signedHeaderCandidates = []string{
 // added in transit. That protection was worth nothing here — it was
 // producing a 100% invalid signature — and the narrow candidate list
 // means the exposure is a header the message chose not to set.
+//
+// Detection deliberately uses net/textproto, the same parser msgauth
+// reaches through go-message, because the two must agree. The failure
+// modes are not symmetric:
+//
+//   - Claiming a header is present when the signer disagrees puts it in
+//     h= unsigned-but-claimed, which is the oversigning bug all over
+//     again: a broken signature on every message.
+//   - Claiming it is absent when the signer would have seen it merely
+//     leaves that header uncovered. The signature still verifies.
+//
+// So when the header block is odd — a line missing its colon aborts
+// textproto mid-block, and "Subject : x" parses to the key "Subject "
+// with the space retained — this narrows h= rather than widening it, and
+// degrades to a valid signature over fewer headers. A more permissive
+// hand-rolled scan would find headers msgauth then does not, which is
+// the dangerous direction. Composed messages never take these paths;
+// headerWriter emits "Key: value" and strips CR/LF.
 func signedHeaderKeys(message []byte) []string {
 	present := map[string]bool{}
 	hdr, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(message))).ReadMIMEHeader()

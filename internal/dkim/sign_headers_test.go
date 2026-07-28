@@ -202,3 +202,58 @@ func TestSignedHeaderKeys_UnparseableFallsBackToFullList(t *testing.T) {
 		t.Errorf("got %d keys, want the full candidate list (%d)", len(got), len(signedHeaderCandidates))
 	}
 }
+
+// Odd header blocks must narrow h= rather than widen it, and the resulting
+// signature must still verify. Claiming a header the signer cannot see is
+// the oversigning bug this package exists to prevent; missing one the
+// signer can see only leaves it uncovered.
+//
+// Both shapes below come from review and are unreachable from the composer
+// (headerWriter emits "Key: value" and strips CR/LF), so this pins the
+// degradation direction for any future caller that hands Sign raw bytes.
+func TestSign_OddHeaderBlockNarrowsRatherThanWidens(t *testing.T) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		message string
+		absent  string // must NOT appear in h=
+	}{
+		{
+			// textproto aborts at the colon-less line; Subject after it is lost.
+			name:    "line missing a colon aborts parsing",
+			message: "From: bot@example.com\r\nX-Broken-Header\r\nSubject: hi\r\n\r\nbody",
+			absent:  "subject",
+		},
+		{
+			// "Subject : hi" parses to the key "Subject " (space retained).
+			name:    "space before colon",
+			message: "From: bot@example.com\r\nSubject : hi\r\n\r\nbody",
+			absent:  "subject",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			signed, err := Sign([]byte(tc.message), "example.com", kp.Selector, kp.PrivateKeyDER)
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			h := signedHTag(t, signed)
+			if hasHeader(h, tc.absent) {
+				t.Errorf("h= claims %q the signer may not see, risking oversigning: %v", tc.absent, h)
+			}
+			if !hasHeader(h, "from") {
+				t.Errorf("h= must always cover From: %v", h)
+			}
+			// The whole point: a narrower h= still yields a VALID signature.
+			v := verifySigned(t, signed, "example.com", kp.Selector, kp.PublicKeyDNS)
+			if len(v) != 1 || v[0].Err != nil {
+				t.Errorf("narrowed signature failed to verify: %+v", v)
+			}
+		})
+	}
+}
