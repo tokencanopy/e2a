@@ -324,6 +324,67 @@ func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainIn
 		}
 	}
 
+	// Lock agents before their messages to match the outbound worker's claim
+	// order, then cancel every linked durable send in this same transaction.
+	// A rollback restores both the jobs and the account data.
+	agentRows, err := tx.Query(ctx,
+		`SELECT id FROM agent_identities WHERE user_id = $1 ORDER BY id FOR UPDATE`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("delete: lock agents: %w", err)
+	}
+	for agentRows.Next() {
+		var agentID string
+		if err := agentRows.Scan(&agentID); err != nil {
+			agentRows.Close()
+			return nil, fmt.Errorf("delete: lock agents: %w", err)
+		}
+	}
+	if err := agentRows.Err(); err != nil {
+		agentRows.Close()
+		return nil, fmt.Errorf("delete: lock agents: %w", err)
+	}
+	agentRows.Close()
+
+	var sending bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM messages m
+			  JOIN agent_identities a ON a.id = m.agent_id
+			 WHERE a.user_id = $1
+			   AND m.delivery_status = 'sending'
+			   AND m.send_claimed_at > now() - make_interval(secs => $2)
+		)`,
+		userID, int64(OutboundSendClaimStaleWindow/time.Second),
+	).Scan(&sending); err != nil {
+		return nil, fmt.Errorf("delete: check active sends: %w", err)
+	}
+	if sending {
+		return nil, ErrSendInProgress
+	}
+
+	jobRows, err := tx.Query(ctx,
+		`SELECT m.send_job_id
+		   FROM messages m
+		   JOIN agent_identities a ON a.id = m.agent_id
+		  WHERE a.user_id = $1
+		    AND m.direction = 'outbound'
+		    AND m.delivery_status IN ('accepted', 'sending')
+		    AND m.send_job_id IS NOT NULL
+		  FOR UPDATE OF m`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("delete: load outbound jobs: %w", err)
+	}
+	jobIDs, err := scanOutboundJobIDs(jobRows)
+	if err != nil {
+		return nil, fmt.Errorf("delete: load outbound jobs: %w", err)
+	}
+	if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+		return nil, fmt.Errorf("delete: cancel outbound jobs: %w", err)
+	}
+
 	// Override the SET NULL behavior on usage_events for a complete wipe.
 	if _, err := tx.Exec(ctx, `DELETE FROM usage_events WHERE user_id = $1`, userID); err != nil {
 		return nil, fmt.Errorf("delete: usage_events: %w", err)

@@ -52,6 +52,7 @@ export function messageViewForTool(email: MessageView) {
     delivery_detail: email.deliveryDetail,
     review_status: email.reviewStatus,
     sent_as: email.sentAs,
+    scheduled_at: email.scheduledAt,
     size_bytes: email.sizeBytes,
     deleted_at: email.deletedAt,
     received_at: email.createdAt,
@@ -64,6 +65,17 @@ export function messageViewForTool(email: MessageView) {
   };
 }
 
+// Shared scheduled-send input. A future send_at defers submission to that
+// instant (status "scheduled"); the tool passes it through as a Date so the SDK
+// serializes it as a date-time. Same field on send/reply/forward.
+const sendAtField = z
+  .string()
+  .datetime({ offset: true })
+  .optional()
+  .describe(
+    'Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. If the message is not held for review, a future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold (send_at is dropped and it sends on approval). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.',
+  );
+
 export function registerMessageTools(server: McpServer, client: McpClient): void {
   server.registerTool(
     "send_message",
@@ -71,7 +83,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "Send email",
       annotations: { destructiveHint: false },
       description:
-        "Use when starting a NEW email thread to a fresh recipient. To respond to a message you can see in `list_messages`, use `reply_to_message` instead — it preserves the In-Reply-To / References headers so the reply lands in the same thread, which this tool deliberately does not do. Attach files via `attachments`; pass base64 strings produced by other tools (e.g. `get_attachment`) verbatim — don't hand-encode raw text. **`accepted` and `pending_review` are both success, not failure — do NOT re-send.** `{ status: \"accepted\", message_id: ... }` means the send was durably persisted and queued for submission (async pipeline); it is on its way. `{ status: \"pending_review\", message_id: ... }` means a human review hold caught it first. Either way, re-calling this tool (especially without reusing the same `idempotency_key`) risks a real second send — the terminal outcome (delivered or failed) arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`/`list_messages`, not by retrying. **Templates (beta):** instead of literal subject/text, reference a stored template with `template_id` XOR `template_alias` plus `template_data` — a template reference is mutually exclusive with subject/text/html (pass neither literal field). The server renders before any review hold, so a reviewer sees final content. Missing variables render as empty strings (no error) — validate data against the template's variables first. Only send supports templates; reply/forward do not.",
+        "Use when starting a NEW email thread to a fresh recipient. To respond to a message you can see in `list_messages`, use `reply_to_message` instead — it preserves the In-Reply-To / References headers so the reply lands in the same thread, which this tool deliberately does not do. Attach files via `attachments`; pass base64 strings produced by other tools (e.g. `get_attachment`) verbatim — don't hand-encode raw text. **`accepted`, `scheduled`, and `pending_review` are all success, not failure — do NOT re-send.** `{ status: \"accepted\", message_id: ... }` means the send was durably persisted and queued for immediate submission. `{ status: \"scheduled\", message_id: ..., scheduled_at: ... }` means it was durably queued for future submission at `scheduled_at`; `wait=sent` does not wait until then. `{ status: \"pending_review\", message_id: ... }` means a human review hold caught it first. In every case, re-calling this tool (especially without reusing the same `idempotency_key`) risks a real second send — the terminal outcome (delivered or failed) arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`/`list_messages`, not by retrying. **Templates (beta):** instead of literal subject/text, reference a stored template with `template_id` XOR `template_alias` plus `template_data` — a template reference is mutually exclusive with subject/text/html (pass neither literal field). The server renders before any review hold, so a reviewer sees final content. Missing variables render as empty strings (no error) — validate data against the template's variables first. Only send supports templates; reply/forward do not.",
       inputSchema: strictInputSchema({
         to: z.array(z.string()).describe("Recipient email addresses (one or more)."),
         subject: z.string().optional().describe("Literal subject. Required unless a template reference is used (then it must be omitted)."),
@@ -116,6 +128,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe sends. Set to deduplicate when the caller has its own retry loop (e.g. a stable triggering event id). When omitted the SDK mints a fresh UUIDv4 per call — protects against network-layer retries only, not user-driven retries.",
           ),
+        send_at: sendAtField,
         email: emailSelector,
       }),
     },
@@ -146,6 +159,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
               ? { conversationId: args.conversation_id }
               : {}),
             ...(args.reply_to !== undefined ? { replyTo: args.reply_to } : {}),
+            ...(args.send_at !== undefined ? { sendAt: new Date(args.send_at) } : {}),
           },
           opts,
           args.email,
@@ -159,7 +173,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "Reply to a message",
       annotations: { destructiveHint: false },
       description:
-        "Use whenever you're responding to a message you can see — preserves the In-Reply-To and References headers so the reply joins the original email thread instead of starting a new one. Works on both a message the agent RECEIVED (replies to its sender) and a message the agent SENT (continues the thread to its original recipients, i.e. a Gmail-style follow-up on your own message). Prefer this over `send_message` for any in-thread response; thread fragmentation (broken conversation view in the recipient's mail client) is the most visible symptom of using `send_message` by mistake. Pass `reply_all: true` to copy the original Cc list; subject is auto-derived as `Re: …` by the server. Same review caveat as `send_message`: **`accepted` and `pending_review` are both success, not failure — do NOT re-send.** `accepted` means the reply was durably persisted and queued for submission (async pipeline); `pending_review` means a human review hold caught it first. The terminal outcome arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`, not by retrying.",
+        "Use whenever you're responding to a message you can see — preserves the In-Reply-To and References headers so the reply joins the original email thread instead of starting a new one. Works on both a message the agent RECEIVED (replies to its sender) and a message the agent SENT (continues the thread to its original recipients, i.e. a Gmail-style follow-up on your own message). Prefer this over `send_message` for any in-thread response; thread fragmentation (broken conversation view in the recipient's mail client) is the most visible symptom of using `send_message` by mistake. Pass `reply_all: true` to copy the original Cc list; subject is auto-derived as `Re: …` by the server. Same review caveat as `send_message`: **`accepted`, `scheduled`, and `pending_review` are all success, not failure — do NOT re-send.** `accepted` means the reply was durably persisted and queued for immediate submission; `scheduled` means it was durably queued for future submission at `scheduled_at`; `pending_review` means a human review hold caught it first. The terminal outcome arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`, not by retrying.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the message to reply to — inbound or one the agent sent (e.g. msg_…)."),
         text: z.string().describe("Plain-text reply body."),
@@ -189,6 +203,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe replies. A natural choice is the inbound `message_id` you're replying to — the same triggering event yields the same key, so a retry replays the original response instead of double-sending. Omit to let the SDK mint a fresh UUIDv4 per call.",
           ),
+        send_at: sendAtField,
         email: emailSelector,
       }),
     },
@@ -213,6 +228,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
               ? { conversationId: args.conversation_id }
               : {}),
             ...(args.reply_to !== undefined ? { replyTo: args.reply_to } : {}),
+            ...(args.send_at !== undefined ? { sendAt: new Date(args.send_at) } : {}),
           },
           opts,
           args.email,
@@ -226,7 +242,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "Forward a message",
       annotations: { destructiveHint: false },
       description:
-        "Forward a message the agent has received OR one it sent to one or more new recipients. The server auto-prepends a Gmail-style header block (From/Date/Subject/To/Cc) and the original body to whatever optional comment you pass in `text`/`html`, **and carries over the original message's attachments by default** — you do NOT need to re-fetch them via `get_attachment`. Anything you pass in `attachments[]` is added on top of the originals. **Unlike `reply_to_message`, a forward is a NEW thread** — no In-Reply-To / References headers are emitted, so the recipient sees a fresh conversation. Use this when the user asks to share an email with someone else; use `reply_to_message` when continuing the existing conversation. Same review behavior as send/reply: **`accepted` and `pending_review` are both success, not failure — do NOT re-send.** `accepted` means the forward was durably persisted and queued for submission (async pipeline); `pending_review` means a human review hold caught it first. The terminal outcome arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`, not by retrying.",
+        "Forward a message the agent has received OR one it sent to one or more new recipients. The server auto-prepends a Gmail-style header block (From/Date/Subject/To/Cc) and the original body to whatever optional comment you pass in `text`/`html`, **and carries over the original message's attachments by default** — you do NOT need to re-fetch them via `get_attachment`. Anything you pass in `attachments[]` is added on top of the originals. **Unlike `reply_to_message`, a forward is a NEW thread** — no In-Reply-To / References headers are emitted, so the recipient sees a fresh conversation. Use this when the user asks to share an email with someone else; use `reply_to_message` when continuing the existing conversation. Same review behavior as send/reply: **`accepted`, `scheduled`, and `pending_review` are all success, not failure — do NOT re-send.** `accepted` means the forward was durably persisted and queued for immediate submission; `scheduled` means it was durably queued for future submission at `scheduled_at`; `pending_review` means a human review hold caught it first. The terminal outcome arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`, not by retrying.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the message to forward — inbound or one the agent sent (e.g. msg_…)."),
         to: z.array(z.string()).describe("Forward target addresses (one or more)."),
@@ -258,6 +274,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Stable key for retry-safe forwards. The inbound `message_id` plus target list is a natural choice.",
           ),
+        send_at: sendAtField,
         email: emailSelector,
       }),
     },
@@ -284,6 +301,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
               ? { conversationId: args.conversation_id }
               : {}),
             ...(args.reply_to !== undefined ? { replyTo: args.reply_to } : {}),
+            ...(args.send_at !== undefined ? { sendAt: new Date(args.send_at) } : {}),
           },
           opts,
           args.email,
@@ -476,7 +494,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "Restore a message from trash",
       annotations: { destructiveHint: false, idempotentHint: false },
       description:
-        "Restore a soft-deleted message before its trash-retention window expires. Time spent in trash does not consume the message's normal retention. Returns the restored message; a live message returns `not_in_trash`.",
+        "Restore a soft-deleted message before its trash-retention window expires. A scheduled message restored before `scheduled_at` re-arms; at/after `scheduled_at` it returns live as failed with submission canceled. Returns the restored message; a live message returns `not_in_trash`.",
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the trashed message to restore."),
         email: emailSelector,

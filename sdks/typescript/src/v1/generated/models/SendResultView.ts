@@ -25,11 +25,15 @@ export class SendResultView {
     */
     'providerMessageId'?: string;
     /**
+    * Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.
+    */
+    'scheduledAt'?: Date;
+    /**
     * From identity used. Open set; tolerate unknown values. Known values: own_address, relay.
     */
     'sentAs'?: string;
     /**
-    * Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code.
+    * Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code.
     */
     'status': string;
 
@@ -67,6 +71,12 @@ export class SendResultView {
             "baseName": "provider_message_id",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sentAs",

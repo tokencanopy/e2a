@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/dkim"
@@ -78,6 +79,12 @@ type SendRequest struct {
 	ConversationID   string              `json:"conversation_id,omitempty"`
 	Attachments      []Attachment        `json:"attachments,omitempty"`
 	Unsubscribe      *UnsubscribeOptions `json:"unsubscribe,omitempty"`
+	// ScheduledAt, when non-nil, defers this send to a future instant: the
+	// message is accepted + queued immediately (delivery_status='accepted'), but
+	// its River outbound_send job is held until this time. Nil means send now.
+	// The API edge validates it (future + within the max horizon) and normalizes
+	// a nil/past value to nil before this reaches DeliverOutbound.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 }
 
 type UnsubscribeOptions struct {
@@ -335,7 +342,12 @@ func (s *Sender) ComposeForAccept(agent *identity.AgentIdentity, req SendRequest
 // Keeping the header logic here (not in the worker) means Send and the async
 // path share one source of truth for what SES actually receives.
 func (s *Sender) SubmitOnce(messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
-	return s.smtpRelay.SendOnce(envelopeFrom, recipients, s.applySESConfigSet(applyCorrelationHeader(sentBody, messageID)))
+	return s.SubmitOnceContext(context.Background(), messageID, envelopeFrom, recipients, sentBody)
+}
+
+// SubmitOnceContext is SubmitOnce with caller cancellation propagated to SMTP.
+func (s *Sender) SubmitOnceContext(ctx context.Context, messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
+	return s.smtpRelay.SendOnceContext(ctx, envelopeFrom, recipients, s.applySESConfigSet(applyCorrelationHeader(sentBody, messageID)))
 }
 
 // applyCorrelationHeader prepends the X-E2A-Message-ID marker. The id is

@@ -211,6 +211,9 @@ type MessageSummaryWire = {
   size_bytes?: number;
   created_at: string;
   deleted_at?: string;
+  // Future submit instant for a scheduled outbound send (outbound-only,
+  // present only while a future send_at is set). Drives the "Scheduled" chip.
+  scheduled_at?: string;
 };
 
 type PageMessageSummaryWire = {
@@ -243,6 +246,7 @@ function projectSummary(w: MessageSummaryWire): import("../types").MessageSummar
     size_bytes: w.size_bytes,
     created_at: w.created_at,
     deleted_at: w.deleted_at,
+    scheduled_at: w.scheduled_at,
   };
 }
 

@@ -34,7 +34,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
 
-const USAGE = `e2a — email for AI agents
+export const USAGE = `e2a — email for AI agents
 
 Scriptable primitives for agent harnesses (send/reply/messages/whoami, with a
 stable exit-code contract) plus login and real-time listen. Interactive
@@ -104,6 +104,9 @@ Usage:
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
         --conversation-id <id>     Thread id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
+        --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
+                                   status=scheduled, sent "not before" then. Direct self-send is unsupported;
+                                   trash prevents submission; restore before send time re-arms, at/after leaves it canceled
         --idempotency-key <k>      Stable key so a retried invocation can't double-send
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
@@ -591,7 +594,7 @@ async function main() {
     case "send":
       checkFlags(args, [
         "--to", "--subject", "--body", "--body-file", "--html-file", "--attach",
-        "--conversation-id", "--conversation", "--reply-to", "--agent", "--idempotency-key", "--json",
+        "--conversation-id", "--conversation", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
       ]);
       getPositionals(args, 0, "usage: e2a send [options]");
       await send({
@@ -606,6 +609,7 @@ async function main() {
         // rejection) is shared via getConversationId — see FIX 3.
         conversationId: getConversationId(args),
         replyTo: getFlagChecked(args, "--reply-to"),
+        sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
         json: hasFlag(args, "--json"),
@@ -613,7 +617,7 @@ async function main() {
       break;
     case "reply":
       checkFlags(args, [
-        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--agent", "--idempotency-key", "--json",
+        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
       ]);
       await reply(getPositionals(args, 1, "usage: e2a reply <message-id> [options]")[0], {
         attach: getFlagsChecked(args, "--attach"),
@@ -621,6 +625,7 @@ async function main() {
         bodyFile: getFlagChecked(args, "--body-file"),
         htmlFile: getFlagChecked(args, "--html-file"),
         replyTo: getFlagChecked(args, "--reply-to"),
+        sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
         json: hasFlag(args, "--json"),

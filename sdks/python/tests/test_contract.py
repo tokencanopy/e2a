@@ -20,6 +20,7 @@ import json as json_mod
 import os
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -110,7 +111,16 @@ class Runner:
         self.base_url = base_url
         self.api_key = api_key
         self.scenario = scenario
-        self.vars: dict[str, str] = {}
+        # One stable instant per scenario: request bodies and later
+        # expectations must resolve to the exact same value, while never aging
+        # into the past.
+        future = (datetime.now(timezone.utc) + timedelta(minutes=5)).replace(
+            microsecond=0
+        )
+        self.vars: dict[str, str] = {
+            "future_rfc3339": future.isoformat().replace("+00:00", "Z"),
+            "scenario_token": uuid.uuid4().hex[:12],
+        }
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -416,6 +426,51 @@ def test_runner_captures_response_values_for_later_paths(monkeypatch):
     assert paths == ["/messages", "/messages/msg_captured/lifecycle"]
 
 
+def test_runner_resolves_future_rfc3339_once_per_scenario():
+    before = datetime.now(timezone.utc)
+    runner = Runner(
+        "https://contract.test",
+        "key",
+        {
+            "name": "future_timestamp",
+            "description": "dynamic timestamp parity",
+            "steps": [],
+        },
+    )
+    try:
+        first = runner.resolve("{future_rfc3339}")
+        second = runner.resolve("{future_rfc3339}")
+    finally:
+        runner.close()
+
+    parsed = datetime.fromisoformat(first.replace("Z", "+00:00"))
+    assert second == first
+    assert before + timedelta(minutes=4) <= parsed
+    assert parsed <= datetime.now(timezone.utc) + timedelta(minutes=6)
+    assert first.endswith("Z")
+    assert parsed.microsecond == 0
+
+
+def test_runner_assigns_unique_lowercase_hex_token_per_scenario():
+    first = Runner(
+        "https://contract.test",
+        "key",
+        {"name": "first", "description": "unique dynamic placeholder", "steps": []},
+    )
+    second = Runner(
+        "https://contract.test",
+        "key",
+        {"name": "second", "description": "unique dynamic placeholder", "steps": []},
+    )
+    try:
+        first_token = first.resolve("{scenario_token}")
+        assert re.fullmatch(r"[0-9a-f]{12}", first_token)
+        assert second.resolve("{scenario_token}") != first_token
+    finally:
+        first.close()
+        second.close()
+
+
 def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeypatch):
     scenario = {
         "name": "failure_cleanup",
@@ -526,6 +581,47 @@ def test_managed_unsubscribe_scenario_is_self_cleaning_and_lifecycle_observable(
     ]
 
 
+def test_scheduled_send_scenario_is_self_cleaning_and_projection_complete():
+    scenario = _scenario_by_name("scheduled_send_fields")
+    steps = {step["id"]: step for step in scenario["steps"]}
+
+    assert scenario["setup"][0]["register_agent"]["email"] == (
+        "scheduled-contract-{scenario_token}@agents.e2a.dev"
+    )
+    assert steps["schedule_send"]["body"]["send_at"] == "{future_rfc3339}"
+    assert steps["schedule_send"]["expect"]["body_match"] == {
+        "status": "scheduled",
+        "scheduled_at": "{future_rfc3339}",
+    }
+    assert steps["schedule_send"]["capture"] == {
+        "scheduled_message_id": "message_id"
+    }
+    assert steps["get_scheduled_message"]["expect"]["body_match"] == {
+        "id": "{scheduled_message_id}",
+        "delivery_status": "accepted",
+        "scheduled_at": "{future_rfc3339}",
+    }
+    assert steps["list_scheduled_message"]["expect"]["body_array_contains"] == {
+        "items": {
+            "id": "{scheduled_message_id}",
+            "delivery_status": "accepted",
+            "scheduled_at": "{future_rfc3339}",
+        }
+    }
+    assert steps["trash_scheduled_message"]["expect"]["body_match"] == {
+        "deleted": True,
+        "id": "{scheduled_message_id}",
+    }
+    assert steps["restore_before_scheduled_at"]["expect"]["body_match"] == {
+        "id": "{scheduled_message_id}",
+        "delivery_status": "accepted",
+        "scheduled_at": "{future_rfc3339}",
+    }
+    assert [step["id"] for step in scenario["cleanup"]] == [
+        "delete_scheduled_agent_permanently"
+    ]
+
+
 @pytest.fixture(params=_scenario_ids() if SCENARIOS_PATH.exists() else [])
 def scenario(request):
     return _scenario_by_name(request.param)
@@ -549,11 +645,12 @@ def test_contract_scenario(scenario):
 # ergonomic client's wrapper-only features (wait="sent", unsubscribe kwarg)
 # need their own live-server coverage here.
 #
-# Contract-server send topology (cmd/e2a-contract-server): no outbound River
-# worker is wired, so external sends fail closed (500 outbound queue
-# unavailable). The deterministic terminal path is the self-send LOOPBACK,
-# which delivers synchronously — wait="sent" on it observes status="sent"
-# immediately rather than polling to the server-side ceiling.
+# Contract-server send topology (cmd/e2a-contract-server): the real River
+# enqueuer is wired but its outbound worker is not started, so external sends
+# can prove accepted/scheduled queue contracts without submitting real mail.
+# The deterministic terminal path is the self-send LOOPBACK, which delivers
+# synchronously — wait="sent" on it observes status="sent" immediately rather
+# than polling to the server-side ceiling.
 
 
 def _slug(prefix: str) -> str:

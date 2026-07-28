@@ -12,11 +12,12 @@
  *   E2A_TEST_BASE_URL  — test server URL
  *   E2A_TEST_API_KEY   — valid API key for the test user
  *
- * Contract-server send topology (cmd/e2a-contract-server): no outbound River
- * worker is wired, so external sends fail closed (500 outbound queue
- * unavailable). The deterministic terminal path is the self-send LOOPBACK,
- * which delivers synchronously — `wait: "sent"` on it observes `status:
- * "sent"` immediately rather than polling to the 15s ceiling.
+ * Contract-server send topology (cmd/e2a-contract-server): the real River
+ * enqueuer is wired but its outbound worker is not started, so external sends
+ * can prove accepted/scheduled queue contracts without submitting real mail.
+ * The deterministic terminal path is the self-send LOOPBACK, which delivers
+ * synchronously — `wait: "sent"` on it observes `status: "sent"` immediately
+ * rather than polling to the 15s ceiling.
  */
 import { describe, it, expect } from "vitest";
 import { E2AClient } from "../../src/v1/client.js";

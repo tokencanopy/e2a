@@ -213,3 +213,68 @@ func TestClient_InsertTxRollbackDropsJob(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 }
+
+func TestClient_CancelTxIsAtomicAndMissingIsSuccess(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	client, err := jobs.New(pool, jobs.Config{}, pingRegistrar{w: &pingWorker{got: make(chan string, 1)}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	inserted, err := client.Insert(ctx, pingArgs{ID: "scheduled"}, &river.InsertOpts{
+		ScheduledAt: time.Now().Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	jobID := inserted.Job.ID
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin rollback tx: %v", err)
+	}
+	if err := client.CancelTx(ctx, tx, jobID); err != nil {
+		t.Fatalf("CancelTx before rollback: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	var state string
+	if err := pool.QueryRow(ctx, `SELECT state::text FROM river_job WHERE id = $1`, jobID).Scan(&state); err != nil {
+		t.Fatalf("read rolled-back job: %v", err)
+	}
+	if state != "scheduled" {
+		t.Fatalf("state after rollback = %q, want scheduled", state)
+	}
+
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin commit tx: %v", err)
+	}
+	if err := client.CancelTx(ctx, tx, jobID); err != nil {
+		t.Fatalf("CancelTx before commit: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT state::text FROM river_job WHERE id = $1`, jobID).Scan(&state); err != nil {
+		t.Fatalf("read cancelled job: %v", err)
+	}
+	if state != "cancelled" {
+		t.Fatalf("state after commit = %q, want cancelled", state)
+	}
+
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin missing tx: %v", err)
+	}
+	if err := client.CancelTx(ctx, tx, 1<<62); err != nil {
+		t.Fatalf("CancelTx missing job: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("Rollback missing tx: %v", err)
+	}
+}

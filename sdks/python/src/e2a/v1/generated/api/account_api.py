@@ -361,7 +361,7 @@ class AccountApi:
     ) -> DeleteUserDataResult:
         """Delete your account + all data (irreversible)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
@@ -397,6 +397,7 @@ class AccountApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteUserDataResult",
+            '409': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -428,7 +429,7 @@ class AccountApi:
     ) -> ApiResponse[DeleteUserDataResult]:
         """Delete your account + all data (irreversible)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
@@ -464,6 +465,7 @@ class AccountApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteUserDataResult",
+            '409': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -495,7 +497,7 @@ class AccountApi:
     ) -> RESTResponseType:
         """Delete your account + all data (irreversible)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
@@ -531,6 +533,7 @@ class AccountApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteUserDataResult",
+            '409': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,

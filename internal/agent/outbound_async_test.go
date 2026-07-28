@@ -69,11 +69,27 @@ func eventLifecycle(t *testing.T, pool *pgxpool.Pool, messageID, eventType strin
 }
 
 // fakeOutboundEnqueuer stands in for the shared River client: it records the
-// in-tx enqueue and returns a stable job id the accept-tx stamps on the row.
-type fakeOutboundEnqueuer struct{ jobID int64 }
+// in-tx enqueue and returns a stable job id the accept-tx stamps on the row. For
+// a scheduled send it also records the requested run instant so tests can assert
+// the send_at was threaded through to the job.
+type fakeOutboundEnqueuer struct {
+	jobID       int64
+	scheduledAt time.Time // set when EnqueueScheduledSendTx was used
+	cancelled   []int64
+}
 
 func (f *fakeOutboundEnqueuer) EnqueueSendTx(_ context.Context, _ pgx.Tx, _ string) (int64, error) {
 	return f.jobID, nil
+}
+
+func (f *fakeOutboundEnqueuer) EnqueueScheduledSendTx(_ context.Context, _ pgx.Tx, _ string, at time.Time) (int64, error) {
+	f.scheduledAt = at
+	return f.jobID, nil
+}
+
+func (f *fakeOutboundEnqueuer) CancelTx(_ context.Context, _ pgx.Tx, jobID int64) error {
+	f.cancelled = append(f.cancelled, jobID)
+	return nil
 }
 
 type txSentinelEnqueuer struct{}
@@ -82,6 +98,10 @@ func (txSentinelEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageI
 	var id int64
 	err := tx.QueryRow(ctx, `INSERT INTO task6_durable_jobs (message_id) VALUES ($1) RETURNING id`, messageID).Scan(&id)
 	return id, err
+}
+
+func (s txSentinelEnqueuer) EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, _ time.Time) (int64, error) {
+	return s.EnqueueSendTx(ctx, tx, messageID)
 }
 
 func installTask6DurableJobs(t *testing.T, pool *pgxpool.Pool) {
@@ -171,6 +191,7 @@ func setupAsyncAPIWithPool(t *testing.T) (*agent.API, *identity.Store, webhookpu
 	api.SetOutbox(outbox)
 	enq := &fakeOutboundEnqueuer{jobID: 999}
 	api.SetOutboundEnqueuer(enq)
+	store.SetOutboundJobCanceller(enq)
 	return api, store, outbox, enq, pool
 }
 
@@ -329,6 +350,137 @@ func TestDeliverOutbound_QueueLifecycleFailureRollsBack(t *testing.T) {
 	}
 	if jobsCount != 0 || lifecycleAfter != lifecycleBaseline {
 		t.Fatalf("partial accept jobs=%d lifecycle before=%d after=%d", jobsCount, lifecycleBaseline, lifecycleAfter)
+	}
+}
+
+// TestDeliverOutbound_ScheduledAccept pins the scheduled-send accept path
+// (migration 084): a future ScheduledAt is accepted as status=scheduled, threads
+// the instant into the River enqueue (EnqueueScheduledSendTx), persists
+// scheduled_at on the row, and — deliberately — leaves delivery_status='accepted'
+// (no new status; a future-scheduled River job is invisible to the reconciler).
+func TestDeliverOutbound_ScheduledAccept(t *testing.T) {
+	api, store, _, enq := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "scheduledaccept")
+	at := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"alice@external.test"}, Subject: "later", Body: "scheduled body",
+		ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr != nil {
+		t.Fatalf("DeliverOutbound: %+v", oerr)
+	}
+	if res == nil || res.Status != "scheduled" || res.ScheduledAt == nil || !res.ScheduledAt.Equal(at) {
+		t.Fatalf("result = %+v, want status=scheduled with ScheduledAt=%v", res, at)
+	}
+	// The scheduled instant was threaded to the River enqueue (not the immediate path).
+	if !enq.scheduledAt.Equal(at) {
+		t.Fatalf("enqueued ScheduledAt = %v, want %v", enq.scheduledAt, at)
+	}
+	// The row persists scheduled_at and stays delivery_status='accepted'.
+	m, err := store.GetMessageWithContent(ctx, res.MessageID, ag.ID)
+	if err != nil {
+		t.Fatalf("GetMessageWithContent: %v", err)
+	}
+	if m.DeliveryStatus != "accepted" {
+		t.Errorf("delivery_status = %q, want accepted (scheduled rows stay accepted)", m.DeliveryStatus)
+	}
+	if m.ScheduledAt == nil || !m.ScheduledAt.Equal(at) {
+		t.Errorf("stored scheduled_at = %v, want %v", m.ScheduledAt, at)
+	}
+}
+
+// A scheduled send that is over the monthly cap at FIRE time is refused
+// terminally (delivery_status=failed) and never submitted — closing the
+// "schedule into a future month to bypass quota" gap. Immediate sends are gated
+// at accept and are unaffected (the quota gate here only runs for scheduled_at
+// rows). Review item 2.
+func TestSendWorker_ScheduledSendOverMonthlyQuotaRefusedAtFire(t *testing.T) {
+	api, store, outbox, _, pool := setupAsyncAPIWithPool(t)
+	installTask6DurableJobs(t, pool)
+	api.SetOutboundEnqueuer(txSentinelEnqueuer{})
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "schedquota")
+	at := time.Now().Add(48 * time.Hour).UTC()
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"alice@external.test"}, Subject: "later", Body: "b", ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr != nil || res == nil || res.Status != "scheduled" {
+		t.Fatalf("scheduled accept: res=%+v err=%+v", res, oerr)
+	}
+	var sendJobID *int64
+	if err := pool.QueryRow(ctx, `SELECT send_job_id FROM messages WHERE id=$1`, res.MessageID).Scan(&sendJobID); err != nil || sendJobID == nil {
+		t.Fatalf("send_job_id: %v", err)
+	}
+
+	adapter := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
+	adapter.SetScheduledSendQuota(func(context.Context, string) (bool, error) { return true, nil }) // over cap at fire
+	deliverer := &countingAsyncDeliverer{}
+	if err := outboundsend.NewSendWorker(adapter, deliverer).Work(ctx, workerJobWithID(res.MessageID, *sendJobID, 1)); err != nil {
+		t.Fatalf("worker.Work: %v", err)
+	}
+	if deliverer.calls != 0 {
+		t.Errorf("over-quota scheduled send must NOT be submitted; deliverer calls=%d", deliverer.calls)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT delivery_status FROM messages WHERE id=$1`, res.MessageID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Errorf("delivery_status = %q, want failed (refused at fire for quota)", status)
+	}
+}
+
+// Self-send delivers immediately in-process (the scheduling path never runs), so
+// a future send_at on a self-send is rejected rather than silently delivered
+// early. Review item 3.
+func TestDeliverOutbound_SelfSendRejectsScheduledAt(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "selfsched")
+	at := time.Now().Add(24 * time.Hour).UTC()
+
+	_, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{ag.EmailAddress()}, Subject: "self later", Body: "b", ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr == nil || oerr.Status != 400 || oerr.Code != "invalid_request" {
+		t.Fatalf("self-send with send_at: want 400 invalid_request, got %+v", oerr)
+	}
+}
+
+// The conversation view is the third projection of the summary contract (after
+// list + detail); it must also carry scheduled_at so a scheduled send is
+// distinguishable there. Review item 4.
+func TestGetConversationByID_CarriesScheduledAt(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "convsched")
+	at := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"alice@external.test"}, Subject: "later", Body: "b",
+		ConversationID: "conv_sched_1", ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr != nil {
+		t.Fatalf("DeliverOutbound: %+v", oerr)
+	}
+	conv, err := store.GetConversationByID(ctx, ag.ID, "conv_sched_1")
+	if err != nil {
+		t.Fatalf("GetConversationByID: %v", err)
+	}
+	var found *identity.Message
+	for i := range conv.Messages {
+		if conv.Messages[i].ID == res.MessageID {
+			found = &conv.Messages[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("scheduled message not present in conversation view")
+	}
+	if found.ScheduledAt == nil || !found.ScheduledAt.Equal(at) {
+		t.Errorf("conversation view scheduled_at = %v, want %v", found.ScheduledAt, at)
 	}
 }
 
@@ -797,10 +949,10 @@ func TestSendWorker_TrashLinearizesWithDurableClaim(t *testing.T) {
 	go func() { trashDone <- trashStore.SoftDeleteMessage(ctx, res.MessageID, ag.ID) }()
 	select {
 	case err := <-trashDone:
-		if err != nil {
+		if !errors.Is(err, identity.ErrSendInProgress) {
 			close(deliverer.release)
 			<-workDone
-			t.Fatalf("SoftDeleteMessage: %v", err)
+			t.Fatalf("SoftDeleteMessage during provider call = %v, want ErrSendInProgress", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		close(deliverer.release)
@@ -816,6 +968,9 @@ func TestSendWorker_TrashLinearizesWithDurableClaim(t *testing.T) {
 	close(deliverer.release)
 	if err := <-workDone; err != nil {
 		t.Fatalf("worker.Work: %v", err)
+	}
+	if err := trashStore.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
+		t.Fatalf("SoftDeleteMessage after provider call: %v", err)
 	}
 
 	var deliveryStatus, providerID string
@@ -1000,7 +1155,7 @@ func TestSendWorker_TrashCancellationLifecycleFailureRollsBackState(t *testing.T
 }
 
 func TestSendWorker_RetryBackoffReleasesClaimForPurge(t *testing.T) {
-	api, store, outbox, _ := setupAsyncAPI(t)
+	api, store, outbox, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncreleasepurge")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1022,10 +1177,13 @@ func TestSendWorker_RetryBackoffReleasesClaimForPurge(t *testing.T) {
 	if err := store.PurgeMessage(ctx, res.MessageID, ag.ID); err != nil {
 		t.Fatalf("PurgeMessage after released retry claim: %v", err)
 	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
+	}
 }
 
 func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
-	api, store, _, _ := setupAsyncAPI(t)
+	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstalepurge")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1037,9 +1195,6 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	if payload, err := store.ClaimOutboundForSend(ctx, res.MessageID, 999); err != nil || payload == nil {
 		t.Fatalf("ClaimOutboundForSend = (%v, %v), want payload", payload, err)
 	}
-	if err := store.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
-		t.Fatalf("SoftDeleteMessage: %v", err)
-	}
 	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE messages SET send_claimed_at = now() - make_interval(secs => $2) WHERE id=$1`,
@@ -1048,13 +1203,19 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("backdate claim: %v", err)
 	}
+	if err := store.SoftDeleteMessage(ctx, res.MessageID, ag.ID); err != nil {
+		t.Fatalf("SoftDeleteMessage(stale claim): %v", err)
+	}
 	if err := store.PurgeMessage(ctx, res.MessageID, ag.ID); err != nil {
 		t.Fatalf("PurgeMessage(stale claim): %v", err)
+	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
 	}
 }
 
 func TestDeleteAgent_AllowsStaleOrphanedSendClaim(t *testing.T) {
-	api, store, _, _ := setupAsyncAPI(t)
+	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstaleagent")
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
@@ -1079,6 +1240,9 @@ func TestDeleteAgent_AllowsStaleOrphanedSendClaim(t *testing.T) {
 	}
 	if _, err := store.DeleteAgent(ctx, ag.ID, user.ID); err != nil {
 		t.Fatalf("DeleteAgent(stale claim): %v", err)
+	}
+	if len(enq.cancelled) != 1 || enq.cancelled[0] != 999 {
+		t.Fatalf("cancelled jobs = %v, want [999]", enq.cancelled)
 	}
 }
 

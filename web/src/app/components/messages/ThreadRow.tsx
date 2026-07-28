@@ -8,6 +8,7 @@ import { useState } from "react";
 import { CounterpartyAvatar } from "./CounterpartyAvatar";
 import { MessageStatusChip, deriveStatusChip } from "./MessageStatusChip";
 import { formatRelativeAge } from "../../../lib/relativeTime";
+import { formatScheduledSend } from "../../../lib/scheduledTime";
 import type { Thread } from "./threading";
 
 export function ThreadRow({
@@ -33,8 +34,10 @@ export function ThreadRow({
           direction: "outbound",
           delivery_status: latest.status,
           review_status: latest.review_status,
+          scheduled_at: latest.scheduled_at,
         })
       : null;
+  const scheduled = latestStatus?.label === "Scheduled";
   const fw = unread ? 600 : 400;
   // Hover highlight via state, not a `hover:bg-*` class: the inline
   // `background` below (active/unread tinting) would otherwise win over a
@@ -115,7 +118,20 @@ export function ThreadRow({
           direction="outbound"
           delivery_status={latest.status}
           review_status={latest.review_status}
+          scheduled_at={latest.scheduled_at}
         />
+      )}
+      {scheduled && (
+        <span
+          className="shrink-0"
+          style={{
+            fontSize: 11,
+            color: "var(--fg-subtle)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {formatScheduledSend(latest.scheduled_at)}
+        </span>
       )}
       {pending && !latestStatus?.attention && (
         <span

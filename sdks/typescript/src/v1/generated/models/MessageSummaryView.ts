@@ -26,7 +26,7 @@ export class MessageSummaryView {
     'deliveredTo': string;
     'deliveryDetail'?: string;
     /**
-    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy \'queued\' is superseded by \'accepted\'.)
+    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy \'queued\' is superseded by \'accepted\'.)
     */
     'deliveryStatus'?: string;
     'direction': MessageSummaryViewDirectionEnum;
@@ -51,6 +51,10 @@ export class MessageSummaryView {
     * Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field.
     */
     'reviewStatus'?: string;
+    /**
+    * Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows. Moving to trash before provider submission prevents submission. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.
+    */
+    'scheduledAt'?: Date;
     /**
     * From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.
     */
@@ -174,6 +178,12 @@ export class MessageSummaryView {
             "baseName": "review_status",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sentAs",

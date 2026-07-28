@@ -151,6 +151,27 @@ const res = await client.messages.send(address, body, { wait: "sent" });
 if (res.status === "sent") { /* delivered to the relay */ }
 ```
 
+Scheduled sending is **beta and may change before it is declared stable**.
+Schedule a send by passing a `Date`. The durable `scheduled` result is success,
+not a reason to retry; even with `wait: "sent"` it returns immediately rather
+than holding the HTTP request until the future time:
+
+```typescript
+const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+const res = await client.messages.send(address, {
+  to: ["alice@example.com"],
+  subject: "Tomorrow's update",
+  text: "Hello later",
+  sendAt: tomorrow,
+}, { wait: "sent" });
+if (res.status === "scheduled") console.log(res.scheduledAt);
+```
+
+`sendAt` must be no more than 90 days ahead. Direct loopback to the sending
+agent's own address cannot be scheduled and returns `400 invalid_request`
+unless a review hold takes precedence; held messages drop the schedule and send
+when approved.
+
 ### Managed unsubscribe (beta)
 
 Opt a single-recipient send, reply, or forward into e2a-managed unsubscribe.

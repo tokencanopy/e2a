@@ -1159,8 +1159,14 @@ type OutboundResult struct {
 	// Status is the send progression the wire maps to `status`. Empty on the
 	// synchronous path (the caller renders "sent"); "accepted" on the async path
 	// (durably persisted + queued; the terminal outcome arrives via email.sent /
-	// email.failed). See async-message-pipeline.md, slice C.
+	// email.failed); "scheduled" when the send was deferred to a future instant
+	// (ScheduledAt). See async-message-pipeline.md, slice C.
 	Status string
+	// ScheduledAt is set only when Status=="scheduled": the future instant the
+	// queued send will be submitted. It must be carried on BOTH the live return
+	// and the in-transaction idempotency completion so a keyed replay renders the
+	// identical scheduled view (never a bare "accepted").
+	ScheduledAt *time.Time
 }
 
 // OutboundError carries an HTTP status + message so both the legacy handler
@@ -1321,6 +1327,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// §7.2 / async-send-contract.md): billing must not run ahead of a durable
 	// message row, or a crash between meter and persist bills an invisible send.
 	if isSelfSend(req, agent.EmailAddress()) {
+		// Self-send is an immediate in-process loopback; the scheduling path
+		// (River ScheduledAt) never runs for it, so a future send_at would be
+		// silently dropped. Reject it rather than deliver early against intent.
+		if req.ScheduledAt != nil {
+			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
+		}
 		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, idemCompleteTx)
 		if err != nil {
 			log.Printf("[api] self-send failed: agent=%s error=%v", agent.EmailAddress(), err)
@@ -1358,6 +1370,16 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		log.Printf("[api] async compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
+	// Scheduled send (migration 084): a future req.ScheduledAt defers WHEN the
+	// send job runs (river ScheduledAt) — the message is still accepted + queued
+	// atomically here, and the row stays delivery_status='accepted'. The edge has
+	// already validated that ScheduledAt, when set, is in the future and within
+	// the max horizon; a nil/past value is an ordinary immediate send.
+	scheduledAt := req.ScheduledAt
+	acceptStatus := "accepted"
+	if scheduledAt != nil {
+		acceptStatus = "scheduled"
+	}
 	var accepted *identity.Message
 	// Crash boundary:
 	//   - Before Commit returns, WithTx rolls back the message, River job, and
@@ -1372,7 +1394,18 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if err != nil {
 			return err
 		}
-		jobID, err := a.outboundEnq.EnqueueSendTx(ctx, tx, msg.ID)
+		// Stamp the schedule marker + enqueue the job to run at that instant. Both
+		// happen in this same tx, so scheduled_at and the River job's ScheduledAt
+		// are committed together with the message.
+		var jobID int64
+		if scheduledAt != nil {
+			if err := a.store.StampScheduledAtTx(ctx, tx, msg.ID, *scheduledAt); err != nil {
+				return err
+			}
+			jobID, err = a.outboundEnq.EnqueueScheduledSendTx(ctx, tx, msg.ID, *scheduledAt)
+		} else {
+			jobID, err = a.outboundEnq.EnqueueSendTx(ctx, tx, msg.ID)
+		}
 		if err != nil {
 			return err
 		}
@@ -1380,7 +1413,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 			return err
 		}
 		if idemCompleteTx != nil {
-			if err := idemCompleteTx(ctx, tx, &OutboundResult{MessageID: msg.ID, Status: "accepted"}); err != nil {
+			if err := idemCompleteTx(ctx, tx, &OutboundResult{MessageID: msg.ID, Status: acceptStatus, ScheduledAt: scheduledAt}); err != nil {
 				return err
 			}
 		}
@@ -1394,8 +1427,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		a.annotateAndAudit(ctx, agent, accepted.ID, req, verdict)
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
-	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
+	scheduledLog := "-"
+	if scheduledAt != nil {
+		scheduledLog = scheduledAt.UTC().Format(time.RFC3339)
+	}
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s scheduled_at=%s from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, acceptStatus, scheduledLog, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
+	return &OutboundResult{MessageID: accepted.ID, Status: acceptStatus, ScheduledAt: scheduledAt, SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
 // SendTestCore accepts (or HITL-holds) a platform test email to the agent's

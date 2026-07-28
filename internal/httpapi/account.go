@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"time"
@@ -89,8 +90,13 @@ func (s *Server) registerAccount() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
 		Summary: "Delete your account + all data (irreversible)", Tags: []string{"account"},
-		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
+		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
 		Security:    []map[string][]string{{"bearer": {}}},
+		Responses: map[string]*huma.Response{
+			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
+				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."),
+			"default": s.errorEnvelopeResponse(),
+		},
 	}, s.handleDeleteAccount)
 
 	huma.Register(s.API, huma.Operation{
@@ -271,6 +277,10 @@ func (s *Server) handleDeleteAccount(ctx context.Context, in *deleteAccountInput
 	}
 	res, err := s.deps.DeleteUserData(ctx, user)
 	if err != nil {
+		if errors.Is(err, identity.ErrSendInProgress) {
+			return nil, NewError(http.StatusConflict, "send_in_progress",
+				"an outbound provider call is still in progress; retry after it finishes")
+		}
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
 	}
 	// Conform to the uniform delete-object shape: every delete op returns

@@ -123,11 +123,12 @@ type SendResultView struct {
 	// review_approved is the inbound-release outcome of POST .../approve (an
 	// inbound hold released to the agent's inbox — no send). sent/pending_review
 	// are the send/outbound-approve outcomes.
-	Status            string     `json:"status" doc:"Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code."`
+	Status            string     `json:"status" doc:"Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code."`
 	MessageID         string     `json:"message_id"`
 	ProviderMessageID string     `json:"provider_message_id,omitempty" doc:"Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id."`
 	SentAs            string     `json:"sent_as,omitempty" doc:"From identity used. Open set; tolerate unknown values. Known values: own_address, relay."`
 	Method            string     `json:"method,omitempty" doc:"Send transport. Open set; tolerate unknown values. Known values: smtp, loopback."`
+	ScheduledAt       *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."`
 	ApprovalExpiresAt *time.Time `json:"approval_expires_at,omitempty"`
 	// Edited is set only by approve (true/false = did the reviewer edit the
 	// draft before sending); omitted on the plain send path.
@@ -224,6 +225,36 @@ func recipientCountError(groups ...[]string) *ErrorEnvelope {
 	return nil
 }
 
+// maxScheduleHorizon caps how far into the future a send_at may be scheduled.
+// River retains a `scheduled` job indefinitely (pruning only touches finalized
+// jobs), so an unbounded send_at is a footgun that also stretches the
+// trash-cancel window; 90 days is a generous planning horizon well short of
+// "forever".
+const maxScheduleHorizon = 90 * 24 * time.Hour
+
+const scheduledSendBetaDoc = "Beta: scheduled sending may change before it is declared stable."
+
+// scheduledInstant validates a caller-supplied send_at and returns the effective
+// future schedule instant (UTC), or nil to send immediately. A nil/zero value or
+// one at/before `now` is immediate (nil, nil). A value beyond maxScheduleHorizon
+// is rejected with 400 invalid_request. Keeping the "past = immediate" rule (vs
+// a hard error) is deliberate: minor client/server clock skew shouldn't turn an
+// intended-now send into an error.
+func scheduledInstant(sendAt *time.Time, now time.Time) (*time.Time, *ErrorEnvelope) {
+	if sendAt == nil || sendAt.IsZero() {
+		return nil, nil
+	}
+	if !sendAt.After(now) {
+		return nil, nil // at/before now — send immediately
+	}
+	if sendAt.After(now.Add(maxScheduleHorizon)) {
+		return nil, NewError(http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("send_at is too far in the future — at most %d days ahead", int(maxScheduleHorizon/(24*time.Hour))))
+	}
+	at := sendAt.UTC()
+	return &at, nil
+}
+
 // SendEmailRequest is the new-thread send body. `to` is required (RFC 5321
 // requires ≥1 recipient; From/Date are server-set). Content comes in one of
 // two mutually exclusive shapes: literal subject + text (+ optional
@@ -246,6 +277,7 @@ type SendEmailRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
 }
 
 // UnsubscribeOptions is the beta per-message opt-in to e2a-managed unsubscribe
@@ -281,7 +313,7 @@ type createMessageInput struct {
 	Address        string `path:"email"`
 	RawBody        []byte
 	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."`
-	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."`
+	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."`
 	Body           SendEmailRequest
 }
 
@@ -293,11 +325,16 @@ type sendOutput struct {
 func (s *Server) registerOutbound() {
 	// 202 Accepted covers every non-terminal outbound outcome: the message was
 	// durably accepted but not yet delivered — either queued for async
-	// submission (status=accepted; the terminal sent/failed arrives via GET /
-	// webhook events) or held for human approval (status=pending_review).
+	// immediate submission (status=accepted; the terminal sent/failed arrives
+	// via GET / webhook events), queued for future submission
+	// (status=scheduled), or held for human approval (status=pending_review).
 	// Declared explicitly because Huma infers only the single DefaultStatus
 	// (200, kept for the terminal-synchronous status=sent result).
 	accepted202 := func() *huma.Response {
+		return s.jsonResponse(reflect.TypeOf(SendResultView{}), "SendResultView",
+			"Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses.")
+	}
+	testAccepted202 := func() *huma.Response {
 		return s.jsonResponse(reflect.TypeOf(SendResultView{}), "SendResultView",
 			"Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval).")
 	}
@@ -308,12 +345,12 @@ func (s *Server) registerOutbound() {
 	// render the standard ErrorEnvelope — branch on error.code.
 	badRequest400 := func() *huma.Response {
 		return s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
-			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).")
+			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).")
 	}
 	huma.Register(s.API, huma.Operation{
 		OperationID: "sendMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages",
 		Summary: "Send a new email", Tags: []string{"messages"},
-		Description:  "Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. 202 + pending_review when the agent has HITL enabled. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc + " Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).",
+		Description:  scheduledSendBetaDoc + " Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc + " Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).",
 		Security:     []map[string][]string{{"bearer": {}}},
 		MaxBodyBytes: maxOutboundBytes,
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.idempotencyInFlightResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
@@ -322,7 +359,7 @@ func (s *Server) registerOutbound() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "replyToMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages/{id}/reply",
 		Summary: "Reply to a message", Tags: []string{"messages"},
-		Description:  "Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). 202 when held for HITL. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
+		Description:  scheduledSendBetaDoc + " Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
 		Security:     []map[string][]string{{"bearer": {}}},
 		MaxBodyBytes: maxOutboundBytes,
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.replyForwardConflictResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
@@ -331,7 +368,7 @@ func (s *Server) registerOutbound() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "forwardMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages/{id}/forward",
 		Summary: "Forward a message", Tags: []string{"messages"},
-		Description:  "Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. 202 when held for HITL. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
+		Description:  scheduledSendBetaDoc + " Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
 		Security:     []map[string][]string{{"bearer": {}}},
 		MaxBodyBytes: maxOutboundBytes,
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.replyForwardConflictResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
@@ -342,7 +379,7 @@ func (s *Server) registerOutbound() {
 		Summary: "Send a test email to the agent's own address", Tags: []string{"agents"},
 		Description: "Send a platform-originated test email (From: the platform noreply identity) to the agent's own address over the real external SMTP route, to confirm inbound delivery end to end. Returns 202: status=accepted (the message is durably persisted and queued; message_id is the GET-able e2a message id, and the terminal outcome arrives via GET /v1/messages/{id} or the email.sent / email.failed webhook events — provider_message_id appears only after provider submission) or status=pending_review when held for review. Always branch on body.status.",
 		Security:    []map[string][]string{{"bearer": {}}},
-		Responses:   map[string]*huma.Response{"202": accepted202(), "402": s.limitExceededResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
+		Responses:   map[string]*huma.Response{"202": testAccepted202(), "402": s.limitExceededResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
 	}, s.handleTestSend)
 }
 
@@ -395,6 +432,7 @@ type ReplyRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
 }
 
 type replyInput struct {
@@ -402,7 +440,7 @@ type replyInput struct {
 	ID             string `path:"id"`
 	RawBody        []byte
 	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."`
-	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."`
+	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."`
 	Body           ReplyRequest
 }
 
@@ -470,6 +508,14 @@ func parentNotYetSubmitted(msg *identity.Message) *ErrorEnvelope {
 	}
 	if msg.DeliveryStatus != "accepted" && msg.DeliveryStatus != "sending" {
 		return nil
+	}
+	// A scheduled parent won't gain its provider Message-ID until it fires, which
+	// may be far off — say so (and when) instead of the bare "retry after it is
+	// sent", which reads as imminent.
+	if msg.ScheduledAt != nil && msg.ScheduledAt.After(time.Now()) {
+		return NewError(http.StatusConflict, "message_not_yet_delivered",
+			fmt.Sprintf("referenced message is scheduled to send at %s and has not been submitted yet — reply or forward once it sends (threading anchors on the parent's provider Message-ID, assigned only at submission)",
+				msg.ScheduledAt.UTC().Format(time.RFC3339Nano)))
 	}
 	return NewError(http.StatusConflict, "message_not_yet_delivered",
 		"referenced message not yet delivered — retry after it is sent, or use wait=sent on the original send")
@@ -541,6 +587,11 @@ func (s *Server) handleReply(ctx context.Context, in *replyInput) (*sendOutput, 
 	if env := recipientCountError(req.To, req.CC, req.BCC); env != nil {
 		return nil, env
 	}
+	sched, senv := scheduledInstant(b.SendAt, time.Now())
+	if senv != nil {
+		return nil, senv
+	}
+	req.ScheduledAt = sched
 	return s.deliver(ctx, user, ag, literalRequest(req), "reply", parentMessageID, "/v1/reply/"+in.ID, in.IdempotencyKey, in.Wait, in.RawBody, msg)
 }
 
@@ -584,6 +635,7 @@ type ForwardRequest struct {
 	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address."`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"Additional attachments to include alongside the forwarded message's original attachments, which are carried over automatically. Limits apply to the combined set (originals + these): at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
 }
 
 type forwardInput struct {
@@ -591,7 +643,7 @@ type forwardInput struct {
 	ID             string `path:"id"`
 	RawBody        []byte
 	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."`
-	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."`
+	Wait           string `query:"wait" doc:"Optional bounded wait. wait=sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."`
 	Body           ForwardRequest
 }
 
@@ -636,6 +688,11 @@ func (s *Server) handleForward(ctx context.Context, in *forwardInput) (*sendOutp
 	}
 	req.CC = agent.StripAgentSelfAliases(req.CC, ag.EmailAddress())
 	req.BCC = agent.StripAgentSelfAliases(req.BCC, ag.EmailAddress())
+	sched, senv := scheduledInstant(b.SendAt, time.Now())
+	if senv != nil {
+		return nil, senv
+	}
+	req.ScheduledAt = sched
 	return s.deliver(ctx, user, ag, literalRequest(req), "forward", msg.ThreadMessageID(), "/v1/forward/"+in.ID, in.IdempotencyKey, in.Wait, in.RawBody, msg)
 }
 
@@ -918,6 +975,15 @@ func acceptedView(messageID string) SendResultView {
 	return SendResultView{Status: "accepted", MessageID: messageID, Method: "smtp"}
 }
 
+// scheduledView is the async-accept wire body for a scheduled send. Like
+// acceptedView it is built identically for the live response and the idempotency
+// cache entry (byte-identical replay), and it deliberately reports status
+// "scheduled" (not "accepted") so the wait=sent poll loop is skipped — a
+// scheduled send has no imminent outcome to wait for.
+func scheduledView(messageID string, at *time.Time) SendResultView {
+	return SendResultView{Status: "scheduled", MessageID: messageID, Method: "smtp", ScheduledAt: at}
+}
+
 // outboundResultView is shared by the live response and the same-transaction
 // idempotency completion. That keeps queue acceptance (202/accepted) distinct
 // from terminal providerless loopback delivery (200/sent) on every replay.
@@ -927,6 +993,9 @@ func outboundResultView(res *agent.OutboundResult) (int, SendResultView) {
 			Status: "pending_review", MessageID: res.PendingMessageID,
 			ApprovalExpiresAt: res.ApprovalExpiresAt,
 		}
+	}
+	if res.Status == "scheduled" {
+		return http.StatusAccepted, scheduledView(res.MessageID, res.ScheduledAt)
 	}
 	if res.Status == "accepted" {
 		return http.StatusAccepted, acceptedView(res.MessageID)
@@ -1006,6 +1075,10 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 		if env := validateReplyTo(b.ReplyTo); env != nil {
 			return outbound.SendRequest{}, env
 		}
+		sched, senv := scheduledInstant(b.SendAt, time.Now())
+		if senv != nil {
+			return outbound.SendRequest{}, senv
+		}
 		// The sender is the path agent (decision 3) — there is no body `from`;
 		// the agent is the path and auth scopes the sender, so no spoofing is
 		// possible.
@@ -1014,6 +1087,7 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 			Body: b.Body, HTMLBody: b.HTMLBody, ConversationID: b.ConversationID,
 			ReplyTo: b.ReplyTo, Attachments: b.Attachments,
 			Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
+			ScheduledAt: sched,
 		}, nil
 	}
 	// A cold send has no referenced inbound (nil) — it's not a reply/forward.

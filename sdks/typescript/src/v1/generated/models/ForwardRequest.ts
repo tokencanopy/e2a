@@ -36,6 +36,10 @@ export class ForwardRequest {
     * Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent\'s own address.
     */
     'replyTo'?: string;
+    /**
+    * Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.
+    */
+    'sendAt'?: Date;
     'text': string;
     /**
     * Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
@@ -86,6 +90,12 @@ export class ForwardRequest {
             "baseName": "reply_to",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "sendAt",
+            "baseName": "send_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "text",

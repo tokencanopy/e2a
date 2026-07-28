@@ -191,6 +191,33 @@ if result.status == "sent":
 Always branch on the result's `status`, not the HTTP code — a timeout is not
 a failure, the message is still queued for delivery.
 
+Scheduled sending is **beta and may change before it is declared stable**.
+Schedule a send with a timezone-aware `datetime`. The durable `scheduled`
+result is success, not a reason to retry; even with `wait="sent"` it returns
+immediately rather than holding the HTTP request until the future time:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+result = await client.messages.send(
+    "sender@example.com",
+    {
+        "to": ["recipient@example.net"],
+        "subject": "Tomorrow's update",
+        "text": "Hello later",
+        "send_at": datetime.now(timezone.utc) + timedelta(days=1),
+    },
+    wait="sent",
+)
+if result.status == "scheduled":
+    print(result.scheduled_at)
+```
+
+`send_at` must be no more than 90 days ahead. Direct loopback to the sending
+agent's own address cannot be scheduled and returns `400 invalid_request`
+unless a review hold takes precedence; held messages drop the schedule and send
+when approved.
+
 ### Managed unsubscribe (beta)
 
 Opt a single-recipient send, reply, or forward into e2a-managed unsubscribe.

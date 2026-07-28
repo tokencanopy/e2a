@@ -390,20 +390,31 @@ describe("e2a MCP server", () => {
   });
 
   // The real backend status vocabulary (internal/httpapi/outbound.go
-  // SendResultView) includes "accepted" — the async-outbound success status
-  // that REPLACES "sent" for queue-first delivery. A model that doesn't know
-  // "accepted" is a terminal success can mistake it for an ambiguous/failed
-  // result and re-send without reusing idempotency_key, causing a real
-  // duplicate send. Guard that all three send-shaped tool descriptions
-  // document it as success and tell the model not to retry.
-  it("documents `accepted` as a terminal success status on send/reply/forward (no-retry guard)", async () => {
+  // SendResultView) includes "accepted" and "scheduled" as durable-success
+  // outcomes. A model that mistakes either for an ambiguous/failed result can
+  // re-send without reusing idempotency_key, causing a real duplicate.
+  it("documents durable send outcomes on send/reply/forward (no-retry guard)", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t]));
     for (const name of ["send_message", "reply_to_message", "forward_message"]) {
       const description = byName.get(name)?.description ?? "";
       expect(description, `${name} description`).toContain("accepted");
+      expect(description, `${name} description`).toContain("scheduled");
       expect(description, `${name} description`).toMatch(/do NOT re-send/i);
       expect(description, `${name} description`).toMatch(/pending_review/);
+
+      const properties = (byName.get(name)?.inputSchema as {
+        properties?: Record<string, { description?: string }>;
+      })?.properties ?? {};
+      expect(properties.send_at?.description, `${name}.send_at description`).toMatch(
+        /own address.*400 invalid_request/i,
+      );
+      expect(properties.send_at?.description, `${name}.send_at beta label`).toMatch(
+        /beta:.*may change before.*stable/i,
+      );
+      expect(properties.send_at?.description, `${name}.send_at restore cutoff`).toMatch(
+        /restoring at or after.*leaves the send canceled/i,
+      );
     }
   });
 
@@ -843,6 +854,54 @@ describe("e2a MCP server", () => {
       "msg_in",
       ["destination@example.com"],
       { text: "FYI" },
+      {},
+      undefined,
+    );
+  });
+
+  it("send/reply/forward pass RFC 3339 send_at through as the same scheduled instant", async () => {
+    const sendAt = "2026-08-01T09:00:00-07:00";
+    const expected = new Date(sendAt);
+
+    await client.callTool({
+      name: "send_message",
+      arguments: {
+        to: ["alice@example.com"],
+        subject: "Scheduled",
+        text: "Later",
+        send_at: sendAt,
+      },
+    });
+    expect(stub.send).toHaveBeenCalledWith(
+      expect.objectContaining({ sendAt: expected }),
+      {},
+      undefined,
+    );
+
+    await client.callTool({
+      name: "reply_to_message",
+      arguments: { message_id: "msg_in", text: "Later", send_at: sendAt },
+    });
+    expect(stub.reply).toHaveBeenCalledWith(
+      "msg_in",
+      expect.objectContaining({ sendAt: expected }),
+      {},
+      undefined,
+    );
+
+    await client.callTool({
+      name: "forward_message",
+      arguments: {
+        message_id: "msg_in",
+        to: ["destination@example.com"],
+        text: "Later",
+        send_at: sendAt,
+      },
+    });
+    expect(stub.forward).toHaveBeenCalledWith(
+      "msg_in",
+      ["destination@example.com"],
+      expect.objectContaining({ sendAt: expected }),
       {},
       undefined,
     );

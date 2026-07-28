@@ -432,6 +432,11 @@ type OutboundSendPayload struct {
 	// (the SMTP-accept↔mark-sent crash window's duplicate residual).
 	ProviderAccepted   bool
 	ProviderAcceptedAt *time.Time
+	// ScheduledAt is messages.scheduled_at for a scheduled send (nil for an
+	// immediate one). The retry-horizon clock starts at max(CreatedAt,
+	// ScheduledAt) so a long-scheduled send keeps the full outage-tolerant tail
+	// from its fire time instead of a horizon already blown at fire.
+	ScheduledAt *time.Time
 	// ProviderMessageID is the evidence-repaired provider id ('' when none).
 	ProviderMessageID string
 }
@@ -578,6 +583,7 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		failureReason      string
 		failureOccurredAt  *time.Time
 		failureAttempt     *int
+		scheduledAt        *time.Time
 	)
 	var userID, registeredDomain string
 	// Lock agent first to match permanent agent deletion's lock order, then
@@ -601,14 +607,14 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		        m.to_recipients, m.cc, m.bcc, m.raw_message, m.created_at,
 		        m.deleted_at, m.send_job_id, m.provider_accepted_at, COALESCE(m.provider_message_id,''),
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_failure_reason_code,''),
-		        m.delivery_failure_occurred_at,m.delivery_failure_attempt
+		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.scheduled_at
 		   FROM messages m
 		  WHERE m.id = $1 AND m.agent_id = $2 AND m.direction = 'outbound'
 		  FOR UPDATE OF m`,
 		messageID, agentID,
 	).Scan(&deliveryStatus, &envelopeFrom, &sentAs, &messageType, &to, &cc, &bcc, &raw, &createdAt,
 		&deletedAt, &stampedJobID, &providerAcceptedAt, &providerMessageID,
-		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt)
+		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt, &scheduledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -637,6 +643,19 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		// Provenance 'local' (a deliberate local cancel): if provider evidence
 		// later proves an earlier crashed attempt DID reach SES, the §3.1
 		// correction may still record the truthful outcome on the hidden row.
+		//
+		// Scheduled-send note: reversible trash does not cancel the River job; it
+		// is claim-gated here. Restoring a trashed scheduled message before its
+		// scheduled_at therefore re-arms it (the job fires and, finding the row
+		// un-trashed, submits). Restoring at/after scheduled_at cancels the
+		// past-due job and restores only the row. Irreversible message/agent/
+		// account deletion also transactionally cancels the linked River job.
+		//
+		// Domain-verification note: verification is checked at accept, not
+		// re-checked here at fire (up to 90 days later). That's safe because a
+		// verified domain cannot lapse independently of its agents — DeleteDomain
+		// is blocked while any agent exists (ErrDomainHasAgents), and deleting the
+		// agent trips the agentDeletedAt cancel in this very branch.
 		if _, err := tx.Exec(ctx,
 			`UPDATE messages
 			    SET delivery_status = 'failed',
@@ -683,6 +702,7 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		ProviderAccepted:   providerAcceptedAt != nil,
 		ProviderAcceptedAt: providerAcceptedAt,
 		ProviderMessageID:  providerMessageID,
+		ScheduledAt:        scheduledAt,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err

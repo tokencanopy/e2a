@@ -17,6 +17,7 @@ export interface SendOptions {
   json?: boolean;
   idempotencyKey?: string;
   attach?: string[];
+  sendAt?: string;
 }
 
 export interface ReplyOptions {
@@ -28,6 +29,7 @@ export interface ReplyOptions {
   json?: boolean;
   idempotencyKey?: string;
   attach?: string[];
+  sendAt?: string;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -62,9 +64,38 @@ function readAttachments(paths: string[] | undefined): Attachment[] | undefined 
 }
 
 const SEND_USAGE =
-  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--agent <inbox>] [--json]";
+  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
 const REPLY_USAGE =
-  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--agent <inbox>] [--json]";
+  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
+
+/**
+ * Parse the optional --send-at flag into a Date for scheduled send. Requires an
+ * RFC 3339 timestamp with an explicit offset so the instant is unambiguous. A
+ * value at or before now sends immediately; a value more than 90 days ahead is
+ * rejected server-side. Direct loopback to the sending agent's own address
+ * cannot be scheduled and returns 400 invalid_request unless a review hold
+ * takes precedence (holds drop send_at). Returns undefined when absent.
+ */
+export function parseSendAt(value: string | undefined, usage: string): Date | undefined {
+  if (value === undefined) return undefined;
+  // Require an explicit UTC offset (Z or ±HH:MM), matching the MCP tool's strict
+  // RFC 3339 rule. Without it, `new Date()` reads a bare date-time as LOCAL time
+  // and a date-only value as UTC midnight — silently shifting the intended send
+  // instant across timezones.
+  const rfc3339WithOffset =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  if (!rfc3339WithOffset.test(value)) {
+    return fail(
+      EXIT.USAGE,
+      `--send-at must be an RFC 3339 date-time WITH an explicit offset, e.g. 2026-08-01T09:00:00Z or 2026-08-01T09:00:00-07:00 (got "${value}")\n${usage}`,
+    );
+  }
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) {
+    return fail(EXIT.USAGE, `--send-at is not a valid date-time: "${value}" (use RFC 3339, e.g. 2026-08-01T09:00:00Z)\n${usage}`);
+  }
+  return at;
+}
 
 function readFileOrUsage(path: string, flag: string): string {
   try {
@@ -114,6 +145,15 @@ function emitSendResult(result: SendResultView, json?: boolean): void {
     // stdout before the message id above flushes, and scripts need that id to
     // approve the held message.
     process.exitCode = EXIT.HELD;
+  } else if (result.status === "scheduled") {
+    // Scheduled is a SUCCESSFUL, intended acceptance (exit 0): the message is
+    // durably queued to go out at send_at, not held by mistake. Note it so a
+    // human sees the deferral, and point at how to cancel.
+    const when = result.scheduledAt ? new Date(result.scheduledAt).toISOString() : "the requested time";
+    process.stderr.write(
+      `NOTE: send accepted as "scheduled" — it will be submitted at ${when} (not before), not now. ` +
+        `Cancel it before then by moving message ${result.messageId} to trash (via the dashboard or the delete-message API); restoring it before ${when} re-arms the send, while restoring at or after that time leaves the send canceled.\n`,
+    );
   } else if (result.status === "failed") {
     process.stderr.write(
       `WARNING: send reached terminal status "failed" for message "${result.messageId}". ` +
@@ -141,6 +181,7 @@ export async function send(opts: SendOptions): Promise<void> {
 
   const client = createClient();
   const agentEmail = requireAgentEmail(opts.agent);
+  const sendAt = parseSendAt(opts.sendAt, SEND_USAGE);
   // Optional fields may be undefined — the generated serializer drops
   // undefined-valued keys before they reach the wire. An explicit
   // --idempotency-key makes a *re-invocation* after an ambiguous failure
@@ -156,6 +197,7 @@ export async function send(opts: SendOptions): Promise<void> {
       conversationId: opts.conversationId,
       replyTo: opts.replyTo,
       attachments: readAttachments(opts.attach),
+      sendAt,
     },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
@@ -168,10 +210,11 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
 
   const client = createClient();
   const agentEmail = requireAgentEmail(opts.agent);
+  const sendAt = parseSendAt(opts.sendAt, REPLY_USAGE);
   const result = await client.messages.reply(
     agentEmail,
     messageId,
-    { text: body, html: htmlBody, replyTo: opts.replyTo, attachments: readAttachments(opts.attach) },
+    { text: body, html: htmlBody, replyTo: opts.replyTo, attachments: readAttachments(opts.attach), sendAt },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
   emitSendResult(result, opts.json);

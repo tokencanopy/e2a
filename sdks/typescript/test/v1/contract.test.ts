@@ -16,6 +16,7 @@
  * gated behind live-server env vars and is not part of the unit build.
  */
 import { describe, it, expect, afterAll, vi } from "vitest";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import { parse as yamlParse } from "yaml";
@@ -104,6 +105,50 @@ it("keeps the managed-unsubscribe scenario self-cleaning and lifecycle-observabl
   ]);
 });
 
+it("keeps the scheduled-send scenario self-cleaning and projection-complete", () => {
+  const scenario = loadScenarios().find(
+    (candidate) => candidate.name === "scheduled_send_fields",
+  );
+  expect(scenario).toBeDefined();
+  expect(scenario!.setup?.[0]?.register_agent?.email).toBe(
+    "scheduled-contract-{scenario_token}@agents.e2a.dev",
+  );
+
+  const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
+  const send = steps.get("schedule_send");
+  expect(send?.body?.send_at).toBe("{future_rfc3339}");
+  expect(send?.expect?.body_match).toEqual({
+    status: "scheduled",
+    scheduled_at: "{future_rfc3339}",
+  });
+  expect(send?.capture).toEqual({ scheduled_message_id: "message_id" });
+
+  expect(steps.get("get_scheduled_message")?.expect?.body_match).toEqual({
+    id: "{scheduled_message_id}",
+    delivery_status: "accepted",
+    scheduled_at: "{future_rfc3339}",
+  });
+  expect(steps.get("list_scheduled_message")?.expect?.body_array_contains).toEqual({
+    items: {
+      id: "{scheduled_message_id}",
+      delivery_status: "accepted",
+      scheduled_at: "{future_rfc3339}",
+    },
+  });
+  expect(steps.get("trash_scheduled_message")?.expect?.body_match).toEqual({
+    deleted: true,
+    id: "{scheduled_message_id}",
+  });
+  expect(steps.get("restore_before_scheduled_at")?.expect?.body_match).toEqual({
+    id: "{scheduled_message_id}",
+    delivery_status: "accepted",
+    scheduled_at: "{future_rfc3339}",
+  });
+  expect(scenario!.cleanup?.map((step) => step.id)).toEqual([
+    "delete_scheduled_agent_permanently",
+  ]);
+});
+
 it("runs cleanup in order after a primary failure without masking it", async () => {
   const paths: string[] = [];
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -131,6 +176,42 @@ it("runs cleanup in order after a primary failure without masking it", async () 
   } finally {
     fetchMock.mockRestore();
   }
+});
+
+it("resolves future_rfc3339 once per scenario to a future UTC instant", () => {
+  const before = Date.now();
+  const runner = new Runner("https://contract.test", "key", {
+    name: "future_timestamp",
+    description: "dynamic timestamp parity",
+    steps: [],
+  });
+
+  const first = runner.resolve("{future_rfc3339}");
+  const second = runner.resolve("{future_rfc3339}");
+  const parsed = Date.parse(first);
+
+  expect(second).toBe(first);
+  expect(Number.isNaN(parsed)).toBe(false);
+  expect(parsed).toBeGreaterThanOrEqual(before + 4 * 60_000);
+  expect(parsed).toBeLessThanOrEqual(Date.now() + 6 * 60_000);
+  expect(first).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+});
+
+it("assigns a unique lowercase-hex token to each scenario", () => {
+  const first = new Runner("https://contract.test", "key", {
+    name: "first",
+    description: "unique dynamic placeholder",
+    steps: [],
+  });
+  const second = new Runner("https://contract.test", "key", {
+    name: "second",
+    description: "unique dynamic placeholder",
+    steps: [],
+  });
+
+  const firstToken = first.resolve("{scenario_token}");
+  expect(firstToken).toMatch(/^[0-9a-f]{12}$/);
+  expect(second.resolve("{scenario_token}")).not.toBe(firstToken);
 });
 
 it("surfaces cleanup failure when the scenario itself succeeds", async () => {
@@ -311,6 +392,12 @@ class Runner {
     private readonly apiKey: string,
     private readonly scenario: Scenario,
   ) {
+    // One stable instant per scenario: request bodies and later expectations
+    // must resolve to the exact same value, while never aging into the past.
+    const future = new Date(Date.now() + 5 * 60_000);
+    future.setUTCMilliseconds(0);
+    this.vars.future_rfc3339 = future.toISOString().replace(".000Z", "Z");
+    this.vars.scenario_token = randomBytes(6).toString("hex");
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }

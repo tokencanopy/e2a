@@ -821,6 +821,89 @@ scenarios:
             deleted: true
             domain: suppression-contract.test.dev
 
+  - name: scheduled_send_fields
+    description: >
+      A future send_at is durably accepted as status=scheduled, echoes the
+      normalized scheduled_at instant, and preserves scheduled_at on message
+      detail and list projections. wait=sent must return the scheduled result
+      immediately rather than waiting for the future instant.
+    setup:
+      - register_agent:
+          email: scheduled-contract-{scenario_token}@agents.e2a.dev
+    steps:
+      - id: schedule_send
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages?wait=sent
+        body:
+          to:
+            - recipient@example.net
+          subject: scheduled send conformance
+          text: delivered later
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_message
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_message
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_message
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_scheduled_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
   - name: info_unauthenticated_shape
     description: >
       GET /v1/info is the deployment-discovery endpoint — works

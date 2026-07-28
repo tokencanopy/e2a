@@ -62,6 +62,7 @@ export class Message {
     'reviewedByUserId'?: string;
     'scanAction'?: string;
     'scanScore'?: number;
+    'scheduledAt'?: Date;
     'sentAs'?: string;
     /**
     * RAW MIME byte length of the whole stored message (octet length of raw_message). Distinct from an attachment\'s size_bytes (DECODED payload size). Dominant term of storage-quota accounting (usage.storage_bytes).
@@ -294,6 +295,12 @@ export class Message {
             "baseName": "scan_score",
             "type": "number",
             "format": "double"
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sentAs",

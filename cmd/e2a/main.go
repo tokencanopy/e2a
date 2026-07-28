@@ -278,6 +278,7 @@ func main() {
 		log.Printf("Outbound sending ramp enabled: %d→%d recipients over %d qualified days", cfg.SendingRamp.StartDaily, cfg.SendingRamp.TargetDaily, cfg.SendingRamp.RampDays)
 	}
 	outboundSendStore := agent.NewOutboundSendStore(store, webhookOutbox, usageTracker)
+	store.SetScheduledSendFinalizer(outboundSendStore)
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
 		agent.NewOutboundDeliverer(sender),
@@ -426,6 +427,7 @@ func main() {
 			log.Fatalf("jobs: build shared river client: %v", jerr)
 		}
 		jobsClient = jc
+		store.SetOutboundJobCanceller(jobsClient)
 		if senderMgr != nil {
 			senderMgr.SetEnqueuer(jobsClient)
 			senderEnqueuer = senderMgr
@@ -622,6 +624,13 @@ func main() {
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
 	api.SetEnforcer(enforcer)
+	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
+	// month a scheduled send actually fires (accept-time enforcement can't know a
+	// future fire month). Over-cap → refuse terminally; a transient lookup error
+	// fails open so a glitch never drops a legitimate send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
+		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
+	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
@@ -915,4 +924,18 @@ func main() {
 	// River drain is bounded by the same shutdownCtx, so this returns by the
 	// deadline regardless.
 	<-riverDone
+}
+
+// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
+// fire-time concern for scheduled messages. The message is already persisted,
+// so a later storage-cap breach must not cancel it; only the monthly message
+// cap for the month in which it fires is terminal.
+func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if limitErr, ok := limits.IsLimitExceeded(err); ok {
+		return limitErr.Resource == "messages_month", nil
+	}
+	return false, err
 }

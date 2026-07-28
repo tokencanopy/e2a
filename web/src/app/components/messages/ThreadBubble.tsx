@@ -10,7 +10,8 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { CounterpartyAvatar } from "./CounterpartyAvatar";
-import { MessageStatusChip } from "./MessageStatusChip";
+import { MessageStatusChip, isFutureScheduled } from "./MessageStatusChip";
+import { formatScheduledSend } from "../../../lib/scheduledTime";
 import { EmailHtmlBody } from "./EmailHtmlBody";
 import { AttachmentChips, downloadableAttachments } from "./AttachmentChips";
 import { MessageLifecycleData } from "./MessageLifecycleTimeline";
@@ -78,6 +79,10 @@ export function ThreadBubble({
 }) {
   const isInbound = message.direction === "inbound";
   const pending = message.review_status === "pending_review";
+  const scheduled = isFutureScheduled({
+    direction: message.direction,
+    scheduled_at: message.scheduled_at,
+  });
   const [showDetails, setShowDetails] = useState(false);
   const [showLifecycle, setShowLifecycle] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -241,7 +246,21 @@ export function ThreadBubble({
               direction="outbound"
               delivery_status={message.status}
               review_status={message.review_status}
+              scheduled_at={message.scheduled_at}
             />
+          )}
+          {scheduled && (
+            <span
+              className="shrink-0"
+              style={{
+                fontFamily: "var(--f-mono)",
+                fontSize: 11,
+                color: "var(--fg-subtle)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {formatScheduledSend(message.scheduled_at)}
+            </span>
           )}
           <span className="flex-1" />
           <span

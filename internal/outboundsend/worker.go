@@ -90,6 +90,12 @@ type SendJob struct {
 	// AcceptedAt is messages.created_at — the outage tail's clock, so a job that has
 	// been snoozing through an outage past sendRetryHorizon can be terminated.
 	AcceptedAt time.Time
+	// ScheduledAt is messages.scheduled_at for a scheduled send (zero for an
+	// immediate one). The retry horizon is measured from max(AcceptedAt,
+	// ScheduledAt): a send scheduled far past accept still gets the full
+	// outage-tolerant tail from its fire time, instead of a horizon already blown
+	// the moment it first runs.
+	ScheduledAt time.Time
 	// ProviderAccepted is set when authoritatively correlated provider-accept
 	// evidence (an SNS-verified, header- or provider-id-matched SES
 	// notification) has been recorded for this message: the provider already
@@ -107,7 +113,14 @@ type SendJob struct {
 // retry horizon. Zero AcceptedAt (unknown) is treated as not-past so an outage keeps
 // deferring rather than being falsely terminated on a missing timestamp.
 func (j *SendJob) pastRetryHorizon() bool {
-	return !j.AcceptedAt.IsZero() && time.Since(j.AcceptedAt) > sendRetryHorizon
+	// Measure from max(accept, scheduled): a scheduled send's outage tail starts
+	// when it fires, not when it was accepted, so a >72h-out schedule isn't
+	// terminally failed on its very first attempt.
+	start := j.AcceptedAt
+	if j.ScheduledAt.After(start) {
+		start = j.ScheduledAt
+	}
+	return !start.IsZero() && time.Since(start) > sendRetryHorizon
 }
 
 // alreadyDone reports whether the message has already been submitted to the

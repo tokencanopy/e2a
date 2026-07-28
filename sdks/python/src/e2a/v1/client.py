@@ -412,7 +412,9 @@ class AgentsResource:
         return await self._c._write_idempotent(lambda h: self._api.delete_agent(email, confirm="DELETE", _headers=h))
 
     async def restore(self, email: str) -> AgentView:
-        """Restore an agent from the 30-day trash. Account scope only."""
+        """Restore an agent from the 30-day trash. Scheduled messages restored
+        before scheduled_at re-arm; at/after scheduled_at they return live as
+        failed with submission canceled. Account scope only."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_agent(email, _headers=h)
         )
@@ -453,9 +455,12 @@ class AgentsResource:
 
 
 class MessagesResource:
-    """Message operations. The managed-unsubscribe option and its raw
-    ``GET|POST /u/{token}`` confirmation flow are beta and may change before
-    they are declared stable."""
+    """Message operations.
+
+    Scheduled sending via ``send_at`` / ``scheduled_at`` and the managed-
+    unsubscribe option (including its raw ``GET|POST /u/{token}`` confirmation
+    flow) are beta and may change before they are declared stable.
+    """
 
     def __init__(self, api: MessagesApi, client: AsyncE2AClient) -> None:
         self._api = api
@@ -557,7 +562,9 @@ class MessagesResource:
         )
 
     async def restore(self, email: str, message_id: str) -> MessageView:
-        """Restore a soft-deleted message and resume its retention clock."""
+        """Restore a soft-deleted message. A scheduled message restored before
+        scheduled_at re-arms; at/after scheduled_at it returns live as failed
+        with submission canceled."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_message(email, message_id, _headers=h)
         )
@@ -580,18 +587,26 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Send a message. The optional managed-unsubscribe field is beta.
+        """Send a message.
+
+        Scheduled sending via ``body.send_at`` and the resulting
+        ``scheduled_at`` / ``status="scheduled"`` fields is beta and may
+        change before it is declared stable. The optional managed-unsubscribe
+        field is also beta.
 
         Pass ``unsubscribe={"mode": "managed"}`` (or an
         :class:`UnsubscribeOptions`) to opt the message into e2a-managed
         unsubscribe handling; when given, it wins over any ``unsubscribe``
         already present in ``body``.
 
-        Pass ``wait="sent"`` for an optional bounded wait: the request is held
-        server-side until the asynchronously delivered message reaches a
-        terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed
-        state; on timeout the result stays ``status="accepted"``. Default: no
-        wait. Always branch on the result's ``status``, not the HTTP code.
+        Pass ``wait="sent"`` for an optional bounded wait on an immediate
+        send: the request is held server-side until the asynchronously
+        delivered message reaches a terminal-or-held state or at most 20
+        seconds elapse (currently ~15s), then returns the observed state; on
+        timeout the result stays ``status="accepted"``. A future ``send_at``
+        returns ``status="scheduled"`` immediately and does not wait for that
+        time. Default: no wait. Always branch on the result's ``status``, not
+        the HTTP code.
         """
         req = _coerce(SendEmailRequest, body)
         if unsubscribe is not None:
@@ -616,8 +631,13 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Reply to a message. The optional managed-unsubscribe field is beta,
-        and ``wait="sent"`` requests the same bounded wait (see :meth:`send`)."""
+        """Reply to a message.
+
+        Scheduled sending via ``body.send_at`` is beta and may change before
+        it is declared stable. The optional managed-unsubscribe field is also
+        beta, and ``wait="sent"`` requests the same bounded wait (see
+        :meth:`send`).
+        """
         req = _coerce(ReplyRequest, body)
         if unsubscribe is not None:
             if req is body:
@@ -638,8 +658,13 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Forward a message. The optional managed-unsubscribe field is beta,
-        and ``wait="sent"`` requests the same bounded wait (see :meth:`send`)."""
+        """Forward a message.
+
+        Scheduled sending via ``body.send_at`` is beta and may change before
+        it is declared stable. The optional managed-unsubscribe field is also
+        beta, and ``wait="sent"`` requests the same bounded wait (see
+        :meth:`send`).
+        """
         req = _coerce(ForwardRequest, body)
         if unsubscribe is not None:
             if req is body:

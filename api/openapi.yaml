@@ -2221,6 +2221,11 @@ components:
           description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
           maxLength: 320
           type: string
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
@@ -2510,6 +2515,9 @@ components:
         scan_score:
           format: double
           type: number
+        scheduled_at:
+          format: date-time
+          type: string
         sent_as:
           type: string
         size_bytes:
@@ -2704,7 +2712,7 @@ components:
         delivery_detail:
           type: string
         delivery_status:
-          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"
+          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"
           type: string
         direction:
           enum:
@@ -2743,6 +2751,11 @@ components:
         review_status:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows. Moving to trash before provider submission prevents submission. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -2815,7 +2828,7 @@ components:
         delivery_detail:
           type: string
         delivery_status:
-          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"
+          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"
           type: string
         direction:
           enum:
@@ -2873,6 +2886,11 @@ components:
         review_status:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -3603,6 +3621,11 @@ components:
           description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
           maxLength: 320
           type: string
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
@@ -3766,6 +3789,11 @@ components:
           description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. "Support <support@acme.com>"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
           maxLength: 320
           type: string
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         subject:
           description: Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).
           maxLength: 2000
@@ -3816,12 +3844,19 @@ components:
         provider_message_id:
           description: Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id.
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used. Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
         status:
-          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code."
+          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code."
           type: string
+          x-experimental-values:
+            - scheduled
       required:
         - status
         - message_id
@@ -4567,7 +4602,7 @@ openapi: 3.1.0
 paths:
   /v1/account:
     delete:
-      description: Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+      description: Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
       operationId: deleteAccount
       parameters:
         - description: Must be the literal DELETE — this action is irreversible.
@@ -4590,12 +4625,21 @@ paths:
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
         default:
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Error
+          description: Error — the standard envelope; branch on error.code.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5709,7 +5753,7 @@ paths:
       tags:
         - messages
     post:
-      description: "Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. 202 + pending_review when the agent has HITL enabled. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
+      description: "Beta: scheduled sending may change before it is declared stable. Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
       operationId: sendMessage
       parameters:
         - in: path
@@ -5723,12 +5767,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -5751,7 +5795,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5760,7 +5804,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5827,7 +5871,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}:
     delete:
-      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held).
+      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
       operationId: deleteMessage
       parameters:
         - description: The agent's full email address.
@@ -6044,7 +6088,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}/forward:
     post:
-      description: "Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. 202 when held for HITL. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: forwardMessage
       parameters:
         - in: path
@@ -6063,12 +6107,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -6091,7 +6135,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6100,7 +6144,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6225,7 +6269,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/messages/{id}/reply:
     post:
-      description: "Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). 202 when held for HITL. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: replyToMessage
       parameters:
         - in: path
@@ -6244,12 +6288,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -6272,7 +6316,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6281,7 +6325,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6348,7 +6392,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}/restore:
     post:
-      description: Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. Returns the restored message. 409 not_in_trash when the message is not in the trash.
+      description: Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. For a scheduled outbound message, restoring before scheduled_at re-arms submission; restoring at or after scheduled_at returns the message live with delivery_status=failed and leaves submission canceled. Returns the restored message. 409 not_in_trash when the message is not in the trash.
       operationId: restoreMessage
       parameters:
         - description: The agent's full email address.
@@ -6470,7 +6514,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/restore:
     post:
-      description: Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+      description: Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
       operationId: restoreAgent
       parameters:
         - description: The agent's full email address, e.g. support@acme.com.

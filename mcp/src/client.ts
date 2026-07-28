@@ -269,6 +269,7 @@ export class McpClient {
       attachments?: Array<Attachment>;
       conversationId?: string;
       replyTo?: string;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,
@@ -287,6 +288,7 @@ export class McpClient {
       attachments?: Array<Attachment>;
       conversationId?: string;
       replyTo?: string;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,
@@ -310,6 +312,7 @@ export class McpClient {
       attachments?: Array<Attachment>;
       conversationId?: string;
       replyTo?: string;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,

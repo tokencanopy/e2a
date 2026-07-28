@@ -64,6 +64,7 @@ class Message(BaseModel):
     reviewed_by_user_id: Optional[StrictStr] = None
     scan_action: Optional[StrictStr] = None
     scan_score: Optional[Union[StrictFloat, StrictInt]] = None
+    scheduled_at: Optional[datetime] = None
     sent_as: Optional[StrictStr] = None
     size_bytes: Optional[StrictInt] = Field(default=None, description="RAW MIME byte length of the whole stored message (octet length of raw_message). Distinct from an attachment's size_bytes (DECODED payload size). Dominant term of storage-quota accounting (usage.storage_bytes).")
     status: Optional[StrictStr] = None
@@ -76,7 +77,7 @@ class Message(BaseModel):
     webhook_error: Optional[StrictStr] = None
     webhook_status: Optional[StrictStr] = None
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "approval_expires_at", "attachments", "authentication", "bcc", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "edited", "email_message_id", "envelope_from", "expires_at", "flag_reason", "flagged", "header_from", "html", "id", "labels", "method", "provider_message_id", "raw_message", "read_status", "rejection_reason", "reply_to", "review_reason", "reviewed_at", "reviewed_by_name", "reviewed_by_user_id", "scan_action", "scan_score", "sent_as", "size_bytes", "status", "subject", "text", "to", "type", "verified_domain", "webhook_attempts", "webhook_error", "webhook_status"]
+    __properties: ClassVar[List[str]] = ["agent_email", "approval_expires_at", "attachments", "authentication", "bcc", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "edited", "email_message_id", "envelope_from", "expires_at", "flag_reason", "flagged", "header_from", "html", "id", "labels", "method", "provider_message_id", "raw_message", "read_status", "rejection_reason", "reply_to", "review_reason", "reviewed_at", "reviewed_by_name", "reviewed_by_user_id", "scan_action", "scan_score", "scheduled_at", "sent_as", "size_bytes", "status", "subject", "text", "to", "type", "verified_domain", "webhook_attempts", "webhook_error", "webhook_status"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -236,6 +237,7 @@ class Message(BaseModel):
             "reviewed_by_user_id": obj.get("reviewed_by_user_id"),
             "scan_action": obj.get("scan_action"),
             "scan_score": obj.get("scan_score"),
+            "scheduled_at": obj.get("scheduled_at"),
             "sent_as": obj.get("sent_as"),
             "size_bytes": obj.get("size_bytes"),
             "status": obj.get("status"),
