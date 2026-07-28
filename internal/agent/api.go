@@ -1859,12 +1859,14 @@ func ValidateRecipients(groups ...[]string) error { return validateRecipients(gr
 // recipient item in to/cc/bcc, a reply_to override, or an agent email — as the
 // FULL string (optional display name + <addr>), so a multi-megabyte display
 // name can't ride in on an otherwise-valid address. 320 is the classic
-// 64+1+255 addr-spec ceiling with the display-name form held to the same
+// historical addr-spec envelope with the display-name form held to the same
 // budget. Counted in Unicode code points (runes), NOT bytes, to match the
 // OpenAPI maxLength semantics of the /v1 request schemas (JSON Schema counts
 // code points; Huma validates with utf8.RuneCountInString). The /v1 schemas
 // declare the same value declaratively; this runtime check is the shared
-// backstop for every recipient list that reaches the send path.
+// backstop for every recipient list that reaches the send path. After parsing,
+// outbound.ValidateMailboxAddress separately enforces SMTP's octet limits on
+// the addr-spec itself.
 const MaxAddressLen = 320
 
 func validateRecipients(groups ...[]string) error {
@@ -1878,7 +1880,11 @@ func validateRecipients(groups ...[]string) error {
 			if n := utf8.RuneCountInString(addr); n > MaxAddressLen {
 				return fmt.Errorf("recipient address too long — %d characters, max %d (display name + address combined)", n, MaxAddressLen)
 			}
-			if _, err := mail.ParseAddress(addr); err != nil {
+			parsed, err := mail.ParseAddress(addr)
+			if err != nil {
+				return fmt.Errorf("invalid recipient %q: %w", addr, err)
+			}
+			if err := outbound.ValidateMailboxAddress(parsed.Address); err != nil {
 				return fmt.Errorf("invalid recipient %q: %w", addr, err)
 			}
 		}
