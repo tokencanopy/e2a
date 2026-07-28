@@ -106,3 +106,46 @@ it("still follows URL selection changes for deep links and browser navigation", 
     await screen.findByText("Open without requiring a refresh."),
   ).toBeInTheDocument();
 });
+
+it("keeps the row open when the superseded collapse commit lands after it", async () => {
+  const user = userEvent.setup();
+  // Start from the settled post-resolution URL: the collapse to /reviews is
+  // what handleResolved issued, and it has not committed yet.
+  mockRouteSelectedId = "msg_resolved";
+  const { rerender } = render(<PendingPage />);
+
+  const row = await screen.findByRole("button", {
+    name: /Remaining pending review/,
+  });
+  await user.click(row);
+  await waitFor(() =>
+    expect(
+      screen.getByText("Open without requiring a refresh."),
+    ).toBeInTheDocument(),
+  );
+
+  // Next commits the queued navigations in order, so the earlier
+  // replace("/reviews") lands FIRST — a superseded echo, not a user action.
+  // Syncing from it would collapse the row and tear down its detail fetch.
+  mockRouteSelectedId = "";
+  rerender(<PendingPage />);
+  expect(
+    screen.getByText("Open without requiring a refresh."),
+  ).toBeInTheDocument();
+
+  // Our real target lands and the guard releases.
+  mockRouteSelectedId = "msg_remaining";
+  rerender(<PendingPage />);
+  expect(
+    screen.getByText("Open without requiring a refresh."),
+  ).toBeInTheDocument();
+
+  // Once caught up, an external navigation collapses the accordion again.
+  mockRouteSelectedId = "";
+  rerender(<PendingPage />);
+  await waitFor(() =>
+    expect(
+      screen.queryByText("Open without requiring a refresh."),
+    ).not.toBeInTheDocument(),
+  );
+});

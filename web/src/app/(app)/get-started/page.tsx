@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { listDomains } from "../../components/onboarding/api";
 import { track } from "../../components/onboarding/analytics";
@@ -68,13 +68,37 @@ export default function GetStartedPage() {
   const [error, setError] = useState("");
   const [bootstrapping, setBootstrapping] = useState(true);
 
+  // The step our own last router.push/replace is heading for, or null when the
+  // URL is already caught up. Next's app router queues navigations and commits
+  // every one of them in order, so a navigation issued while an earlier one is
+  // still in flight renders an intermediate SUPERSEDED step — syncing from that
+  // echo would bounce the user back a screen before the real target lands.
+  const pendingStep = useRef<Step | null>(null);
+
   // Route state remains canonical for deep links and browser navigation, but
   // forward interactions update locally first. Same-page router transitions
   // can lag briefly; deriving the rendered step only from useSearchParams made
   // a selected option appear inert until the URL commit completed.
   useEffect(() => {
+    if (pendingStep.current !== null) {
+      if (routeStep === pendingStep.current) pendingStep.current = null;
+      return;
+    }
     setStep(routeStep);
   }, [routeStep]);
+
+  // Single place that moves the step: optimistic local state first, then the
+  // URL. `replace` is for translating legacy/bad entry URLs (no history entry);
+  // `push` is for user-driven forward steps so Back walks the funnel.
+  const goToStep = useCallback(
+    (next: Step, href: string, mode: "push" | "replace") => {
+      pendingStep.current = next === routeStep ? null : next;
+      setStep(next);
+      if (mode === "replace") router.replace(href);
+      else router.push(href);
+    },
+    [router, routeStep],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -93,20 +117,21 @@ export default function GetStartedPage() {
           if (!matchedDomain) {
             setDomainData(null);
             setAddressType(null);
-            setStep("choose");
-            router.replace("/get-started");
+            goToStep("choose", "/get-started", "replace");
             setError(`Domain ${initialDomain} not found in your account`);
           } else {
             setDomainData(matchedDomain);
-            setStep("custom_checklist");
-            router.replace("/get-started?step=custom_checklist");
+            goToStep(
+              "custom_checklist",
+              "/get-started?step=custom_checklist",
+              "replace",
+            );
           }
         } catch (err) {
           if (cancelled) return;
           setDomainData(null);
           setAddressType(null);
-          setStep("choose");
-          router.replace("/get-started");
+          goToStep("choose", "/get-started", "replace");
           setError(
             err instanceof Error
               ? err.message
@@ -123,8 +148,7 @@ export default function GetStartedPage() {
         // Replace the legacy ?mode=shared with the canonical ?step= so
         // back from shared_form lands on the choose step rather than
         // bouncing back to ?mode=shared again.
-        setStep("shared_form");
-        router.replace("/get-started?step=shared_form");
+        goToStep("shared_form", "/get-started?step=shared_form", "replace");
         setBootstrapping(false);
         return;
       }
@@ -149,10 +173,9 @@ export default function GetStartedPage() {
   // again and the same fallback fires in a loop.
   useEffect(() => {
     if (step === "success" && !agent && !bootstrapping) {
-      setStep("choose");
-      router.replace("/get-started");
+      goToStep("choose", "/get-started", "replace");
     }
-  }, [step, agent, bootstrapping, router]);
+  }, [step, agent, bootstrapping, goToStep]);
 
   // Top-level fork: agent (MCP) jumps straight to the headless cards; web opens
   // the shared/custom address chooser.
@@ -160,19 +183,17 @@ export default function GetStartedPage() {
     setMethod(m);
     setError("");
     track("setup_method_selected", { method: m });
-    const nextStep = m === "agent" ? "agent_mcp" : "address";
-    setStep(nextStep);
-    router.push(`/get-started?step=${nextStep}`);
+    const nextStep: Step = m === "agent" ? "agent_mcp" : "address";
+    goToStep(nextStep, `/get-started?step=${nextStep}`, "push");
   };
 
   const handleAddressChoice = (type: AddressType) => {
     setAddressType(type);
     setError("");
     track("address_type_selected", { type });
-    setStep(type === "shared" ? "shared_form" : "custom_checklist");
-    router.push(
-      `/get-started?step=${type === "shared" ? "shared_form" : "custom_checklist"}`,
-    );
+    const nextStep: Step =
+      type === "shared" ? "shared_form" : "custom_checklist";
+    goToStep(nextStep, `/get-started?step=${nextStep}`, "push");
   };
 
   const handleBackToChoose = () => {
@@ -180,10 +201,16 @@ export default function GetStartedPage() {
     // what the user expects from the browser's own Back button); fall
     // back to a push to the choose step if there's nothing to go back
     // to in the same-origin history.
-    if (window.history.length > 1) {
+    //
+    // routeStep is the gate, not `step`: because forward steps now render
+    // optimistically, this button paints before its own ?step= push commits.
+    // In that window the top of the history stack is still whatever preceded
+    // /get-started, so back() would leave onboarding entirely instead of
+    // returning to the chooser.
+    if (routeStep !== "choose" && window.history.length > 1) {
       router.back();
     } else {
-      router.push("/get-started");
+      goToStep("choose", "/get-started", "push");
     }
   };
 
@@ -245,8 +272,7 @@ export default function GetStartedPage() {
           onBack={handleBackToChoose}
           onCreated={(agentData) => {
             setAgent(agentData);
-            setStep("success");
-            router.push("/get-started?step=success");
+            goToStep("success", "/get-started?step=success", "push");
           }}
         />
       )}
@@ -257,8 +283,7 @@ export default function GetStartedPage() {
           onBack={handleBackToChoose}
           onComplete={(agentData) => {
             setAgent(agentData);
-            setStep("success");
-            router.push("/get-started?step=success");
+            goToStep("success", "/get-started?step=success", "push");
           }}
         />
       )}
