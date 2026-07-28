@@ -97,6 +97,102 @@ describe("Webhooks page", () => {
     expect(document.body.innerHTML).not.toContain("signing_secret");
   });
 
+  it("shows the coding-agent prompt card with the scoping nudge", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("region", { name: "Set up with a coding agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/register the subscription/i),
+    ).toBeInTheDocument();
+    // The scoping nudge is the whole point of putting a notice here.
+    expect(
+      screen.getByText(/Only want events from certain inboxes\?/i),
+    ).toBeInTheDocument();
+  });
+
+  // Scope column. An unscoped subscription receives every agent's events;
+  // before this column existed, that was indistinguishable in the UI from a
+  // narrowly-scoped one — which is exactly how an account-wide webhook went
+  // unnoticed in production.
+  it("renders an unscoped webhook as 'all agents' rather than blank", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [{ ...webhook, filters: {} }] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("all agents")).toBeInTheDocument();
+  });
+
+  it("treats a missing filters object as unscoped", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("all agents")).toBeInTheDocument();
+  });
+
+  it("lists the agents a scoped webhook is filtered to", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              filters: { agent_emails: ["agent@inbox.example.com"] },
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("agent@inbox.example.com")).toBeInTheDocument();
+    expect(screen.queryByText("all agents")).not.toBeInTheDocument();
+  });
+
+  it("summarizes conversation and label filters alongside agents", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              filters: {
+                agent_emails: ["a@example.com"],
+                conversation_ids: ["conv_1", "conv_2"],
+                labels: ["urgent"],
+              },
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText("a@example.com · 2 conversations · labels: urgent"),
+    ).toBeInTheDocument();
+  });
+
   it("creates a webhook, reveals the signing secret once, and hides it on dismiss", async () => {
     const created = {
       id: "wh_new0002",

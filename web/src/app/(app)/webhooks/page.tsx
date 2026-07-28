@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { PageShell } from "../../components/loft/PageShell";
+import {
+  AgentPromptCard,
+  AGENT_PROMPTS,
+} from "../../components/AgentPromptCard";
 
 // /webhooks owns the user's webhook lifecycle — create, reveal
 // the one-time signing secret, rotate it, delete. In the /v1 redesign
@@ -11,14 +15,20 @@ import { PageShell } from "../../components/loft/PageShell";
 
 // Inline-code chip used inline in the subtitle copy. Pulled out so
 // the two usages in the page header stay byte-identical.
+// Inline code inside running prose. Sized in `em` so the chip tracks the
+// paragraph's font size instead of jumping to a fixed 12px mid-sentence,
+// and given a tight line-height so the border box stays inside the 1.6
+// line box — otherwise the chip crowds the lines above and below it.
 const inlineCodeStyle: React.CSSProperties = {
   fontFamily: "var(--f-mono)",
-  fontSize: 12,
+  fontSize: "0.92em",
+  lineHeight: 1,
   padding: "1px 6px",
   background: "var(--bg-elev)",
   border: "1px solid var(--border-sub)",
   borderRadius: "var(--r-sm)",
   color: "var(--fg)",
+  whiteSpace: "nowrap",
 };
 
 // WebhookView (GET /v1/webhooks → { items: [...] }). GET never
@@ -34,7 +44,40 @@ type WebhookView = {
   last_delivered_at?: string;
   signing_secret?: string;
   previous_secret_expires_at?: string;
+  filters?: WebhookFiltersView | null;
 };
+
+// Mirrors WebhookFiltersView (api/openapi.yaml). An absent or empty filter
+// object means the subscription is UNSCOPED — it receives events for every
+// agent on the account, not just a chosen few. That distinction is invisible
+// unless the UI says so, which is why the row renders scope explicitly.
+type WebhookFiltersView = {
+  agent_emails?: string[] | null;
+  conversation_ids?: string[] | null;
+  labels?: string[] | null;
+};
+
+// Summarize a subscription's scope for the table. The unscoped case is a
+// distinct variant rather than an empty string so the caller is forced to
+// handle it deliberately — and renders it as a warning, not as ordinary text.
+function describeScope(
+  filters?: WebhookFiltersView | null,
+): { scoped: false } | { scoped: true; parts: string[] } {
+  const parts: string[] = [];
+  const agents = filters?.agent_emails ?? [];
+  const conversations = filters?.conversation_ids ?? [];
+  const labels = filters?.labels ?? [];
+
+  if (agents.length > 0) parts.push(agents.join(", "));
+  if (conversations.length > 0) {
+    parts.push(
+      `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}`,
+    );
+  }
+  if (labels.length > 0) parts.push(`labels: ${labels.join(", ")}`);
+
+  return parts.length > 0 ? { scoped: true, parts } : { scoped: false };
+}
 
 // The curated set of common event types shown in the create picker. The
 // server's CreateWebhookRequest.events enum (api/openapi.yaml) accepts more
@@ -157,18 +200,27 @@ export default function WebhooksPage() {
         <>
           <span style={{ display: "block" }}>
             <strong style={{ color: "var(--fg)" }}>For webhook delivery.</strong>{" "}
-            When your inbox receives mail via a webhook subscription, e2a
-            HMAC-signs every payload it POSTs to the endpoint with that
-            webhook&apos;s signing secret so your handler can confirm the
-            request really came from e2a.
+            When your inbox receives mail via a webhook subscription, e2a{" "}
+            {/* The hyphen in "HMAC-signs" is a valid break opportunity, so it
+                lands at end-of-line and reads as a hyphenation artifact.
+                nowrap keeps the compound intact. */}
+            <span style={{ whiteSpace: "nowrap" }}>HMAC-signs</span>{" "}
+            every payload it POSTs to the endpoint with that webhook&apos;s
+            signing secret so your handler can confirm the request really came
+            from e2a.
           </span>
           <span style={{ display: "block", marginTop: 10 }}>
             The signing secret is shown <strong style={{ color: "var(--fg)" }}>once</strong>{" "}
             when you create or rotate a webhook — copy it then. Pass it to{" "}
-            <code style={inlineCodeStyle}>constructEvent()</code> /{" "}
-            <code style={inlineCodeStyle}>construct_event()</code> in the
-            SDK to validate. Rotation keeps the previous secret valid for a
-            short overlap so you can swap it in without dropping deliveries.
+            {/* Keep the two chips and their separator on one line: split
+                across a line break they read as two unrelated fragments. */}
+            <span style={{ whiteSpace: "nowrap" }}>
+              <code style={inlineCodeStyle}>constructEvent()</code> /{" "}
+              <code style={inlineCodeStyle}>construct_event()</code>
+            </span>{" "}
+            in the SDK to validate. Rotation keeps the previous secret valid
+            for a short overlap so you can swap it in without dropping
+            deliveries.
           </span>
           <span
             style={{
@@ -190,6 +242,10 @@ export default function WebhooksPage() {
           onDismiss={() => setRevealed(null)}
         />
       )}
+
+      <div className="mb-10">
+        <AgentPromptCard {...AGENT_PROMPTS.webhooks} />
+      </div>
 
       {loading ? (
         <p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
@@ -471,6 +527,7 @@ function WebhooksTable({
           >
             <th className="px-4 py-2 font-semibold">URL</th>
             <th className="px-4 py-2 font-semibold">Events</th>
+            <th className="px-4 py-2 font-semibold">Scope</th>
             <th className="px-4 py-2 font-semibold">Status</th>
             <th className="px-4 py-2 font-semibold">Created</th>
             <th className="px-4 py-2"></th>
@@ -562,6 +619,7 @@ function WebhookRow({
   };
 
   const busy = deleting || rotating;
+  const scope = describeScope(webhook.filters);
 
   return (
     <tr
@@ -576,6 +634,24 @@ function WebhookRow({
         {(webhook.events ?? []).length > 0
           ? (webhook.events ?? []).join(", ")
           : "all"}
+      </td>
+      {/* Scope. An unscoped subscription receives every agent's events, so it
+          is called out in warn tone rather than rendered as blank/"none" —
+          a silent empty cell reads as "nothing notable here", which is the
+          opposite of the truth. */}
+      <td className="px-4 py-3 font-mono text-[11px]">
+        {scope.scoped ? (
+          <span style={{ color: "var(--fg-muted)" }}>
+            {scope.parts.join(" · ")}
+          </span>
+        ) : (
+          <span
+            style={{ color: "var(--warn-strong)" }}
+            title="No filters set — this endpoint receives events for every agent on the account."
+          >
+            all agents
+          </span>
+        )}
       </td>
       <td className="px-4 py-3 font-mono text-[12px]">
         <span
