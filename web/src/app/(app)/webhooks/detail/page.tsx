@@ -18,6 +18,7 @@ import { PageShell } from "../../../components/loft/PageShell";
 import { getWebhook } from "../../../components/onboarding/api";
 import { describeScope } from "../../../../lib/webhooks";
 import { webhookKey } from "../../../../lib/swrKeys";
+import { DeliveriesFeed } from "./DeliveriesFeed";
 
 export default function WebhookDetailPage() {
   return (
@@ -129,6 +130,8 @@ function WebhookDetailContent({ id }: { id: string }) {
           </Field>
         </dl>
       </section>
+
+      <DeliveriesFeed webhookId={webhook.id} />
     </PageShell>
   );
 }

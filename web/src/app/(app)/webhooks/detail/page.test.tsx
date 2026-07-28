@@ -109,6 +109,209 @@ describe("webhook detail page", () => {
     expect(screen.queryByText("Deliveries")).not.toBeInTheDocument();
   });
 
+  describe("deliveries feed", () => {
+    const delivery = {
+      id: "whd_1",
+      type: "email.received",
+      status: "delivered",
+      attempts: 1,
+      next_retry_at: "2026-07-27T12:00:00Z",
+      created_at: "2026-07-27T11:00:00Z",
+      last_attempt_at: "2026-07-27T11:00:05Z",
+      last_status_code: 200,
+    };
+
+    it("lists delivery rows with their event type and state", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () => okJson({ items: [delivery], next_cursor: null }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("email.received")).toBeInTheDocument();
+      });
+      expect(screen.getByText("delivered")).toBeInTheDocument();
+    });
+
+    // "Failed" alone sends people to their own logs. The status code and the
+    // error body are what make the row actionable.
+    it("shows the HTTP status code and error for a failed delivery", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [
+              {
+                ...delivery,
+                status: "failed",
+                attempts: 10,
+                last_status_code: 503,
+                last_error: "upstream connect error",
+              },
+            ],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("failed")).toBeInTheDocument();
+      });
+      expect(screen.getByText(/503/)).toBeInTheDocument();
+      expect(screen.getByText(/upstream connect error/)).toBeInTheDocument();
+    });
+
+    // A pending delivery with a future retry is in flight, not broken.
+    it("distinguishes a retrying delivery from a failed one", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [
+              {
+                ...delivery,
+                status: "pending",
+                attempts: 3,
+                // Far future so the row is 'retrying' regardless of when the
+                // suite runs.
+                next_retry_at: "2099-01-01T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText(/retrying/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/^failed$/)).not.toBeInTheDocument();
+    });
+
+    // Worker lag or clock skew. Must not render a negative countdown.
+    it("renders an overdue retry without a countdown", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [
+              {
+                ...delivery,
+                status: "pending",
+                next_retry_at: "2000-01-01T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText(/retry due/i)).toBeInTheDocument();
+      });
+      expect(document.body.textContent).not.toMatch(/-\d+/);
+    });
+
+    // Both are open sets. An unrecognized status must not read as success,
+    // and an unrecognized event type must not be dropped.
+    it("surfaces an unrecognized status verbatim instead of as success", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [{ ...delivery, status: "scheduled", type: "some.future.event" }],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("some.future.event")).toBeInTheDocument();
+      });
+      expect(screen.getByText("scheduled")).toBeInTheDocument();
+      expect(screen.queryByText("delivered")).not.toBeInTheDocument();
+    });
+
+    // last_error is arbitrary bytes from a customer's endpoint.
+    it("renders a hostile error body as inert text", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [
+              {
+                ...delivery,
+                status: "failed",
+                last_error: "<img src=x onerror=alert(1)>",
+              },
+            ],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("failed")).toBeInTheDocument();
+      });
+      expect(document.querySelector("img")).toBeNull();
+      expect(
+        screen.getByText(/<img src=x onerror=alert\(1\)>/),
+      ).toBeInTheDocument();
+    });
+
+    it("truncates a long error and reveals the rest on demand", async () => {
+      const long = "E".repeat(400);
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({
+        deliveries: () =>
+          okJson({
+            items: [{ ...delivery, status: "failed", last_error: long }],
+            next_cursor: null,
+          }),
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText("failed")).toBeInTheDocument();
+      });
+      expect(screen.queryByText(long)).not.toBeInTheDocument();
+
+      screen.getByRole("button", { name: /show full error/i }).click();
+      await waitFor(() => {
+        expect(screen.getByText(long)).toBeInTheDocument();
+      });
+    });
+
+    // "This endpoint has never received anything" and "nothing matched the
+    // filter you picked" are different facts and must not share a string.
+    it("distinguishes never-delivered from nothing-matching-the-filter", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({ deliveries: () => okJson({ items: [], next_cursor: null }) });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText(/no deliveries yet/i)).toBeInTheDocument();
+      });
+    });
+
+    it("requests the server-side status filter when one is selected", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      respond({ deliveries: () => okJson({ items: [], next_cursor: null }) });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(screen.getByText(/no deliveries yet/i)).toBeInTheDocument();
+      });
+
+      screen.getByRole("button", { name: "Failed" }).click();
+      await waitFor(() => {
+        const urls = mockFetch.mock.calls.map((c) => c[0] as string);
+        expect(urls.some((u) => u.includes("status=failed"))).toBe(true);
+      });
+    });
+  });
+
   it("explains a missing id parameter rather than fetching", async () => {
     searchParams = new URLSearchParams();
     respond({});
