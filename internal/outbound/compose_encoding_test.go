@@ -179,6 +179,61 @@ func TestComposeWithAttachmentsEncodesNonASCIIBody(t *testing.T) {
 	}
 }
 
+// A composed message must never contain a line a compliant MTA would have
+// to wrap. DKIM signs after composition, and relaxed body canonicalisation
+// absorbs rewritten line endings but NOT a break inserted mid-line — an
+// over-length line therefore fails verification with "body hash did not
+// verify" once the MTA wraps it.
+func TestComposedMessageHasNoOverlongLine(t *testing.T) {
+	longLine := strings.Repeat("a", 5000)
+
+	cases := []struct {
+		name string
+		raw  func() ([]byte, error)
+	}{
+		{"single part", func() ([]byte, error) {
+			return ComposeMessage("agent@bot.example.com", []string{"a@b.test"}, nil,
+				"Hello", longLine, "text/plain", "", nil, "relay.e2a.dev", "", "")
+		}},
+		{"multipart", func() ([]byte, error) {
+			return ComposeMultipartMessage("agent@bot.example.com", []string{"a@b.test"}, nil,
+				"Hello", longLine, "<p>"+longLine+"</p>", "", nil, "relay.e2a.dev", "", "")
+		}},
+		{"with attachments", func() ([]byte, error) {
+			return ComposeMessageWithAttachments("agent@bot.example.com", []string{"a@b.test"}, nil,
+				"Hello", longLine, "", "", nil, "relay.e2a.dev", "", "",
+				[]Attachment{{Filename: "a.txt", ContentType: "text/plain", Data: strings.Repeat("aGk=", 400)}})
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := tc.raw()
+			if err != nil {
+				t.Fatalf("compose failed: %v", err)
+			}
+			for i, line := range strings.Split(string(raw), "\r\n") {
+				if len(line) > maxLineOctets {
+					t.Errorf("line %d is %d octets, exceeds the %d limit", i, len(line), maxLineOctets)
+				}
+			}
+		})
+	}
+}
+
+// The long-line body must still be recoverable end to end.
+func TestComposeLongAsciiLineRoundTrips(t *testing.T) {
+	longLine := strings.Repeat("a", 5000)
+	raw, err := ComposeMessage("agent@bot.example.com", []string{"a@b.test"}, nil,
+		"Hello", longLine, "text/plain", "", nil, "relay.e2a.dev", "", "")
+	if err != nil {
+		t.Fatalf("ComposeMessage failed: %v", err)
+	}
+	if got := strings.TrimSpace(mailparse.Parse(raw, 1<<20).Text); got != longLine {
+		t.Errorf("round trip lost data: got %d chars, want %d", len(got), len(longLine))
+	}
+}
+
 func TestEncodeBody(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -191,6 +246,13 @@ func TestEncodeBody(t *testing.T) {
 		{"curly apostrophe", "it’s", "quoted-printable"},
 		{"emoji", "ship it \U0001F680", "quoted-printable"},
 		{"latin-1 accent", "café", "quoted-printable"},
+		// RFC 5322 § 2.1.1 caps a line at 998 octets. At the limit the
+		// 7bit fast path is still safe; one octet over, a downstream MTA
+		// would wrap and break the DKIM body hash, so encode instead.
+		{"ascii line exactly at the limit", strings.Repeat("a", 998), "7bit"},
+		{"ascii line one octet over", strings.Repeat("a", 999), "quoted-printable"},
+		{"long line among short ones", "ok\r\n" + strings.Repeat("b", 1200) + "\r\nok", "quoted-printable"},
+		{"many short ascii lines stay 7bit", strings.Repeat("short line\r\n", 500), "7bit"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

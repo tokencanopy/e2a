@@ -251,12 +251,21 @@ func writeThreadingHeaders(writeHeader func(string, string), replyToMsgID string
 // bulk-mailer tell. A single em dash in an otherwise clean message was
 // enough to trigger it.
 //
-// Pure-ASCII bodies stay 7bit and byte-identical, so the common path is
-// unchanged. Anything else becomes quoted-printable, which keeps the text
-// human-readable on the wire, needs no 8BITMIME support from the relay, and
-// is already decoded on the receive side by internal/mailparse.
+// Over-length lines force the same treatment even when the body is pure
+// ASCII. RFC 5322 § 2.1.1 caps a line at 998 octets, and a compliant MTA
+// hard-wraps anything longer — after we have signed. Relaxed DKIM body
+// canonicalisation absorbs *rewritten* line endings (bare LF to CRLF is
+// harmless) but not *inserted* ones, so a wrap mid-line changes the body
+// hash and the signature fails with "body hash did not verify". Routing
+// those bodies through quoted-printable, which soft-wraps at 76 octets,
+// means no downstream wrap is ever needed.
+//
+// Otherwise pure-ASCII bodies stay 7bit and byte-identical, so the common
+// path is unchanged. Anything else becomes quoted-printable, which keeps
+// the text human-readable on the wire, needs no 8BITMIME support from the
+// relay, and is already decoded on the receive side by internal/mailparse.
 func encodeBody(body string) (encoding, encoded string) {
-	if isASCII(body) {
+	if isASCII(body) && !hasOverlongLine(body) {
 		return "7bit", body
 	}
 	var buf strings.Builder
@@ -268,6 +277,26 @@ func encodeBody(body string) (encoding, encoded string) {
 		return "8bit", body
 	}
 	return "quoted-printable", buf.String()
+}
+
+// maxLineOctets is the RFC 5322 § 2.1.1 limit on a line's content,
+// excluding the trailing CRLF.
+const maxLineOctets = 998
+
+// hasOverlongLine reports whether any line in s exceeds maxLineOctets.
+// Lines are split on LF and a trailing CR is discounted, so the check is
+// correct whether the caller supplied CRLF or bare LF endings.
+func hasOverlongLine(s string) bool {
+	for {
+		line, rest, more := strings.Cut(s, "\n")
+		if len(strings.TrimSuffix(line, "\r")) > maxLineOctets {
+			return true
+		}
+		if !more {
+			return false
+		}
+		s = rest
+	}
 }
 
 // isASCII reports whether s is entirely 7-bit. Checked bytewise rather than
