@@ -310,3 +310,16 @@ func TestSweepReportsFailedPublishes(t *testing.T) {
 		t.Errorf("published metric = %d, want 0", m.published)
 	}
 }
+
+// TestSweepArgsRoutesPeriodicWork pins the public River contract. Renaming the
+// kind would strand already-enqueued jobs, while moving the sweep off the
+// maintenance queue could let outreach wake-ups compete with customer sends.
+func TestSweepArgsRoutesPeriodicWork(t *testing.T) {
+	args := contactdue.SweepArgs{}
+	if got := args.Kind(); got != "contact_due_sweep" {
+		t.Errorf("kind = %q, want contact_due_sweep", got)
+	}
+	if got := args.InsertOpts().Queue; got != "maintenance" {
+		t.Errorf("queue = %q, want maintenance", got)
+	}
+}
