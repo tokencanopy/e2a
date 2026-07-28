@@ -30,6 +30,70 @@ export type WebhookView = {
   filters?: WebhookFiltersView | null;
 };
 
+// Mirrors WebhookDeliveryView (api/openapi.yaml). One row is ONE attempt
+// series against ONE subscriber — distinct from the event that triggered it.
+//
+// There is deliberately no event_id here: the API does not expose one yet, so
+// a delivery cannot currently be navigated back to its event or message.
+export type WebhookDeliveryView = {
+  id: string;
+  type: string;
+  status: string;
+  attempts: number;
+  next_retry_at: string;
+  created_at: string;
+  last_attempt_at?: string;
+  last_error?: string;
+  last_status_code?: number;
+};
+
+// `retrying` and `retry_due` are both IN FLIGHT — split so the UI can show a
+// countdown for the first and nothing for the second. `unknown` exists
+// because status is an open set (the redeliver endpoint documents a
+// `scheduled` value absent from the deliveries enum); it fails closed, never
+// collapsing an unrecognized status into success.
+export type DeliveryStateKind =
+  | "delivered"
+  | "failed"
+  | "retrying"
+  | "retry_due"
+  | "unknown";
+
+export type DeliveryClassification = {
+  kind: DeliveryStateKind;
+  // The server's status string, always preserved so an unrecognized value can
+  // be shown verbatim rather than guessed at.
+  raw: string;
+};
+
+// `now` is a required parameter rather than a call to Date.now() so the
+// retrying/retry_due boundary is testable without faking timers.
+export function classifyDelivery(
+  delivery: WebhookDeliveryView,
+  now: Date,
+): DeliveryClassification {
+  const raw = delivery.status ?? "";
+  switch (raw) {
+    case "delivered":
+      return { kind: "delivered", raw };
+    case "failed":
+      return { kind: "failed", raw };
+    case "pending": {
+      const next = delivery.next_retry_at
+        ? new Date(delivery.next_retry_at)
+        : null;
+      // A missing or unparseable schedule means we know it is in flight but
+      // not when it resumes. Claiming a future time we do not have would be
+      // a fabrication; retry_due renders without a countdown.
+      const hasFutureRetry =
+        next !== null && !Number.isNaN(next.getTime()) && next > now;
+      return { kind: hasFutureRetry ? "retrying" : "retry_due", raw };
+    }
+    default:
+      return { kind: "unknown", raw };
+  }
+}
+
 export type WebhookScope =
   | { scoped: false }
   | { scoped: true; parts: string[] };

@@ -7,6 +7,10 @@ import type {
   ProtectionConfig,
 } from "./types";
 import type {
+  WebhookDeliveryView,
+  WebhookView,
+} from "../../../lib/webhooks";
+import type {
   AttachmentMeta,
   DashboardAgent,
   InboundMessageDetail,
@@ -733,4 +737,49 @@ export async function rejectPendingMessage(
       body: JSON.stringify({ reason }),
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Webhook observability reads.
+//
+// The delivery log is per-subscriber: one row is one attempt series against
+// one endpoint. Rows are returned verbatim rather than projected — every
+// field the UI reads is either optional or an open-set string, so narrowing
+// here would silently drop values the server adds later. Classification into
+// a rendered state lives in lib/webhooks.ts.
+// ---------------------------------------------------------------------------
+
+export async function getWebhook(id: string): Promise<WebhookView> {
+  return request<WebhookView>("/v1/webhooks/" + encodeURIComponent(id));
+}
+
+export type WebhookDeliveryPage = {
+  items: WebhookDeliveryView[];
+  next_cursor: string | null;
+};
+
+export async function listWebhookDeliveries(
+  id: string,
+  opts: {
+    // Server-side filter; the API accepts pending | delivered | failed.
+    status?: string;
+    cursor?: string;
+    pageSize?: number;
+  } = {},
+): Promise<WebhookDeliveryPage> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.pageSize) params.set("limit", String(opts.pageSize));
+  const qs = params.toString();
+  const page = await request<{
+    items?: WebhookDeliveryView[];
+    next_cursor?: string | null;
+  }>(
+    "/v1/webhooks/" + encodeURIComponent(id) + "/deliveries" + (qs ? "?" + qs : ""),
+  );
+  return {
+    items: page.items ?? [],
+    next_cursor: page.next_cursor ?? null,
+  };
 }

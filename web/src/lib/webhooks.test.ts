@@ -1,4 +1,95 @@
-import { describeScope } from "./webhooks";
+import { classifyDelivery, describeScope } from "./webhooks";
+
+describe("classifyDelivery", () => {
+  const NOW = new Date("2026-07-27T12:00:00Z");
+  const base = {
+    id: "whd_1",
+    type: "email.received",
+    attempts: 1,
+    created_at: "2026-07-27T11:00:00Z",
+    next_retry_at: "2026-07-27T11:00:00Z",
+  };
+
+  it("classifies a delivered row", () => {
+    expect(classifyDelivery({ ...base, status: "delivered" }, NOW)).toEqual({
+      kind: "delivered",
+      raw: "delivered",
+    });
+  });
+
+  it("classifies a terminally failed row", () => {
+    expect(classifyDelivery({ ...base, status: "failed" }, NOW)).toEqual({
+      kind: "failed",
+      raw: "failed",
+    });
+  });
+
+  // A pending delivery with a future retry is IN FLIGHT, not broken. The
+  // retry envelope runs 72h, so this state is long-lived and must not read
+  // as failure or people escalate on a delivery that is still working.
+  it("classifies pending with a future retry as retrying", () => {
+    expect(
+      classifyDelivery(
+        { ...base, status: "pending", next_retry_at: "2026-07-27T12:30:00Z" },
+        NOW,
+      ),
+    ).toEqual({ kind: "retrying", raw: "pending" });
+  });
+
+  // Worker lag or clock skew puts next_retry_at in the past. Rendering a
+  // countdown here would produce a negative duration.
+  it("classifies pending with a past retry as retry_due", () => {
+    expect(
+      classifyDelivery(
+        { ...base, status: "pending", next_retry_at: "2026-07-27T11:30:00Z" },
+        NOW,
+      ),
+    ).toEqual({ kind: "retry_due", raw: "pending" });
+  });
+
+  it("classifies pending with an unparseable retry time as retry_due", () => {
+    expect(
+      classifyDelivery(
+        { ...base, status: "pending", next_retry_at: "not-a-date" },
+        NOW,
+      ),
+    ).toEqual({ kind: "retry_due", raw: "pending" });
+  });
+
+  it("classifies pending with a missing retry time as retry_due", () => {
+    // next_retry_at is required by the schema, but the UI must not crash or
+    // fabricate a countdown if the server ever omits it.
+    const noRetry = {
+      id: base.id,
+      type: base.type,
+      attempts: base.attempts,
+      created_at: base.created_at,
+      status: "pending",
+    } as unknown as Parameters<typeof classifyDelivery>[0];
+    expect(classifyDelivery(noRetry, NOW)).toEqual({
+      kind: "retry_due",
+      raw: "pending",
+    });
+  });
+
+  // The status field is an open set. `scheduled` is not hypothetical: the
+  // redeliver endpoint's own description says a fanned-out redelivery lands
+  // as "scheduled". Anything unrecognized must surface as unknown with the
+  // server's string preserved — never silently bucketed as success.
+  it("classifies an unrecognized status as unknown, preserving the raw value", () => {
+    expect(classifyDelivery({ ...base, status: "scheduled" }, NOW)).toEqual({
+      kind: "unknown",
+      raw: "scheduled",
+    });
+  });
+
+  it("classifies an empty status as unknown", () => {
+    expect(classifyDelivery({ ...base, status: "" }, NOW)).toEqual({
+      kind: "unknown",
+      raw: "",
+    });
+  });
+});
 
 describe("describeScope", () => {
   // An absent or empty filter object means the subscription receives events
