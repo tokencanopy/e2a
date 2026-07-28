@@ -133,7 +133,7 @@ signed request bytes through a 1 MiB limit before signature verification, so a
 chunked request cannot bypass the bound or allocate an unbounded body.
 
 See [webhook.py](webhook.py) for the implementation, including
-[HMAC signature verification](https://github.com/tokencanopy/e2a/blob/main/sdks/python/README.md#quick-start)
+[HMAC signature verification](https://github.com/tokencanopy/e2a/blob/main/sdks/python/README.md#verify-a-webhook)
 which you should *always* do on a public webhook before trusting any
 field on the parsed payload.
 
