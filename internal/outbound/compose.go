@@ -272,6 +272,7 @@ func encodeBody(body string) (encoding, encoded string) {
 	if is7BitTransportSafe(body) && !hasOverlongLine(body) {
 		return "7bit", body
 	}
+	body = canonicalizeLineEndings(body)
 	var buf strings.Builder
 	w := quotedprintable.NewWriter(&buf)
 	if _, err := io.WriteString(w, body); err != nil {
@@ -281,6 +282,15 @@ func encodeBody(body string) (encoding, encoded string) {
 		return "8bit", body
 	}
 	return "quoted-printable", buf.String()
+}
+
+// canonicalizeLineEndings converts every CRLF, lone CR, and bare LF line
+// ending to CRLF before quoted-printable encoding. Go's text-mode QP writer
+// tracks a pending CR internally; feeding it an encoded byte between CR and LF
+// can otherwise make it mistake the later LF for the CR's partner and drop it.
+func canonicalizeLineEndings(s string) string {
+	s = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s)
+	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
 // maxLineOctets is the RFC 5322 § 2.1.1 limit on a line's content,

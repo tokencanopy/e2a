@@ -346,6 +346,7 @@ func TestEncodeBody(t *testing.T) {
 		{"canonical CRLF", "line one\r\nline two", "7bit"},
 		{"NUL is not valid 7bit data", "before\x00after", "quoted-printable"},
 		{"bare CR is not valid 7bit data", "line one\rline two", "quoted-printable"},
+		{"encoded byte between CR and LF", "\r\x00\n", "quoted-printable"},
 		{"bare LF is canonicalised by SMTP", "line one\nline two", "7bit"},
 		{"em dash", "a — b", "quoted-printable"},
 		{"curly apostrophe", "it’s", "quoted-printable"},
