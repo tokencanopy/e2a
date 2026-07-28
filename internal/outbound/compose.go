@@ -195,7 +195,7 @@ func ComposeMessageWithAttachments(from string, to []string, cc []string, subjec
 	for _, att := range attachments {
 		buf.WriteString("--" + mixedBoundary + "\r\n")
 		buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
-		buf.WriteString("Content-Disposition: " + attachmentDisposition(att.Filename) + "\r\n")
+		buf.WriteString(contentDispositionHeaderPrefix + attachmentDisposition(att.Filename) + "\r\n")
 		buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
 
 		// att.Data is already base64-encoded from the API request
@@ -349,6 +349,8 @@ func writeBodyPart(buf *strings.Builder, contentType, body string) {
 	buf.WriteString("\r\n")
 }
 
+const contentDispositionHeaderPrefix = "Content-Disposition: "
+
 // attachmentDisposition renders the Content-Disposition header value for an
 // attachment filename.
 //
@@ -368,14 +370,52 @@ func writeBodyPart(buf *strings.Builder, contentType, body string) {
 // byte-identical on the wire. FormatMediaType would emit them unquoted —
 // equally valid, but a gratuitous change to every message with an
 // attachment when only the non-ASCII case is broken.
+//
+// A long encoded value uses RFC 2231 continuation parameters. The API does
+// not cap filename length, and percent-encoding can triple the wire size; a
+// single filename*= parameter can therefore exceed SMTP's 998-octet line
+// limit even when the original UTF-8 filename is modest. Continuations keep
+// each parameter on a short foldable line and reconstruct byte-for-byte.
 func attachmentDisposition(filename string) string {
+	var disposition string
 	nonASCII := strings.IndexFunc(filename, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
 	if nonASCII {
 		if d := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); d != "" {
-			return d
+			disposition = d
 		}
 	}
-	return fmt.Sprintf("attachment; filename=%q", filename)
+	if disposition == "" {
+		disposition = fmt.Sprintf("attachment; filename=%q", filename)
+	}
+	if len(contentDispositionHeaderPrefix)+len(disposition) <= maxLineOctets {
+		return disposition
+	}
+	return continuedAttachmentDisposition(filename)
+}
+
+func continuedAttachmentDisposition(filename string) string {
+	const bytesPerSegment = 20
+	const upperhex = "0123456789ABCDEF"
+
+	var disposition strings.Builder
+	disposition.Grow(len(filename)*3 + len(filename)/bytesPerSegment*20)
+	disposition.WriteString("attachment")
+
+	for segment, offset := 0, 0; offset < len(filename); segment++ {
+		end := min(offset+bytesPerSegment, len(filename))
+		disposition.WriteString(";\r\n filename*")
+		disposition.WriteString(fmt.Sprintf("%d*=", segment))
+		if segment == 0 {
+			disposition.WriteString("utf-8''")
+		}
+		for _, b := range []byte(filename[offset:end]) {
+			disposition.WriteByte('%')
+			disposition.WriteByte(upperhex[b>>4])
+			disposition.WriteByte(upperhex[b&0x0f])
+		}
+		offset = end
+	}
+	return disposition.String()
 }
 
 func headerWriter(buf *strings.Builder) func(string, string) {

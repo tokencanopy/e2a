@@ -59,6 +59,23 @@ func TestAttachmentFilenameRoundTrips(t *testing.T) {
 	}
 }
 
+func TestAttachmentFilenameRFC2231EncodingRespectsLineLimit(t *testing.T) {
+	filename := strings.Repeat("界", 120) + ".pdf"
+	raw := composeWithAttachment(t, filename)
+
+	for i, line := range strings.Split(string(raw), "\r\n") {
+		if len(line) > maxLineOctets {
+			t.Fatalf("line %d is %d octets, exceeds the %d-octet limit:\n%s",
+				i+1, len(line), maxLineOctets, line)
+		}
+	}
+
+	atts := mailparse.Attachments(raw)
+	if len(atts) != 1 || atts[0].Filename != filename {
+		t.Fatalf("continued filename round trip = %+v, want %q", atts, filename)
+	}
+}
+
 // Values containing MIME specials must stay parseable rather than
 // terminating the parameter list early.
 func TestAttachmentFilenameWithSpecialsStaysParseable(t *testing.T) {
