@@ -261,7 +261,7 @@ func TestSign_PrependedDuplicateHeaderIsDetected(t *testing.T) {
 
 // N+1 must not come at the cost of the fix it builds on: an ABSENT
 // candidate is still omitted entirely, so a relay adding one for the
-// first time (SES and Message-ID) still verifies.
+// first time still verifies, and provider-owned Date remains unsigned.
 func TestSign_NPlusOneDoesNotResurrectOversigning(t *testing.T) {
 	kp, err := GenerateKeypair()
 	if err != nil {
@@ -276,10 +276,19 @@ func TestSign_NPlusOneDoesNotResurrectOversigning(t *testing.T) {
 		t.Fatalf("h= claims an absent Message-ID: %v", h)
 	}
 
-	delivered := append([]byte(sesMessageIDHeader), signed...)
+	delivered := bytes.Replace(
+		signed,
+		[]byte("Date: Fri, 22 May 2026 12:00:00 +0000"),
+		[]byte("Date: Fri, 22 May 2026 12:00:01 +0000"),
+		1,
+	)
+	if bytes.Equal(delivered, signed) {
+		t.Fatal("Date replacement target not found — test is inert")
+	}
+	delivered = append([]byte(sesMessageIDHeader), delivered...)
 	v := verifySigned(t, delivered, "example.com", kp.Selector, kp.PublicKeyDNS)
 	if len(v) != 1 || v[0].Err != nil {
-		t.Errorf("SES stamping Message-ID broke the signature again: %+v", v)
+		t.Errorf("SES rewriting Message-ID/Date broke the signature again: %+v", v)
 	}
 }
 
