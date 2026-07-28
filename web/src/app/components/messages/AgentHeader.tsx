@@ -16,7 +16,7 @@ import { CounterpartyAvatar } from "./CounterpartyAvatar";
 import { sendAgentTestEmail } from "../onboarding/api";
 import type { DashboardAgent } from "../types";
 
-export type AgentTab = "messages" | "trash" | "settings";
+export type AgentTab = "messages" | "outreach" | "trash" | "settings";
 
 // The agent-detail surface is intentionally scoped to two tabs:
 //   • Messages — the threaded inbox + focus view.
@@ -28,6 +28,7 @@ export type AgentTab = "messages" | "trash" | "settings";
 // (see git history at 63876fc).
 const TABS: { key: AgentTab; label: string; slug: string }[] = [
   { key: "messages", label: "Inbox", slug: "messages" },
+  { key: "outreach", label: "Outreach", slug: "outreach" },
   { key: "trash", label: "Trash", slug: "trash" },
   { key: "settings", label: "Settings", slug: "settings" },
 ];

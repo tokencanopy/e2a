@@ -28,6 +28,12 @@ export const AGENT_PROMPTS = {
     prompt:
       "Help me connect a custom domain to e2a using https://api.e2a.dev/mcp",
   },
+  contacts: {
+    blurb:
+      "Your coding agent can import contacts, enroll them with an inbox, and work outreach over MCP while it is running.",
+    prompt:
+      "Help me set up e2a contacts and outreach using https://api.e2a.dev/mcp",
+  },
   // Webhooks are two jobs, not one: register the subscription, and write a
   // handler that verifies the HMAC signature. The prompt names both so the
   // agent doesn't stop at a subscription pointing to an unwritten endpoint.

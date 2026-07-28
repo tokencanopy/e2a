@@ -565,6 +565,12 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 		if txErr != nil {
 			return txErr
 		}
+		if agent.UserID != "" && headerFrom != "" && authentication.Passed() && !screenRes.Hold && !screenRes.Blocked() {
+			if _, txErr = srv.store.RecordInboundActivityTx(ctx, tx, agent.UserID, agent.ID,
+				headerFrom, conversationID, inboundMsg.CreatedAt); txErr != nil {
+				return txErr
+			}
+		}
 
 		correlations := messagelifecycle.SafeCorrelationIDs(map[string]string{
 			"email_message_id": threadInfo.MessageID,

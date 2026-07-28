@@ -119,7 +119,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | `recipient_suppressed` | 422 | A recipient is on the account-wide or exact sending-agent suppression list — un-suppress or drop it. |
 | **Not found / gone** | | |
 | `not_found` | 404 | No such resource (agents, messages, webhooks, …). |
-| `attachment_not_found`, `template_not_found`, `starter_template_not_found` | 404 | The `*_not_found` family — a specific sub-resource is missing. |
+| `attachment_not_found`, `contact_not_found`, `engagement_not_found`, `import_batch_not_found`, `template_not_found`, `starter_template_not_found` | 404 | The `*_not_found` family — a specific sub-resource is missing. |
 | `gone` | 410 | The event exists but is past the 30-day retention window. |
 | **Conflict / state** | | |
 | `conflict` | 409 | Generic state conflict (e.g. redelivery to a webhook that never matched the event). |
@@ -132,6 +132,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
+| `precondition_failed` | 412 | The resource changed since the supplied `If-Match` value was read. Fetch the latest representation and retry the edit deliberately. |
 | `domain_not_registered` | 400 | Create-agent on a domain the account has not registered. |
 | `domain_has_agents` | 400 | Domain delete blocked while agents exist on it — **including agents in the trash**, which keep their addresses for the 30-day restore window and do not appear in `list_agents`. The message names which kind is blocking and how many; purge trashed ones with `?confirm=DELETE&permanent=true`. |
 | `domain_not_verified` | 400 / 403 | Domain verification pending — 400 on create-agent, 403 on send paths. |
@@ -139,7 +140,7 @@ or the state first); `rate_limited`, `idempotency_in_flight`, and 5xx
 | **Capacity — see the 402/429 split above** | | |
 | `limit_exceeded` | 402 | Plan **quota** (stock/flow cap); `details` is `LimitExceededDetails`. Not retryable. |
 | `rate_limited` | 429 | Request-**rate** limit; wait `details.retry_after_seconds` / `Retry-After`, then retry. |
-| `template_limit_reached`, `webhook_limit_reached` | 400 | Fixed per-account count caps (not plan quotas) — delete one first. |
+| `contact_limit_reached`, `template_limit_reached`, `webhook_limit_reached` | 400 | Fixed per-account count caps (not plan quotas) — delete one first. |
 | **Idempotency** | | |
 | `idempotency_in_flight` | 409 | Same key still executing — wait, then retry the byte-identical request to replay it. |
 | `idempotency_key_reuse` | 422 | Same key, different body — caller bug; never blind-retry. |
@@ -196,21 +197,32 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | --- | --- | --- |
 | `approveReview` | `POST /v1/reviews/{id}/approve` | Reviews |
 | `createAgentSuppression` | `POST /v1/agents/{email}/suppressions` | Agent suppressions |
+| `createContact` | `POST /v1/contacts` | Contacts |
 | `createTemplate` | `POST /v1/templates` | Templates |
 | `deleteAgentSuppression` | `DELETE /v1/agents/{email}/suppressions/{address}` | Agent suppressions |
+| `deleteContact` | `DELETE /v1/contacts/{address}` | Contacts |
+| `deleteEngagement` | `DELETE /v1/agents/{email}/contacts/{address}` | Contacts |
+| `deleteImportBatch` | `DELETE /v1/contacts/imports/{batch_id}` | Contacts |
 | `deleteTemplate` | `DELETE /v1/templates/{id}` | Templates |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
+| `getContact` | `GET /v1/contacts/{address}` | Contacts |
+| `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
 | `getReview` | `GET /v1/reviews/{id}` | Reviews |
 | `getStarterTemplate` | `GET /v1/starter-templates/{alias}` | Starter templates |
 | `getTemplate` | `GET /v1/templates/{id}` | Templates |
+| `importContacts` | `POST /v1/contacts/import` | Contacts |
 | `listAgentSuppressions` | `GET /v1/agents/{email}/suppressions` | Agent suppressions |
+| `listContacts` | `GET /v1/contacts` | Contacts |
+| `listEngagements` | `GET /v1/agents/{email}/contacts` | Contacts |
 | `listReviews` | `GET /v1/reviews` | Reviews |
 | `listStarterTemplates` | `GET /v1/starter-templates` | Starter templates |
 | `listTemplates` | `GET /v1/templates` | Templates |
 | `putAgentProtection` | `PUT /v1/agents/{email}/protection` | Protection config |
 | `rejectReview` | `POST /v1/reviews/{id}/reject` | Reviews |
+| `updateContact` | `PATCH /v1/contacts/{address}` | Contacts |
 | `updateTemplate` | `PATCH /v1/templates/{id}` | Templates |
+| `upsertEngagement` | `PUT /v1/agents/{email}/contacts/{address}` | Contacts |
 | `validateTemplate` | `POST /v1/templates/validate` | Templates |
 
 ### Compatibility rules
@@ -714,7 +726,7 @@ own **per-webhook signing secret** that signs the payloads sent to it.
 
 Agent-scoped suppression management is beta. The authenticated list, create,
 and delete operations and their request/response schemas may change before
-they are declared stable. `agent.suppression_added` is a beta event emitted
+they are declared stable. `agent.suppression_added`, `contact.due` is a beta event emitted
 once when a new exact-agent
 block is created. Its current payload is
 `{agent_email, address, source}`, where `source` is `unsubscribe` or `manual`.

@@ -69,6 +69,25 @@ test("the e2a skill bootstraps and verifies an MCP connection", async () => {
   assert.match(bootstrap, /never ask.*API key/i);
 });
 
+test("the e2a skill teaches the contacts and outreach loop without overclaiming wake-up", async () => {
+  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
+  const outreach = source.match(
+    /### Manage contacts and outreach \(beta\)[\s\S]*?(?=\n### |\n## )/,
+  )?.[0] ?? "";
+
+  assert.match(outreach, /import_contacts/);
+  assert.match(outreach, /list_outreach_contacts/);
+  assert.match(outreach, /replied=false/);
+  assert.match(outreach, /suppressed=false/);
+  assert.match(outreach, /next_action_before/);
+  assert.match(outreach, /last_outbound_before/);
+  assert.match(outreach, /reply_to_message/);
+  assert.match(outreach, /set_outreach_contact/);
+  assert.match(outreach, /deployed webhook/i);
+  assert.match(outreach, /does not launch.*local coding-agent/i);
+  assert.match(source, /MCP surface is \*\*71 tools\*\* \(20 runtime\/inbox \+ 51 admin\/setup\)/);
+});
+
 test("the setup guide reaches a verified first inbox", async () => {
   const source = await readFile("plugins/e2a/docs/setup.md", "utf8");
 

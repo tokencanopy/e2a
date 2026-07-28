@@ -1708,6 +1708,11 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 			return err
 		}
 		messagesDeleted = msgTag.RowsAffected()
+		// Operational outreach state dies with a permanent agent deletion.
+		// Suppressions deliberately survive: consent outlives the inbox.
+		if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, agentID); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, agentID)
 		return err
 	})
@@ -1759,6 +1764,22 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 			`UPDATE agent_identities SET deleted_at = NULL WHERE id = $1`, agentID); err != nil {
 			return err
 		}
+		// Past-due outreach remains visible to the agent's pull query, but a
+		// restore must not enqueue every wake-up that accumulated while the
+		// inbox was intentionally inactive. A later reschedule changes
+		// next_action_at and naturally re-arms contact.due.
+		if _, err := tx.Exec(ctx,
+			`UPDATE contact_engagements
+			    SET notified_next_action_at = next_action_at,
+			        updated_at = now()
+			  WHERE user_id = $1
+			    AND agent_id = $2
+			    AND next_action_at IS NOT NULL
+			    AND next_action_at <= now()
+			    AND notified_next_action_at IS DISTINCT FROM next_action_at`,
+			userID, agentID); err != nil {
+			return err
+		}
 		// Give back the trash time to pending holds on the agent's LIVE
 		// messages only. Message retention itself is indefinite.
 		_, err = tx.Exec(ctx,
@@ -1802,6 +1823,22 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, id); err != nil {
+				return err
+			}
+			// Outreach state dies with the agent, in the SAME transaction.
+			//
+			// contact_engagements deliberately has no FK to agent_identities (it
+			// mirrors agent_suppressions), so nothing cascades this for us — and
+			// because agent_id IS the agent's email address, anything left behind
+			// would be inherited by a recreated agent at that address. That agent
+			// would wake up holding last campaign's stage and a past-due schedule
+			// and mail investors it never contacted.
+			//
+			// Suppressions are deliberately NOT deleted here: consent has to
+			// survive deletion and recreation. That asymmetry — operational state
+			// dies, consent persists — is the reason this is an explicit delete
+			// rather than a cascade.
+			if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, id); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, id); err != nil {

@@ -29,7 +29,7 @@ class UpdateWebhookRequest(BaseModel):
     """ # noqa: E501
     description: Optional[StrictStr] = None
     enabled: Optional[StrictBool] = None
-    events: Optional[List[StrictStr]] = Field(default=None, description="Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable.")
+    events: Optional[List[StrictStr]] = Field(default=None, description="Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable.")
     filters: Optional[WebhookFiltersRequest] = None
     url: Optional[StrictStr] = Field(default=None, description="When present, must be a non-empty webhook delivery URL; omit to leave the URL unchanged.")
     additional_properties: Dict[str, Any] = {}

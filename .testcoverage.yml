@@ -26,6 +26,10 @@ override:
   # /v1 HTTP handlers (includes the webhook endpoints + idempotency).
   - threshold: 73
     path: ^internal/httpapi$
+  # contact.due outreach wake-up sweep — claim-and-mark plus the event payload,
+  # which is a published contract webhook subscribers depend on.
+  - threshold: 75
+    path: ^internal/contactdue$
   # Outbound send on River — the at-least-once send worker + accept-tx enqueue.
   - threshold: 75
     path: ^internal/outboundsend$

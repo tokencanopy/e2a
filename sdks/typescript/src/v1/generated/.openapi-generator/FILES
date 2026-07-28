@@ -1,5 +1,6 @@
 apis/AccountApi.ts
 apis/AgentsApi.ts
+apis/ContactsApi.ts
 apis/ConversationsApi.ts
 apis/DomainsApi.ts
 apis/EventsApi.ts
@@ -29,12 +30,18 @@ models/Attachment.ts
 models/AttachmentMetaView.ts
 models/AttachmentView.ts
 models/Authentication.ts
+models/ContactEngagementView.ts
+models/ContactImportItemResult.ts
+models/ContactImportResult.ts
+models/ContactImportRow.ts
+models/ContactView.ts
 models/ConversationDetailView.ts
 models/ConversationSummaryView.ts
 models/CreateAPIKeyRequest.ts
 models/CreateAPIKeyResponse.ts
 models/CreateAgentRequest.ts
 models/CreateAgentSuppressionRequest.ts
+models/CreateContactRequest.ts
 models/CreateTemplateRequest.ts
 models/CreateWebhookRequest.ts
 models/CreateWebhookResponse.ts
@@ -43,7 +50,10 @@ models/DMARCResult.ts
 models/DNSRecord.ts
 models/DeleteAgentResult.ts
 models/DeleteApiKeyResult.ts
+models/DeleteContactResult.ts
 models/DeleteDomainResult.ts
+models/DeleteEngagementResult.ts
+models/DeleteImportBatchResult.ts
 models/DeleteMessageResult.ts
 models/DeleteSuppressionResult.ts
 models/DeleteTemplateResult.ts
@@ -63,6 +73,7 @@ models/EmailDeliveredData.ts
 models/EmailFailedData.ts
 models/EmailReceivedData.ts
 models/EmailSentData.ts
+models/EmbeddedContactView.ts
 models/ErrorBody.ts
 models/ErrorEnvelope.ts
 models/EventEnvelope.ts
@@ -70,6 +81,7 @@ models/EventView.ts
 models/FieldError.ts
 models/ForwardRequest.ts
 models/HoldReasonView.ts
+models/ImportContactsRequest.ts
 models/LimitExceededDetails.ts
 models/LimitExceededEnvelope.ts
 models/LimitExceededErrorBody.ts
@@ -86,6 +98,8 @@ models/ObjectSerializer.ts
 models/PageAPIKeyView.ts
 models/PageAgentSuppressionView.ts
 models/PageAgentView.ts
+models/PageContactEngagementView.ts
+models/PageContactView.ts
 models/PageConversationSummaryView.ts
 models/PageDomainView.ts
 models/PageEventView.ts
@@ -142,10 +156,12 @@ models/ThreatCategoryView.ts
 models/TooManyRecipientsDetails.ts
 models/UnsubscribeOptions.ts
 models/UpdateAgentRequest.ts
+models/UpdateContactRequest.ts
 models/UpdateMessageRequest.ts
 models/UpdateMessageResultView.ts
 models/UpdateTemplateRequest.ts
 models/UpdateWebhookRequest.ts
+models/UpsertEngagementRequest.ts
 models/UsageEventEntry.ts
 models/UserExport.ts
 models/UserExportUser.ts

@@ -87,6 +87,7 @@ type Metrics interface {
 
 // Janitor holds the prune dependencies and runs the cleanup sweep. All fields
 // are required except oauth, which is nil when the OAuth provider is disabled.
+
 type Janitor struct {
 	messages     MessagePruner
 	deliveries   DeliveryPruner

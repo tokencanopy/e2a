@@ -57,6 +57,7 @@ export enum TestWebhookRequestTypeEnum {
     AgentSuppressionAdded = 'agent.suppression_added',
     EmailFlagged = 'email.flagged',
     EmailBlocked = 'email.blocked',
-    EmailReviewRequested = 'email.review_requested'
+    EmailReviewRequested = 'email.review_requested',
+    ContactDue = 'contact.due'
 }
 

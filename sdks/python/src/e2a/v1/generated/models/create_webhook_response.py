@@ -32,7 +32,7 @@ class CreateWebhookResponse(BaseModel):
     created_at: datetime
     description: StrictStr
     enabled: StrictBool
-    events: List[StrictStr] = Field(description="The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable.")
+    events: List[StrictStr] = Field(description="The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable.")
     filters: WebhookFiltersView
     id: StrictStr
     last_delivered_at: Optional[datetime] = None

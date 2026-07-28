@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
-version: 21
+version: 22
 ---
 
 # Using e2a
 
-<!-- version: 21 -->
+<!-- version: 22 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -94,6 +94,33 @@ opt-in; never enable it merely because an inbox was created.
 4. Reply in-thread with `reply_to_message` and the original `message_id`; reuse the bound `conversation_id` on later replies.
 
 For attachment bytes, use `get_attachment` with a 0-based index. It returns the attachment's metadata plus a short-lived `download_url`; pass `inline: true` to get base64 `data` inline for small files. Indexes are stable within a message.
+
+### Manage contacts and outreach (beta)
+
+Contacts are durable account-level identity; outreach is one inbox's state for
+working that contact. e2a stores the state and derives real send/reply facts,
+but it never writes or sends a follow-up on its own.
+
+1. Import and optionally enroll with `import_contacts`. Pass already-parsed
+   rows, an explicit `agent_email`, and an optional initial `stage`. Import
+   never sends email. Account scope is required for the account-wide import.
+2. When the user asks to work the queue, call `list_outreach_contacts` with
+   `replied=false`, `suppressed=false`, `next_action_before=<now>`, and
+   `last_outbound_before=<stale cutoff>`. The last filter is the duplicate-send
+   safety net when a prior send succeeded but the later state update failed.
+3. Start first contact with `send_message`. Continue an existing thread with
+   `reply_to_message` and a message from that thread; a new send fragments the
+   recipient's inbox even if `conversation_id` is reused.
+4. After an accepted send, update the caller-owned `stage` and
+   `next_action_at` with `set_outreach_contact`. e2a updates reply status,
+   activity timestamps, counts, and the latest conversation from real mail.
+   Preserve the normal `pending_review` no-retry rule.
+
+`next_action_at` is not a scheduled send. It makes the row available to the due
+query and emits `contact.due`. Only a deployed webhook receiver can use that
+event to wake an agent runtime; it does not launch a local coding-agent session
+over MCP or WebSocket. Claude Code and similar interactive clients work the
+queue when the user starts or resumes them.
 
 ### Compose before sending
 
@@ -237,5 +264,5 @@ The full, current integration code — SDK install, send / reply / parse, webhoo
 - Webhook + SDK code: https://e2a.dev/sdk.md
 - Exact tool signatures: call `tools/list` (authoritative).
 - OpenAPI contract: https://e2a.dev/v1/openapi.yaml
-- The MCP surface is **60 tools** (16 runtime/inbox + 44 admin/setup) spanning agents, messages, attachments, domains, events, webhooks, API keys, and templates (beta). The set you see depends on your credential's scope: an agent-scoped credential sees the 16 runtime tools; an account-scoped credential sees all 60. Tool descriptions teach behavior; this skill teaches the mental model. (`create_api_key` mints **agent-scoped** keys only — account-scoped keys come from the dashboard or raw API.)
+- The MCP surface is **71 tools** (20 runtime/inbox + 51 admin/setup) spanning agents, messages, attachments, contacts and outreach, domains, events, webhooks, API keys, and templates (beta). The set you see depends on your credential's scope: an agent-scoped credential sees the 20 runtime tools; an account-scoped credential sees all 71. Tool descriptions teach behavior; this skill teaches the mental model. (`create_api_key` mints **agent-scoped** keys only — account-scoped keys come from the dashboard or raw API.)
 - Plugin homepage / docs index: https://e2a.dev (machine-readable index: https://e2a.dev/llms.txt)

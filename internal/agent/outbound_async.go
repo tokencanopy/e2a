@@ -188,6 +188,18 @@ func (a *outboundSendStore) finalizeSentTx(ctx context.Context, tx pgx.Tx, info 
 	if err := a.meterSentTx(ctx, tx, info); err != nil {
 		return err
 	}
+	// A terminally accepted send and the timestamps used by the safe follow-up
+	// query are one invariant. Keep them in this transaction so a crash cannot
+	// leave a recently contacted person eligible for another send.
+	for _, rcpt := range info.Message.ToRecipients {
+		if rcpt == "" {
+			continue
+		}
+		if _, err := a.store.RecordOutboundActivityTx(ctx, tx, info.UserID,
+			info.Message.AgentID, rcpt, info.Message.ConversationID, occurredAt); err != nil {
+			return err
+		}
+	}
 	transition, err := appendSubmissionTransition(ctx, tx, info.Message.ID, jobID, attempt, occurredAt,
 		messagelifecycle.ReasonSubmissionUpstreamAccepted, "", providerMessageID)
 	if err != nil {
