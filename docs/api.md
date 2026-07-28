@@ -245,8 +245,9 @@ every `/v1` operation not listed here is covered by the GA freeze.
   send, `hold_reason`, the review-detail `protection` evidence, and the
   `flagged` / `flag_reason` verdict) and `(beta)` in prose — today: templates,
   starter templates, reviews, the agent protection config, agent-scoped
-  suppression management, and managed unsubscribe (including its raw
-  confirmation flow). They are **exempt from the
+  suppression management, managed unsubscribe (including its raw confirmation
+  flow), and scheduled sending (`send_at`, `scheduled_at`, and the `scheduled`
+  send-result value). They are **exempt from the
   freeze**: they may change or be removed without a major version. Where only
   specific *values* of a stable field are experimental (the screening +
   review-hold event types `email.flagged`, `email.blocked`,
@@ -423,7 +424,9 @@ or on the deployment's shared domain (see `GET /v1/info`).
 
 The message surface is agent-scoped: the agent in the path is the sender (there is
 no `from` field). `reply`, `forward`, and `attachments` are sub-resources of a
-single message.
+single message. The send, reply, and forward operations remain stable, but their
+optional scheduled-sending capability is **beta** and may change before it is
+declared stable.
 
 - `GET …/messages` — list inbound + outbound with filters (`direction`,
   `read_status`, `sort`, `from`, `subject_contains`, `conversation_id`, `labels`,
@@ -431,26 +434,28 @@ single message.
   `status=pending_review`.
 - `POST …/messages` — send a new email (a new thread). Returns `202 Accepted` for
   every non-terminal outcome — `pending_review` when the agent's protection policy
-  holds it for review, `scheduled` when a future `send_at` is durably queued, or
-  `accepted` when the async pipeline durably queues immediate submission — and
-  `200 OK` for the terminal-synchronous `sent`. The send result `status` is an
-  open set — known values `accepted | scheduled | sent | pending_review |
-  review_approved | failed`. **Always branch on `status`, not the HTTP code.**
+  holds it for review, `scheduled` **(beta)** when a future `send_at` is durably
+  queued, or `accepted` when the async pipeline durably queues immediate
+  submission — and `200 OK` for the terminal-synchronous `sent`. The send result
+  `status` is an open set — known values `accepted | scheduled | sent |
+  pending_review | review_approved | failed`. **Always branch on `status`, not
+  the HTTP code.**
   `accepted` (async pipeline) means the message is durably persisted and queued;
   the terminal outcome then arrives via the `email.sent` / `email.failed` webhook
   events or `GET …/messages/{id}`. `provider_message_id` is absent until the
-  message is actually sent. `scheduled` is also successful durable acceptance:
-  do not re-send it. `scheduled_at` is the future submission time (a “not before”
-  bound; provider retries can make submission later). Optional `?wait=sent`
-  holds an immediately queued request until the message reaches a
-  terminal-or-held state or a bounded timeout; a future `send_at` instead returns
-  `status=scheduled` immediately and does not wait until that time.
-- `send_at` on send/reply/forward must be RFC 3339 with an explicit UTC offset,
-  can be at most 90 days ahead, and does not survive a review hold (approval
-  sends immediately). A future direct loopback whose only recipient is the
-  sending agent's own address returns `400 invalid_request` because loopback is
-  immediate. Trashing a scheduled message prevents submission; restoring it
-  before `scheduled_at` re-arms the existing job.
+  message is actually sent. `scheduled` **(beta)** is also successful durable
+  acceptance: do not re-send it. `scheduled_at` **(beta)** is the future
+  submission time (a “not before” bound; provider retries can make submission
+  later). Optional `?wait=sent` holds an immediately queued request until the
+  message reaches a terminal-or-held state or a bounded timeout; a future
+  `send_at` instead returns `status=scheduled` immediately and does not wait
+  until that time.
+- `send_at` **(beta)** on send/reply/forward must be RFC 3339 with an explicit
+  UTC offset, can be at most 90 days ahead, and does not survive a review hold
+  (approval sends immediately). A future direct loopback whose only recipient
+  is the sending agent's own address returns `400 invalid_request` because
+  loopback is immediate. Trashing a scheduled message prevents submission;
+  restoring it before `scheduled_at` re-arms the existing job.
 - **`delivery_status`** on a message follows `accepted → sending → sent →
   delivered | deferred | bounced | complained | failed`. Note **`sent` ≠
   `delivered`**: `sent` means the upstream provider (SES) accepted the message,
