@@ -94,6 +94,36 @@ describe("webhook detail page", () => {
     expect(screen.queryByText("all agents")).not.toBeInTheDocument();
   });
 
+  it("renders auto-disabled as danger with recovery guidance", async () => {
+    searchParams = new URLSearchParams("id=wh_1");
+    respond({
+      webhook: () =>
+        okJson({
+          ...webhook,
+          enabled: false,
+          auto_disabled_at: "2026-07-27T11:00:00Z",
+        }),
+    });
+
+    render(<WebhookDetailPage />);
+    await waitFor(() => {
+      expect(screen.getByText("auto-disabled")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("auto-disabled").closest(".loft-chip")).toHaveClass(
+      "loft-chip--danger",
+    );
+    expect(
+      screen.getByText(/disabled this webhook after repeated delivery failures/i),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByText(/disabled this webhook after repeated delivery failures/i)
+        .closest("div"),
+    ).toHaveStyle({ background: "var(--danger-bg)" });
+    expect(screen.getByText(/five-minute cooldown/i)).toBeInTheDocument();
+  });
+
   // The id comes from a user-editable query string, and delivery rows outlive
   // the subscription they belong to — so "webhook is gone" is a reachable
   // state that must render cleanly rather than throw or half-render.
@@ -342,14 +372,124 @@ describe("webhook detail page", () => {
         expect(screen.getByText("email.sent")).toBeInTheDocument();
       });
       expect(screen.getAllByText("email.received")).toHaveLength(2);
+      const deliveryUrls = mockFetch.mock.calls
+        .map(([url]) => String(url))
+        .filter((url) => url.includes("/deliveries"));
+      expect(deliveryUrls).toHaveLength(2);
       expect(
-        mockFetch.mock.calls.some(([url]) =>
-          String(url).includes("cursor=next-page"),
-        ),
-      ).toBe(true);
+        deliveryUrls.filter((url) => !url.includes("cursor=")),
+      ).toHaveLength(1);
+      expect(
+        deliveryUrls.filter((url) => url.includes("cursor=next-page")),
+      ).toHaveLength(1);
       expect(
         screen.queryByRole("button", { name: /load older/i }),
       ).not.toBeInTheDocument();
+    });
+
+    it("retries a failed continuation without advancing to another cursor", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      let nextPageAttempts = 0;
+      mockFetch.mockImplementation((url: string) => {
+        if (!url.includes("/deliveries")) return okJson(webhook);
+        if (url.includes("cursor=next-page")) {
+          nextPageAttempts += 1;
+          if (nextPageAttempts === 1) {
+            return Promise.resolve({
+              ok: false,
+              status: 500,
+              text: () => Promise.resolve("temporary failure"),
+            });
+          }
+          return okJson({
+            items: [{ ...delivery, id: "whd_older", type: "email.sent" }],
+            next_cursor: "third-page",
+          });
+        }
+        if (url.includes("cursor=third-page")) {
+          return okJson({
+            items: [{ ...delivery, id: "whd_oldest", type: "email.failed" }],
+            next_cursor: null,
+          });
+        }
+        return okJson({ items: [delivery], next_cursor: "next-page" });
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(
+          screen.getByRole("button", { name: "Load older" }),
+        ).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Load older" }));
+      await waitFor(() => {
+        expect(
+          screen.getByRole("button", { name: "Retry loading older" }),
+        ).toBeInTheDocument();
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Retry loading older" }),
+      );
+      await waitFor(() => {
+        expect(screen.getByText("email.sent")).toBeInTheDocument();
+      });
+
+      const urls = mockFetch.mock.calls.map(([url]) => String(url));
+      expect(
+        urls.filter(
+          (url) => url.includes("/deliveries") && !url.includes("cursor="),
+        ),
+      ).toHaveLength(1);
+      expect(urls.filter((url) => url.includes("cursor=next-page"))).toHaveLength(
+        2,
+      );
+      expect(urls.some((url) => url.includes("cursor=third-page"))).toBe(false);
+      expect(
+        screen.getByRole("button", { name: "Load older" }),
+      ).toBeInTheDocument();
+    });
+
+    it("refreshes every loaded page so later pending rows can terminalize", async () => {
+      searchParams = new URLSearchParams("id=wh_1");
+      let olderFetches = 0;
+      mockFetch.mockImplementation((url: string) => {
+        if (!url.includes("/deliveries")) return okJson(webhook);
+        if (url.includes("cursor=next-page")) {
+          olderFetches += 1;
+          return okJson({
+            items: [
+              {
+                ...delivery,
+                id: "whd_older",
+                type: "email.sent",
+                status: olderFetches === 1 ? "pending" : "failed",
+                attempts: olderFetches === 1 ? 2 : 8,
+              },
+            ],
+            next_cursor: null,
+          });
+        }
+        return okJson({ items: [delivery], next_cursor: "next-page" });
+      });
+
+      render(<WebhookDetailPage />);
+      await waitFor(() => {
+        expect(
+          screen.getByRole("button", { name: "Load older" }),
+        ).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Load older" }));
+      await waitFor(() => {
+        expect(screen.getByText("retrying")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Refresh deliveries" }));
+      await waitFor(() => {
+        expect(screen.getByText("failed")).toBeInTheDocument();
+      });
+      expect(olderFetches).toBe(2);
     });
   });
 

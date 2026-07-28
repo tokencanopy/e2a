@@ -97,6 +97,12 @@ function WebhookDetailContent({ id }: { id: string }) {
 
   const scope = describeScope(webhook.filters);
   const health = classifyWebhookHealth(webhook, new Date());
+  const healthTone =
+    health.kind === "active"
+      ? "success"
+      : health.kind === "auto_disabled"
+        ? "danger"
+        : "warn";
 
   return (
     <PageShell
@@ -114,8 +120,8 @@ function WebhookDetailContent({ id }: { id: string }) {
       >
         <dl className="grid gap-4 md:grid-cols-3">
           <Field label="Status">
-            <Chip tone={health.kind === "active" ? "success" : "warn"}>
-              <Dot tone={health.kind === "active" ? "success" : "warn"} />
+            <Chip tone={healthTone}>
+              <Dot tone={healthTone} />
               {HEALTH_LABEL[health.kind]}
             </Chip>
             {health.lastDeliveredAt ? (
@@ -159,6 +165,21 @@ function WebhookDetailContent({ id }: { id: string }) {
           </Field>
         </dl>
       </section>
+
+      {health.kind === "auto_disabled" ? (
+        <div
+          className="rounded-[var(--r-lg)] border p-4 mt-4 text-[13px]"
+          style={{
+            background: "var(--danger-bg)",
+            borderColor: "var(--danger)",
+            color: "var(--danger-strong)",
+          }}
+        >
+          <strong>Delivery paused.</strong> e2a disabled this webhook after
+          repeated delivery failures. Fix the endpoint, then re-enable it
+          through the API after the five-minute cooldown.
+        </div>
+      ) : null}
 
       <DeliveriesFeed webhookId={webhook.id} />
     </PageShell>

@@ -171,7 +171,8 @@ Contents, top to bottom:
    using the existing server-side filter.
 
 Each delivery row shows: event type, status, `attempts`, `last_status_code`,
-a truncated `last_error`, and `last_attempt_at` / `next_retry_at`.
+a truncated `last_error`, and `last_attempt_at`. It intentionally omits
+`next_retry_at`, which is not authoritative once River owns retry scheduling.
 
 ### D3 — List-row health uses only fields already on `WebhookView`
 

@@ -62,6 +62,7 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
     isValidating,
     size,
     setSize,
+    mutate,
   } = useSWRInfinite<WebhookDeliveryPage>(
     (pageIndex, previousPage) => {
       if (previousPage && !previousPage.next_cursor) return null;
@@ -76,6 +77,7 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
         cursor: cursor || undefined,
       });
     },
+    { revalidateFirstPage: false },
   );
 
   const items = pages?.flatMap((page) => page.items) ?? [];
@@ -94,6 +96,20 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
           Deliveries
         </h2>
         <div className="flex items-center gap-1 flex-wrap">
+          <button
+            type="button"
+            onClick={() => void mutate()}
+            disabled={isValidating}
+            className="px-2.5 py-1 text-[12px] transition disabled:opacity-50"
+            style={{
+              background: "transparent",
+              color: "var(--fg-muted)",
+              border: "1px solid transparent",
+              borderRadius: "var(--r-sm)",
+            }}
+          >
+            Refresh deliveries
+          </button>
           {STATUS_FILTERS.map((f) => (
             <button
               key={f.value || "all"}
@@ -166,12 +182,28 @@ export function DeliveriesFeed({ webhookId }: { webhookId: string }) {
       )}
 
       {error && pages ? (
-        <p className="text-[12px] mt-3 mb-0" style={{ color: "var(--danger-strong)" }}>
-          Couldn&apos;t load older deliveries. Try again.
-        </p>
+        <>
+          <p className="text-[12px] mt-3 mb-0" style={{ color: "var(--danger-strong)" }}>
+            Couldn&apos;t load older deliveries. Try again.
+          </p>
+          <button
+            type="button"
+            onClick={() => void setSize(size)}
+            disabled={isValidating}
+            className="mt-3 px-3 py-1.5 text-[12px] transition disabled:opacity-50"
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-sm)",
+              color: "var(--fg)",
+            }}
+          >
+            Retry loading older
+          </button>
+        </>
       ) : null}
 
-      {nextCursor ? (
+      {nextCursor && !error ? (
         <button
           type="button"
           onClick={() => void setSize(size + 1)}
