@@ -374,11 +374,11 @@ const contentDispositionHeaderPrefix = "Content-Disposition: "
 // equally valid, but a gratuitous change to every message with an
 // attachment when only the non-ASCII case is broken.
 //
-// A long encoded value uses RFC 2231 continuation parameters. The API does
-// not cap filename length, and percent-encoding can triple the wire size; a
-// single filename*= parameter can therefore exceed SMTP's 998-octet line
-// limit even when the original UTF-8 filename is modest. Continuations keep
-// each parameter on a short foldable line and reconstruct byte-for-byte.
+// A long encoded value uses RFC 2231 continuation parameters. Percent-encoding
+// can triple the wire size, so a filename within the API's byte cap can still
+// make a single filename*= parameter exceed SMTP's 998-octet line limit.
+// Continuations keep each parameter on a short foldable line and reconstruct
+// byte-for-byte.
 func attachmentDisposition(filename string) string {
 	var disposition string
 	nonASCII := strings.IndexFunc(filename, func(r rune) bool { return r > unicode.MaxASCII }) >= 0

@@ -46,7 +46,7 @@ type DKIMKeyLookup interface {
 
 // Attachment is a base64-encoded file attachment.
 type Attachment struct {
-	Filename    string `json:"filename" example:"report.pdf"`
+	Filename    string `json:"filename" example:"report.pdf" doc:"Attachment filename. Maximum 1024 UTF-8 bytes; longer names are rejected as invalid_attachment."`
 	ContentType string `json:"content_type" example:"application/pdf"`
 	Data        string `json:"data" example:"base64-encoded-content" doc:"Base64-encoded file content. Each attachment must be ≤ 10 MiB decoded; a message may carry at most 10 attachments totaling ≤ 25 MiB decoded."` // base64-encoded
 } // @name Attachment
