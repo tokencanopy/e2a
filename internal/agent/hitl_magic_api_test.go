@@ -317,6 +317,7 @@ func TestMagicApprovePOSTQueues(t *testing.T) {
 	if !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' in body, got: %s", body)
 	}
+	assertViewMessageCTA(t, body, a.EmailAddress(), msg.ID)
 
 	if msgs := smtpDone(); len(msgs) != 0 {
 		t.Fatalf("approval submitted %d SMTP messages inline, want zero", len(msgs))
@@ -361,6 +362,8 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	}
 	if body := readBody(t, resp); !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' on the result page, got: %s", body)
+	} else {
+		assertViewMessageCTA(t, body, a.EmailAddress(), held.ID)
 	}
 
 	if msgs := smtpDone(); len(msgs) != 0 {
@@ -391,6 +394,27 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	}
 }
 
+// assertViewMessageCTA pins the approve result page's call to action: a
+// deep link to the dashboard's single-message focus view for the message
+// that was just approved, NOT the generic dashboard root. Both query params
+// matter — the focus view resolves the message through the agent-scoped
+// detail endpoint (?email=) and picks its outbound projection from
+// ?direction=. `&` arrives HTML-escaped in the href attribute.
+func assertViewMessageCTA(t *testing.T, body, agentEmail, messageID string) {
+	t.Helper()
+	want := "/inboxes/messages/view?email=" + url.QueryEscape(agentEmail) +
+		"&amp;id=" + url.QueryEscape(messageID) + "&amp;direction=outbound"
+	if !strings.Contains(body, `href="`+want+`"`) {
+		t.Errorf("result page missing view-message href %q, got: %s", want, body)
+	}
+	if !strings.Contains(body, ">View message</a>") {
+		t.Errorf("result page missing 'View message' button label, got: %s", body)
+	}
+	if strings.Contains(body, "Open the dashboard") {
+		t.Errorf("approve result page should not fall back to the dashboard CTA, got: %s", body)
+	}
+}
+
 // subjectsOf is a small helper to keep error messages readable when an
 // inbox-shape assertion fails.
 func subjectsOf(msgs []identity.Message) []string {
@@ -414,6 +438,11 @@ func TestMagicRejectPOSTWithReason(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST reject: status = %d", resp.StatusCode)
+	}
+	// Only approve deep-links the message; a rejected draft is discarded, so
+	// reject keeps the generic dashboard CTA.
+	if body := readBody(t, resp); !strings.Contains(body, "Open the dashboard") {
+		t.Errorf("reject result page should keep the dashboard CTA, got: %s", body)
 	}
 
 	if msgs := smtpDone(); len(msgs) != 0 {

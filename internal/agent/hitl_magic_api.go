@@ -6,6 +6,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -273,8 +274,9 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	if handled {
 		log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s delivery=async",
 			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
-		writeMagicMessage(w, http.StatusOK, "Approved",
-			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))))
+		writeMagicResult(w, http.StatusOK, "Approved",
+			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+			viewMessageCTA(agent.EmailAddress(), sent.ID))
 		return
 	}
 
@@ -308,9 +310,10 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s",
 		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 
-	writeMagicMessage(w, http.StatusOK,
+	writeMagicResult(w, http.StatusOK,
 		"Approved",
-		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))))
+		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+		viewMessageCTA(agent.EmailAddress(), sent.ID))
 }
 
 // writeMagicApproveError renders the magic-link HTML error page for an async
@@ -728,17 +731,55 @@ func setMagicHeaders(w http.ResponseWriter, status int) {
 	w.WriteHeader(status)
 }
 
-// writeMagicMessage renders the post-action / error page. Cream surface,
-// inline brand mark up top, big editorial-italic title, ember CTA back
-// to the dashboard.
+// magicCTA is the single call-to-action button at the foot of the result
+// page.
+type magicCTA struct {
+	Label string
+	Href  string
+}
+
+// dashboardCTA is the fallback CTA: every error, reject, and
+// already-resolved page lands the reviewer on the dashboard because there
+// is no one message worth deep-linking to.
+var dashboardCTA = magicCTA{Label: "Open the dashboard", Href: "/dashboard"}
+
+// viewMessageCTA deep-links the dashboard's single-message focus view so an
+// approving reviewer lands on the message they just approved instead of the
+// dashboard root. The href is relative on purpose — these pages are served
+// by the same origin as the dashboard, so this works under any public URL.
+// Both identifiers are required by the focus view (it resolves the message
+// through the agent-scoped detail endpoint); if either is missing there is
+// nothing to link to, so fall back to the dashboard.
+func viewMessageCTA(agentEmail, messageID string) magicCTA {
+	if agentEmail == "" || messageID == "" {
+		return dashboardCTA
+	}
+	return magicCTA{
+		Label: "View message",
+		// direction=outbound selects the outbound projection on the focus
+		// page; a held message resolved through this flow is always outbound.
+		Href: "/inboxes/messages/view?email=" + url.QueryEscape(agentEmail) +
+			"&id=" + url.QueryEscape(messageID) + "&direction=outbound",
+	}
+}
+
+// writeMagicMessage renders the post-action / error page with the default
+// dashboard CTA.
 func writeMagicMessage(w http.ResponseWriter, status int, title, body string) {
+	writeMagicResult(w, status, title, body, dashboardCTA)
+}
+
+// writeMagicResult renders the post-action / error page. Cream surface,
+// inline brand mark up top, big editorial-italic title, ember CTA at the
+// foot.
+func writeMagicResult(w http.ResponseWriter, status int, title, body string, cta magicCTA) {
 	setMagicHeaders(w, status)
 	writeLoftHead(w, title)
 	fmt.Fprintf(w, `<div class="result">
 <span class="eyebrow">%s</span>
 <h1>%s</h1>
 <p>%s</p>
-<p><a class="btn btn-primary" href="/dashboard">Open the dashboard</a></p>
+<p><a class="btn btn-primary" href="%s">%s</a></p>
 </div>
 </div>
 </body>
@@ -750,6 +791,8 @@ func writeMagicMessage(w http.ResponseWriter, status int, title, body string) {
 		// path runs html.EscapeString itself before calling us). Don't
 		// double-escape.
 		body,
+		html.EscapeString(cta.Href),
+		html.EscapeString(cta.Label),
 	)
 }
 
