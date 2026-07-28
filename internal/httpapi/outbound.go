@@ -714,6 +714,10 @@ func validateReplyTo(replyTo string) *ErrorEnvelope {
 		return NewError(http.StatusBadRequest, "invalid_request",
 			"reply_to must be a single email address")
 	}
+	if err := outbound.ValidateMailboxAddress(addrs[0].Address); err != nil {
+		return NewError(http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("reply_to is not a valid SMTP mailbox: %v", err))
+	}
 	return nil
 }
 

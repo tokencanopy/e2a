@@ -153,6 +153,13 @@ func TestNormalizeAddrsInvalid(t *testing.T) {
 	}
 }
 
+func TestNormalizeAddrsRejectsOversizedUTF8Mailbox(t *testing.T) {
+	_, err := normalizeAddrs([]string{strings.Repeat("😀", 250) + "@b.test"})
+	if err == nil {
+		t.Fatal("expected oversized UTF-8 mailbox to be rejected")
+	}
+}
+
 func TestDedupe(t *testing.T) {
 	got := dedupe([]string{"a@b.com", "c@d.com", "A@B.com", "c@d.com"})
 	want := []string{"a@b.com", "c@d.com"}

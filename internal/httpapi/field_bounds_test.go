@@ -337,6 +337,9 @@ func TestReplyToAndConversationIDBackstopRuneSemantics(t *testing.T) {
 	if env := validateReplyTo(`"` + cjk(display+1) + `" <r@x.com>`); env == nil {
 		t.Fatal("reply_to at 321 code points must fail")
 	}
+	if env := validateReplyTo(strings.Repeat("😀", 250) + "@b.test"); env == nil {
+		t.Fatal("reply_to with an oversized UTF-8 addr-spec must fail")
+	}
 	if err := validateConversationID(cjk(maxConversationIDLen)); err != nil {
 		t.Fatalf("conversation_id at 200 code points must pass, got %v", err)
 	}

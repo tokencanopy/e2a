@@ -538,9 +538,35 @@ func normalizeAddrs(addrs []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%q: %w", a, err)
 		}
+		if err := ValidateMailboxAddress(parsed.Address); err != nil {
+			return nil, fmt.Errorf("%q: %w", a, err)
+		}
 		out = append(out, strings.ToLower(parsed.Address))
 	}
 	return out, nil
+}
+
+const (
+	maxSMTPLocalPartOctets = 64
+	maxSMTPMailboxOctets   = 254 // 256-byte SMTP path limit minus "<" and ">"
+)
+
+// ValidateMailboxAddress enforces SMTP's octet limits on a parsed addr-spec.
+// Unicode code-point limits alone are insufficient: a syntactically valid
+// SMTPUTF8 local part can occupy four bytes per rune and become an indivisible
+// header token that exceeds both the mailbox and header-line limits.
+func ValidateMailboxAddress(address string) error {
+	at := strings.LastIndexByte(address, '@')
+	if at <= 0 || at == len(address)-1 {
+		return fmt.Errorf("mailbox must contain a local part and domain")
+	}
+	if n := len(address[:at]); n > maxSMTPLocalPartOctets {
+		return fmt.Errorf("mailbox local part is %d octets; maximum is %d", n, maxSMTPLocalPartOctets)
+	}
+	if n := len(address); n > maxSMTPMailboxOctets {
+		return fmt.Errorf("mailbox is %d octets; maximum is %d", n, maxSMTPMailboxOctets)
+	}
+	return nil
 }
 
 // removeAddrs removes any address in exclude from addrs (case-insensitive).
