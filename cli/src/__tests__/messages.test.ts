@@ -72,15 +72,15 @@ describe("messages commands", () => {
     );
   });
 
-  it("passes q through verbatim and omits it when unset", async () => {
+  it("passes filter through verbatim and omits it when unset", async () => {
     mockList.mockReturnValue(summaries());
     const { messagesList } = await import("../commands/messages.js");
 
-    await messagesList({ q: "label:urgent" });
+    await messagesList({ filter: "label:urgent" });
     expect(mockList).toHaveBeenCalledWith("bot@agents.e2a.dev", {
       sort: "asc",
       readStatus: "all",
-      q: "label:urgent",
+      filter: "label:urgent",
       limit: 100,
     });
 

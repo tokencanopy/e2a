@@ -6,7 +6,7 @@ export interface MessagesListOptions {
   agent?: string;
   direction?: string;
   since?: string;
-  q?: string;
+  filter?: string;
   conversation?: string;
   limit?: string;
   readStatus?: string;
@@ -27,7 +27,7 @@ export interface MessagesLifecycleOptions {
 }
 
 const LIST_USAGE =
-  "usage: e2a messages list [--direction inbound|outbound|all] [--since <ISO>] [--q <expr>] [--conversation <id>] [--read-status unread|read|all] [--limit <n>] [--agent <inbox>] [--json]";
+  "usage: e2a messages list [--direction inbound|outbound|all] [--since <ISO>] [--filter <expr>] [--conversation <id>] [--read-status unread|read|all] [--limit <n>] [--agent <inbox>] [--json]";
 const GET_USAGE = "usage: e2a messages get <message-id> [--text] [--agent <inbox>] [--json]";
 const LIFECYCLE_USAGE =
   "usage: e2a messages lifecycle <message-id> (beta) [--agent <inbox>] [--limit <1-100>] [--cursor <cursor>] [--json]";
@@ -62,7 +62,7 @@ export async function messagesList(opts: MessagesListOptions): Promise<void> {
     params.readStatus = opts.readStatus as (typeof READ_STATUSES)[number];
   }
   if (opts.since) params.since = opts.since;
-  if (opts.q !== undefined) params.q = opts.q;
+  if (opts.filter !== undefined) params.filter = opts.filter;
   if (opts.conversation) params.conversationId = opts.conversation;
 
   let max: number | undefined;

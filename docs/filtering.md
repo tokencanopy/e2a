@@ -1,6 +1,6 @@
-# Message filtering (`q`)
+# Message filtering (`filter`)
 
-`GET /v1/agents/{email}/messages?q=…` accepts a small, boolean filter
+`GET /v1/agents/{email}/messages?filter=…` accepts a small, boolean filter
 language. It is an addition to—not a replacement for—the existing flat list
 parameters. See the [filter-query design](superpowers/specs/2026-07-25-filter-query-language-design.md)
 for rationale and rollout details.
@@ -64,9 +64,9 @@ created=2026-07-01
 
 ## Composition, errors, and limits
 
-`q` is ANDed with every flat list filter (`direction`, `read_status`, `from`,
+`filter` is ANDed with every flat list filter (`direction`, `read_status`, `from`,
 `labels`, `since`, and so on). A pagination cursor is tied to the complete
-filter identity, including `q`; start a new query if any filter changes.
+filter identity, including `filter`; start a new query if any filter changes.
 
 Invalid syntax, unknown fields, unsupported operators, invalid values, and
 limit violations return HTTP 400 with error code `invalid_filter`. Parse and

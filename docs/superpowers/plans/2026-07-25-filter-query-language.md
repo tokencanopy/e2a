@@ -1,8 +1,14 @@
-# Filter Query Language (`q`) Implementation Plan
+# Filter Query Language Implementation Plan
+
+> **Amendment (2026-07-28, PR #735):** The public message-list boolean-expression
+> parameter is `filter`, not `q`. The grammar and implementation semantics in this
+> historical plan are unchanged; its remaining `q` references describe the original
+> proposed spelling only. The implemented API, SDKs, CLI, MCP tool, docs, and
+> production E2E use `filter`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a boolean filter query language (`q` param) to `list_messages`, backed by a new dependency-free, schema-agnostic Go package `internal/filterquery` (parse → validate → emit parameterized Postgres SQL).
+**Goal:** Add a boolean filter query language (`filter` param) to `list_messages`, backed by a new dependency-free, schema-agnostic Go package `internal/filterquery` (parse → validate → emit parameterized Postgres SQL).
 
 **Architecture:** Spec: `docs/superpowers/specs/2026-07-25-filter-query-language-design.md`. Hand-rolled recursive-descent parser over the AIP-160 EBNF; validation against an adopter-supplied `FieldRegistry`; emission through a `Dialect` interface. e2a's messages schema lives only in `internal/identity`'s registry. Ships as PR 1 (package only) + PR 2 (API surface + MCP + SDKs + CLI + docs).
 
@@ -363,7 +369,7 @@ Expected: PASS (6 tests)
 
 ```bash
 git add internal/filterquery/ docs/superpowers/specs/2026-07-25-filter-query-language-design.md
-git commit -m "feat(filterquery): lexer and error type for the q filter language
+git commit -m "feat(filterquery): lexer and error type for the filter language
 
 Also corrects the spec's precedence note (NOT > OR > implicit AND >
 explicit AND, per the AIP-160 EBNF).
@@ -2349,7 +2355,7 @@ Expected: PASS (unit tests need no DB)
 
 ```bash
 git add internal/identity/filter_registry.go internal/identity/filter_registry_test.go
-git commit -m "feat(identity): messages field registry for the q filter language
+git commit -m "feat(identity): messages field registry for the filter language
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
@@ -2403,7 +2409,7 @@ In `GetMessagesByAgent`, immediately after the `if len(f.Labels) > 0 { … }` bl
 	if f.Q != nil {
 		frag, qargs, err := f.Q.Emit(filterquery.PostgresDialect{}, len(args)+1)
 		if err != nil {
-			return nil, fmt.Errorf("emit q filter: %w", err)
+			return nil, fmt.Errorf("emit filter: %w", err)
 		}
 		if frag != "" {
 			query += " AND " + frag
@@ -2802,7 +2808,7 @@ In `handleListMessages`, after the existing filter validation (~line 686, near `
 	var qExpr *filterquery.Expr
 	if in.Q != "" {
 		if utf8.RuneCountInString(in.Q) > 500 {
-			return nil, NewError(http.StatusBadRequest, "invalid_filter", "q filter too long (max 500 chars)")
+			return nil, NewError(http.StatusBadRequest, "invalid_filter", "filter too long (max 500 chars)")
 		}
 		expr, err := filterquery.Parse(in.Q, identity.MessagesQRegistry())
 		if err != nil {
@@ -2833,7 +2839,7 @@ Expected: PASS
 
 ```bash
 git add internal/httpapi/
-git commit -m "feat(api): q filter param on list_messages with cursor pinning
+git commit -m "feat(api): filter param on list_messages with cursor pinning
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
@@ -2919,14 +2925,14 @@ Expected: PASS
 
 ```bash
 git add mcp/
-git commit -m "feat(mcp): q filter on list_messages
+git commit -m "feat(mcp): filter on list_messages
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
 
 ---
 
-### Task 14: SDK regen + CLI `--q`
+### Task 14: SDK regen + CLI `--filter`
 
 **Files:**
 - Modify (generated): `sdks/python/src/e2a/v1/generated/**`, `sdks/typescript/src/v1/generated/**`
@@ -2944,7 +2950,7 @@ Expected: `ListMessagesParams` (TS) and the messages API (Python) expose `q`; ch
 
 - [ ] **Step 2: CLI flag**
 
-In `cli/src/commands/messages.ts` usage line, append ` [--q <expr>]`; in the params building for `messages list`, add `q` when the flag is present (follow how `--since` maps into `params`). In `cli/src/__tests__/args.test.ts` add a case asserting `messages list --q "label:urgent"` puts `q: "label:urgent"` into the SDK params.
+In `cli/src/commands/messages.ts` usage line, append ` [--filter <expr>]`; in the params building for `messages list`, add `filter` when the flag is present (follow how `--since` maps into `params`). In `cli/src/__tests__/args.test.ts` add a case asserting `messages list --filter "label:urgent"` puts `filter: "label:urgent"` into the SDK params.
 
 - [ ] **Step 3: Run**
 
@@ -2959,7 +2965,7 @@ Expected: PASS
 
 ```bash
 git add sdks/ cli/
-git commit -m "feat(sdks,cli): q filter param across python/ts SDKs and CLI
+git commit -m "feat(sdks,cli): filter param across python/ts SDKs and CLI
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```

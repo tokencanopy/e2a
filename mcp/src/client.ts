@@ -282,8 +282,13 @@ export class McpClient {
   // Cursor pagination (§6a #3): returns ONE page + next_cursor. `limit` is the
   // page size; pass a prior response's next_cursor as `cursor` for the next page.
   listMessages(params: McpListMessagesParams): Promise<Page<MessageSummaryView>> {
-    const { explicitAddress, cursor, ...rest } = params;
-    return this.sdk.messages.list(this.resolveAddress(explicitAddress), rest).page(cursor);
+    const { explicitAddress, cursor, filter, ...rest } = params;
+    return this.sdk.messages
+      .list(this.resolveAddress(explicitAddress), {
+        ...rest,
+        ...(filter !== undefined ? { filter } : {}),
+      })
+      .page(cursor);
   }
 
   restoreMessage(messageId: string, explicitAddress?: string): Promise<MessageView> {

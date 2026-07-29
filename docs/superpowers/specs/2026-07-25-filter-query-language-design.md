@@ -4,6 +4,13 @@ Date: 2026-07-25
 Status: Approved (design), pre-implementation
 Audience: e2a server, SDK, and MCP maintainers
 
+## Amendment (2026-07-28): public parameter spelling
+
+PR #735 corrects the public message-list boolean-expression parameter from
+`q` to `filter`. The grammar and semantics in this historical design are
+unchanged. References to `q` below document the original proposal only; the
+implemented API, SDKs, CLI, MCP tool, docs, and production E2E use `filter`.
+
 ## Context and goals
 
 `GET /v1/agents/{email}/messages` today filters via flat params: `direction`,
@@ -162,7 +169,7 @@ Rules that make this safe and correct:
   existing filter-identity rejection, same as other filters.
 - MCP `list_messages` gains optional `q` (pass-through, same validation).
 - SDKs regenerate from OpenAPI (Python `messages.list(..., q=...)`, TS
-  `{ q }`), CLI `messages list --q`, docs page documenting the grammar.
+  `{ filter }`), CLI `messages list --filter`, docs page documenting the grammar.
 
 ## Error model
 

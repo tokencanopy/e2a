@@ -104,8 +104,10 @@ describe("getFlag", () => {
     expect(getFlag(args, "--to")).toBe("a@b.com");
   });
 
-  it("extracts a messages list q expression verbatim", () => {
-    expect(getFlag(["--q", "label:urgent"], "--q")).toBe("label:urgent");
+  it("extracts a messages list filter expression verbatim", () => {
+    expect(
+      getFlag(["messages", "list", "--filter", "label:urgent"], "--filter"),
+    ).toBe("label:urgent");
   });
 });
 
@@ -210,6 +212,16 @@ describe("checkFlags (FIX 1: single-dash flag typos)", () => {
   it("still rejects unknown --long-flags and --flag=value (pre-existing behavior)", () => {
     expect(() => checkFlags(["--bogus"], ["--json"])).toThrow("process.exit");
     expect(() => checkFlags(["--json=true"], ["--json"])).toThrow("process.exit");
+  });
+
+  it("rejects the retired legacy flag while accepting --filter", () => {
+    const retiredFilterFlag = `--${"q"}`;
+    expect(() => checkFlags([retiredFilterFlag, "label:urgent"], ["--filter"])).toThrow("process.exit");
+    expect(mockExit).toHaveBeenCalledWith(2);
+    mockExit.mockClear();
+
+    expect(() => checkFlags(["--filter", "label:urgent"], ["--filter"])).not.toThrow();
+    expect(mockExit).not.toHaveBeenCalled();
   });
 
   it("rejects the removed login --with-key flag", () => {

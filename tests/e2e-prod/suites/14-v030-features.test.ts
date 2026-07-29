@@ -229,13 +229,13 @@ test("agent messages: ?labels= filter accepted without error", async () => {
   assert.equal(r.status, 200, `expected 200, got ${r.status}: ${r.raw.slice(0, 200)}`);
 });
 
-test("agent messages: q OR union and AND NOT difference on isolated loopback messages", async () => {
+test("agent messages: filter OR union and AND NOT difference on isolated loopback messages", async () => {
   // Do not use the shared primary inbox: this creates a throwaway agent, sends
   // only to itself (the providerless loopback path), and deletes the agent in
   // finally so its messages cascade away even if an assertion fails.
-  const email = `${uniqueSlug("qfilter")}@${client.env.sharedDomain}`;
+  const email = `${uniqueSlug("filter")}@${client.env.sharedDomain}`;
   const created = await client.post<{ email: string }>("/v1/agents", {
-    body: { email, name: "q filter e2e" },
+    body: { email, name: "filter e2e" },
     expect: 201,
   });
   const agentEmail = created.body!.email;
@@ -244,7 +244,7 @@ test("agent messages: q OR union and AND NOT difference on isolated loopback mes
   try {
     const receiveLoopback = async (subject: string): Promise<string> => {
       await client.post(`/v1/agents/${encodeURIComponent(agentEmail)}/messages`, {
-        body: { to: [agentEmail], subject, text: "q filter loopback fixture" },
+        body: { to: [agentEmail], subject, text: "filter loopback fixture" },
         expect: [200, 202],
       });
       // The inbound copy can arrive asynchronously. Explicitly request all
@@ -263,10 +263,10 @@ test("agent messages: q OR union and AND NOT difference on isolated loopback mes
       throw new Error(`loopback message ${JSON.stringify(subject)} did not arrive for ${agentEmail}`);
     };
 
-    const idA = await receiveLoopback(uniqueSubject("q filter a"));
-    const idB = await receiveLoopback(uniqueSubject("q filter b"));
-    const labelA = uniqueSlug("q-a");
-    const labelB = uniqueSlug("q-b");
+    const idA = await receiveLoopback(uniqueSubject("filter a"));
+    const idB = await receiveLoopback(uniqueSubject("filter b"));
+    const labelA = uniqueSlug("filter-a");
+    const labelB = uniqueSlug("filter-b");
     for (const [id, label] of [[idA, labelA], [idB, labelB]] as const) {
       const updated = await client.patch<{ labels?: string[] }>(
         `/v1/agents/${encodeURIComponent(agentEmail)}/messages/${encodeURIComponent(id)}`,
@@ -275,22 +275,22 @@ test("agent messages: q OR union and AND NOT difference on isolated loopback mes
       assert.ok(updated.body?.labels?.includes(label), `message ${id} received label ${label}`);
     }
 
-    const matchedIDs = async (q: string): Promise<string[]> => {
+    const matchedIDs = async (filter: string): Promise<string[]> => {
       const listed = await client.get<{ items?: Array<{ id: string }> }>(
         `/v1/agents/${encodeURIComponent(agentEmail)}/messages`,
-        { query: { q, direction: "inbound", read_status: "all", limit: 100 }, expect: 200 },
+        { query: { filter, direction: "inbound", read_status: "all", limit: 100 }, expect: 200 },
       );
       return (listed.body?.items ?? []).map((item) => item.id).sort();
     };
 
-    assert.deepEqual(await matchedIDs(`label:${labelA} OR label:${labelB}`), [idA, idB].sort(), "q OR returns the label union");
-    assert.deepEqual(await matchedIDs(`label:${labelA} AND NOT label:${labelB}`), [idA], "q AND NOT returns only label A");
+    assert.deepEqual(await matchedIDs(`label:${labelA} OR label:${labelB}`), [idA, idB].sort(), "filter OR returns the label union");
+    assert.deepEqual(await matchedIDs(`label:${labelA} AND NOT label:${labelB}`), [idA], "filter AND NOT returns only label A");
   } finally {
     const deleted = await client.delete(`/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE&permanent=true`);
     const cleanupSucceeded = [200, 204, 404].includes(deleted.status);
     assert.ok(
       cleanupSucceeded,
-      `delete throwaway q-filter agent: ${deleted.status} ${deleted.raw.slice(0, 200)}`,
+      `delete throwaway filter agent: ${deleted.status} ${deleted.raw.slice(0, 200)}`,
     );
     if (cleanupSucceeded) untrack("agent", agentEmail);
   }

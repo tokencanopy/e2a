@@ -6,11 +6,11 @@ type ListMessagesParams = Parameters<McpClient["listMessages"]>[0];
 const senderFilter: ListMessagesParams = { from_: "alice@example.com" };
 void senderFilter;
 
-// The MCP wrapper must preserve generated SDK q filters while adding only its
+// The MCP wrapper must preserve generated SDK filter expressions while adding only its
 // cursor/address transport fields. This assignment fails to typecheck if the
 // handwritten wrapper parameter shape drifts from the SDK again.
-const queryFilter: ListMessagesParams = { q: "label:urgent" };
-void queryFilter;
+const expressionFilter: ListMessagesParams = { filter: "label:urgent" };
+void expressionFilter;
 
 // The MCP tool and its wrapper follow the SDK's reserved-word-safe spelling.
 // @ts-expect-error `from` is the REST wire name, not the MCP input name.
