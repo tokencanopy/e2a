@@ -11,6 +11,7 @@ import { SIGN_IN_LABEL } from "../../lib/site";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const APP_LOGIN_RETURN_PATHS = ["/reviews"] as const;
 
 export default function AppLayout({
   children,
@@ -103,6 +104,7 @@ export default function AppLayout({
             Sign in to access this page.
           </p>
           <SignInLink
+            preserveCurrentPaths={APP_LOGIN_RETURN_PATHS}
             className="inline-block px-4 py-2 text-[13px] font-medium transition"
             style={{
               background: "var(--accent-fill)",

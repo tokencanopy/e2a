@@ -41,6 +41,7 @@ const signedIn = {
 beforeEach(() => {
   mockAuth = signedIn;
   document.body.style.overflow = "";
+  window.history.replaceState(null, "", "/");
 });
 
 async function openDrawer() {
@@ -67,6 +68,21 @@ describe("(app) layout — auth gates", () => {
     expect(screen.getByRole("link", { name: "Sign in with Google" }))
       .toHaveAttribute("href", "/api/auth/login");
     expect(screen.queryByText("page content")).not.toBeInTheDocument();
+  });
+
+  it("preserves a review deep link through sign-in", async () => {
+    mockAuth = { user: null, loading: false };
+    window.history.replaceState(null, "", "/reviews?id=msg_held");
+
+    render(<AppLayout><div>page content</div></AppLayout>);
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Sign in with Google" }))
+        .toHaveAttribute(
+          "href",
+          "/api/auth/login?return_to=%2Freviews%3Fid%3Dmsg_held",
+        ),
+    );
   });
 
   it("renders children on the authenticated app surface", () => {

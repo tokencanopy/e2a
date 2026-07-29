@@ -176,7 +176,7 @@ func issuePending(t *testing.T, store *identity.Store, agentID string) *identity
 	msg, err := store.CreatePendingOutboundMessage(context.Background(), agentID,
 		[]string{"alice@example.com"}, nil, nil,
 		"Held", "plain body", "<p>html</p>", nil,
-		"send", "", "", "", 3600)
+		"send", "conv_magic_review", "", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestMagicApprovePOSTQueues(t *testing.T) {
 	if !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' in body, got: %s", body)
 	}
-	assertViewMessageCTA(t, body, a.EmailAddress(), msg.ID)
+	assertViewMessageCTA(t, body, a.EmailAddress(), msg.ConversationID, msg.ID)
 
 	if msgs := smtpDone(); len(msgs) != 0 {
 		t.Fatalf("approval submitted %d SMTP messages inline, want zero", len(msgs))
@@ -363,7 +363,7 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	if body := readBody(t, resp); !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' on the result page, got: %s", body)
 	} else {
-		assertViewMessageCTA(t, body, a.EmailAddress(), held.ID)
+		assertViewMessageCTA(t, body, a.EmailAddress(), held.ConversationID, held.ID)
 	}
 
 	if msgs := smtpDone(); len(msgs) != 0 {
@@ -394,18 +394,21 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	}
 }
 
-// assertViewMessageCTA pins the approve result page's call to action: a
-// deep link to the dashboard's single-message focus view for the message
-// that was just approved, NOT the generic dashboard root. Both query params
-// matter — the focus view resolves the message through the agent-scoped
-// detail endpoint (?email=) and picks its outbound projection from
-// ?direction=. `&` arrives HTML-escaped in the href attribute.
-func assertViewMessageCTA(t *testing.T, body, agentEmail, messageID string) {
+// assertViewMessageCTA pins the approve result page's call to action to the
+// canonical inbox thread. Messages with a conversation select that thread;
+// legacy/orphan messages fall back to their synthetic single-message thread.
+func assertViewMessageCTA(t *testing.T, body, agentEmail, conversationID, messageID string) {
 	t.Helper()
-	want := "/inboxes/messages/view?email=" + url.QueryEscape(agentEmail) +
-		"&amp;id=" + url.QueryEscape(messageID) + "&amp;direction=outbound"
+	threadKey := "conv:" + conversationID
+	if conversationID == "" {
+		threadKey = "orphan:" + messageID
+	}
+	want := "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" + threadKey
 	if !strings.Contains(body, `href="`+want+`"`) {
 		t.Errorf("result page missing view-message href %q, got: %s", want, body)
+	}
+	if strings.Contains(body, "/inboxes/messages/view") {
+		t.Errorf("result page should not link to the retired focus view, got: %s", body)
 	}
 	if !strings.Contains(body, ">View message</a>") {
 		t.Errorf("result page missing 'View message' button label, got: %s", body)

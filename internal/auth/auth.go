@@ -267,8 +267,8 @@ func writeCLIHandoffPage(store *identity.Store, w http.ResponseWriter, r *http.R
 // CLI login params (cli_callback, cli_state) are encoded into the OAuth state
 // parameter so they survive the redirect through Google without relying on cookies.
 // return_to (optional) is a same-origin server path the user resumes on after
-// callback success — only paths under /oauth2/ are permitted, used to bounce
-// MCP OAuth clients back into /oauth2/authorize after a session is created.
+// callback success. MCP OAuth paths and the dashboard's consolidated review
+// route are permitted.
 func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	cliCallback := r.URL.Query().Get("cli_callback")
 	cliState := r.URL.Query().Get("cli_state")
@@ -303,16 +303,12 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(EncodeOAuthState(state)), http.StatusFound)
 }
 
-// validateReturnToPath enforces the same-origin / known-prefix allow-list
+// validateReturnToPath enforces the same-origin / known-route allow-list
 // for return_to values. Accepting an arbitrary URL would turn /api/auth/login
 // into an open redirector that an attacker could chain with phishing-class
-// social engineering. Limiting to /oauth2/-prefixed server paths means
-// the bounce can only land inside the OAuth flow we own (Slice 5b renamed the
-// OAuth surface from /oauth2/* to /oauth2/*).
+// social engineering. The OAuth flow owns /oauth2/*; /reviews is the one
+// authenticated dashboard route that must preserve email deep links.
 func validateReturnToPath(raw string) error {
-	if !strings.HasPrefix(raw, "/oauth2/") {
-		return errors.New("return_to must be a server path starting with /oauth2/")
-	}
 	if strings.ContainsAny(raw, "\\\n\r\x00") {
 		return errors.New("return_to contains forbidden characters")
 	}
@@ -324,6 +320,10 @@ func validateReturnToPath(raw string) error {
 	if u.Scheme != "" || u.Host != "" || u.User != nil {
 		return errors.New("return_to must be a path with no scheme or authority")
 	}
+	allowed := strings.HasPrefix(u.Path, "/oauth2/") || u.Path == "/reviews"
+	if !allowed {
+		return errors.New("return_to must target /oauth2/* or /reviews")
+	}
 	// Reject path traversal that survives the HasPrefix check by being
 	// collapsed by the browser. e.g. raw "/oauth2/../../dashboard"
 	// matches the prefix but http.Redirect emits a Location header that
@@ -331,7 +331,8 @@ func validateReturnToPath(raw string) error {
 	// path.Clean folds the "../" segments and we re-check the prefix on
 	// the normalized form.
 	cleaned := path.Clean(u.Path)
-	if !strings.HasPrefix(cleaned, "/oauth2/") && cleaned != "/oauth2" {
+	cleanedAllowed := strings.HasPrefix(cleaned, "/oauth2/") || cleaned == "/oauth2" || cleaned == "/reviews"
+	if !cleanedAllowed {
 		return errors.New("return_to escapes the allow-list after normalization")
 	}
 	// Also reject empty segments which a future router refactor might

@@ -52,13 +52,13 @@ You get three entry points.
 
 ### The email
 
-As soon as a message lands in pending state, the platform emails the account owner. The email carries the subject, recipient list, and expiration time — but **not the body**. Sensitive draft content never leaves our systems by email; it only appears on a token-gated review page.
+As soon as a message lands in pending state, the platform emails the account owner. The email carries the subject, recipient list, and expiration time — but **not the body**. Sensitive draft content never leaves our systems by email; it only appears in the authenticated dashboard or on a signed confirmation page.
 
-The email has two buttons: **Review & approve** and **Review & reject**.
+The primary **Review message** button opens the dashboard's consolidated review queue with that message expanded. Signed **Quick approve** and **Quick reject** links remain available as no-login shortcuts.
 
 ### The confirmation page
 
-Clicking a button takes you to a one-page, no-JavaScript confirmation view. Full body, recipients, subject, attachments — plus a single button to commit the action. The "click the link in the email, see a form, click the button" split protects you from Gmail, Outlook Safe Links, or corporate mail gateways that preview URLs (they'd see the page, not the side effect). The token is single-action (an approve token can't be redeemed at reject) and short-lived.
+Clicking a quick-action link takes you to a one-page, no-JavaScript confirmation view. Full body, recipients, subject, attachments — plus a single button to commit the action. The "click the link in the email, see a form, click the button" split protects you from Gmail, Outlook Safe Links, or corporate mail gateways that preview URLs (they'd see the page, not the side effect). The token is single-action (an approve token can't be redeemed at reject) and short-lived.
 
 ### The dashboard
 
