@@ -448,11 +448,11 @@ class MessagesResource:
         subject_contains: Optional[str] = None,
         conversation_id: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        q: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
         limit: Optional[int] = None,
         deleted: Optional[bool] = None,
+        filter: Optional[str] = None,
     ) -> AutoPager[MessageSummaryView]:
         # `from` is a Python keyword; the generator is configured (via
         # --name-mappings/--parameter-name-mappings in generate-oag.sh) to expose
@@ -469,12 +469,12 @@ class MessagesResource:
                     subject_contains=subject_contains,
                     conversation_id=conversation_id,
                     labels=labels,
-                    q=q,
                     since=since,
                     until=until,
                     cursor=cursor,
                     limit=limit,
                     deleted=deleted,
+                    filter=filter,
                     _headers=h,
                 )
             )

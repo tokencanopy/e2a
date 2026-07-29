@@ -1624,12 +1624,12 @@ class MessagesApi:
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
-        q: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
         cursor: Optional[StrictStr] = None,
         limit: Optional[Annotated[int, Field(le=100, strict=True, ge=1)]] = None,
         deleted: Annotated[Optional[StrictBool], Field(description="List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).")] = None,
+        filter: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1663,8 +1663,6 @@ class MessagesApi:
         :type conversation_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
-        :param q: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
-        :type q: str
         :param since: RFC3339; created_at >= since.
         :type since: str
         :param until: RFC3339; created_at < until.
@@ -1675,6 +1673,8 @@ class MessagesApi:
         :type limit: int
         :param deleted: List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
         :type deleted: bool
+        :param filter: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
+        :type filter: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1706,12 +1706,12 @@ class MessagesApi:
             subject_contains=subject_contains,
             conversation_id=conversation_id,
             labels=labels,
-            q=q,
             since=since,
             until=until,
             cursor=cursor,
             limit=limit,
             deleted=deleted,
+            filter=filter,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1743,12 +1743,12 @@ class MessagesApi:
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
-        q: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
         cursor: Optional[StrictStr] = None,
         limit: Optional[Annotated[int, Field(le=100, strict=True, ge=1)]] = None,
         deleted: Annotated[Optional[StrictBool], Field(description="List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).")] = None,
+        filter: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1782,8 +1782,6 @@ class MessagesApi:
         :type conversation_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
-        :param q: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
-        :type q: str
         :param since: RFC3339; created_at >= since.
         :type since: str
         :param until: RFC3339; created_at < until.
@@ -1794,6 +1792,8 @@ class MessagesApi:
         :type limit: int
         :param deleted: List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
         :type deleted: bool
+        :param filter: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
+        :type filter: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1825,12 +1825,12 @@ class MessagesApi:
             subject_contains=subject_contains,
             conversation_id=conversation_id,
             labels=labels,
-            q=q,
             since=since,
             until=until,
             cursor=cursor,
             limit=limit,
             deleted=deleted,
+            filter=filter,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1862,12 +1862,12 @@ class MessagesApi:
         subject_contains: Annotated[Optional[StrictStr], Field(description="Case-insensitive substring match on subject.")] = None,
         conversation_id: Optional[StrictStr] = None,
         labels: Annotated[Optional[List[StrictStr]], Field(description="Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.")] = None,
-        q: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         since: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at >= since.")] = None,
         until: Annotated[Optional[StrictStr], Field(description="RFC3339; created_at < until.")] = None,
         cursor: Optional[StrictStr] = None,
         limit: Optional[Annotated[int, Field(le=100, strict=True, ge=1)]] = None,
         deleted: Annotated[Optional[StrictBool], Field(description="List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).")] = None,
+        filter: Annotated[Optional[StrictStr], Field(description="Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -1901,8 +1901,6 @@ class MessagesApi:
         :type conversation_id: str
         :param labels: Comma-separated list (e.g. labels=urgent,follow-up); AND-matched — a message must carry every given label.
         :type labels: List[str]
-        :param q: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
-        :type q: str
         :param since: RFC3339; created_at >= since.
         :type since: str
         :param until: RFC3339; created_at < until.
@@ -1913,6 +1911,8 @@ class MessagesApi:
         :type limit: int
         :param deleted: List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
         :type deleted: bool
+        :param filter: Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
+        :type filter: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -1944,12 +1944,12 @@ class MessagesApi:
             subject_contains=subject_contains,
             conversation_id=conversation_id,
             labels=labels,
-            q=q,
             since=since,
             until=until,
             cursor=cursor,
             limit=limit,
             deleted=deleted,
+            filter=filter,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -1976,12 +1976,12 @@ class MessagesApi:
         subject_contains,
         conversation_id,
         labels,
-        q,
         since,
         until,
         cursor,
         limit,
         deleted,
+        filter,
         _request_auth,
         _content_type,
         _headers,
@@ -2035,10 +2035,6 @@ class MessagesApi:
             
             _query_params.append(('labels', labels))
             
-        if q is not None:
-            
-            _query_params.append(('q', q))
-            
         if since is not None:
             
             _query_params.append(('since', since))
@@ -2058,6 +2054,10 @@ class MessagesApi:
         if deleted is not None:
             
             _query_params.append(('deleted', deleted))
+            
+        if filter is not None:
+            
+            _query_params.append(('filter', filter))
             
         # process the header parameters
         # process the form parameters

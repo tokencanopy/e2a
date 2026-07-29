@@ -407,12 +407,39 @@ describe("E2AClient", () => {
     expect(url.searchParams.has("from_")).toBe(false);
   });
 
-  it("messages.list serializes q as the wire query", async () => {
+  it("sends the structured filter after all existing list parameters", async () => {
     globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    const messages = client.messages as unknown as {
+      api: { listMessages: (...args: unknown[]) => Promise<unknown> };
+    };
+    const listMessagesSpy = vi.spyOn(messages.api, "listMessages");
 
-    await client.messages.list("bot@test.dev", { q: "label:urgent" }).page();
+    await client.messages.list("bot@test.dev", {
+      direction: "all",
+      deleted: true,
+      filter: "label:urgent",
+    }).toArray({ limit: 10 });
 
-    expect(new URL(lastCall().url).searchParams.get("q")).toBe("label:urgent");
+    const url = new URL(lastCall().url);
+    expect(url.searchParams.get("filter")).toBe("label:urgent");
+    expect(url.searchParams.has("q")).toBe(false);
+    expect(url.searchParams.get("deleted")).toBe("true");
+    expect(listMessagesSpy).toHaveBeenCalledWith(
+      "bot@test.dev",
+      "all",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      "label:urgent",
+    );
   });
 
   it("messages.list({ deleted: true }) lists the trash", async () => {
