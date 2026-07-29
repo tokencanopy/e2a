@@ -172,6 +172,24 @@ func TestHandleLogin_EncodesReviewReturnToInOAuthState(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_EncodesInboxThreadReturnToInOAuthState(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+
+	returnTo := "/inboxes/messages?email=bot%40example.com#conv:%E5%AE%A2"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/login?return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	w := httptest.NewRecorder()
+
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusFound, w.Body.String())
+	}
+}
+
 // TestHandleLogin_RejectsReturnToOutsideAllowList: every value the
 // allow-list refuses must produce 400 rather than silently strip — a
 // silent strip would land the user on /dashboard, leaving the original
@@ -183,6 +201,7 @@ func TestHandleLogin_RejectsReturnToOutsideAllowList(t *testing.T) {
 		"/dashboard",                         // unrelated dashboard route
 		"/reviews/other",                     // review allow-list is exact
 		"/reviews/../dashboard",              // review path traversal
+		"/inboxes/messages/view",             // inbox allow-list is exact
 		"/api/v1/agents",                     // wrong prefix
 		"https://evil.com/oauth2/authorize",  // absolute
 		"//evil.com/oauth2/authorize",        // protocol-relative

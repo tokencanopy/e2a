@@ -18,7 +18,11 @@ import { listAgentMessages } from "../../../../components/onboarding/api";
 import type { MessageSummary } from "../../../../components/types";
 import { ThreadList } from "../../../../components/messages/ThreadList";
 import { ThreadDetail } from "../../../../components/messages/ThreadDetail";
-import { groupIntoThreads } from "../../../../components/messages/threading";
+import {
+  decodeThreadFragment,
+  encodeThreadFragment,
+  groupIntoThreads,
+} from "../../../../components/messages/threading";
 import { inboxPolling } from "../../../../../lib/livePolling";
 import { agentMessagesKey } from "../../../../../lib/swrKeys";
 
@@ -26,7 +30,9 @@ import { agentMessagesKey } from "../../../../../lib/swrKeys";
 // idiomatic way to read browser-owned state without effect ping-pong.
 function getHash(): string {
   if (typeof window === "undefined") return "";
-  return window.location.hash ? window.location.hash.slice(1) : "";
+  return window.location.hash
+    ? decodeThreadFragment(window.location.hash.slice(1))
+    : "";
 }
 function subscribeHash(onChange: () => void) {
   window.addEventListener("hashchange", onChange);
@@ -124,7 +130,7 @@ function AgentInboxContent({ email }: { email: string }) {
       // pushState (not replace) so opening a conversation adds a history
       // entry — the browser Back button then returns to the thread list
       // instead of skipping it and jumping to the top-level inbox list.
-      window.history.pushState(null, "", `#${key}`);
+      window.history.pushState(null, "", `#${encodeThreadFragment(key)}`);
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     }
   };

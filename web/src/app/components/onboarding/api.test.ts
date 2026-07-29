@@ -9,6 +9,7 @@ import {
   listAgents,
   listAgentMessages,
   listPendingMessages,
+  findPendingMessage,
   getInboxUnread,
   getMessageDetailWire,
   getReviewDetailWire,
@@ -187,6 +188,33 @@ describe("message projection (v1 contract)", () => {
     await listPendingMessages();
     const urls = mockFetch.mock.calls.map((c) => c[0] as string);
     expect(urls).toEqual(["/v1/reviews"]);
+  });
+
+  it("follows review cursors until it finds a deep-linked hold", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/v1/reviews?limit=100") {
+        return okJson({
+          items: [{ id: "newer", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "newer", review_status: "pending_review", created_at: "2026-01-02T00:00:00Z" }],
+          next_cursor: "page-2",
+        });
+      }
+      if (url === "/v1/reviews?limit=100&cursor=page-2") {
+        return okJson({
+          items: [{ id: "target", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "target hold", review_status: "pending_review", created_at: "2026-01-01T00:00:00Z" }],
+          next_cursor: null,
+        });
+      }
+      return notFound();
+    });
+
+    await expect(findPendingMessage("target")).resolves.toMatchObject({
+      id: "target",
+      subject: "target hold",
+    });
+    expect(mockFetch.mock.calls.map((c) => c[0])).toEqual([
+      "/v1/reviews?limit=100",
+      "/v1/reviews?limit=100&cursor=page-2",
+    ]);
   });
 });
 

@@ -17,6 +17,7 @@ function setSearchParams(params: Record<string, string>) {
 
 beforeEach(() => {
   mockRouterReplace.mockReset();
+  global.fetch = jest.fn() as unknown as typeof fetch;
 });
 
 describe("legacy message focus route", () => {
@@ -35,12 +36,41 @@ describe("legacy message focus route", () => {
     });
   });
 
-  it("redirects ordinary message links to the owning inbox", async () => {
+  it("resolves ordinary message links to their exact canonical thread", async () => {
     setSearchParams({
       email: "support@acme.io",
       id: "msg_inbound",
       direction: "inbound",
       headers: "1",
+    });
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            id: "msg_inbound",
+            direction: "inbound",
+            conversation_id: "客户 1%ready",
+          }),
+        ),
+    });
+
+    render(<LegacyMessageFocusRedirect />);
+
+    await waitFor(() => {
+      expect(mockRouterReplace).toHaveBeenCalledWith(
+        "/inboxes/messages?email=support%40acme.io#conv:%E5%AE%A2%E6%88%B7%201%25ready",
+      );
+    });
+  });
+
+  it("falls back to the owning inbox when legacy detail lookup fails", async () => {
+    setSearchParams({ email: "support@acme.io", id: "msg_missing" });
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: () => Promise.resolve("not found"),
     });
 
     render(<LegacyMessageFocusRedirect />);

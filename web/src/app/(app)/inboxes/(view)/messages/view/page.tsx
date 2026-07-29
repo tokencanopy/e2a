@@ -7,6 +7,8 @@
 
 import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { getMessageDetailWire } from "../../../../../components/onboarding/api";
+import { encodeThreadFragment } from "../../../../../components/messages/threading";
 
 function LegacyMessageFocusRedirectContent() {
   const router = useRouter();
@@ -16,15 +18,45 @@ function LegacyMessageFocusRedirectContent() {
   const pending = searchParams.get("pending") === "1";
 
   useEffect(() => {
+    let cancelled = false;
+    const inboxURL = email
+      ? `/inboxes/messages?email=${encodeURIComponent(email)}`
+      : "/inboxes";
+
     if (pending && id) {
       router.replace(`/reviews?id=${encodeURIComponent(id)}`);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
-    if (email) {
-      router.replace(`/inboxes/messages?email=${encodeURIComponent(email)}`);
-      return;
+    if (!email) {
+      router.replace("/inboxes");
+      return () => {
+        cancelled = true;
+      };
     }
-    router.replace("/inboxes");
+    if (!id) {
+      router.replace(inboxURL);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void getMessageDetailWire(email, id)
+      .then((message) => {
+        if (cancelled) return;
+        const key = message.conversation_id
+          ? `conv:${message.conversation_id}`
+          : `orphan:${message.id}`;
+        router.replace(`${inboxURL}#${encodeThreadFragment(key)}`);
+      })
+      .catch(() => {
+        if (!cancelled) router.replace(inboxURL);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [email, id, pending, router]);
 
   return null;

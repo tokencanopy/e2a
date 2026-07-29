@@ -176,7 +176,7 @@ func issuePending(t *testing.T, store *identity.Store, agentID string) *identity
 	msg, err := store.CreatePendingOutboundMessage(context.Background(), agentID,
 		[]string{"alice@example.com"}, nil, nil,
 		"Held", "plain body", "<p>html</p>", nil,
-		"send", "conv_magic_review", "", "", 3600)
+		"send", "客户 1% ready", "", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,11 +399,12 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 // legacy/orphan messages fall back to their synthetic single-message thread.
 func assertViewMessageCTA(t *testing.T, body, agentEmail, conversationID, messageID string) {
 	t.Helper()
-	threadKey := "conv:" + conversationID
+	prefix, value := "conv:", conversationID
 	if conversationID == "" {
-		threadKey = "orphan:" + messageID
+		prefix, value = "orphan:", messageID
 	}
-	want := "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" + threadKey
+	want := "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" +
+		prefix + url.PathEscape(value)
 	if !strings.Contains(body, `href="`+want+`"`) {
 		t.Errorf("result page missing view-message href %q, got: %s", want, body)
 	}

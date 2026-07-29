@@ -327,6 +327,33 @@ describe("AgentInboxPage", () => {
     expect(within(detail).getAllByText("PR #2841 merged").length).toBeGreaterThan(0);
   });
 
+  it("decodes an encoded fragment before matching a custom conversation id", async () => {
+    setSearchParams({ email: "support@acme.io" });
+    const custom = {
+      ...PARENT_INBOUND,
+      id: "msg_custom",
+      conversation_id: "客户 1%ready",
+      subject: "Encoded conversation",
+    };
+    mockMessages([custom]);
+    window.history.replaceState(
+      null,
+      "",
+      "#conv:%E5%AE%A2%E6%88%B7%201%25ready",
+    );
+
+    render(<AgentInboxPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("thread-detail")).toBeInTheDocument();
+    });
+    expect(
+      within(screen.getByTestId("thread-detail")).getAllByText(
+        "Encoded conversation",
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+
   it("clicking a thread row opens its conversation (selects via hash)", async () => {
     setSearchParams({ email: "support@acme.io" });
     mockMessages([ORPHAN_INBOUND]);

@@ -11,7 +11,7 @@ import { SIGN_IN_LABEL } from "../../lib/site";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const APP_LOGIN_RETURN_PATHS = ["/reviews"] as const;
+const APP_LOGIN_RETURN_PATHS = ["/reviews", "/inboxes/messages"] as const;
 
 export default function AppLayout({
   children,

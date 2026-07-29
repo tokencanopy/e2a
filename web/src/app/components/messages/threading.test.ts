@@ -1,7 +1,12 @@
 // Threading-logic contract for the dashboard inbox.
 
 import type { MessageSummary } from "../types";
-import { groupIntoThreads, findThread } from "./threading";
+import {
+  decodeThreadFragment,
+  encodeThreadFragment,
+  groupIntoThreads,
+  findThread,
+} from "./threading";
 
 function isoMinutesAgo(now: Date, n: number): string {
   return new Date(now.getTime() - n * 60_000).toISOString();
@@ -20,6 +25,19 @@ function msg(partial: Partial<MessageSummary>): MessageSummary {
     ...partial,
   };
 }
+
+describe("thread fragment codec", () => {
+  it("round-trips spaces, Unicode, and literal percent signs", () => {
+    const key = "conv:客户 1%ready";
+    const encoded = encodeThreadFragment(key);
+    expect(encoded).toBe("conv:%E5%AE%A2%E6%88%B7%201%25ready");
+    expect(decodeThreadFragment(encoded)).toBe(key);
+  });
+
+  it("leaves a malformed legacy percent fragment readable", () => {
+    expect(decodeThreadFragment("conv:100%ready")).toBe("conv:100%ready");
+  });
+});
 
 describe("groupIntoThreads", () => {
   const NOW = new Date("2026-05-24T12:00:00Z");

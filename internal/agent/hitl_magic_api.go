@@ -752,13 +752,14 @@ func viewMessageCTA(agentEmail, conversationID, messageID string) magicCTA {
 	if agentEmail == "" || messageID == "" {
 		return dashboardCTA
 	}
-	threadKey := "conv:" + conversationID
+	prefix, value := "conv:", conversationID
 	if conversationID == "" {
-		threadKey = "orphan:" + messageID
+		prefix, value = "orphan:", messageID
 	}
 	return magicCTA{
 		Label: "View message",
-		Href:  "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" + threadKey,
+		Href: "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" +
+			prefix + url.PathEscape(value),
 	}
 }
 

@@ -40,7 +40,9 @@ export function SignInLink({
       return;
     }
     setResolvedHref(
-      signInURLWithReturnTo(window.location.pathname + window.location.search),
+      signInURLWithReturnTo(
+        window.location.pathname + window.location.search + window.location.hash,
+      ),
     );
   }, [href, preserveCurrentPaths]);
 
