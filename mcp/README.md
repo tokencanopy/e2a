@@ -121,15 +121,15 @@ Hosts that support OAuth connectors can instead add `https://api.e2a.dev/mcp` as
 
 ## Tools
 
-The server exposes up to **60** tools spanning agents, messages, human-in-the-loop
-approval, attachments, domains, events, webhooks, API keys, and email templates
-(beta).
+The server exposes up to **71** tools spanning agents, messages, human-in-the-loop
+approval, attachments, domains, events, webhooks, API keys, contacts/outreach,
+and email templates (beta).
 **The visible set depends on your credential's scope:** an **agent**-scoped
-credential sees the 16 runtime/inbox tools (read, send, reply, restore messages);
-an **account**-scoped credential also sees the 44 admin/setup
-tools (agent/domain/webhook/event/template/API-key management — **and HITL
-review discovery plus approve/reject, which is an account-owner action, never
-agent self-approval**) — all 60.
+credential sees the 20 runtime/inbox tools (read, send, reply, restore
+messages, per-agent outreach); an **account**-scoped credential also sees the
+51 admin/setup tools (agent/domain/webhook/event/template/API-key/contact
+management — **and HITL review discovery plus approve/reject, which is an
+account-owner action, never agent self-approval**) — all 71.
 Every tool carries MCP annotations (`readOnlyHint`/`destructiveHint`/
 `idempotentHint`) so hosts can auto-approve reads and flag destructive actions.
 The tables below highlight the most commonly used ones — your MCP host's tool list
@@ -206,6 +206,25 @@ dashboard or the raw API, where a human is in the loop.
 | `list_api_keys` | List the account's API keys — metadata only (secrets are shown once, at creation). |
 | `create_api_key` | Mint a new agent-scoped key bound to an inbox; returns the plaintext key ONCE — store it immediately. |
 | `delete_api_key` | Revoke a key permanently (requires `confirm: true`). |
+
+### Contacts (beta)
+
+The people an account corresponds with (`list_contacts` / `get_contact` /
+`create_contact` / `update_contact` / `delete_contact`, admin/account-scoped)
+and one agent's per-contact outreach state — stage, next action, reply/
+suppression facts (`list_outreach_contacts` / `get_outreach_contact` /
+`set_outreach_contact` / `delete_outreach_contact`, agent-scoped). Import is
+inert — it records identity and enrolls outreach without sending anything.
+
+| Tool | Description |
+| --- | --- |
+| `list_contacts` / `get_contact` | List account contacts (filter by provenance/import batch/creation window) or fetch one by address. |
+| `create_contact` / `update_contact` / `delete_contact` | Create, partially update (`etag`-guarded via `if_match`), or delete a contact's identity. Deleting a contact does not remove suppressions. |
+| `import_contacts` | Bulk-import contacts from rows, optionally enrolling them into an agent's outreach. |
+| `delete_contact_import` | Reverse an import batch, removing untouched contacts and the enrolments it created. |
+| `list_outreach_contacts` / `get_outreach_contact` | List or fetch the contacts an agent is working, with server-derived reply/delivery facts. |
+| `set_outreach_contact` | Enroll a contact in an agent's outreach, or update the agent-owned fields (stage, next action). |
+| `delete_outreach_contact` | Un-enroll a contact from an agent's outreach; the contact and its suppressions survive. |
 
 ### Templates (beta)
 

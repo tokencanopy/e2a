@@ -36,9 +36,9 @@ Both are presented as `Authorization: Bearer <credential>`.
 
 If you are an MCP client, you do not need an API key. Run the standard discovery + DCR + authorization-code flow:
 
-1. **Discover** — `GET https://api.e2a.dev/.well-known/oauth-authorization-server`. Read `registration_endpoint`, `authorization_endpoint`, `token_endpoint`. Scope to request: `mcp`.
+1. **Discover** — `GET https://api.e2a.dev/.well-known/oauth-authorization-server`. Read `registration_endpoint`, `authorization_endpoint`, `token_endpoint`. Scope to request: `agent` (add `account` for workspace-admin access).
 2. **Register** — `POST` your client metadata to `registration_endpoint` (RFC 7591). You'll receive a `client_id`. Token endpoint auth method is `none` — you are a public client.
-3. **Authorize** — redirect the user to `authorization_endpoint` with `response_type=code`, your `client_id`, `redirect_uri`, `scope=mcp`, and PKCE S256 (`code_challenge`, `code_challenge_method=S256`). The user logs in to e2a and consents.
+3. **Authorize** — redirect the user to `authorization_endpoint` with `response_type=code`, your `client_id`, `redirect_uri`, `scope=agent`, and PKCE S256 (`code_challenge`, `code_challenge_method=S256`). The user logs in to e2a and consents.
 4. **Token exchange** — `POST` `code` + `code_verifier` to `token_endpoint`. You receive `access_token` (prefix `ate2a_…`) and `refresh_token`.
 5. **Use** — present the access token as a bearer; refresh with the refresh token before `expires_in`.
 
@@ -166,7 +166,7 @@ No code reading, no copy-paste, no transcript leakage. This is uniquely possible
 
 What e2a publishes today:
 
-- **RFC 8414 authorization-server metadata** at [`https://api.e2a.dev/.well-known/oauth-authorization-server`](https://api.e2a.dev/.well-known/oauth-authorization-server) — advertises `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, supported grants (`authorization_code`, `refresh_token`), PKCE (`S256`), and the RFC 9207 `iss` parameter. Request the `mcp` scope.
+- **RFC 8414 authorization-server metadata** at [`https://api.e2a.dev/.well-known/oauth-authorization-server`](https://api.e2a.dev/.well-known/oauth-authorization-server) — advertises `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, supported grants (`authorization_code`, `refresh_token`), PKCE (`S256`), and the RFC 9207 `iss` parameter. Request the `agent` scope (`account` for workspace-admin access).
 - **RFC 6750 Bearer challenges** on every 401 from `/v1/...` — `WWW-Authenticate: Bearer realm="e2a"` for unknown/missing credentials, plus RFC 6750 §3.1 error params for OAuth-bearer failures.
 
 What e2a publishes for the autonomous-agent path today (gated behind an opt-in signing-key config; see [Agent identity](#agent-identity)):

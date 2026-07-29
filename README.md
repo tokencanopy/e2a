@@ -251,6 +251,7 @@ domains/webhooks in the **web dashboard**.
 | `e2a agents list\|create\|get` | Manage inboxes (requires an account-scoped key) |
 | `e2a keys create\|list\|delete` | Mint, list, and revoke API keys (requires an account-scoped key) |
 | `e2a protection get\|set` | Show or update an agent's HITL screening/review config |
+| `e2a contacts list\|get\|create\|update\|delete\|import\|outreach ...` | Manage account contacts, suppression, and per-agent outreach state |
 | `e2a send` / `e2a reply` | Send an email as the agent, or reply in-thread |
 | `e2a messages list\|get` | List or fetch messages for an agent |
 | `e2a listen --agent <email>` | Stream inbound email for an agent over WebSocket (real-time; `--json` for raw, `--forward <url>` to bridge to a local HTTP handler) |

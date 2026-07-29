@@ -343,6 +343,14 @@ alone via `list`/`get`/`approve`/`reject`; and `client.templates` (beta) —
 reusable `{{variable}}` email templates plus the read-only starter catalog,
 referenced from `messages.send` via `template_id`/`template_alias`.
 
+`client.contacts` manages the people an account corresponds with:
+`list`/`get`/`get_with_etag`/`create`/`update`/`delete` (account-scoped,
+optimistic concurrency via `if_match`), plus `import_`/`delete_import` for
+CSV-driven bulk upload. `client.contacts.outreach(email, ...)` and its
+`get_outreach`/`get_outreach_with_etag`/`set_outreach`/`delete_outreach`
+counterparts track one agent's per-contact engagement (stage, next action,
+reply/suppression state) and may be driven by an agent-scoped credential.
+
 The sync `E2AClient` exposes the **same resource tree** — drop the `await`.
 It mirrors the async client dynamically (every async method is bridged, not
 re-implemented), so the two surfaces are identical by construction.
