@@ -17,8 +17,8 @@ var (
 	qRegistry     *filterquery.Registry
 )
 
-// MessagesQRegistry returns the shared field registry for list_messages q.
-func MessagesQRegistry() *filterquery.Registry {
+// MessagesFilterRegistry returns the shared field registry for list_messages filters.
+func MessagesFilterRegistry() *filterquery.Registry {
 	qRegistryOnce.Do(func() {
 		reg, err := filterquery.NewRegistry(
 			labelQField(),

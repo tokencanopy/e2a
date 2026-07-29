@@ -3677,9 +3677,9 @@ type MessageListFilter struct {
 	// rows. Handler-layer validates each entry against the same charset
 	// rule used on writes so callers can't smuggle SQL through here.
 	Labels []string
-	// Q is a parsed and validated q-expression. The Postgres store emits it
-	// after built-in filters so placeholder numbering stays correct.
-	Q *filterquery.Expr
+	// Filter is a parsed and registry-validated expression. The store emits it
+	// after built-in filters so placeholder numbering remains contiguous.
+	Filter *filterquery.Expr
 	// Deleted flips the query to the TRASH view: only soft-deleted rows.
 	// False (default) lists indefinitely retained live rows only.
 	Deleted bool
@@ -3808,14 +3808,17 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 		query += fmt.Sprintf(` AND m.labels @> $%d`, len(args)+1)
 		args = append(args, f.Labels)
 	}
-	if f.Q != nil {
-		frag, qargs, err := f.Q.Emit(filterquery.PostgresDialect{}, len(args)+1)
+	if f.Filter != nil {
+		fragment, filterArgs, err := f.Filter.Emit(
+			filterquery.PostgresDialect{},
+			len(args)+1,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("emit q filter: %w", err)
+			return nil, fmt.Errorf("emit message filter: %w", err)
 		}
-		if frag != "" {
-			query += " AND " + frag
-			args = append(args, qargs...)
+		if fragment != "" {
+			query += " AND " + fragment
+			args = append(args, filterArgs...)
 		}
 	}
 

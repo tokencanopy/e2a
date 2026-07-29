@@ -148,12 +148,12 @@ func TestQFilterDifferential(t *testing.T) {
 
 	for _, tc := range queries {
 		t.Run(tc.q, func(t *testing.T) {
-			expr, err := filterquery.Parse(tc.q, identity.MessagesQRegistry())
+			expr, err := filterquery.Parse(tc.q, identity.MessagesFilterRegistry())
 			if err != nil {
 				t.Fatalf("Parse(%q): %v", tc.q, err)
 			}
 			messages, err := store.GetMessagesByAgent(ctx, identity.MessageListFilter{
-				AgentID: agentID, Direction: "inbound", Status: "all", Limit: 100, Q: expr,
+				AgentID: agentID, Direction: "inbound", Status: "all", Limit: 100, Filter: expr,
 			})
 			if err != nil {
 				t.Fatalf("GetMessagesByAgent(%q): %v", tc.q, err)
@@ -171,7 +171,7 @@ func TestQFilterComposesAfterFlatFilters(t *testing.T) {
 	ctx := context.Background()
 	agentID := seedQAgent(t, store, ctx)
 	byKey := seedQFixtures(t, pool, store, agentID)
-	expr, err := filterquery.Parse(`from:corp.com`, identity.MessagesQRegistry())
+	expr, err := filterquery.Parse(`from:corp.com`, identity.MessagesFilterRegistry())
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestQFilterComposesAfterFlatFilters(t *testing.T) {
 	messages, err := store.GetMessagesByAgent(ctx, identity.MessageListFilter{
 		AgentID: agentID, Direction: "inbound", Status: "all", Limit: 100,
 		From: "alice", SubjectContains: "quarter", ConversationID: "qdiff-conversation",
-		Since: day, Until: day.AddDate(0, 0, 1), Labels: []string{"urgent"}, Q: expr,
+		Since: day, Until: day.AddDate(0, 0, 1), Labels: []string{"urgent"}, Filter: expr,
 	})
 	if err != nil {
 		t.Fatalf("GetMessagesByAgent: %v", err)
@@ -205,11 +205,11 @@ func TestQFilterPropagatesEmissionErrorBeforeQuery(t *testing.T) {
 	}
 
 	store := identity.NewStore(nil)
-	_, err = store.GetMessagesByAgent(context.Background(), identity.MessageListFilter{AgentID: "agent_not_queried", Q: expr})
+	_, err = store.GetMessagesByAgent(context.Background(), identity.MessageListFilter{AgentID: "agent_not_queried", Filter: expr})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("GetMessagesByAgent error = %v, want wrapped %v", err, sentinel)
 	}
-	if !strings.Contains(err.Error(), "emit q filter") {
-		t.Errorf("error = %q, want q-emission context", err)
+	if !strings.Contains(err.Error(), "emit message filter") {
+		t.Errorf("error = %q, want message-filter emission context", err)
 	}
 }
