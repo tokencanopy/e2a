@@ -276,7 +276,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 		writeMagicResult(w, http.StatusOK, "Approved",
 			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))),
-			viewMessageCTA(agent.EmailAddress(), sent.ID))
+			viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 		return
 	}
 
@@ -313,7 +313,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	writeMagicResult(w, http.StatusOK,
 		"Approved",
 		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))),
-		viewMessageCTA(agent.EmailAddress(), sent.ID))
+		viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 }
 
 // writeMagicApproveError renders the magic-link HTML error page for an async
@@ -743,23 +743,23 @@ type magicCTA struct {
 // is no one message worth deep-linking to.
 var dashboardCTA = magicCTA{Label: "Open the dashboard", Href: "/dashboard"}
 
-// viewMessageCTA deep-links the dashboard's single-message focus view so an
-// approving reviewer lands on the message they just approved instead of the
-// dashboard root. The href is relative on purpose — these pages are served
-// by the same origin as the dashboard, so this works under any public URL.
-// Both identifiers are required by the focus view (it resolves the message
-// through the agent-scoped detail endpoint); if either is missing there is
-// nothing to link to, so fall back to the dashboard.
-func viewMessageCTA(agentEmail, messageID string) magicCTA {
+// viewMessageCTA deep-links the canonical inbox and selects the thread that
+// contains the newly approved message. The href is relative on purpose —
+// these pages are served by the same origin as the dashboard, so this works
+// under any public URL. Older messages without a conversation id use the
+// inbox's synthetic orphan thread key.
+func viewMessageCTA(agentEmail, conversationID, messageID string) magicCTA {
 	if agentEmail == "" || messageID == "" {
 		return dashboardCTA
 	}
+	prefix, value := "conv:", conversationID
+	if conversationID == "" {
+		prefix, value = "orphan:", messageID
+	}
 	return magicCTA{
 		Label: "View message",
-		// direction=outbound selects the outbound projection on the focus
-		// page; a held message resolved through this flow is always outbound.
-		Href: "/inboxes/messages/view?email=" + url.QueryEscape(agentEmail) +
-			"&id=" + url.QueryEscape(messageID) + "&direction=outbound",
+		Href: "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" +
+			prefix + url.PathEscape(value),
 	}
 }
 

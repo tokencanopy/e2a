@@ -9,8 +9,8 @@
 // Prefixes are added by this code, never extracted from operator input
 // — even if the SDK caller sends `conversation_id="orphan:foo"`, the
 // resulting thread key is `conv:orphan:foo`, which does not collide
-// with the synthetic key `orphan:foo`. The URL fragment uses these
-// prefixed keys directly.
+// with the synthetic key `orphan:foo`. URL fragments encode the
+// operator-controlled suffix and decode it before key comparison.
 //
 // All inputs are pure: no Date.now() side effects (caller passes `now`),
 // no I/O. That keeps the unit tests deterministic.
@@ -18,6 +18,25 @@
 import type { MessageSummary } from "../types";
 
 export type ThreadState = "pending" | "active" | "handed-off" | "closed";
+
+export function encodeThreadFragment(key: string): string {
+  const separator = key.indexOf(":");
+  if (separator < 0) return encodeURIComponent(key);
+  return (
+    key.slice(0, separator + 1) +
+    encodeURIComponent(key.slice(separator + 1))
+  );
+}
+
+export function decodeThreadFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    // Old links may contain an unescaped literal "%". Keep them readable
+    // rather than turning a malformed escape into an empty selection.
+    return fragment;
+  }
+}
 
 export type Counterparty = {
   email: string;

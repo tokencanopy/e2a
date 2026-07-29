@@ -41,6 +41,7 @@ const signedIn = {
 beforeEach(() => {
   mockAuth = signedIn;
   document.body.style.overflow = "";
+  window.history.replaceState(null, "", "/");
 });
 
 async function openDrawer() {
@@ -67,6 +68,40 @@ describe("(app) layout — auth gates", () => {
     expect(screen.getByRole("link", { name: "Sign in with Google" }))
       .toHaveAttribute("href", "/api/auth/login");
     expect(screen.queryByText("page content")).not.toBeInTheDocument();
+  });
+
+  it("preserves a review deep link through sign-in", async () => {
+    mockAuth = { user: null, loading: false };
+    window.history.replaceState(null, "", "/reviews?id=msg_held");
+
+    render(<AppLayout><div>page content</div></AppLayout>);
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Sign in with Google" }))
+        .toHaveAttribute(
+          "href",
+          "/api/auth/login?return_to=%2Freviews%3Fid%3Dmsg_held",
+        ),
+    );
+  });
+
+  it("preserves a canonical inbox thread through sign-in", async () => {
+    mockAuth = { user: null, loading: false };
+    window.history.replaceState(
+      null,
+      "",
+      "/inboxes/messages?email=bot%40example.com#conv:%E5%AE%A2%E6%88%B7",
+    );
+
+    render(<AppLayout><div>page content</div></AppLayout>);
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Sign in with Google" }))
+        .toHaveAttribute(
+          "href",
+          "/api/auth/login?return_to=%2Finboxes%2Fmessages%3Femail%3Dbot%2540example.com%23conv%3A%25E5%25AE%25A2%25E6%2588%25B7",
+        ),
+    );
   });
 
   it("renders children on the authenticated app surface", () => {

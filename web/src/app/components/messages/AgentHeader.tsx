@@ -19,7 +19,7 @@ import type { DashboardAgent } from "../types";
 export type AgentTab = "messages" | "outreach" | "trash" | "settings";
 
 // The agent-detail surface is intentionally scoped to two tabs:
-//   • Messages — the threaded inbox + focus view.
+//   • Messages — the threaded inbox with inline conversation detail.
 //   • Settings — per-agent editors (mode, webhook URL, HITL config,
 //     delete).
 // Overview + Webhooks were considered and dropped: Overview duplicated

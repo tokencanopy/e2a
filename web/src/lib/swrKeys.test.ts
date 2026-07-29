@@ -6,7 +6,7 @@
 // per-message key was recently re-shaped from ["pending-message", email,
 // id] to ["message-detail", id] (collapsing two colliding per-surface
 // entries into one); a predicate left on the old shape would match nothing
-// and approve/reject would leave the focus page showing a stale
+// and approve/reject would leave the Review row showing a stale
 // "Pending review" forever.
 //
 // These run against the MODULE-LEVEL SWR cache (no test-utils/swr

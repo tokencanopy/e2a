@@ -28,31 +28,6 @@ jest.mock("next/navigation", () => ({
 }));
 
 describe("Responsive layout contracts", () => {
-  it("pending split-pane stacks below md and goes 320px+1fr at md+", () => {
-    // Mirror the JSX in dashboard/pending/page.tsx without importing
-    // the whole route (which pulls in fetch + AuthProvider). The
-    // assertion is on the responsive class string.
-    const { container } = render(
-      <div
-        className="grid grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)] md:[height:calc(100vh-var(--chrome-h)-200px)]"
-        data-testid="pending-shell"
-      />,
-    );
-    const shell = container.querySelector('[data-testid="pending-shell"]');
-    expect(shell?.className).toContain("grid-cols-1");
-    expect(shell?.className).toContain("md:grid-cols-[320px_minmax(0,1fr)]");
-  });
-
-  it("queue/detail divider flips from vertical (md+) to horizontal (mobile)", () => {
-    const { container } = render(
-      <div className="flex flex-col min-h-0 border-b md:border-b-0 md:border-r" />,
-    );
-    const div = container.firstElementChild!;
-    expect(div.className).toContain("border-b");
-    expect(div.className).toContain("md:border-b-0");
-    expect(div.className).toContain("md:border-r");
-  });
-
   it("agent card header stacks vertically on mobile, side-by-side on md+", () => {
     const { container } = render(
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3" />,

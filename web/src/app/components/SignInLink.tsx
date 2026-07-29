@@ -1,6 +1,12 @@
 "use client";
 
-import { SIGN_IN_URL, SITE_URL, LEGACY_SIGN_IN_URL } from "../../lib/site";
+import { useEffect, useState } from "react";
+import {
+  SIGN_IN_URL,
+  SITE_URL,
+  LEGACY_SIGN_IN_URL,
+  signInURLWithReturnTo,
+} from "../../lib/site";
 
 /**
  * Detects in-app browsers (WebViews) that Google OAuth blocks.
@@ -18,19 +24,35 @@ export function SignInLink({
   style,
   children,
   href = SIGN_IN_URL,
+  preserveCurrentPaths,
 }: {
   className?: string;
   style?: React.CSSProperties;
   children: React.ReactNode;
   href?: string;
+  preserveCurrentPaths?: readonly string[];
 }) {
+  const [resolvedHref, setResolvedHref] = useState(href);
+
+  useEffect(() => {
+    if (!preserveCurrentPaths?.includes(window.location.pathname)) {
+      setResolvedHref(href);
+      return;
+    }
+    setResolvedHref(
+      signInURLWithReturnTo(
+        window.location.pathname + window.location.search + window.location.hash,
+      ),
+    );
+  }, [href, preserveCurrentPaths]);
+
   const handleClick = (e: React.MouseEvent) => {
     if (isInAppBrowser()) {
       e.preventDefault();
       // Try to open in system browser on iOS/Android. Build via the URL
       // constructor so an absolute href (or one missing its leading slash)
       // can't produce a concatenated dead link.
-      const url = new URL(href, window.location.origin).href;
+      const url = new URL(resolvedHref, window.location.origin).href;
       // iOS: window.open in in-app browsers sometimes opens Safari
       window.open(url, "_blank");
       // Also show a message in case the open didn't work. The WebView block
@@ -45,7 +67,7 @@ export function SignInLink({
 
   return (
     <a
-      href={href}
+      href={resolvedHref}
       className={className}
       style={style}
       onClick={handleClick}

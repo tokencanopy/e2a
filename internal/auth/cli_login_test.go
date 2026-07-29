@@ -142,6 +142,54 @@ func TestHandleLogin_EncodesReturnToInOAuthState(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_EncodesReviewReturnToInOAuthState(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+
+	returnTo := "/reviews?id=msg_held"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/login?return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	w := httptest.NewRecorder()
+
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusFound, w.Body.String())
+	}
+	loc, _ := url.Parse(w.Result().Header.Get("Location"))
+	stateParam := loc.Query().Get("state")
+	stateJSON, _ := base64.URLEncoding.DecodeString(stateParam)
+	var state struct {
+		ReturnTo string `json:"rt"`
+	}
+	if err := json.Unmarshal(stateJSON, &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.ReturnTo != returnTo {
+		t.Errorf("return_to = %q, want %q", state.ReturnTo, returnTo)
+	}
+}
+
+func TestHandleLogin_EncodesInboxThreadReturnToInOAuthState(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+
+	returnTo := "/inboxes/messages?email=bot%40example.com#conv:%E5%AE%A2"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/login?return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	w := httptest.NewRecorder()
+
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusFound, w.Body.String())
+	}
+}
+
 // TestHandleLogin_RejectsReturnToOutsideAllowList: every value the
 // allow-list refuses must produce 400 rather than silently strip — a
 // silent strip would land the user on /dashboard, leaving the original
@@ -150,16 +198,19 @@ func TestHandleLogin_RejectsReturnToOutsideAllowList(t *testing.T) {
 	ua, _, _ := setupUserAuth(t)
 
 	bad := []string{
-		"/dashboard",                                    // wrong prefix
-		"/api/v1/agents",                                // wrong prefix
-		"https://evil.com/oauth2/authorize",          // absolute
-		"//evil.com/oauth2/authorize",                // protocol-relative
-		"/oauth2/authorize\nSet-Cookie: x=y",         // header injection
-		"\\api\\oauth\\authorize",                       // backslash bypass
-		"http://localhost/oauth2/authorize",          // scheme present
-		"/oauth2/../../dashboard",                    // path traversal escaping the allow-list
-		"/oauth2/../v1/agents",                       // path traversal into another API surface
-		"/oauth2//evil.com/path",                     // empty segment after prefix
+		"/dashboard",                         // unrelated dashboard route
+		"/reviews/other",                     // review allow-list is exact
+		"/reviews/../dashboard",              // review path traversal
+		"/inboxes/messages/view",             // inbox allow-list is exact
+		"/api/v1/agents",                     // wrong prefix
+		"https://evil.com/oauth2/authorize",  // absolute
+		"//evil.com/oauth2/authorize",        // protocol-relative
+		"/oauth2/authorize\nSet-Cookie: x=y", // header injection
+		"\\api\\oauth\\authorize",            // backslash bypass
+		"http://localhost/oauth2/authorize",  // scheme present
+		"/oauth2/../../dashboard",            // path traversal escaping the allow-list
+		"/oauth2/../v1/agents",               // path traversal into another API surface
+		"/oauth2//evil.com/path",             // empty segment after prefix
 	}
 	for _, rt := range bad {
 		t.Run(rt, func(t *testing.T) {

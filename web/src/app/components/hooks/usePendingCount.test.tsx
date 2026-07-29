@@ -81,7 +81,7 @@ describe("usePendingCount", () => {
   // here — at this unit scope it's a one-line proxy over SWR's own
   // mutate() API, which has its own test suite upstream. Pinning
   // it here ran into module-level SWR cache leakage between tests
-  // that was easier to verify end-to-end on the focus page approve
+  // that is easier to verify end-to-end on the Review-page approve
   // flow.
 
   it("returns null on fetch error (distinguishable from zero)", async () => {

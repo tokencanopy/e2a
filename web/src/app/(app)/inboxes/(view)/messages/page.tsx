@@ -18,7 +18,11 @@ import { listAgentMessages } from "../../../../components/onboarding/api";
 import type { MessageSummary } from "../../../../components/types";
 import { ThreadList } from "../../../../components/messages/ThreadList";
 import { ThreadDetail } from "../../../../components/messages/ThreadDetail";
-import { groupIntoThreads } from "../../../../components/messages/threading";
+import {
+  decodeThreadFragment,
+  encodeThreadFragment,
+  groupIntoThreads,
+} from "../../../../components/messages/threading";
 import { inboxPolling } from "../../../../../lib/livePolling";
 import { agentMessagesKey } from "../../../../../lib/swrKeys";
 
@@ -26,7 +30,9 @@ import { agentMessagesKey } from "../../../../../lib/swrKeys";
 // idiomatic way to read browser-owned state without effect ping-pong.
 function getHash(): string {
   if (typeof window === "undefined") return "";
-  return window.location.hash ? window.location.hash.slice(1) : "";
+  return window.location.hash
+    ? decodeThreadFragment(window.location.hash.slice(1))
+    : "";
 }
 function subscribeHash(onChange: () => void) {
   window.addEventListener("hashchange", onChange);
@@ -58,8 +64,7 @@ function AgentInboxContent({ email }: { email: string }) {
   const router = useRouter();
 
   // Initial 100-row window. SWR keys by email so navigating between
-  // agents fetches independently; mutations on the focus page call
-  // `invalidateAgentMessages(email)` to refresh this query.
+  // agents fetches independently; review actions invalidate this query.
   const {
     data: initialPage,
     error: fetchError,
@@ -87,7 +92,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // Concatenate the initial page with any imperatively-loaded older
   // pages, then de-dupe by `id`. The de-dupe matters because
   // SWR can revalidate the initial page mid-session (focus event,
-  // explicit invalidation from the focus page's approve flow). New
+  // explicit invalidation from the Review page). New
   // messages arriving at the top push the initial-page boundary
   // down, which can re-include rows that already live in
   // `olderPages`. Without this de-dupe, the same message renders
@@ -125,7 +130,7 @@ function AgentInboxContent({ email }: { email: string }) {
       // pushState (not replace) so opening a conversation adds a history
       // entry — the browser Back button then returns to the thread list
       // instead of skipping it and jumping to the top-level inbox list.
-      window.history.pushState(null, "", `#${key}`);
+      window.history.pushState(null, "", `#${encodeThreadFragment(key)}`);
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     }
   };
@@ -141,24 +146,10 @@ function AgentInboxContent({ email }: { email: string }) {
     }
   };
 
-  // MessageView now carries direction and review_status. Keep copies from the
-  // list row in the URL for compatibility with older cached detail payloads:
-  //   &direction=<inbound|outbound>  → picks the detail projection
-  //   &pending=1                     → gates approve/reject
-  // The focus page defaults to inbound / not-pending when absent.
-  const focusUrl = (m: MessageSummary, withHeaders: boolean) => {
-    const pending = m.review_status === "pending_review" ? "&pending=1" : "";
-    return (
-      `/inboxes/messages/view?email=${encodeURIComponent(email)}` +
-      `&id=${encodeURIComponent(m.id)}` +
-      `&direction=${m.direction}${pending}` +
-      (withHeaders ? "&headers=1" : "")
-    );
-  };
-  // Only the pending-review callout navigates to the approve/reject
-  // surface; reading happens inline in the conversation.
+  // Reading stays inline in the conversation. A held draft opens the same
+  // account-wide Review row used by the sidebar and notification email.
   const openMessage = (m: MessageSummary) => {
-    router.push(focusUrl(m, false));
+    router.push(`/reviews?id=${encodeURIComponent(m.id)}`);
   };
 
   const loadOlder = async () => {
