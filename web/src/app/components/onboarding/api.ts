@@ -21,9 +21,7 @@ import type {
 } from "../types";
 
 /** Thrown by `request` on any non-2xx HTTP response. Carries the raw
- *  status code so callers can branch on 404 vs 500 vs 401 (the
- *  messages focus page uses this to distinguish "fall back to inbound
- *  endpoint" from "surface the real server error"). */
+ *  status code so callers can branch on 404 vs 500 vs 401. */
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {

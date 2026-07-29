@@ -281,7 +281,7 @@ describe("AgentInboxPage", () => {
     expect(screen.getByText(/Outbound reply waiting on your approval/)).toBeInTheDocument();
   });
 
-  it("clicking the pending callout navigates to the focus page with that message id", async () => {
+  it("clicking the pending callout opens that row on the consolidated Review page", async () => {
     setSearchParams({ email: "support@acme.io" });
     mockMessages([PENDING_REPLY, PARENT_INBOUND]);
     window.history.replaceState(null, "", "#conv:conv_K3p9aQ");
@@ -294,18 +294,7 @@ describe("AgentInboxPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Review →/ }));
 
-    expect(mockRouterPush).toHaveBeenCalledWith(
-      expect.stringContaining("/inboxes/messages/view"),
-    );
-    const url = mockRouterPush.mock.calls[0][0];
-    expect(url).toContain("id=msg_pending");
-    // Regression (Bug 2 + Bug 3): the inbox row carries direction +
-    // review_status, which the focus page can't recover from the detail
-    // MessageView — so they must be threaded into the URL. Without
-    // &direction=outbound the focus page misclassifies it as inbound;
-    // without &pending=1 it never shows approve/reject.
-    expect(url).toContain("direction=outbound");
-    expect(url).toContain("pending=1");
+    expect(mockRouterPush).toHaveBeenCalledWith("/reviews?id=msg_pending");
   });
 
   it("renders the empty state when there are no messages", async () => {

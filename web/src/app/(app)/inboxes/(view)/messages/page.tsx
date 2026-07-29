@@ -58,8 +58,7 @@ function AgentInboxContent({ email }: { email: string }) {
   const router = useRouter();
 
   // Initial 100-row window. SWR keys by email so navigating between
-  // agents fetches independently; mutations on the focus page call
-  // `invalidateAgentMessages(email)` to refresh this query.
+  // agents fetches independently; review actions invalidate this query.
   const {
     data: initialPage,
     error: fetchError,
@@ -87,7 +86,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // Concatenate the initial page with any imperatively-loaded older
   // pages, then de-dupe by `id`. The de-dupe matters because
   // SWR can revalidate the initial page mid-session (focus event,
-  // explicit invalidation from the focus page's approve flow). New
+  // explicit invalidation from the Review page). New
   // messages arriving at the top push the initial-page boundary
   // down, which can re-include rows that already live in
   // `olderPages`. Without this de-dupe, the same message renders
@@ -141,24 +140,10 @@ function AgentInboxContent({ email }: { email: string }) {
     }
   };
 
-  // MessageView now carries direction and review_status. Keep copies from the
-  // list row in the URL for compatibility with older cached detail payloads:
-  //   &direction=<inbound|outbound>  → picks the detail projection
-  //   &pending=1                     → gates approve/reject
-  // The focus page defaults to inbound / not-pending when absent.
-  const focusUrl = (m: MessageSummary, withHeaders: boolean) => {
-    const pending = m.review_status === "pending_review" ? "&pending=1" : "";
-    return (
-      `/inboxes/messages/view?email=${encodeURIComponent(email)}` +
-      `&id=${encodeURIComponent(m.id)}` +
-      `&direction=${m.direction}${pending}` +
-      (withHeaders ? "&headers=1" : "")
-    );
-  };
-  // Only the pending-review callout navigates to the approve/reject
-  // surface; reading happens inline in the conversation.
+  // Reading stays inline in the conversation. A held draft opens the same
+  // account-wide Review row used by the sidebar and notification email.
   const openMessage = (m: MessageSummary) => {
-    router.push(focusUrl(m, false));
+    router.push(`/reviews?id=${encodeURIComponent(m.id)}`);
   };
 
   const loadOlder = async () => {

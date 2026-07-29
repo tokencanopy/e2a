@@ -202,7 +202,7 @@ export type ListMessagesResponse = {
 };
 
 // MessageView from `GET /v1/agents/{address}/messages/{id}`. Used by the
-// focus page's inbound branch. The `/v1` detail endpoint returns the
+// inline inbox thread. The `/v1` detail endpoint returns the
 // same MessageView shape for inbound and outbound; inbound rows carry
 // canonical authentication evidence + `raw_message`, and the parsed text/plain body comes
 // through `body.text`.

@@ -195,8 +195,8 @@ describe("message projection (v1 contract)", () => {
 // endpoints under one shared cache key (see lib/swrKeys.ts). That
 // invariant only holds if (a) both fetchers return the wire unprojected
 // and (b) the projectors stay pure functions applied at the point of use.
-// The tests below pin both halves; the cross-surface render tests in
-// inboxes/(view)/messages/view/page.test.tsx pin the consequence.
+// The tests below pin both halves; PendingRow and ThreadBubble render tests
+// pin the cross-surface consequence.
 
 // A MessageView as the REVIEW read returns it (GET /v1/reviews/{id}) —
 // the superset: it alone carries hold_reason + protection.
@@ -290,7 +290,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
   });
 
   it("projectInbound defaults absent list/scalar fields instead of leaking undefined", () => {
-    // The focus page and ThreadBubble index into these without guards
+    // PendingRow and ThreadBubble index into these without guards
     // (cc.join, attachments.map) — undefined here is
     // a crash there.
     const d = projectInbound({
@@ -317,7 +317,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
     const out = projectMessageDetail("support@acme.dev", REVIEW_WIRE, "inbound");
     expect(out.direction).toBe("outbound");
     // Outbound rows read the draft body; the discriminated union is what
-    // lets the focus page narrow safely.
+    // lets each consuming surface narrow safely.
     expect(out.direction === "outbound" && out.data.body_text).toBe(
       "Hello, your refund is on the way.",
     );

@@ -113,7 +113,7 @@ export function ThreadBubble({
   const wasUnreadInbound = isInbound && message.read_status === "unread";
 
   // Fetch this message's body, cached as the RAW wire under the shared
-  // per-message key so this bubble and the focus page read one entry in
+  // per-message key so this bubble and the Review row read one entry in
   // one shape (see lib/swrKeys.ts). Projected below.
   const { data: wire, isLoading } = useSWR(
     messageDetailKey(message.id),

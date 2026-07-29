@@ -80,7 +80,7 @@ function PendingContent() {
   // After approve/reject: refetch the queue, collapse to a clean list,
   // and invalidate the derived caches (sidebar badge, agent cards, the
   // inbox views, the resolved message's lifecycle panel) so the resolved
-  // row drops everywhere — mirroring what the focus page used to do.
+  // row drops everywhere.
   const handleResolved = useCallback(async () => {
     const resolved = messages.find((m) => m.id === selectedId);
     void Promise.all([
