@@ -2056,9 +2056,9 @@ class MessagesApi:
             _query_params.append(('deleted', deleted))
             
         if filter is not None:
-            
+
             _query_params.append(('filter', filter))
-            
+
         # process the header parameters
         # process the form parameters
         # process the body parameter
