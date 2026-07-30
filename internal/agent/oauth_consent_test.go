@@ -554,9 +554,14 @@ func TestHTTP_Consent_Allow_Existing_NotEnumerable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A real agent on another account, and — deliberately — one on a domain
-	// that is NOT verified, which the SMTP edge hides behind the same 550 it
-	// uses for unknown recipients. This surface must hide it too.
+	// A real agent on another account, on the shared domain (which the
+	// fixture seeds verified via EnsureSharedDomain). Domain verification is
+	// not what this test turns on: handleOAuthConsent never consults
+	// DomainVerified, so the invariant it pins — existence must not be
+	// observable — holds for verified and unverified domains alike. That
+	// matters because the SMTP edge hides unverified-domain agents behind the
+	// same 550 it uses for unknown recipients (internal/relay/server.go), so
+	// this surface must not be the one that discloses them.
 	if _, err := store.CreateAgent(ctx, "realvictim@agents.e2a.dev", "agents.e2a.dev", "", "", "local", other.ID); err != nil {
 		t.Fatal(err)
 	}
