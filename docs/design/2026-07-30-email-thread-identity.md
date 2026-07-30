@@ -3,8 +3,8 @@
 Status: proposed
 Date: 2026-07-30
 Owners: e2a maintainers
-Surfaces: database, inbound SMTP, outbound delivery, HTTP API, webhooks/events,
-WebSocket, dashboard, SDKs, CLI, MCP
+Surfaces: database, inbound SMTP, outbound delivery, existing HTTP message
+reads, dashboard, generated SDK models
 
 ---
 
@@ -33,11 +33,12 @@ RFC `Message-ID` / `In-Reply-To` / `References` topology, and authenticated
 internal delivery correlation. `conversation_id` remains unchanged as
 caller-owned workflow correlation.
 
-The schema, fields, and thread resources are additive. Existing request and
-response fields keep their current meaning, and `/conversations` remains
-available. One deliberate behavior change is called out separately: replying
-to a terminally failed outbound message that has no wire anchor returns a new
-409 instead of sending an unthreaded message.
+The schema and one response field are additive. Existing request fields,
+status codes, reply behavior, and `conversation_id` semantics keep their
+current meaning. This design adds no thread endpoint, request parameter,
+webhook/event field, WebSocket field, CLI command, or MCP tool. The only
+public projection is optional, response-only `thread_id` on existing message
+list and detail responses so the dashboard can group the messages it loads.
 
 There is no historical bulk backfill. Messages created after thread assignment
 is enabled receive `thread_id`. An older threadless message is assigned one
@@ -68,9 +69,9 @@ that convenience does not turn the field into email topology.
 
 ## Goals
 
-1. Show the complete email exchange for messages created after thread
-   assignment is enabled when they are replies to one another, whether or not
-   callers set `conversation_id`.
+1. Group messages loaded by the dashboard according to email reply topology
+   after thread assignment is enabled, whether or not callers set
+   `conversation_id`.
 2. Keep fresh sends separate even when subject, participants, or
    `conversation_id` happen to match.
 3. Match normal email-client topology without making an external provider's
@@ -94,6 +95,13 @@ that convenience does not turn the field into email topology.
   or `conversation_id`.
 - Introduce a caller-writable `thread_id`.
 - Transport `thread_id` in SMTP headers.
+- Add public thread list or detail endpoints, a message filter by `thread_id`,
+  or an SDK method for enumerating threads.
+- Guarantee retrieval of a complete arbitrarily long thread in one API
+  operation. The dashboard continues to use the existing paginated message
+  list and can discover older members as it loads older pages.
+- Add `thread_id` to webhooks, stored events, WebSocket notifications, data
+  exports, CLI output contracts, or MCP tool schemas.
 - Automatically merge already-established threads after a late or conflicting
   ancestor arrives.
 - Bulk-backfill historical messages or reconstruct old threads. Old rows stay
@@ -263,9 +271,9 @@ driver's prepared/generic-plan behavior that the legacy inbound query uses
 - Generate `thread_id` with the existing cryptographically random ID facility.
 - Encode it as `thr_` followed by 32 lowercase hexadecimal characters, matching
   the existing 128-bit message/conversation ID construction.
-- Validate thread path values against `^thr_[0-9a-f]{32}$`.
+- Validate generated and persisted values against `^thr_[0-9a-f]{32}$`.
 - Never accept a `thread_id` in send, reply, forward, or inbound request data.
-- A thread path lookup always includes the authenticated `agent_id`.
+- Every internal thread lookup includes `agent_id`.
 
 ## RFC Message-ID canonicalization
 
@@ -453,8 +461,8 @@ vacuous agreement.
 ### 7. Idempotent retry
 
 If a message already exists under an idempotency key, return its existing
-thread identity. Never rerun assignment in a way that changes the stored
-decision.
+message result and retain its existing internal thread identity. Never rerun
+assignment in a way that changes the stored decision.
 
 ### Lazy anchor helper
 
@@ -498,12 +506,12 @@ This design must not copy that trust decision into thread assignment.
 
 ## Reply headers and wire behavior
 
-`thread_id` is an internal projection. RFC headers remain the source of
-wire-client threading.
+`thread_id` is an internal identity with a minimal read projection. RFC headers
+remain the source of wire-client threading.
 
 ### Outbound replies
 
-An API reply must:
+When its parent has a usable canonical wire anchor, an API reply must:
 
 - set `In-Reply-To` to the exact qualified on-wire Message-ID of its parent;
 - construct `References` from the parent's valid reference chain plus that
@@ -515,50 +523,22 @@ long chain can remove a mid-chain anchor needed by a participant who did not
 receive the immediate parent, so any future header-budget policy requires its
 own provider evidence, compatibility analysis, and wire-level review.
 
-### Terminal outbound messages without a wire anchor
+### Outbound messages without a wire anchor
 
-Replying to an outbound row has three relevant states:
+Preserve the existing reply lifecycle and error behavior:
 
 | Usable canonical wire anchor | Submission state | Result |
 | --- | --- | --- |
 | Yes | Any state allowed by the existing reply lifecycle rules | Send the reply using that exact RFC parent |
-| No | `accepted` or `sending` | Existing retryable `409 message_not_yet_delivered` |
-| No | Any other state, including legacy null status, terminal failure, or a nominal `sent` row whose provider ID cannot be canonicalized | New non-retryable `409 message_has_no_wire_anchor` |
+| No | `accepted` or `sending` | Keep the existing retryable `409 message_not_yet_delivered` |
+| No | Any other state currently accepted by the reply operation | Preserve the current send behavior without inventing `In-Reply-To` or `References` |
 
-The new error means the referenced message either never existed on the wire or
-cannot be proven to have a usable RFC parent for a reply. The predicate is based
-on a canonicalizable, direction-appropriate wire anchor, not merely a non-empty
-`provider_message_id`:
-
-```json
-{
-  "error": {
-    "code": "message_has_no_wire_anchor",
-    "message": "Referenced outbound message has no usable RFC Message-ID; create a new send instead."
-  }
-}
-```
-
-Use HTTP 409 because the requested reply conflicts with the current state of
-the referenced resource. The caller can start a fresh send, which receives a
-new thread.
-
-Register the code in the shared error catalog as `retryable: false`, and update
-the reply operation's 409 documentation so it distinguishes this terminal
-state from retryable `message_not_yet_delivered`.
-
-This is a coordinated behavior change, not a purely additive one. Today a
-reply to a terminally failed outbound row can succeed without
-`In-Reply-To`/`References`. Release notes must tell callers to create a fresh
-send instead, and the new error ships with the coordinated API batch rather
-than the schema-only phase.
-
-The error is reply-specific. Reply and forward currently share
-`loadRepliableMessage` / `parentNotYetSubmitted`, and an end-to-end regression
-test deliberately pins the existing forward gate. Implement
-`message_has_no_wire_anchor` in the reply handler after the shared load, not in
-that shared seam. A forward remains a new root and this feature does not relax
-or otherwise change its existing authorization and lifecycle gates.
+The last case still inherits the referenced message's internal `thread_id`
+because the authorized API reply relationship is authoritative. It may appear
+as a fresh root in external email clients because e2a has no reliable RFC
+anchor to emit. That limitation already exists on the wire; this feature logs
+the condition but does not turn it into a new API error or otherwise change
+reply or forward authorization and lifecycle gates.
 
 ### Edited reply subjects
 
@@ -568,138 +548,40 @@ clients may split a heavily edited subject despite valid RFC headers. Preserve
 the API contract; document the best-effort wire behavior and consider a UI
 warning rather than rejecting the edit.
 
-## HTTP API
+## Minimal HTTP API projection
 
-### Additive message fields
+Add optional, response-only `thread_id` to exactly these existing message
+representations:
 
-Add optional, response-only `thread_id` to every public representation that
-already identifies a message and for which a thread decision exists:
+- the message list summary returned by
+  `GET /v1/agents/{email}/messages`;
+- the message detail returned by
+  `GET /v1/agents/{email}/messages/{id}`.
 
-- message detail and message list summary;
-- send/reply/forward result;
-- held-message review views;
-- WebSocket message notifications;
-- webhook and event payload message data;
-- data export rows.
+When a message has no assigned thread, serializers omit `thread_id`; they never
+emit an explicit JSON `null`. Generated Python and TypeScript models treat it
+as optional. The field is server-owned, and no request schema accepts it.
 
-Historical event envelopes remain immutable and omit the field. Old messages
-may also remain threadless indefinitely, so SDK models always treat the field
-as optional.
+Do not populate `thread_id` in send/reply/forward results, held-message review
+payloads, webhooks, stored events, WebSocket notifications, data exports, CLI
+output, or MCP tool output in this feature. `thread_parent_id` and
+`rfc_message_id_key` remain internal implementation fields.
 
-`thread_parent_id` and `rfc_message_id_key` are internal implementation fields
-and are not exposed in the initial API.
+Do not add `/threads` endpoints or a `thread_id` filter to `/messages`.
+Consequently, the API does not promise server-side thread enumeration or
+complete thread retrieval. A caller can observe the identity on messages it
+already reads, but the initial product consumer is the dashboard.
 
-### New thread resources
-
-Add:
-
-```http
-GET /v1/agents/{email}/threads
-GET /v1/agents/{email}/threads/{id}
-```
-
-These are parallel to, not replacements for, the current conversation
-endpoints.
-
-#### List response
-
-```json
-{
-  "items": [
-    {
-      "id": "thr_...",
-      "last_message_at": "2026-07-30T18:42:11Z",
-      "first_message_at": "2026-07-30T18:30:00Z",
-      "message_count": 3,
-      "inbound_count": 2,
-      "outbound_count": 1,
-      "has_unread": true,
-      "latest_subject": "Re: Hi Jace",
-      "latest_from": "gretta@aisa.one"
-    }
-  ],
-  "next_cursor": null
-}
-```
-
-The list:
-
-- uses the standard v1 `{ "items": [...], "next_cursor": ... }` envelope;
-- uses a distinct `ThreadSummaryView` whose field names mirror
-  `ConversationSummaryView`, with `id` containing the `thr_` resource ID;
-- includes live, normally visible messages only;
-- excludes held inbound messages until approved, consistent with inbox views;
-- therefore excludes held inbound messages from `has_unread`;
-- excludes soft-deleted messages from counts and previews;
-- still retains their thread identity internally for restore and topology;
-- supports the same `since`, `until`, and bounded page-size behavior as
-  `/conversations`;
-- orders by `(last_message_at desc, thread_id desc)`;
-- binds cursor state to agent and filters;
-- captures `as_of` on the first page and evaluates thread aggregates using
-  messages with `created_at <= as_of` on later pages, preventing new arrivals
-  from reordering that pagination snapshot.
-
-Concurrent delete, restore, or lazy adoption of an old anchor may still change
-membership during pagination. `has_unread` may also change because read status
-is mutable independently of `created_at`. The endpoint documents that limited
-best-effort behavior.
-
-An approved held message keeps the thread chosen when it was received.
-
-#### Detail response
-
-```json
-{
-  "id": "thr_...",
-  "last_message_at": "2026-07-30T18:42:11Z",
-  "first_message_at": "2026-07-30T18:30:00Z",
-  "message_count": 3,
-  "inbound_count": 2,
-  "outbound_count": 1,
-  "has_unread": true,
-  "latest_subject": "Re: Hi Jace",
-  "latest_from": "gretta@aisa.one",
-  "participants": [
-    "jace@team.tokencanopy.com",
-    "gretta@aisa.one"
-  ],
-  "labels": [],
-  "participants_truncated": false,
-  "labels_truncated": false,
-  "messages": [
-    {
-      "id": "msg_...",
-      "thread_id": "thr_...",
-      "conversation_id": "run_42",
-      "direction": "inbound",
-      "subject": "Hi Jace",
-      "created_at": "2026-07-30T18:30:00Z"
-    }
-  ],
-  "next_cursor": null
-}
-```
-
-Use a distinct `ThreadDetailView`. The summary covers all live visible members
-inside the cursor's `as_of` snapshot. Participants and labels are computed over
-that same snapshot by bounded aggregate queries, capped at 100 unique values
-each, with the corresponding truncation flag. Messages use the existing public
-message summary schema and chronological `(created_at, id)` ordering.
-
-The detail operation accepts `cursor` and `limit` (default and maximum 100),
-and `next_cursor` paginates only the `messages` array. It captures an `as_of`
-snapshot like the list operation and binds cursor state to agent, thread, and
-snapshot. The dashboard must follow this pagination rather than infer a thread
-by grouping only the first page of `/messages`.
-
-### Authorization and caching
-
-- Apply the same agent ownership checks as message and conversation reads.
-- Return 400 `invalid_request` for a malformed thread ID.
-- Return 404 for an unknown, cross-agent, or non-visible thread.
-- Send `Cache-Control: no-store` on authenticated thread reads.
-- A known RFC Message-ID never grants access to a thread.
+The current Go/OpenAPI types are reused across several operations:
+`MessageSummaryView` also appears inside conversation detail, while
+`MessageView` also backs review detail and restore responses. Add the optional
+property to those existing shared schemas so generated SDK method return types
+do not change. Populate it only in the message-list and message-detail
+handlers; conversation, review, and restore handlers continue omitting it.
+This means generated models tolerate the optional property anywhere the shared
+schema is referenced, but no additional operation intentionally emits it.
+Do not fork stable operation return types merely to hide an optional property.
+The OpenAPI compatibility gate and generated SDK diff are the acceptance test.
 
 ### Existing conversation endpoints
 
@@ -716,51 +598,51 @@ email threads.
 
 ### Contract symmetry
 
-The implementation must land together across:
+The minimal response-field change lands together across:
 
-- OpenAPI schema and generated/handwritten server types;
-- Python SDK;
-- TypeScript SDK;
-- CLI;
-- MCP server;
-- dashboard.
+- the Go message summary/detail views and serializers;
+- OpenAPI;
+- generated Python and TypeScript message models;
+- the dashboard.
 
-Adding optional response fields is backward compatible. No request gains a
-caller-writable `thread_id`.
+CLI behavior and output, MCP tool schemas, webhook/event schemas, WebSocket
+payloads, and export schemas remain unchanged. Conversation, review, and
+restore handlers also keep omitting the field despite their reuse of shared
+OpenAPI components. Tests must prove that the underlying model addition does
+not accidentally expand those emitted payloads.
+
+Adding the optional response field is backward compatible. No request gains a
+caller-writable `thread_id`, and no existing status code or operation behavior
+changes.
 
 ## Webhooks, events, and WebSocket
 
-Newly emitted message events include optional `thread_id` in the typed message
-payload and, where the event store maintains indexed routing columns, in a
-nullable routing column.
-
-Initial scope does not add a webhook subscription filter by `thread_id`.
-Consumers can correlate the payload field. A later filter can be added after
-event-index cardinality is measured.
-
-Delivery lifecycle events must copy the persisted message's thread identity;
-they must not resolve topology independently.
-
-WebSocket notifications follow the same optional-field rule. A missing value
-means a legacy threadless message, not a new independent thread identity.
+These contracts do not change. They do not expose `thread_id`, add a routing
+column for it, or resolve topology independently. A future proposal may add
+event correlation only after an external consumer demonstrates the need.
 
 ## Dashboard behavior
 
-After the new-write path and API are deployed:
+After the new-write path and optional response field are deployed:
 
-1. assignment-enabled inbox thread lists use `/threads`;
-2. thread detail uses the server-paginated `/threads/{id}` resource;
-3. the UI displays `conversation_id` only as optional workflow metadata;
-4. rows with null `thread_id` remain accessible through the existing message
-   view under a clearly labeled unthreaded-messages path and never
-   disappear merely because `/threads` excludes them;
-5. trash grouping uses the existing trash-message list plus each message's
-   optional `thread_id`; `/threads` remains live-only;
-6. restoring a threaded message preserves its thread, while restoring a
+1. the dashboard continues loading the existing cursor-paginated `/messages`
+   resource;
+2. a row with non-null `thread_id` is grouped by `thr:<thread_id>`;
+3. a legacy row with no `thread_id` uses the current
+   `conv:<conversation_id>` or `orphan:<message_id>` fallback so it remains
+   visible;
+4. `conversation_id` is displayed only as optional workflow metadata for new
+   threaded rows and never determines their group;
+5. loading older message pages may add older members to an already-visible
+   thread; the UI does not claim that a group is complete while more message
+   pages remain;
+6. trash grouping uses the existing trash-message list plus each message's
+   optional `thread_id`;
+7. restoring a threaded message preserves its thread, while restoring a
    legacy null row leaves it null unless new traffic later references it.
 
-Roll out behind a server capability or web feature flag so an older server does
-not break the dashboard during rollback.
+The absence fallback makes the dashboard compatible with an older server
+during rollback without a new capability endpoint.
 
 ## Scenario matrix
 
@@ -778,7 +660,7 @@ not break the dashboard during rollback.
 | Agent replies twice to one inbound message | One branched thread | Both replies reference the same parent |
 | Agent replies to its latest outbound reply | Same thread once exact provider ID exists | New reply references that outbound message |
 | Agent replies while outbound is still being submitted | Retryable 409 | No guessed RFC parent |
-| Agent replies to terminally failed outbound with no provider ID | `message_has_no_wire_anchor` | Caller must make a fresh send |
+| Agent replies to terminally failed outbound with no provider ID | Inherit the referenced row's internal thread | Preserve current send behavior; without reply headers the client may show a fresh root |
 | Forward an inbound or outbound message | New thread | Forward is a new root |
 | Reply to the forwarded message | Forward's thread | Normal reply headers |
 | Reply-all with changed CC/BCC | Same thread | New recipients see only content included in this message |
@@ -792,7 +674,7 @@ not break the dashboard during rollback.
 | Inbound reply is held for review | Thread chosen at receipt and preserved | Not visible in normal list until approved |
 | Held reply is rejected | Hidden from normal thread; identity retained until purge | No outbound effect |
 | Held reply is TTL-approved | Original thread retained | Reply/forward operation type remains correct |
-| Idempotent API retry | Existing thread returned | No duplicate wire send |
+| Idempotent API retry | Existing internal thread retained | No duplicate wire send |
 | Provider delivery retry | Existing thread retained | Same logical message |
 | Soft-delete then restore | Same thread | No topology change |
 | Parent is soft-deleted before a reply arrives | Child can still resolve through hidden anchor | Parent remains hidden |
@@ -851,11 +733,10 @@ startup sweep, or read-time repair.
 - That direct old row is locked and stamped in the same transaction as the new
   message; its historical parents, siblings, and conversation peers remain
   untouched.
-- `/threads` includes only rows with non-null thread IDs.
-- `/messages`, `/conversations`, trash, and historical events retain their
-  existing behavior and continue to expose legacy rows.
-- SDKs and consumers always treat absent `thread_id` as a supported legacy
-  state.
+- `/messages`, `/conversations`, trash, and historical events continue to
+  expose legacy rows.
+- Message list/detail clients always treat absent `thread_id` as a supported
+  legacy state.
 - Neither reads nor dashboard navigation mutate old data.
 
 This boundary keeps database work proportional to new traffic. It deliberately
@@ -877,23 +758,23 @@ new descendants rather than the parent's entire historical exchange.
 - Enable exact, locked lazy adoption when new traffic directly references an
   old anchor.
 - Verify no writer after assignment enablement creates an unexplained null.
-- Keep the new terminal-reply behavior disabled until the coordinated API
-  phase.
+- Preserve existing reply status codes and lifecycle behavior.
 
-### Phase 3: API exposure
+### Phase 3: minimal read projection
 
-- Add optional response fields and `/threads`.
-- Release SDK, CLI, and MCP support in the coordinated API batch.
-- Enable and document `message_has_no_wire_anchor`.
+- Add optional `thread_id` only to existing message list/detail responses.
+- Regenerate OpenAPI plus Python and TypeScript message models.
+- Prove webhook/event, WebSocket, export, CLI, and MCP contracts did not
+  change.
 - Keep `/conversations` unchanged.
 
 ### Phase 4: dashboard enablement
 
-- Enable the new thread endpoints behind a capability/feature flag.
-- Verify complete post-assignment history beyond the first 100 messages.
-- Preserve a visible route to legacy null messages.
-- Retain a fallback while the minimum supported server version can lack
-  `/threads`.
+- Group loaded rows by non-null `thread_id`.
+- Preserve the existing conversation/orphan fallback for legacy null rows and
+  older servers.
+- Keep existing message pagination and make incomplete loaded history clear
+  while older pages remain.
 
 ### Permanent nullable state
 
@@ -901,15 +782,17 @@ new descendants rather than the parent's entire historical exchange.
   rows created after that instant that unexpectedly lack a thread; Phase-1 and
   rollback-window rows are supported threadless messages.
 - Do not add a database `NOT NULL` constraint: historical rows are
-  intentionally null and the public contract permanently supports absence.
+  intentionally null and the message-read contract permanently supports
+  absence.
 
 ### Rollback
 
 Old binaries ignore the additive nullable columns. Rolling application code
-back does not require removing or rewriting data. Disable the dashboard feature
-flag before or with an application rollback. Do not drop columns or indexes as
-part of an incident rollback. Lazily stamped old anchors remain harmless
-additive metadata after rollback.
+back does not require removing or rewriting data. If the dashboard reaches an
+older server, the absent-field fallback automatically preserves its current
+conversation/orphan grouping. Do not drop columns or indexes as part of an
+incident rollback. Lazily stamped old anchors remain harmless additive
+metadata after rollback.
 
 ## Observability
 
@@ -956,8 +839,8 @@ addresses from routine logs.
 - lazy old-anchor locking and concurrent adoption.
 - direction-specific RFC key provenance.
 - `References` construction and legal folding remain byte-compatible.
-- terminal outbound error classification, including null status, terminal
-  failure, and nominal `sent` with an unusable provider ID.
+- terminal outbound replies without a usable anchor retain their existing
+  status and send behavior while inheriting internal thread identity.
 
 ### Database integration tests
 
@@ -966,7 +849,6 @@ Every direct SQL message writer must assert `thread_id` behavior. Cover:
 - inbound accepted, held, approved, rejected, and restored;
 - queued, scheduled, sent, delivered, failed, and retried outbound messages;
 - reply, reply-all, forward, test-send, and self-send;
-- webhook/event and WebSocket reads;
 - concurrent replies and concurrent inbound/API adoption of one old anchor;
 - proof that deployment does not sweep unrelated old null rows;
 - every provider-acceptance and reconciliation writer populates the canonical
@@ -978,12 +860,17 @@ Every direct SQL message writer must assert `thread_id` behavior. Cover:
 ### API contract tests
 
 - old requests remain valid without `thread_id`;
-- optional fields do not become required in generated SDK models;
+- message list/detail include `thread_id` when assigned and omit it, rather
+  than emit null, when absent;
+- `thread_id` remains optional in generated Python and TypeScript message
+  models;
 - no request schema accepts `thread_id`;
-- `/conversations` response shape and meaning stay unchanged;
-- cross-agent thread access returns 404;
-- pagination cursors cannot be replayed across agents or filter sets;
-- new error code is represented across OpenAPI, SDKs, CLI, and MCP.
+- OpenAPI contains no `/threads` path or `thread_id` message filter;
+- `/conversations` meaning and emitted payload stay unchanged; its reused
+  generated message model merely tolerates the optional property;
+- send/reply/forward, review, restore, webhook/event, WebSocket, export, CLI,
+  and MCP emitted payloads do not populate `thread_id`;
+- reply status codes and documented errors remain unchanged.
 
 ### End-to-end tests
 
@@ -997,8 +884,8 @@ Automate the scenario matrix where the environment permits. In particular:
 - agent-to-agent messages have mailbox-local thread IDs;
 - authenticated test delivery twin shares a thread;
 - a spoofed internal-origin header does not activate twin correlation;
-- terminal failed outbound returns `message_has_no_wire_anchor`;
-- a thread with more than 100 messages is fully retrievable by pagination.
+- terminal failed outbound preserves its existing API outcome;
+- dashboard grouping remains correct as older `/messages` pages are appended.
 
 Wire assertions must verify `Message-ID`, `In-Reply-To`, and `References`
 independently of internal `thread_id`. The change must not regress the
@@ -1010,7 +897,8 @@ qualified-ID behavior established by commit
 
 Follow the production policy: use throwaway agents and inboxes only, never real
 agent mailboxes or external personal addresses, and delete the throwaway agents
-afterward. Verify both API grouping and raw received headers.
+afterward. Verify the optional message-read field, dashboard grouping, and raw
+received headers.
 
 ## Implementation work packages
 
@@ -1024,21 +912,22 @@ The implementation should be reviewable in this order:
    - transactional `EnsureThreadTx`.
 3. **Wire-anchor correctness**
    - exact provider ID contract;
-   - terminal no-anchor error;
+   - preserved terminal no-anchor reply behavior;
    - unchanged `References` behavior;
    - authenticated twin correlation.
 4. **Legacy coexistence and observability**
    - exact lazy adoption, no-sweep proof, metrics, invariant audit.
-5. **Public API symmetry**
-   - OpenAPI, HTTP endpoints, events, WebSocket, Python, TypeScript, CLI, MCP.
+5. **Minimal message-read projection**
+   - existing Go message list/detail views, OpenAPI, Python, and TypeScript;
+   - negative contract checks for events, WebSocket, export, CLI, and MCP.
 6. **Dashboard cutover**
-   - server-paginated thread views, trash/restore handling, feature fallback.
+   - grouping over existing message pages, trash/restore handling, legacy
+     fallback.
 7. **Documentation cleanup**
    - distinguish application conversations from email threads throughout API
      docs and examples.
 
-Each package must preserve nullable compatibility until the coordinated API and
-dashboard rollout is complete.
+Each package must preserve nullable compatibility throughout rollout.
 
 ## Current code audit map
 
@@ -1064,18 +953,24 @@ known high-risk touchpoints are:
   transaction;
 - `internal/identity/local_delivery.go`: approved local/self-send delivery and
   its Inbox twin;
-- `internal/httpapi/outbound.go`: reply/forward parent validation, send
-  results, and error catalog;
+- `internal/httpapi/messages.go` and message view types: the only new public
+  projection, limited to existing list/detail responses;
+- `internal/httpapi/outbound.go`: regression coverage that reply/forward
+  status codes, results, and error behavior remain unchanged;
 - `internal/hitlworker/worker.go`: stored operation reconstruction.
   `sendRequestFromStoredMessage` currently copies `EmailMessageID`
   unconditionally, so TTL-approved forwards require a regression test proving
   they do not acquire reply headers. Its `attachReferencesChain` path also uses
   `GetMessageByEmailMessageID` and belongs in the RFC-ID audit;
-- `internal/eventpayload`, `internal/webhookpub`, `internal/ws`, and
-  `internal/httpapi/events.go`: additive event and notification projection;
+- `internal/eventpayload`, `internal/webhookpub`, `internal/ws`,
+  `internal/httpapi/events.go`, and export serializers: negative contract
+  checks proving no thread projection was added;
 - `web/src/app/(app)/inboxes/(view)/messages/page.tsx` and message components:
-  current client-window grouping and the dashboard cutover;
-- `api/openapi.yaml`, both SDKs, CLI, and MCP: coordinated public contract.
+  grouping over the existing paginated message window;
+- `api/openapi.yaml` and both generated SDKs: optional field parity for the
+  existing message list/detail schemas;
+- CLI and MCP: compatibility checks only; no new command, tool, argument, or
+  output contract.
 
 The implementation review should reject a helper that infers `thread_id` by
 calling `LookupConversationID` or trusting `X-E2A-Conversation-ID`. Those paths
@@ -1097,8 +992,8 @@ documents the distinction at every new `Message.ThreadID` call site.
 - Fresh sends no longer collapse because of subject or caller metadata.
 - Thread decisions are stable, inspectable, and queryable without reparsing all
   headers on every read.
-- Schema and response compatibility are additive and rollback-safe; the one
-  terminal-reply behavior change is explicit, coordinated, and documented.
+- Schema and response compatibility are additive and rollback-safe; existing
+  request, reply, event, WebSocket, export, CLI, and MCP behavior is preserved.
 
 ### Costs
 
@@ -1107,8 +1002,10 @@ documents the distinction at every new `Message.ThreadID` call site.
   old exchanges are intentionally not reconstructed.
 - e2a and an external mail client can still disagree when headers are stripped,
   identifiers conflict, or client-specific subject heuristics intervene.
-- Maintaining both `/threads` and `/conversations` requires precise
-  terminology and SDK support.
+- The dashboard still groups only the message pages it has loaded; there is no
+  server-side thread enumeration or one-call complete-thread retrieval.
+- Public clients can observe `thread_id` on messages but receive no thread
+  resource or thread-oriented query surface.
 
 These costs are preferable to overloading a caller-owned identifier or making
 provider-specific thread IDs part of the public contract.
