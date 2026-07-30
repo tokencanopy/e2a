@@ -1033,13 +1033,34 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(agentChoice, "existing:"):
 		email := identity.NormalizeEmail(strings.TrimPrefix(agentChoice, "existing:"))
+		// ANTI-ENUMERATION INVARIANT: "no such agent" and "exists but owned
+		// by another account" MUST be indistinguishable — same status, same
+		// body. Reaching this line needs only a logged-in session (checked
+		// above) plus any self-registered OAuth client, and agent_choice is
+		// an arbitrary caller-supplied address, so a distinguishable error
+		// turns this endpoint into an existence oracle for other accounts'
+		// inboxes. It would leak strictly more than the SMTP edge does:
+		// session.Rcpt returns the SAME 550 for an unknown recipient and for
+		// a real agent on an unverified domain (internal/relay/server.go), so
+		// unverified-domain agents are invisible over mail and must stay
+		// invisible here. The consent page only ever offers the user their
+		// own agents, so nothing legitimate needs the distinction.
+		//
+		// Same invariant as resolveOwnedAgent (internal/httpapi/operations.go)
+		// and the WebSocket surface, expressed as a 400 rather than their 404
+		// because this is a form POST inside the consent flow, not a REST
+		// resource lookup. A store error collapses in here too: the caller
+		// learns nothing either way and the operator gets the detail from the
+		// log line below.
 		agent, err := a.store.GetAgentByEmail(ctx, email)
-		if err != nil {
-			http.Error(w, "chosen agent does not exist", http.StatusBadRequest)
-			return
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			// Deliberately omits the address: this is an unresolved,
+			// attacker-chosen string that may name a third party, and it
+			// must not reach shipped logs (same rule as relay.Rcpt).
+			log.Printf("[oauth] /consent agent lookup failed: request_id=%s err=%v", reqID, err)
 		}
-		if agent.UserID != user.ID {
-			http.Error(w, "you do not own that agent", http.StatusForbidden)
+		if err != nil || agent.UserID != user.ID {
+			http.Error(w, "unknown or inaccessible agent", http.StatusBadRequest)
 			return
 		}
 		// No agent creation needed — drop straight into the code-
