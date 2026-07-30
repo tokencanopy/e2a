@@ -638,14 +638,33 @@ func (ua *UserAuth) HandleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ANTI-ENUMERATION INVARIANT: a missing agent and one owned by another
+	// account MUST be indistinguishable — same status, same body. This route
+	// needs only a dashboard session, and the address comes from the URL, so
+	// a split response lets any signed-up user probe arbitrary addresses and
+	// map other accounts' inboxes. Same invariant as resolveOwnedAgent
+	// (internal/httpapi/operations.go), the WebSocket handshake, and
+	// HandleAgentActivity below; GetAgentByEmail is NOT user-scoped, so the
+	// ownership check has to be explicit here.
 	agent, err := ua.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil || agent.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
 
 	if err := ua.store.SoftDeleteAgent(r.Context(), agent.ID, user.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		// Ownership is already established above, so this is not an
+		// enumeration path — but never echo err.Error() here: the store's
+		// message names the ownership distinction ("agent not found or not
+		// owned by user") and would reintroduce the leak verbatim.
+		// ErrAgentNotFound at this point means a lost race (the agent was
+		// trashed between the read and the write), which is a genuine 404.
+		if errors.Is(err, identity.ErrAgentNotFound) {
+			http.Error(w, "agent not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("[dashboard] soft-delete agent failed: %v", err)
+		http.Error(w, "failed to delete agent", http.StatusInternalServerError)
 		return
 	}
 
@@ -680,8 +699,14 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ANTI-ENUMERATION INVARIANT: see HandleDeleteAgent above — a missing
+	// agent and one owned by another account must be indistinguishable. The
+	// check has to sit here, before the field-parsing branches: an empty PUT
+	// against a foreign agent would otherwise fall through to the "no
+	// recognized fields" 400 while a nonexistent one 404s, which is the same
+	// oracle by a different route.
 	agnt, err := ua.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil || agnt.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
@@ -701,8 +726,23 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		if req.HITLExpirationAction != nil {
 			action = *req.HITLExpirationAction
 		}
-		if err := ua.store.UpdateAgentHITL(r.Context(), agnt.ID, user.ID, ttl, action); err != nil {
+		// Validate up front so the three error classes UpdateAgentHITL folds
+		// into one return value stay distinguishable HERE, where they map to
+		// different statuses. A config problem is the caller's fault (400)
+		// and its message is safe to echo — it describes the TTL/action, not
+		// ownership.
+		if err := identity.ValidateHITLConfig(ttl, action); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := ua.store.UpdateAgentHITL(r.Context(), agnt.ID, user.ID, ttl, action); err != nil {
+			// Past validation, the remaining cases are a store failure or a
+			// zero-row update (a lost race — the agent was removed between
+			// the ownership check and the write). Never echo err.Error():
+			// the zero-row message is "agent not found or not owned by
+			// user", which would leak the distinction the check above hides.
+			log.Printf("[dashboard] update agent HITL failed: %v", err)
+			http.Error(w, "failed to update agent", http.StatusInternalServerError)
 			return
 		}
 		touched = true
