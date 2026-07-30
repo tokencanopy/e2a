@@ -346,7 +346,7 @@ referenced from `messages.send` via `template_id`/`template_alias`.
 `client.contacts` manages the people an account corresponds with:
 `list`/`get`/`get_with_etag`/`create`/`update`/`delete` (account-scoped,
 optimistic concurrency via `if_match`), plus `import_`/`delete_import` for
-CSV-driven bulk upload. `client.contacts.outreach(email, ...)` and its
+structured-row bulk imports. `client.contacts.outreach(email, ...)` and its
 `get_outreach`/`get_outreach_with_etag`/`set_outreach`/`delete_outreach`
 counterparts track one agent's per-contact engagement (stage, next action,
 reply/suppression state) and may be driven by an agent-scoped credential.

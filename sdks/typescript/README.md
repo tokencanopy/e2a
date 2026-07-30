@@ -296,10 +296,10 @@ referenced from `messages.send` via `template_id`/`template_alias`.
 `client.contacts` manages the people an account corresponds with:
 `list`/`get`/`getWithETag`/`create`/`update`/`delete` (account-scoped,
 optimistic concurrency via `ifMatch`), plus `import`/`deleteImport` for
-CSV-driven bulk upload. `client.contacts.outreach(address, params)` and its
-`get`/`set`/`delete` counterparts track one agent's per-contact engagement
-(stage, next action, reply/suppression state) and may be driven by an
-agent-scoped credential.
+structured-row bulk imports. `client.contacts.outreach(email, params)` and its
+`getOutreach`/`getOutreachWithETag`/`setOutreach`/`deleteOutreach` counterparts
+track one agent's per-contact engagement (stage, next action,
+reply/suppression state) and may be driven by an agent-scoped credential.
 
 ### `new E2AClient(options?)`
 

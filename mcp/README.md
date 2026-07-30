@@ -219,7 +219,7 @@ inert — it records identity and enrolls outreach without sending anything.
 | Tool | Description |
 | --- | --- |
 | `list_contacts` / `get_contact` | List account contacts (filter by provenance/import batch/creation window) or fetch one by address. |
-| `create_contact` / `update_contact` / `delete_contact` | Create, partially update (`etag`-guarded via `if_match`), or delete a contact's identity. Deleting a contact does not remove suppressions. |
+| `create_contact` / `update_contact` / `delete_contact` | Create, partially update (`etag`-guarded via `if_match`), or delete a contact's identity and all of its per-agent outreach rows. Deleting a contact does not remove suppressions. |
 | `import_contacts` | Bulk-import contacts from rows, optionally enrolling them into an agent's outreach. |
 | `delete_contact_import` | Reverse an import batch, removing untouched contacts and the enrolments it created. |
 | `list_outreach_contacts` / `get_outreach_contact` | List or fetch the contacts an agent is working, with server-derived reply/delivery facts. |
