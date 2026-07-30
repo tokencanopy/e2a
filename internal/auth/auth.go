@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"golang.org/x/oauth2"
@@ -647,6 +648,14 @@ func (ua *UserAuth) HandleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// HandleAgentActivity below; GetAgentByEmail is NOT user-scoped, so the
 	// ownership check has to be explicit here.
 	agent, err := ua.store.GetAgentByEmail(r.Context(), email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// A store failure collapses into the same 404 as every other case —
+		// the caller must not learn the difference — but it must not vanish:
+		// without this, a database outage presents as "every agent 404s",
+		// including the caller's own, with nothing in the logs. Omits the
+		// address, which is caller-supplied and may name a third party.
+		log.Printf("[dashboard] agent lookup failed (delete): %v", err)
+	}
 	if err != nil || agent.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -706,6 +715,11 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// recognized fields" 400 while a nonexistent one 404s, which is the same
 	// oracle by a different route.
 	agnt, err := ua.store.GetAgentByEmail(r.Context(), email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// See HandleDeleteAgent: collapse for the caller, but stay visible
+		// to the operator. Address deliberately omitted.
+		log.Printf("[dashboard] agent lookup failed (update): %v", err)
+	}
 	if err != nil || agnt.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -736,11 +750,18 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := ua.store.UpdateAgentHITL(r.Context(), agnt.ID, user.ID, ttl, action); err != nil {
-			// Past validation, the remaining cases are a store failure or a
-			// zero-row update (a lost race — the agent was removed between
-			// the ownership check and the write). Never echo err.Error():
-			// the zero-row message is "agent not found or not owned by
-			// user", which would leak the distinction the check above hides.
+			// Past validation, the remaining cases are a zero-row update and
+			// a store failure. Zero rows is a lost race — the agent went away
+			// between the ownership check and the write — which is a 404, not
+			// a server fault; mapping it to 500 would page on ordinary
+			// concurrency. Matches HandleDeleteAgent above.
+			if errors.Is(err, identity.ErrAgentNotFound) {
+				http.Error(w, "agent not found", http.StatusNotFound)
+				return
+			}
+			// Never echo err.Error() on the remaining path: the store's
+			// zero-row text names the ownership distinction the check above
+			// exists to hide.
 			log.Printf("[dashboard] update agent HITL failed: %v", err)
 			http.Error(w, "failed to update agent", http.StatusInternalServerError)
 			return

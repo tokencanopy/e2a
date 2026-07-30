@@ -294,7 +294,14 @@ func TestHandleUpdateAgent_NotEnumerable(t *testing.T) {
 		return w.Code, w.Body.String()
 	}
 
-	for _, body := range []string{`{}`, `{"hitl_ttl_seconds":3600}`} {
+	// The invalid-config body is the one that pins the ownership check's
+	// PLACEMENT. With the check above ValidateHITLConfig (correct), a foreign
+	// agent 404s like a nonexistent one. Move the check below validation — a
+	// plausible "validate input early" refactor — and this body alone
+	// reopens the oracle: the foreign agent returns 400 with the validation
+	// message while the nonexistent one still 404s. The two valid bodies
+	// cannot tell those orderings apart.
+	for _, body := range []string{`{}`, `{"hitl_ttl_seconds":3600}`, `{"hitl_ttl_seconds":-1}`} {
 		existsStatus, existsBody := probe("agent%40upd-enum-foreign.example.com", body)
 		missingStatus, missingBody := probe("agent%40upd-enum-nowhere.example.com", body)
 
