@@ -70,8 +70,9 @@ async with AsyncE2AClient(api_key=os.environ["E2A_API_KEY"]) as client:
 | `agent.suppression_added` | A recipient was suppressed for one exact sending agent through managed unsubscribe or the management API | Best-effort; **beta** |
 | `domain.sending_verified` | A domain's async SES sending identity reached the verified terminal state | Best-effort |
 | `domain.sending_failed` | A domain's async SES sending identity reached a failed terminal state | Best-effort |
+| `contact.due` | An outreach engagement's `next_action_at` passed, waking an agent that is not running | **At-least-once**; **beta** |
 
-The review-hold + screening events (`email.flagged`, `email.blocked`, `email.review_requested`, `email.review_approved`, `email.review_rejected`) and `agent.suppression_added` are **beta** — their payloads may change before they are declared stable.
+The review-hold + screening events (`email.flagged`, `email.blocked`, `email.review_requested`, `email.review_approved`, `email.review_rejected`), `agent.suppression_added`, and `contact.due` are **beta** — their payloads may change before they are declared stable.
 
 One `email.blocked` asymmetry to know: an **outbound** gate-block refuses the send outright, so no message row exists — its `data.message_id` is a stable rowless soft-ref (`msgblk_…`), the event's top-level `message_id` is absent, and `GET /v1/events?message_id=…` cannot match it (filter by `type` + `agent_email`, or by `conversation_id`, instead). **Inbound** blocks are accept-then-quarantine, reference a real message, and filter normally.
 
@@ -164,6 +165,7 @@ beta event types must still parse. The stable mapping is:
 | `domain.sending_failed` | `DomainSendingFailedData` | `domain`, `sending_status` | `reason` |
 | `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (`bounce` \| `complaint`) | `reason`, `message_id` |
 | `agent.suppression_added` (**beta**) | `AgentSuppressionAddedData` | `agent_email`, `address`, `source` (`unsubscribe` \| `manual`) | — |
+| `contact.due` (**beta**) | — (untyped, built in `internal/contactdue`) | `agent_email`, `address`, `stage`, `next_action_at`, `replied`, `outbound_count`, `contact` (`address`, `display_name`, `metadata`) | `last_outbound_at`, `last_conversation_id` |
 
 Notes:
 
