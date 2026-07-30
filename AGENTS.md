@@ -277,7 +277,7 @@ manually on every API change even though the template won't remind you.
   definite configuration failure). Add new codes, never renumber.
 - **MCP server** (`mcp/`): inbox tools over the REST API; hosted HTTP
   transport (image `ghcr.io/tokencanopy/e2a-mcp-http`). **npm publishing is
-  retired** (`@e2a/mcp-server` frozen at 0.4.0) — do not configure a trusted
+  retired** (`@e2a/mcp-server` frozen at 0.5.0) — do not configure a trusted
   publisher.
 - **Web** (`web/`): Next.js 16 static export; dev rewrites `/api/*` to
   :8080; consumes `@e2a/ui` via a `file:` dep, so `design-system/dist/` is
