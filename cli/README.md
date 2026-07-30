@@ -237,8 +237,9 @@ canonical lifecycle page as JSON).
 
 ### `e2a contacts`
 
-Manage account-level contacts (identity + suppression) and per-agent outreach
-state (requires an account-scoped key, except `outreach`, which is agent-scoped).
+Manage account-level contact identity and per-agent outreach state, with
+suppression visibility. Contact identity operations require account scope;
+`outreach` also supports an agent-scoped credential for its bound inbox.
 
 ```bash
 e2a contacts list --source import --limit 50 --json
@@ -253,6 +254,9 @@ e2a contacts outreach get alice@example.com --agent bot@acme.com
 e2a contacts outreach set alice@example.com --agent bot@acme.com --stage replied --next-action clear
 e2a contacts outreach delete alice@example.com --agent bot@acme.com
 ```
+
+`contacts delete` removes the account contact and all of its per-agent outreach
+rows; suppression and consent records survive.
 
 `list`/`outreach list` flags: `--source` (`import`/`manual`/`inbound`),
 `--import-batch`, `--created-after`/`--created-before` (list) or

@@ -229,7 +229,7 @@ Authenticate either with **OAuth 2.1** (add e2a as a connector and authorize in 
 
 The toolset covers the full agent loop — inbox (`list_messages`, `get_message`, `get_attachment`, `list_conversations`, `get_conversation`, `update_message_labels`), outbound (`send_message`, `reply_to_message`, `forward_message`), HITL review (`list_reviews`, `get_review`, `approve_review`, `reject_review`), plus agent/domain/webhook management. Inbound is consumed by polling (`list_messages`) or a `create_webhook` subscription.
 
-The hosted server is the primary path; npm publishing of `@e2a/mcp-server` is retired (frozen at `0.4.0`). See [mcp/README.md](mcp/README.md) for per-framework setup and the full tool reference.
+The hosted server is the primary path; npm publishing of `@e2a/mcp-server` is retired (frozen at `0.5.0`). See [mcp/README.md](mcp/README.md) for per-framework setup and the full tool reference.
 
 ## CLI
 
@@ -251,7 +251,7 @@ domains/webhooks in the **web dashboard**.
 | `e2a agents list\|create\|get` | Manage inboxes (requires an account-scoped key) |
 | `e2a keys create\|list\|delete` | Mint, list, and revoke API keys (requires an account-scoped key) |
 | `e2a protection get\|set` | Show or update an agent's HITL screening/review config |
-| `e2a contacts list\|get\|create\|update\|delete\|import\|outreach ...` | Manage account contacts, suppression, and per-agent outreach state |
+| `e2a contacts list\|get\|create\|update\|delete\|import\|outreach ...` | Manage account contacts and per-agent outreach state, with suppression visibility |
 | `e2a send` / `e2a reply` | Send an email as the agent, or reply in-thread |
 | `e2a messages list\|get` | List or fetch messages for an agent |
 | `e2a listen --agent <email>` | Stream inbound email for an agent over WebSocket (real-time; `--json` for raw, `--forward <url>` to bridge to a local HTTP handler) |

@@ -213,8 +213,9 @@ The people an account corresponds with (`list_contacts` / `get_contact` /
 `create_contact` / `update_contact` / `delete_contact`, admin/account-scoped)
 and one agent's per-contact outreach state — stage, next action, reply/
 suppression facts (`list_outreach_contacts` / `get_outreach_contact` /
-`set_outreach_contact` / `delete_outreach_contact`, agent-scoped). Import is
-inert — it records identity and enrolls outreach without sending anything.
+`set_outreach_contact` / `delete_outreach_contact`, available to account scope
+or an agent-scoped credential for its bound inbox). Import is inert — it
+records identity and enrolls outreach without sending anything.
 
 | Tool | Description |
 | --- | --- |

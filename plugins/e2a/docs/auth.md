@@ -36,9 +36,9 @@ Both are presented as `Authorization: Bearer <credential>`.
 
 If you are an MCP client, you do not need an API key. Run the standard discovery + DCR + authorization-code flow:
 
-1. **Discover** — `GET https://api.e2a.dev/.well-known/oauth-authorization-server`. Read `registration_endpoint`, `authorization_endpoint`, `token_endpoint`. Scope to request: `agent` (add `account` for workspace-admin access).
-2. **Register** — `POST` your client metadata to `registration_endpoint` (RFC 7591). You'll receive a `client_id`. Token endpoint auth method is `none` — you are a public client.
-3. **Authorize** — redirect the user to `authorization_endpoint` with `response_type=code`, your `client_id`, `redirect_uri`, `scope=agent`, and PKCE S256 (`code_challenge`, `code_challenge_method=S256`). The user logs in to e2a and consents.
+1. **Discover** — `GET https://api.e2a.dev/.well-known/oauth-authorization-server`. Read `registration_endpoint`, `authorization_endpoint`, `token_endpoint`, and `scopes_supported` (`agent` and `account`).
+2. **Register** — `POST` your client metadata to `registration_endpoint` (RFC 7591), including `scope: "agent"` for agent-only access or `scope: "agent account"` to make workspace-admin consent eligible. Account scope is eligible only when every registered redirect URI is HTTPS or an HTTP loopback URI. Omitting `scope` registers the full ceiling the redirect URIs allow. You'll receive a `client_id`; token endpoint auth method is `none` because you are a public client.
+3. **Authorize** — redirect the user to `authorization_endpoint` with `response_type=code`, your `client_id`, `redirect_uri`, a space-delimited scope matching the registered access (`scope=agent` or `scope=agent account`, query-encoded), and PKCE S256 (`code_challenge`, `code_challenge_method=S256`). The user logs in and chooses the exact grant.
 4. **Token exchange** — `POST` `code` + `code_verifier` to `token_endpoint`. You receive `access_token` (prefix `ate2a_…`) and `refresh_token`.
 5. **Use** — present the access token as a bearer; refresh with the refresh token before `expires_in`.
 
