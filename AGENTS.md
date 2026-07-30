@@ -211,7 +211,10 @@ Key packages, grouped (name — a few words each):
 - Webhooks & jobs: `webhook`/`webhookdelivery`/`webhookpub` subscriptions,
   durable fan-out, SSRF-guarded HTTP POST delivery+retry; `eventpayload`
   typed webhook `data` payloads; `jobs` River-backed durable job runtime
-  (Postgres mandatory); `janitor` periodic TTL sweeps (trash, expired holds).
+  (Postgres mandatory); `janitor` periodic TTL sweeps (trash, expired holds);
+  `contactdue` outreach wake-up sweep — emits `contact.due` for engagements
+  past `next_action_at`, on its own River queue/interval, deliberately
+  separate from the janitor's cleanup cadence.
 - Send guards & accounting: `idempotency` `Idempotency-Key` storage+replay;
   `unsubscribe` opaque per-recipient unsubscribe tokens/URLs
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
@@ -291,8 +294,8 @@ manually on every API change even though the template won't remind you.
   runs everything with `-tags integration -p 4` (safe: per-package test DBs). CI additionally race-checks
   `./internal/sendramp` and `./internal/outboundsend` with `-race`.
 - **Coverage ratchet**: `.testcoverage.yml` sets per-package floors (currently
-  webhook, webhookpub, webhookdelivery, httpapi, outboundsend, sendramp,
-  inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
+  webhook, webhookpub, webhookdelivery, httpapi, contactdue, outboundsend,
+  sendramp, inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
   Ratchet floors UP, never down. `make cover-check` runs the same gate CI
   runs (`vladopajic/go-test-coverage`).
 - **Contract tests**: TS and Python SDK contract tests run against
