@@ -50,3 +50,10 @@ Two e2a message records representing one physical email in the same mailbox,
 such as Sent and Inbox records for a self-send or a platform test message that
 returns through SMTP. Twins share a thread but do not have a reply-parent
 relationship.
+
+## Legacy threadless message
+
+A message created before server-owned thread assignment was enabled, or during
+a rollback window, whose `thread_id` remains null. e2a does not bulk-backfill
+these rows. A new message may lazily assign one exact old parent while replying
+to it, but does not reconstruct that parent's earlier conversation graph.
