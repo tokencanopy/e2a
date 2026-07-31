@@ -712,6 +712,132 @@ threads, and one email thread can contain several conversation IDs.
 - `GET …/conversations/{id}` — one application conversation with participants,
   labels, and member messages.
 
+### Contacts & Outreach (`/v1/contacts`, `/v1/agents/{email}/contacts`) (beta)
+
+Contacts are durable **account-level identity** for the people the account
+corresponds with; an **engagement** is one agent's outreach state for working a
+contact. e2a stores the state and derives real send/reply facts from mail
+activity, but it never composes or sends a follow-up on its own. The whole
+surface is **beta** and may change before it is declared stable.
+
+**Scope split:** the account-level contact operations require an
+account-scoped credential. The per-agent engagement operations additionally
+accept an **agent-scoped** credential for its own inbox — that is the
+outreach loop a single sending agent drives.
+
+Account-level contact identity:
+
+- `GET /v1/contacts` — list contacts, newest first, with cursor pagination
+  and filters: `source` (provenance — open set; known values `import`,
+  `manual`, `inbound`; it never changes after creation), `import_batch_id`,
+  `created_after` / `created_before`.
+- `POST /v1/contacts` — create one contact. The address is canonicalized
+  before storage, so a display-name form (`"A. Partner <partner@fund.vc>"`)
+  and the bare address are the same contact — a second create returns `409`.
+  Honors `Idempotency-Key`.
+- `GET /v1/contacts/{address}` — fetch one contact; returns an **`ETag`** for
+  use with `If-Match` on a later update.
+- `PATCH /v1/contacts/{address}` — partial update (`display_name`,
+  `metadata`); omitted fields are left unchanged, and `metadata` is replaced
+  wholesale when present. Address and provenance are immutable. An optional
+  `If-Match` from a prior read rejects a stale edit with
+  `412 precondition_failed`.
+- `DELETE /v1/contacts/{address}?confirm=DELETE` — remove a contact (and its
+  per-agent engagements). **Suppressions are not affected** — consent
+  outlives the contact record, so deleting a contact never makes a
+  previously-blocked address sendable.
+- `POST /v1/contacts/import` — bulk import, **at most 1,000 rows per
+  request** (paginate client-side above that). Returns a `batch_id` plus a
+  **per-row outcome** (`created | updated | skipped | failed`, with a
+  machine-branchable `code` and a `suppressed` flag), so one malformed row
+  never rejects the rest. Import is **inert**: it records identity and sends
+  nothing; suppressed addresses are still recorded (flagged) so the counts
+  stay honest. `on_conflict` is `merge` (default — refreshes `display_name`
+  and `metadata`, leaves provenance and everything hanging off the contact
+  untouched) or `skip`. Optional `agent_email` (+ initial `stage`) enrolls
+  every valid row with that live owned agent in the same transaction without
+  overwriting existing engagement state. Honors `Idempotency-Key` — strongly
+  recommended, since a keyed retry of a timed-out upload replays the original
+  `batch_id` and per-row results instead of importing twice.
+- `DELETE /v1/contacts/imports/{batch_id}?confirm=DELETE` — **reverse an
+  import.** Reversal is deliberately defensive: `import_batch_id` is origin
+  provenance (it records which batch *created* a row and never moves — a
+  later merge re-import keeps it pointing at the original batch), so the tag
+  alone cannot distinguish an untouched import artifact from state the
+  account has since built on. A batch-created row is therefore removed
+  **only when it is verifiably untouched**:
+  - an **engagement** is removed only if it has never been mutated since the
+    import (`updated_at` still equals `created_at`), carries no derived wire
+    activity (no first/last outbound, no last inbound, no last conversation,
+    no delivered due notification), and has no message history between its
+    agent and the address;
+  - a **contact** is removed only if it has never been mutated since the
+    import, has no message history (as sender or as a To/Cc/Bcc recipient),
+    and has **no surviving engagement** — including one created independently
+    of the import. Batch-created engagements are deleted first, so any
+    engagement still present is live outreach state the reversal must not
+    destroy.
+
+  Everything else is retained, and pre-existing outreach and suppressions are
+  never affected. The response reports each category;
+  `contacts_deleted + contacts_retained` accounts for every batch-created
+  contact that still exists at reversal time.
+
+Per-agent outreach state:
+
+- `GET /v1/agents/{email}/contacts` — list the contacts this agent is
+  working, with cursor pagination and filters: `stage`, `replied`,
+  `suppressed`, `next_action_before`, `last_outbound_before`. For a
+  follow-up sweep combine `replied=false`, `next_action_before=<now>`, and
+  `last_outbound_before=<stale cutoff>` — `last_outbound_at` is
+  server-maintained, so the last filter excludes anyone just contacted even
+  when the caller's own state write was lost (the duplicate-send safety net).
+- `GET /v1/agents/{email}/contacts/{address}` — one engagement; returns an
+  **`ETag`** for `If-Match` on a later upsert.
+- `PUT /v1/agents/{email}/contacts/{address}` — enroll a contact in this
+  agent's outreach (creates the contact if needed; returns `201` on first
+  enrolment, `200` on update) or update the **caller-owned** fields.
+  Omitted fields are left unchanged, so advancing the stage after a send
+  does not disturb the schedule. An optional `If-Match` makes the write
+  conditional (the engagement must already exist and still match, else
+  `412`); a conditional request never creates.
+- `DELETE /v1/agents/{email}/contacts/{address}?confirm=DELETE` — un-enroll.
+  The contact itself survives (identity is account-level and other agents may
+  still be working them) and suppressions are untouched — un-enrolling is not
+  consent and never restores sendability.
+
+**Caller-owned vs server-derived engagement fields.** The caller owns
+`stage` (opaque — there is no server-side state machine, any string is
+valid), `next_action_at` (when the caller wants to act next; e2a does not
+act on it), and `metadata`. Everything else is **server-owned and derived
+from real mail activity** — writes to these fields are rejected:
+`replied` (computed as `last_inbound_at > first_outbound_at`, i.e. "replied
+to us", not "has ever written"), `first_outbound_at` / `last_outbound_at` /
+`last_inbound_at`, `outbound_count` (successfully submitted sends since
+enrollment) / `inbound_count` (DMARC-authenticated inbound since enrollment —
+spoofed, held, blocked, and pre-enrollment messages are excluded),
+`last_conversation_id`, and the suppression mirror (`suppressed`,
+`suppression_source`, `suppression_reason` — the same state the send path
+enforces).
+
+**`contact.due` behavior.** When an engagement's `next_action_at` passes, a
+periodic sweep emits the beta, at-least-once `contact.due` event (see
+[events.md](events.md)). It is a **notification, not a send and not an
+execution mechanism**: e2a sends no mail and starts no agent. Only a deployed
+webhook receiver (or an events-log poller) can react to it and wake an agent
+runtime — it does not start an MCP, WebSocket, Claude Code, or Codex session
+by itself. To have e2a submit an already-composed message at a future time,
+use the separate scheduled-sending capability (`send_at`, above).
+
+**Metadata bounds** (contact and engagement `metadata`, and each import
+row's `metadata`): a **flat** JSON object (no nested objects/arrays) with at
+most **50 keys**, each key at most **128 bytes**, each value at most
+**4 KiB**, and the whole encoded object at most **16 KiB**. `metadata` is
+opaque to e2a — never interpreted, only stored and returned. An import row
+exceeding the bounds fails on its own without affecting the rest of the
+batch. Contact addresses are at most 320 Unicode code points and accept a
+bare address or an RFC 5322 mailbox form.
+
 ### Reviews (`/v1/reviews`) (beta)
 
 The unified review queue: every message held in `pending_review` across the

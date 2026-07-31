@@ -70,9 +70,18 @@ async with AsyncE2AClient(api_key=os.environ["E2A_API_KEY"]) as client:
 | `agent.suppression_added` | A recipient was suppressed for one exact sending agent through managed unsubscribe or the management API | Best-effort; **beta** |
 | `domain.sending_verified` | A domain's async SES sending identity reached the verified terminal state | Best-effort |
 | `domain.sending_failed` | A domain's async SES sending identity reached a failed terminal state | Best-effort |
-| `contact.due` | An outreach engagement's `next_action_at` passed, waking an agent that is not running | **At-least-once**; **beta** |
+| `contact.due` | An outreach engagement's `next_action_at` passed — a notification that the contact is due for attention | **At-least-once**; **beta** |
 
 The review-hold + screening events (`email.flagged`, `email.blocked`, `email.review_requested`, `email.review_approved`, `email.review_rejected`), `agent.suppression_added`, and `contact.due` are **beta** — their payloads may change before they are declared stable.
+
+`contact.due` is a notification, not an execution mechanism: e2a sends no mail
+and starts no agent when it fires. Only a **deployed webhook receiver** (or a
+process polling the events log) can react to it and wake an agent runtime — it
+does not start an MCP, WebSocket, Claude Code, or Codex session by itself.
+Interactive clients work the due queue when a user starts or resumes them; to
+have e2a itself submit an already-composed message at a future time, use the
+separate beta scheduled-sending capability (`send_at` — see
+[api.md](api.md#messages-v1agentsemailmessages)).
 
 One `email.blocked` asymmetry to know: an **outbound** gate-block refuses the send outright, so no message row exists — its `data.message_id` is a stable rowless soft-ref (`msgblk_…`), the event's top-level `message_id` is absent, and `GET /v1/events?message_id=…` cannot match it (filter by `type` + `agent_email`, or by `conversation_id`, instead). **Inbound** blocks are accept-then-quarantine, reference a real message, and filter normally.
 

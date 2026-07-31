@@ -46,6 +46,8 @@ What you get on top of bare SMTP:
 - **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening)
 - **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
 - **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
+- **Contacts & outreach (beta)** — account-level contact identity (CRUD + bulk import with safe reversal) and per-agent outreach state with server-derived reply/delivery facts, plus the `contact.due` due-queue notification event → [docs/api.md](docs/api.md#contacts--outreach-v1contacts-v1agentsemailcontacts-beta)
+- **Scheduled sending (beta)** — `send_at` on send/reply/forward defers submission up to 90 days ahead; a scheduled send is durable acceptance (`status=scheduled`) and can be canceled by trashing the message before submission
 
 ## Quickstart
 
