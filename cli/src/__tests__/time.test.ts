@@ -58,4 +58,17 @@ describe("parseRfc3339", () => {
     expect(parseRfc3339("2028-02-29T09:00:00Z", "--x").toISOString()).toBe("2028-02-29T09:00:00.000Z");
     expect(() => parseRfc3339("2027-02-29T09:00:00Z", "--x")).toThrow("process.exit");
   });
+
+  it("matches the MCP/zod rule on its three edge divergences", async () => {
+    const { parseRfc3339 } = await import("../time.js");
+    // Years 0000–0099 are valid RFC 3339 and zod accepts them; Date.UTC would
+    // map them to 19xx, so the round-trip must not use it.
+    expect(parseRfc3339("0026-08-01T09:00:00Z", "--x").getUTCFullYear()).toBe(26);
+    // A fraction requires seconds (RFC 3339 time-second is not optional when
+    // time-secfrac is present).
+    expect(() => parseRfc3339("2026-08-01T09:00.500Z", "--x")).toThrow("process.exit");
+    // Sub-millisecond fractions truncate like server-side parsing; rounding
+    // would roll .9999 into the next second.
+    expect(parseRfc3339("2026-08-01T09:00:00.9999Z", "--x").toISOString()).toBe("2026-08-01T09:00:00.999Z");
+  });
 });

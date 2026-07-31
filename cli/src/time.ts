@@ -6,7 +6,7 @@ import { EXIT, fail } from "./exit.js";
 // across timezones. Shared by scheduled sending (--send-at) and the contact
 // timestamp filters so every CLI time argument follows the same rule.
 const RFC3339_WITH_OFFSET =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Parse a CLI time argument into a Date, rejecting date-only, offsetless, and
@@ -33,14 +33,20 @@ export function parseRfc3339(value: string, flag: string, detail?: string): Date
   const [, yearS, monthS, dayS, hourS, minuteS, secondS, fracS, offsetS] = m;
   const year = Number(yearS), month = Number(monthS), day = Number(dayS);
   const hour = Number(hourS), minute = Number(minuteS), second = secondS === undefined ? 0 : Number(secondS);
-  const fracMs = fracS === undefined ? 0 : Math.round(Number(fracS) * 1000);
+  // Truncate, not round: server-side parsing keeps millisecond precision, so
+  // rounding .9999 up would roll the instant a full second.
+  const fracMs = fracS === undefined ? 0 : Math.trunc(Number(fracS) * 1000);
   if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
     return invalid("field out of range");
   }
   // Component round-trip in UTC catches the impossible dates (Feb 30, Apr 31)
   // that the Date constructor would silently roll into the next month.
-  const base = Date.UTC(year, month - 1, day, hour, minute, second);
-  const rt = new Date(base);
+  // setUTCFullYear rather than Date.UTC: Date.UTC maps years 0–99 to 19xx,
+  // which would falsely reject them.
+  const rt = new Date(0);
+  rt.setUTCFullYear(year, month - 1, day);
+  rt.setUTCHours(hour, minute, second, 0);
+  const base = rt.getTime();
   if (
     rt.getUTCFullYear() !== year || rt.getUTCMonth() !== month - 1 || rt.getUTCDate() !== day ||
     rt.getUTCHours() !== hour || rt.getUTCMinutes() !== minute || rt.getUTCSeconds() !== second
