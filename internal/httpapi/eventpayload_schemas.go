@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,9 +38,12 @@ type EventEnvelope struct {
 // docs/events.md) references the schemas DESCRIPTIVELY — there is
 // intentionally no oneOf/discriminator on the envelope.
 //
-// Beta events are generally open/unstable. AgentSuppressionAddedData is the
-// one documented beta payload: publishing its current shape improves generated
-// SDK discoverability while x-stability-level keeps it outside the GA freeze.
+// Beta events are generally open/unstable. eventpayload.BetaEvents is the
+// documented subset: publishing their current shape improves generated-SDK
+// discoverability while x-stability-level keeps them outside the GA freeze.
+// They are published under x-e2a-beta-event-data-schemas, never under the
+// stable x-e2a-event-data-schemas mapping, so a client cannot mistake a beta
+// payload for a frozen one.
 func (s *Server) registerEventPayloadSchemas() {
 	registry := s.API.OpenAPI().Components.Schemas
 	names := make([]string, 0, len(eventpayload.StableEvents))
@@ -70,16 +74,24 @@ func (s *Server) registerEventPayloadSchemas() {
 		openResponseComponent(registry, name, seen)
 	}
 
-	betaSchema := registry.Schema(reflect.TypeOf(eventpayload.AgentSuppressionAddedData{}), true, "AgentSuppressionAddedData")
-	if betaSchema == nil || betaSchema.Ref != "#/components/schemas/AgentSuppressionAddedData" {
-		panic(fmt.Sprintf("event payload schema AgentSuppressionAddedData registered under an unexpected ref: %+v", betaSchema))
+	for _, event := range eventpayload.BetaEvents {
+		betaSchema := registry.Schema(reflect.TypeOf(event.Payload), true, event.SchemaName)
+		if betaSchema == nil || betaSchema.Ref != "#/components/schemas/"+event.SchemaName {
+			panic(fmt.Sprintf("event payload schema %s registered under an unexpected ref: %+v", event.SchemaName, betaSchema))
+		}
+		// Snapshot first so the stability marker lands on the payload AND on
+		// the components only it introduces (ContactDueContact), while a
+		// component already reachable from a STABLE payload is left alone —
+		// sharing a schema with a frozen event must not un-freeze it.
+		introduced := newlyReachable(registry, event.SchemaName, seen)
+		for _, name := range introduced {
+			betaComponent := registry.Map()[name]
+			if betaComponent.Extensions == nil {
+				betaComponent.Extensions = map[string]any{}
+			}
+			betaComponent.Extensions["x-stability-level"] = "beta"
+		}
 	}
-	openResponseComponent(registry, "AgentSuppressionAddedData", seen)
-	betaComponent := registry.Map()["AgentSuppressionAddedData"]
-	if betaComponent.Extensions == nil {
-		betaComponent.Extensions = map[string]any{}
-	}
-	betaComponent.Extensions["x-stability-level"] = "beta"
 
 	envelope := registry.Schema(reflect.TypeOf(EventEnvelope{}), true, "EventEnvelope")
 	if envelope == nil || envelope.Ref != "#/components/schemas/EventEnvelope" {
@@ -103,9 +115,31 @@ func (s *Server) registerEventPayloadSchemas() {
 		mapping[event.Type] = "#/components/schemas/" + event.SchemaName
 	}
 	data.Extensions["x-e2a-event-data-schemas"] = mapping
-	data.Extensions["x-e2a-beta-event-data-schemas"] = map[string]any{
-		"agent.suppression_added": "#/components/schemas/AgentSuppressionAddedData",
+	betaMapping := make(map[string]any, len(eventpayload.BetaEvents))
+	for _, event := range eventpayload.BetaEvents {
+		betaMapping[event.Type] = "#/components/schemas/" + event.SchemaName
 	}
+	data.Extensions["x-e2a-beta-event-data-schemas"] = betaMapping
+}
+
+// newlyReachable opens a response component and returns, in sorted order, the
+// component names this call was the FIRST to reach. Callers use it to stamp a
+// marker on exactly the components a root introduces, without re-stamping ones
+// an earlier root already owns.
+func newlyReachable(registry huma.Registry, name string, seen map[string]bool) []string {
+	before := make(map[string]bool, len(seen))
+	for visited := range seen {
+		before[visited] = true
+	}
+	openResponseComponent(registry, name, seen)
+	introduced := make([]string, 0, len(seen)-len(before))
+	for visited := range seen {
+		if !before[visited] {
+			introduced = append(introduced, visited)
+		}
+	}
+	sort.Strings(introduced)
+	return introduced
 }
 
 // registerStandaloneSchemaExports anchors public component schemas that are
@@ -130,8 +164,10 @@ func (s *Server) registerStandaloneSchemaExports() {
 			"$ref": "#/components/schemas/" + event.SchemaName,
 		}
 	}
-	exported["AgentSuppressionAddedData"] = map[string]any{
-		"$ref": "#/components/schemas/AgentSuppressionAddedData",
+	for _, event := range eventpayload.BetaEvents {
+		exported[event.SchemaName] = map[string]any{
+			"$ref": "#/components/schemas/" + event.SchemaName,
+		}
 	}
 	for _, entry := range errorCodeCatalog {
 		if entry.DetailsSchema != "" {

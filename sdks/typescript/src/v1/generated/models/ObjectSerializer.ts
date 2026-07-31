@@ -11,6 +11,8 @@ export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
 export * from '../models/AttachmentView.js';
 export * from '../models/Authentication.js';
+export * from '../models/ContactDueContact.js';
+export * from '../models/ContactDueData.js';
 export * from '../models/ContactEngagementView.js';
 export * from '../models/ContactImportItemResult.js';
 export * from '../models/ContactImportResult.js';
@@ -167,6 +169,8 @@ import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { Authentication } from '../models/Authentication.js';
+import { ContactDueContact } from '../models/ContactDueContact.js';
+import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
 import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
 import { ContactImportResult } from '../models/ContactImportResult.js';
@@ -364,6 +368,8 @@ let typeMap: {[index: string]: any} = {
     "AttachmentMetaView": AttachmentMetaView,
     "AttachmentView": AttachmentView,
     "Authentication": Authentication,
+    "ContactDueContact": ContactDueContact,
+    "ContactDueData": ContactDueData,
     "ContactEngagementView": ContactEngagementView,
     "ContactImportItemResult": ContactImportItemResult,
     "ContactImportResult": ContactImportResult,

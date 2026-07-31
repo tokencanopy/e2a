@@ -38,6 +38,37 @@ MCP tool surface), see:
   often decoded to a space by clients/proxies, which silently corrupts
   plus-tagged addresses (`a+tag@x.com`). The official SDKs encode this for you;
   hand-rolled clients must do it themselves.
+- **Email-address limits.** Two independent bounds apply to address-bearing
+  request fields, and they count different things:
+  - The schema's `maxLength: 320` bounds the whole submitted **string** —
+    display name + address combined — in Unicode **code points**.
+  - SMTP's mailbox limits bound the parsed **addr-spec** in **octets** (UTF-8
+    bytes): the local part is at most **64 octets** and the whole
+    `local@domain` at most **254 octets**. They are enforced synchronously, at
+    the edge, on the send paths: a violating `to`/`cc`/`bcc` entry on
+    send/reply/forward is `400 invalid_recipient`, and a violating `reply_to`
+    is `400 invalid_request`.
+
+  The octet limits are the ones that surprise callers, because they are not the
+  320 the schema advertises: a long plus-addressed local part
+  (`orders+2026-07-30-region-eu-west-batch-000123@…`) or a non-ASCII SMTPUTF8
+  local part can pass `maxLength` and still be rejected — one emoji is four
+  octets but only one code point.
+- **`Location` on `201`.** Creates that mint an addressable resource return a
+  path-relative `Location`. Its path segments are percent-encoded **per
+  segment**, which legally leaves the sub-delimiters `@ + & = : $`
+  **unescaped**: `/v1/contacts/a.partner@fund.vc` is a valid, expected value,
+  and so is the fully-escaped `/v1/contacts/a.partner%40fund.vc`. Neither form
+  is promised. Do not string-compare the header against a URL you built
+  locally — to recover the resource key, **percent-decode the final path
+  segment**, then compare.
+- **`ETag` / `If-Match`.** Reads that support optimistic concurrency return an
+  `ETag`: a **strong** validator, currently rendered as a quoted 32-hex
+  character token (`"9f86d081884c7d65…"`). Treat it as **opaque** — never
+  parse it, derive it, or construct one. Store the received value and replay it
+  **verbatim** in a later `If-Match`. Any accepted write moves the validator,
+  so a stale one cannot match and the conditional write is rejected with
+  `412 precondition_failed`.
 - **Pagination.** List endpoints return `{ items, next_cursor }`; pass
   `next_cursor` back as `?cursor=…` to page forward. The SDKs auto-page.
 - **Idempotency.** Nine mutating operations honor an opt-in `Idempotency-Key`
@@ -317,6 +348,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   without `agent_email` remain account-wide.
   Interior schemas carry `x-stability-level: beta` in the OpenAPI document to
   mark that exemption machine-readably; the operation itself is stable.
+  The exported `Message` record is **not** the same shape as the live
+  `MessageView`, by design. It deliberately omits the beta `thread_id`: thread
+  identity is a server-owned read projection of e2a's mailbox-local reply
+  topology, not a fact about the user's data, and the same reasoning already
+  keeps it out of stored events and webhook payloads. It does carry the beta
+  `scheduled_at` (marked `x-stability-level: beta`, like its `MessageView`
+  sibling) because a scheduled-but-unsent message is genuinely the account's
+  own pending data.
   Each exported message carries `attachments` as the same typed
   `AttachmentMetaView` metadata (`{filename, content_type, size_bytes, index}`,
   `size_bytes` = decoded payload) the live API uses; the attachment **bytes**

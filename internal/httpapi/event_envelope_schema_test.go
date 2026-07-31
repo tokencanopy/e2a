@@ -83,7 +83,11 @@ func TestEventEnvelopeIsOpenAndMapped(t *testing.T) {
 	}
 }
 
-func TestEventEnvelopePublishesBetaAgentSuppressionPayload(t *testing.T) {
+// TestEventEnvelopePublishesBetaEventPayloads pins the beta half of the
+// contract: every catalogued beta payload is a real component, is marked beta
+// (so no client mistakes it for frozen), and is reachable from the envelope's
+// SEPARATE beta mapping — never from the stable one.
+func TestEventEnvelopePublishesBetaEventPayloads(t *testing.T) {
 	raw, err := json.Marshal(New(Deps{}).API.OpenAPI())
 	if err != nil {
 		t.Fatalf("render OpenAPI: %v", err)
@@ -96,25 +100,6 @@ func TestEventEnvelopePublishesBetaAgentSuppressionPayload(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parse OpenAPI: %v", err)
 	}
-	schema, ok := doc.Components.Schemas["AgentSuppressionAddedData"]
-	if !ok {
-		t.Fatal("AgentSuppressionAddedData component is missing")
-	}
-	if got := schema["x-stability-level"]; got != "beta" {
-		t.Fatalf("AgentSuppressionAddedData stability = %v, want beta", got)
-	}
-	if got := schema["x-stability"]; got != nil {
-		t.Fatalf("AgentSuppressionAddedData must use only the canonical stability marker, got x-stability=%v", got)
-	}
-	if stable := doc.Components.Schemas["DomainSuppressionAddedData"]; stable["x-stability-level"] != nil || stable["x-stability"] != nil {
-		t.Fatalf("DomainSuppressionAddedData must remain stable and unmarked, got %#v", stable)
-	}
-	props := schema["properties"].(map[string]any)
-	for _, name := range []string{"agent_email", "address", "source"} {
-		if _, ok := props[name]; !ok {
-			t.Errorf("AgentSuppressionAddedData.%s is missing", name)
-		}
-	}
 
 	envelope := doc.Components.Schemas["EventEnvelope"]
 	data := envelope["properties"].(map[string]any)["data"].(map[string]any)
@@ -122,8 +107,105 @@ func TestEventEnvelopePublishesBetaAgentSuppressionPayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("beta event mapping = %#v", data["x-e2a-beta-event-data-schemas"])
 	}
-	if got := mapping["agent.suppression_added"]; got != "#/components/schemas/AgentSuppressionAddedData" {
-		t.Errorf("agent.suppression_added mapping = %v", got)
+	if len(mapping) != len(eventpayload.BetaEvents) {
+		t.Errorf("beta mapping has %d entries, want %d", len(mapping), len(eventpayload.BetaEvents))
+	}
+	stableMapping, _ := data["x-e2a-event-data-schemas"].(map[string]any)
+
+	for _, event := range eventpayload.BetaEvents {
+		schema, ok := doc.Components.Schemas[event.SchemaName]
+		if !ok {
+			t.Errorf("%s component is missing", event.SchemaName)
+			continue
+		}
+		if got := schema["x-stability-level"]; got != "beta" {
+			t.Errorf("%s stability = %v, want beta", event.SchemaName, got)
+		}
+		if got := schema["x-stability"]; got != nil {
+			t.Errorf("%s must use only the canonical stability marker, got x-stability=%v", event.SchemaName, got)
+		}
+		if got := schema["additionalProperties"]; got != true {
+			t.Errorf("%s additionalProperties = %#v, want true (consumer-direction payloads stay additive)", event.SchemaName, got)
+		}
+		want := "#/components/schemas/" + event.SchemaName
+		if got := mapping[event.Type]; got != want {
+			t.Errorf("beta mapping[%s] = %v, want %q", event.Type, got, want)
+		}
+		if _, listed := stableMapping[event.Type]; listed {
+			t.Errorf("beta event %s must NOT appear in the stable x-e2a-event-data-schemas mapping", event.Type)
+		}
+	}
+
+	// A stable sibling must stay unmarked, or "beta" would carry no signal.
+	if stable := doc.Components.Schemas["DomainSuppressionAddedData"]; stable["x-stability-level"] != nil || stable["x-stability"] != nil {
+		t.Fatalf("DomainSuppressionAddedData must remain stable and unmarked, got %#v", stable)
+	}
+
+	for schemaName, properties := range map[string][]string{
+		"AgentSuppressionAddedData": {"agent_email", "address", "source"},
+		"ContactDueData":            {"agent_email", "address", "stage", "next_action_at", "replied", "outbound_count", "contact"},
+		"ContactDueContact":         {"address", "display_name", "metadata"},
+	} {
+		schema, ok := doc.Components.Schemas[schemaName]
+		if !ok {
+			t.Errorf("%s component is missing", schemaName)
+			continue
+		}
+		props, _ := schema["properties"].(map[string]any)
+		for _, name := range properties {
+			if _, ok := props[name]; !ok {
+				t.Errorf("%s.%s is missing", schemaName, name)
+			}
+		}
+	}
+
+	// ContactDueContact is introduced only by a beta payload, so it inherits
+	// the marker; a schema shared with a stable payload must not.
+	if got := doc.Components.Schemas["ContactDueContact"]["x-stability-level"]; got != "beta" {
+		t.Errorf("ContactDueContact stability = %v, want beta", got)
+	}
+	if got := doc.Components.Schemas["AttachmentMetaView"]["x-stability-level"]; got != nil {
+		t.Errorf("AttachmentMetaView is reachable from a stable payload and must stay unmarked, got %v", got)
+	}
+}
+
+// TestBetaEventFixturesValidateAgainstEnvelopeAndMappedData is the beta twin of
+// the stable fixture gate: the committed bytes must satisfy both the generic
+// envelope and the schema the beta mapping points at, so the published shape
+// and the emitted shape cannot drift apart.
+func TestBetaEventFixturesValidateAgainstEnvelopeAndMappedData(t *testing.T) {
+	server := New(Deps{})
+	registry := server.API.OpenAPI().Components.Schemas
+	envelope := registry.Map()["EventEnvelope"]
+	if envelope == nil {
+		t.Fatal("EventEnvelope component is missing")
+	}
+	for _, event := range eventpayload.BetaEvents {
+		for _, fixture := range []string{event.Fixture, event.MinimalFixture} {
+			if fixture == "" {
+				continue
+			}
+			fixture := fixture
+			t.Run(fixture, func(t *testing.T) {
+				raw, err := os.ReadFile(filepath.Join("..", "eventpayload", "testdata", fixture))
+				if err != nil {
+					t.Fatalf("read fixture: %v", err)
+				}
+				var decoded map[string]any
+				if err := json.Unmarshal(raw, &decoded); err != nil {
+					t.Fatalf("decode fixture: %v", err)
+				}
+				validateSchema(t, registry, envelope, "event", decoded)
+				if decoded["type"] != event.Type {
+					t.Fatalf("fixture type = %#v, want %q", decoded["type"], event.Type)
+				}
+				payload := registry.Map()[event.SchemaName]
+				if payload == nil {
+					t.Fatalf("mapped payload component %s is missing", event.SchemaName)
+				}
+				validateSchema(t, registry, payload, "data", decoded["data"])
+			})
+		}
 	}
 }
 
@@ -155,7 +237,9 @@ func TestStandaloneSchemaRefsResolveInRenderedDocument(t *testing.T) {
 	for _, event := range eventpayload.StableEvents {
 		want[event.SchemaName] = "#/components/schemas/" + event.SchemaName
 	}
-	want["AgentSuppressionAddedData"] = "#/components/schemas/AgentSuppressionAddedData"
+	for _, event := range eventpayload.BetaEvents {
+		want[event.SchemaName] = "#/components/schemas/" + event.SchemaName
+	}
 	for _, entry := range errorCodeCatalog {
 		if entry.DetailsSchema != "" {
 			want[entry.DetailsSchema] = "#/components/schemas/" + entry.DetailsSchema

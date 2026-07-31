@@ -29,7 +29,7 @@ class CreateContactRequest(BaseModel):
     """ # noqa: E501
     address: Annotated[str, Field(strict=True, max_length=320)] = Field(description="Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"); it is stored canonicalized. At most 320 Unicode code points.")
     display_name: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Optional human-readable name.")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional caller-owned key/value data, opaque to e2a. Flat objects only.")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["address", "display_name", "metadata"]
 

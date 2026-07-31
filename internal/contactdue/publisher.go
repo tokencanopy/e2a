@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
@@ -65,26 +66,27 @@ func (p *OutboxPublisher) PublishDueBatch(ctx context.Context, now time.Time, li
 
 // eventForDue creates the self-contained wake-up payload. It deliberately does
 // not carry suggested content: e2a wakes; the agent decides and writes.
+//
+// The payload is the typed eventpayload.ContactDueData, locked by golden
+// fixtures under internal/eventpayload/testdata like every other published
+// event. It replaced a hand-built map[string]any whose shape lived only in
+// prose; the two marshal to identical bytes (the struct's field order is the
+// map's key order), which TestEventForDueIsByteIdenticalToTheLegacyMap pins.
 func eventForDue(d identity.DueEngagement) webhookpub.Event {
-	contact := map[string]any{
-		"address":      d.Address,
-		"display_name": d.DisplayName,
-		"metadata":     d.ContactMetadata,
-	}
-	data := map[string]any{
-		"agent_email":    d.AgentEmail,
-		"address":        d.Address,
-		"stage":          d.Stage,
-		"next_action_at": d.NextActionAt,
-		"replied":        d.Replied,
-		"outbound_count": d.OutboundCount,
-		"contact":        contact,
-	}
-	if d.LastOutboundAt != nil {
-		data["last_outbound_at"] = *d.LastOutboundAt
-	}
-	if d.LastConversationID != "" {
-		data["last_conversation_id"] = d.LastConversationID
+	data := eventpayload.ContactDueData{
+		Address:    d.Address,
+		AgentEmail: d.AgentEmail,
+		Contact: eventpayload.ContactDueContact{
+			Address:     d.Address,
+			DisplayName: d.DisplayName,
+			Metadata:    d.ContactMetadata,
+		},
+		LastConversationID: d.LastConversationID,
+		LastOutboundAt:     d.LastOutboundAt,
+		NextActionAt:       d.NextActionAt,
+		OutboundCount:      d.OutboundCount,
+		Replied:            d.Replied,
+		Stage:              d.Stage,
 	}
 	e := webhookpub.NewEvent(webhookpub.EventContactDue, d.UserID, data)
 	e.AgentID = d.AgentEmail

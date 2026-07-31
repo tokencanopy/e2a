@@ -17,25 +17,20 @@ import pprint
 import re  # noqa: F401
 import json
 
-from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ContactView(BaseModel):
+class ContactDueContact(BaseModel):
     """
-    ContactView
+    ContactDueContact
     """ # noqa: E501
-    address: StrictStr = Field(description="Canonical (normalized) email address. This is the resource key: a display-name form such as \"A. Partner <partner@fund.vc>\" and the bare address resolve to the same contact.")
-    created_at: datetime
-    display_name: StrictStr = Field(description="Human-readable name. May be empty.")
-    import_batch_id: Optional[StrictStr] = Field(default=None, description="The import that created this contact, when source is import. Absent otherwise.")
-    metadata: Dict[str, Any] = Field(description="Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.")
-    source: StrictStr = Field(description="How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound.")
-    updated_at: datetime
+    address: StrictStr = Field(description="The contact's canonical address — identical to the payload's top-level address.")
+    display_name: StrictStr = Field(description="The contact's display name; empty string when unset.")
+    metadata: Dict[str, Any] = Field(description="The contact's caller-owned metadata, verbatim and uninterpreted. An empty object when the contact carries none.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["address", "created_at", "display_name", "import_batch_id", "metadata", "source", "updated_at"]
+    __properties: ClassVar[List[str]] = ["address", "display_name", "metadata"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -55,7 +50,7 @@ class ContactView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ContactView from a JSON string"""
+        """Create an instance of ContactDueContact from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -87,7 +82,7 @@ class ContactView(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ContactView from a dict"""
+        """Create an instance of ContactDueContact from a dict"""
         if obj is None:
             return None
 
@@ -96,12 +91,8 @@ class ContactView(BaseModel):
 
         _obj = cls.model_validate({
             "address": obj.get("address"),
-            "created_at": obj.get("created_at"),
             "display_name": obj.get("display_name"),
-            "import_batch_id": obj.get("import_batch_id"),
-            "metadata": obj.get("metadata"),
-            "source": obj.get("source"),
-            "updated_at": obj.get("updated_at")
+            "metadata": obj.get("metadata")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

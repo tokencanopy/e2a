@@ -37,7 +37,7 @@ const (
 type ContactView struct {
 	Address     string         `json:"address" doc:"Canonical (normalized) email address. This is the resource key: a display-name form such as \"A. Partner <partner@fund.vc>\" and the bare address resolve to the same contact."`
 	DisplayName string         `json:"display_name" doc:"Human-readable name. May be empty."`
-	Metadata    map[string]any `json:"metadata" doc:"Caller-owned key/value data. e2a never interprets it. Flat objects only; see the field bounds in the API docs."`
+	Metadata    map[string]any `json:"metadata" doc:"Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata."`
 	Source      string         `json:"source" doc:"How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound."`
 	ImportBatch string         `json:"import_batch_id,omitempty" doc:"The import that created this contact, when source is import. Absent otherwise."`
 	CreatedAt   time.Time      `json:"created_at"`
@@ -108,7 +108,7 @@ type listContactsOutput struct {
 type CreateContactRequest struct {
 	Address     string         `json:"address" required:"true" maxLength:"320" doc:"Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"); it is stored canonicalized. At most 320 Unicode code points."`
 	DisplayName string         `json:"display_name,omitempty" maxLength:"320" doc:"Optional human-readable name."`
-	Metadata    map[string]any `json:"metadata,omitempty" doc:"Optional caller-owned key/value data, opaque to e2a. Flat objects only."`
+	Metadata    map[string]any `json:"metadata,omitempty" doc:"Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it."`
 }
 
 type createContactInput struct {
@@ -141,7 +141,7 @@ type getContactOutput struct {
 // sending them is a 422 rather than a silent no-op.
 type UpdateContactRequest struct {
 	DisplayName *string        `json:"display_name,omitempty" maxLength:"320" doc:"Replace the display name. Omit to leave unchanged."`
-	Metadata    map[string]any `json:"metadata,omitempty" doc:"Replace the metadata object wholesale. Omit to leave unchanged."`
+	Metadata    map[string]any `json:"metadata,omitempty" doc:"Replace the metadata object wholesale. Omit to leave unchanged; send an empty object to clear it."`
 }
 
 type updateContactInput struct {

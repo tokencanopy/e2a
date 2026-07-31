@@ -32,7 +32,7 @@ const (
 type ContactImportRow struct {
 	Address     string         `json:"address" required:"true" maxLength:"320" doc:"Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\")."`
 	DisplayName *string        `json:"display_name,omitempty" maxLength:"320" doc:"Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one."`
-	Metadata    map[string]any `json:"metadata,omitempty" doc:"Optional caller-owned key/value data, opaque to e2a. Flat objects only; the same per-contact bounds apply, and a row that exceeds them fails on its own without affecting the rest of the batch."`
+	Metadata    map[string]any `json:"metadata,omitempty" doc:"Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. A row that exceeds a bound fails on its own, without affecting the rest of the batch."`
 }
 
 // ImportContactsRequest is one upload.

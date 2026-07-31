@@ -18,24 +18,27 @@ import re  # noqa: F401
 import json
 
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.contact_due_contact import ContactDueContact
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ContactView(BaseModel):
+class ContactDueData(BaseModel):
     """
-    ContactView
+    ContactDueData
     """ # noqa: E501
-    address: StrictStr = Field(description="Canonical (normalized) email address. This is the resource key: a display-name form such as \"A. Partner <partner@fund.vc>\" and the bare address resolve to the same contact.")
-    created_at: datetime
-    display_name: StrictStr = Field(description="Human-readable name. May be empty.")
-    import_batch_id: Optional[StrictStr] = Field(default=None, description="The import that created this contact, when source is import. Absent otherwise.")
-    metadata: Dict[str, Any] = Field(description="Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.")
-    source: StrictStr = Field(description="How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound.")
-    updated_at: datetime
+    address: StrictStr = Field(description="The contact's canonical address — who the agent owes an action to.")
+    agent_email: StrictStr = Field(description="The agent that owns this outreach — its id and address (an agent's id IS its email).")
+    contact: ContactDueContact = Field(description="The contact's identity, inlined so an agent-scoped consumer needs no account-wide contact read.")
+    last_conversation_id: Optional[StrictStr] = Field(default=None, description="Conversation id of the most recent exchange with this contact, to continue that thread. Omitted when there is none.")
+    last_outbound_at: Optional[datetime] = Field(default=None, description="When this agent last sent to the contact. Omitted when it never has.")
+    next_action_at: datetime = Field(description="The schedule instant that came due — the value set on the engagement, not the time the sweep observed it.")
+    outbound_count: StrictInt = Field(description="How many messages this agent has sent to the contact since the engagement was created. Computed at claim time, not a stored counter.")
+    replied: StrictBool = Field(description="True when the contact has replied since this agent's first outbound to them.")
+    stage: StrictStr = Field(description="The caller-owned outreach stage, verbatim. e2a never interprets it; empty when unset.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["address", "created_at", "display_name", "import_batch_id", "metadata", "source", "updated_at"]
+    __properties: ClassVar[List[str]] = ["address", "agent_email", "contact", "last_conversation_id", "last_outbound_at", "next_action_at", "outbound_count", "replied", "stage"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -55,7 +58,7 @@ class ContactView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ContactView from a JSON string"""
+        """Create an instance of ContactDueData from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -78,6 +81,9 @@ class ContactView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of contact
+        if self.contact:
+            _dict['contact'] = self.contact.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -87,7 +93,7 @@ class ContactView(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ContactView from a dict"""
+        """Create an instance of ContactDueData from a dict"""
         if obj is None:
             return None
 
@@ -96,12 +102,14 @@ class ContactView(BaseModel):
 
         _obj = cls.model_validate({
             "address": obj.get("address"),
-            "created_at": obj.get("created_at"),
-            "display_name": obj.get("display_name"),
-            "import_batch_id": obj.get("import_batch_id"),
-            "metadata": obj.get("metadata"),
-            "source": obj.get("source"),
-            "updated_at": obj.get("updated_at")
+            "agent_email": obj.get("agent_email"),
+            "contact": ContactDueContact.from_dict(obj["contact"]) if obj.get("contact") is not None else None,
+            "last_conversation_id": obj.get("last_conversation_id"),
+            "last_outbound_at": obj.get("last_outbound_at"),
+            "next_action_at": obj.get("next_action_at"),
+            "outbound_count": obj.get("outbound_count"),
+            "replied": obj.get("replied"),
+            "stage": obj.get("stage")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

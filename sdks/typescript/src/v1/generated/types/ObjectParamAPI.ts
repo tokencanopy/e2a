@@ -14,6 +14,8 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactDueContact } from '../models/ContactDueContact.js';
+import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
 import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
 import { ContactImportResult } from '../models/ContactImportResult.js';
@@ -1164,7 +1166,7 @@ export class ObjectContactsApi {
     }
 
     /**
-     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
      * Un-enrol a contact (beta)
      * @param param the request object
      */
@@ -1173,7 +1175,7 @@ export class ObjectContactsApi {
     }
 
     /**
-     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
      * Un-enrol a contact (beta)
      * @param param the request object
      */

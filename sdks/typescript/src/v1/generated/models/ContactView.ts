@@ -27,7 +27,7 @@ export class ContactView {
     */
     'importBatchId'?: string;
     /**
-    * Caller-owned key/value data. e2a never interprets it. Flat objects only; see the field bounds in the API docs.
+    * Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.
     */
     'metadata': { [key: string]: any; };
     /**
