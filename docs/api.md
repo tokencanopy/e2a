@@ -62,6 +62,36 @@ MCP tool surface), see:
     idempotency-store degradation or a mid-request crash the protection
     degrades to at-least-once — a keyed retry may re-execute the operation
     rather than replay the cached response.
+- **No NUL bytes.** No client-supplied string in a request may contain
+  `U+0000` — anywhere in the JSON body (at any depth, including object *keys*),
+  or in a path, query, or header parameter. Violations are `400
+  invalid_request` with the offending field in `error.details.fields[].location`.
+  The rule is blanket rather than per-field on purpose: a `NUL` cannot be stored
+  in a text column at all, and a caller cannot tell from the outside which
+  strings are persisted and which are only composed, so the answer is the same
+  everywhere. In JSON, a `NUL` can only arrive as the `\u0000` escape.
+- **Conditional writes (`ETag` / `If-Match`).** Single-resource `GET`s return an
+  `ETag`; pass it back as `If-Match` on the write to reject a lost update with
+  `412 precondition_failed`. Three rules follow RFC 9110 §13.1.1 and are worth
+  stating because they are easy to get wrong:
+  - Comparison is **strong**. Send the validator exactly as returned. A
+    `W/`-prefixed weak validator never matches and gets a `412` — weak
+    comparison means "semantically equivalent", which is not a basis for a
+    lost-update guard.
+  - `If-Match: *` means "if any current representation exists": it succeeds on
+    an existing resource and is refused when there is none (it never creates).
+  - Sending the header with an **empty value** is `400 invalid_request`, not an
+    unconditional write. Omit the header entirely to write unconditionally —
+    otherwise an unset variable interpolated into the header would silently
+    perform the very write the guard was there to prevent.
+- **Bulk import: row-level vs request-level.** `POST /v1/contacts/import`
+  returns a per-row outcome so one bad row never rejects the upload. That
+  isolation covers a row's *content* — an unparseable or over-long address, an
+  over-long `display_name`, metadata outside the per-contact bounds — each of
+  which fails only its own row (`status: "failed"` with `invalid_recipient` or
+  `invalid_request`). Problems with the *request* still reject the whole thing:
+  malformed JSON, an unknown field, a missing `address` key, a `NUL` anywhere in
+  the body, more than 1000 rows, or a body over 20 MiB.
 - **Errors.** Non-2xx responses use a single `ErrorEnvelope` shape; branch on
   `error.code` (see [Error codes](#error-codes) below for the full vocabulary).
 - **Capacity limits — the permanent `402` / `429` split.** Two different limits

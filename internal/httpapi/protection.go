@@ -175,7 +175,7 @@ type putProtectionInput struct {
 }
 
 func (s *Server) registerAgentProtection() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAgentProtection",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/protection",
@@ -186,7 +186,7 @@ func (s *Server) registerAgentProtection() {
 		Extensions:  beta(),
 	}, s.handleGetProtection)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "putAgentProtection",
 		Method:      http.MethodPut,
 		Path:        "/v1/agents/{email}/protection",

@@ -498,3 +498,86 @@ func sendJSONFull2(t *testing.T, srv *httptest.Server, key string, body any) (in
 		map[string]string{"Idempotency-Key": key})
 	return code, out
 }
+
+// TestImportLengthViolationsAreRowLevel is the regression for the isolation
+// break found on staging sha-32ce45dc: a 400-character display_name in a
+// three-row batch returned 422 with location body.contacts[1].display_name,
+// no batch_id, and NOTHING imported (req_d7f946efd74b61aa9be5e00f). The same
+// held for a 321-character address. A 1000-row CSV with one long name lost the
+// whole upload — the exact opposite of the endpoint's documented promise that
+// "one malformed row never rejects the rest of the upload".
+//
+// The bound itself is unchanged (320); only the layer enforcing it moved, from
+// item-level maxLength in the request schema to the handler's per-row
+// prevalidation, where every other row-content check already lives.
+func TestImportLengthViolationsAreRowLevel(t *testing.T) {
+	cases := []struct {
+		name string
+		row  map[string]any
+		code string
+	}{
+		{
+			name: "display_name over 320",
+			row:  map[string]any{"address": "long-dn@imp.vc", "display_name": strings.Repeat("D", 400)},
+			code: "invalid_request",
+		},
+		{
+			name: "address over 320",
+			row:  map[string]any{"address": strings.Repeat("a", maxContactAddressLen) + "@imp.vc"},
+			code: "invalid_recipient",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newContactsServer(t, nil)
+			code, body := importBody(t, srv, map[string]any{"contacts": []any{
+				map[string]any{"address": "before@imp.vc"},
+				tc.row,
+				map[string]any{"address": "after@imp.vc"},
+			}})
+			if code != http.StatusOK {
+				t.Fatalf("import = %d %v; want 200 with a per-row failure, not a whole-batch rejection", code, body)
+			}
+			if body["batch_id"] == "" || body["batch_id"] == nil {
+				t.Errorf("response carries no batch_id: %v", body)
+			}
+			res := results(t, body)
+			if res[1]["status"] != "failed" || res[1]["code"] != tc.code {
+				t.Errorf("offending row = %v; want failed/%s", res[1], tc.code)
+			}
+			if res[0]["status"] != "created" || res[2]["status"] != "created" {
+				t.Errorf("one over-long row sank its neighbours: %v / %v", res[0], res[2])
+			}
+		})
+	}
+}
+
+// TestImportAcceptsRowsAtTheLengthBound pins the boundary from the other side:
+// relaxing the schema must not have relaxed the bound.
+func TestImportAcceptsRowsAtTheLengthBound(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body := importBody(t, srv, map[string]any{"contacts": []any{
+		map[string]any{"address": "atbound@imp.vc", "display_name": strings.Repeat("D", maxContactDisplayNameLen)},
+	}})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d %v; want 200", code, body)
+	}
+	if res := results(t, body); res[0]["status"] != "created" {
+		t.Errorf("row at the display_name bound = %v; want created", res[0])
+	}
+}
+
+// TestImportBatchSizeStaysRequestLevel is the other half of the contract: the
+// maxItems cap is a property of the REQUEST, not of any row, so it must keep
+// rejecting the whole request.
+func TestImportBatchSizeStaysRequestLevel(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	rows := make([]any, maxContactImportRows+1)
+	for i := range rows {
+		rows[i] = map[string]any{"address": fmt.Sprintf("row%d@imp.vc", i)}
+	}
+	code, body := importBody(t, srv, map[string]any{"contacts": rows})
+	if code == http.StatusOK {
+		t.Fatalf("over-cap batch = %d %v; want a whole-request rejection", code, body)
+	}
+}

@@ -85,7 +85,7 @@ type slugError struct{ msg string }
 func (e *slugError) Error() string { return e.msg }
 
 func (s *Server) registerAgentWrites() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID:   "createAgent",
 		Method:        http.MethodPost,
 		Path:          "/v1/agents",
@@ -101,7 +101,7 @@ func (s *Server) registerAgentWrites() {
 		},
 	}, s.handleCreateAgent)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateAgent",
 		Method:      http.MethodPatch,
 		Path:        "/v1/agents/{email}",
@@ -111,7 +111,7 @@ func (s *Server) registerAgentWrites() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleUpdateAgent)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAgent",
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}",
@@ -121,7 +121,7 @@ func (s *Server) registerAgentWrites() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteAgent)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "restoreAgent",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/restore",

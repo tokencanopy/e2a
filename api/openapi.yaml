@@ -580,12 +580,10 @@ components:
       additionalProperties: false
       properties:
         address:
-          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>").
-          maxLength: 320
+          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch.
           type: string
         display_name:
-          description: Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
-          maxLength: 320
+          description: Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
           type: string
         metadata:
           additionalProperties: {}
@@ -5427,11 +5425,11 @@ paths:
           required: true
           schema:
             type: string
-        - description: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        - description: "Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."
           in: header
           name: If-Match
           schema:
-            description: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+            description: "Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."
             type: string
       requestBody:
         content:
@@ -5810,7 +5808,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6150,7 +6148,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6331,7 +6329,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6889,7 +6887,7 @@ paths:
       x-stability-level: beta
   /v1/contacts/import:
     post:
-      description: "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      description: "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
       operationId: importContacts
       parameters:
         - description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."
@@ -7070,11 +7068,11 @@ paths:
           required: true
           schema:
             type: string
-        - description: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+        - description: "Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."
           in: header
           name: If-Match
           schema:
-            description: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+            description: "Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."
             type: string
       requestBody:
         content:

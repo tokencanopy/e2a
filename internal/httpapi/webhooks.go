@@ -231,7 +231,7 @@ type deleteWebhookInput struct {
 }
 
 func (s *Server) registerWebhooks() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "createWebhook", Method: http.MethodPost, Path: "/v1/webhooks",
 		Summary: "Create a webhook", Tags: []string{"webhooks"},
 		Description: "Register a webhook subscriber; the one-time signing secret is returned only on this response. Honors Idempotency-Key so a retried create replays the same webhook (same id + secret) instead of registering a second subscription; omit the key to intentionally create distinct subscriptions, including several to the same URL.",
@@ -243,27 +243,27 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleCreateWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listWebhooks", Method: http.MethodGet, Path: "/v1/webhooks",
 		Summary: "List webhooks", Tags: []string{"webhooks"},
 		Description: "List the webhooks owned by the authenticated account, newest first, with cursor pagination.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListWebhooks)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getWebhook", Method: http.MethodGet, Path: "/v1/webhooks/{id}",
 		Summary: "Get a webhook", Tags: []string{"webhooks"},
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleGetWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteWebhook", Method: http.MethodDelete, Path: "/v1/webhooks/{id}",
 		Summary: "Delete a webhook", Tags: []string{"webhooks"},
 		Description: "Delete a webhook subscriber by id. Requires ?confirm=DELETE. Returns 200 with a deletion object ({deleted:true, id}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateWebhook", Method: http.MethodPatch, Path: "/v1/webhooks/{id}",
 		Summary: "Update a webhook", Tags: []string{"webhooks"},
 		Description: "Partial update. url/events/filters are full-replace when present. Re-enabling within the auto-disable cooldown returns 409.",
@@ -275,7 +275,7 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleUpdateWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "rotateWebhookSecret", Method: http.MethodPost, Path: "/v1/webhooks/{id}/rotate-secret",
 		Summary: "Rotate a webhook signing secret", Tags: []string{"webhooks"},
 		Description: "Mint a new signing secret; the previous one stays valid for a 24h grace window. Returns the new secret (shown once). Honors Idempotency-Key so a retried rotate replays the same secret instead of rotating twice (rotate has no request body, so the dedup hash covers the route alone — the same key on a different webhook id is a 422 idempotency_key_reuse).",
@@ -287,14 +287,14 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleRotateWebhookSecret)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "testWebhook", Method: http.MethodPost, Path: "/v1/webhooks/{id}/test",
 		Summary: "Fire a synthetic event", Tags: []string{"webhooks"},
 		Description: "Schedule a one-off synthetic delivery to this webhook for development. Returns the delivery id.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleTestWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listWebhookDeliveries", Method: http.MethodGet, Path: "/v1/webhooks/{id}/deliveries",
 		Summary: "List webhook deliveries", Tags: []string{"webhooks"},
 		Description: "The per-webhook delivery log (read-only debug view).",

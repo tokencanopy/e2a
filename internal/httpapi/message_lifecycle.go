@@ -37,7 +37,7 @@ type messageLifecycleCursor struct {
 }
 
 func (s *Server) registerMessageLifecycle() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getMessageLifecycle",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages/{id}/lifecycle",

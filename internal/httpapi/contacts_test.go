@@ -872,3 +872,115 @@ func TestListContactsCursorPinsFilters(t *testing.T) {
 		t.Errorf("continuation with changed filter = %d %v; want 400 invalid_cursor", code, body)
 	}
 }
+
+// TestPatchContactRejectsEmptyIfMatch is the regression for the guard that
+// silently wasn't one. On staging sha-32ce45dc, `If-Match: ` (present, no
+// value) on PATCH /v1/contacts/{address} returned 200 with a NEW ETag
+// (req_91af2b0f6fe551c8df501fda, confirmed over a raw TLS socket so it is not a
+// client artifact) — the conditional write the caller asked for silently became
+// an unconditional one, and the 200 told the caller the guard had held.
+//
+// RFC 9110 §13.1.1 requires at least one member in the field value, so an empty
+// one is a malformed request (400), not a precondition that failed (412). The
+// quoted-empty form `""` IS a syntactically valid validator and keeps its 412.
+func TestPatchContactRejectsEmptyIfMatch(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	seedContact(t, srv, "empty-ifmatch@example.com", "Before")
+	path := "/v1/contacts/empty-ifmatch%40example.com"
+
+	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": ""})
+	if code != http.StatusBadRequest || errCode(body) != "invalid_request" {
+		t.Fatalf("PATCH with empty If-Match = %d %v; want 400 invalid_request", code, body)
+	}
+
+	// The write must not have happened.
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["display_name"] != "Before" {
+		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+	}
+
+	// A quoted-empty validator is well-formed and simply does not match.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": `""`})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf(`PATCH with If-Match: "" = %d %v; want 412 precondition_failed`, code, body)
+	}
+
+	// Omitting the header entirely is still an unconditional write.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("PATCH without If-Match = %d %v; want 200", code, body)
+	}
+}
+
+// TestETagMatchesUsesStrongComparison pins RFC 9110 §13.1.1: If-Match compares
+// STRONGLY, so a weak validator never matches. Staging sha-32ce45dc stripped
+// the W/ prefix and compared the rest, so `W/"<current>"` returned 200 and the
+// write landed — weak comparison means "semantically equivalent", which is not
+// a basis for a lost-update guard. The stripping was also inconsistent between
+// the single-tag and comma-list paths, so the same tag could be accepted alone
+// and refused in a list.
+func TestETagMatchesUsesStrongComparison(t *testing.T) {
+	const current = `"88eba810c0136ae642cf65a30025858b"`
+	cases := []struct {
+		name    string
+		ifMatch string
+		want    bool
+	}{
+		{"exact strong validator", current, true},
+		{"wildcard", "*", true},
+		{"wildcard with surrounding space", "  *  ", true},
+		{"weak form of the current validator", `W/` + current, false},
+		{"lowercase weak prefix", `w/` + current, false},
+		{"weak inside a comma list", `"other", W/` + current, false},
+		{"strong inside a comma list", `"other", ` + current, true},
+		{"unrelated strong validator", `"deadbeef"`, false},
+		{"weak unrelated validator", `W/"deadbeef"`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := etagMatches(tc.ifMatch, current); got != tc.want {
+				t.Fatalf("etagMatches(%q) = %v, want %v", tc.ifMatch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPatchContactRejectsWeakValidator is the wire-level half: a caller sending
+// the weak form of the CURRENT validator must get 412 and must not have written.
+func TestPatchContactRejectsWeakValidator(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	seedContact(t, srv, "weak-etag@example.com", "Before")
+	path := "/v1/contacts/weak-etag%40example.com"
+
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	etag := headers.Get("ETag")
+	if code != http.StatusOK || etag == "" {
+		t.Fatalf("GET = %d ETag=%q; want 200 with an ETag", code, etag)
+	}
+
+	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PATCH with weak validator = %d %v; want 412 precondition_failed", code, body)
+	}
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["display_name"] != "Before" {
+		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+	}
+
+	// The strong form of the same validator still works, and `*` matches an
+	// existing representation.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": etag})
+	if code != http.StatusOK {
+		t.Fatalf("PATCH with the strong validator = %d %v; want 200", code, body)
+	}
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "Star"}, map[string]string{"If-Match": "*"})
+	if code != http.StatusOK {
+		t.Fatalf("PATCH with If-Match: * on an existing contact = %d %v; want 200", code, body)
+	}
+}

@@ -87,7 +87,7 @@ type conversationOutput struct {
 }
 
 func (s *Server) registerConversations() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listConversations",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations",
@@ -97,7 +97,7 @@ func (s *Server) registerConversations() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListConversations)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getConversation",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations/{id}",

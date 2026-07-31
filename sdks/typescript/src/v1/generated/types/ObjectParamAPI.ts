@@ -1082,7 +1082,7 @@ export interface ContactsApiUpdateContactRequest {
      */
     updateContactRequest: UpdateContactRequest
     /**
-     * Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+     * Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      * Defaults to: undefined
      * @type string
      * @memberof ContactsApiupdateContact
@@ -1112,7 +1112,7 @@ export interface ContactsApiUpsertEngagementRequest {
      */
     upsertEngagementRequest: UpsertEngagementRequest
     /**
-     * Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+     * Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      * Defaults to: undefined
      * @type string
      * @memberof ContactsApiupsertEngagement
@@ -1236,7 +1236,7 @@ export class ObjectContactsApi {
     }
 
     /**
-     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row\'s CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Import contacts in bulk (beta)
      * @param param the request object
      */
@@ -1245,7 +1245,7 @@ export class ObjectContactsApi {
     }
 
     /**
-     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row\'s CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
      * Import contacts in bulk (beta)
      * @param param the request object
      */

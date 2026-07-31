@@ -86,7 +86,7 @@ type StarterTemplateAliasParam struct {
 }
 
 func (s *Server) registerStarterTemplates() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listStarterTemplates", Method: http.MethodGet, Path: "/v1/starter-templates",
 		Summary: "List starter templates (beta)", Tags: []string{"templates"},
 		Description: "List the pre-built starter templates shipped with the deployment, sorted by alias. Returns catalog metadata only; fetch one by alias for the full body sources, or copy one into your library with from_starter on POST /v1/templates. " + templatesBetaDoc,
@@ -94,7 +94,7 @@ func (s *Server) registerStarterTemplates() {
 		Extensions:  beta(),
 	}, s.handleListStarterTemplates)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getStarterTemplate", Method: http.MethodGet, Path: "/v1/starter-templates/{alias}",
 		Summary: "Get a starter template (beta)", Tags: []string{"templates"},
 		Description: "Fetch one starter template by alias, including its full plain-text and HTML body sources. " + templatesBetaDoc,

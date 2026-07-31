@@ -345,9 +345,9 @@ func (s *Server) registerOutbound() {
 	// render the standard ErrorEnvelope — branch on error.code.
 	badRequest400 := func() *huma.Response {
 		return s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
-			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).")
+			"Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).")
 	}
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "sendMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages",
 		Summary: "Send a new email", Tags: []string{"messages"},
 		Description:  scheduledSendBetaDoc + " Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc + " Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).",
@@ -356,7 +356,7 @@ func (s *Server) registerOutbound() {
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.idempotencyInFlightResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
 	}, s.handleCreateMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "replyToMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages/{id}/reply",
 		Summary: "Reply to a message", Tags: []string{"messages"},
 		Description:  scheduledSendBetaDoc + " Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
@@ -365,7 +365,7 @@ func (s *Server) registerOutbound() {
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.replyForwardConflictResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
 	}, s.handleReply)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "forwardMessage", Method: http.MethodPost, Path: "/v1/agents/{email}/messages/{id}/forward",
 		Summary: "Forward a message", Tags: []string{"messages"},
 		Description:  scheduledSendBetaDoc + " Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). " + composedMessageCeilingDoc,
@@ -374,7 +374,7 @@ func (s *Server) registerOutbound() {
 		Responses:    map[string]*huma.Response{"202": accepted202(), "400": badRequest400(), "402": s.limitExceededResponse(), "409": s.replyForwardConflictResponse(), "413": s.outboundPayloadTooLargeResponse(), "422": s.idempotencyReuseResponse(), "429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
 	}, s.handleForward)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "testAgent", Method: http.MethodPost, Path: "/v1/agents/{email}/test",
 		Summary: "Send a test email to the agent's own address", Tags: []string{"agents"},
 		Description: "Send a platform-originated test email (From: the platform noreply identity) to the agent's own address over the real external SMTP route, to confirm inbound delivery end to end. Returns 202: status=accepted (the message is durably persisted and queued; message_id is the GET-able e2a message id, and the terminal outcome arrives via GET /v1/messages/{id} or the email.sent / email.failed webhook events — provider_message_id appears only after provider submission) or status=pending_review when held for review. Always branch on body.status.",
@@ -783,6 +783,13 @@ func validateReplyTo(replyTo string) *ErrorEnvelope {
 //
 //   - count ≤ maxAttachmentCount → 400 invalid_request (too many is a shape/
 //     validation error, not an oversize payload)
+//   - no CR or LF in att.Filename or att.ContentType → 400 invalid_attachment.
+//     Both are written into MIME headers, so a newline there is a header-
+//     injection attempt. The composer refuses it too and always did, but that
+//     refusal surfaces on a path whose errors are 500s — and a permanent client
+//     error returned as a 5xx is precisely what SDK retry logic hammers. Doing
+//     it here matches how CR/LF in the subject is already rejected and keeps
+//     this in the same 400 invalid_attachment family as the filename length cap.
 //   - each att.Data is decodable base64 → 400 invalid_attachment (the composer
 //     passes att.Data verbatim into the MIME body with Content-Transfer-Encoding:
 //     base64, so malformed base64 would otherwise slip past every check and only
@@ -813,6 +820,22 @@ func validateAttachments(atts []outbound.Attachment) *ErrorEnvelope {
 			return NewError(http.StatusBadRequest, "invalid_attachment",
 				fmt.Sprintf("attachment %q filename is too long — %d bytes, limit is %d",
 					name, len(att.Filename), outbound.MaxAttachmentFilenameBytes))
+		}
+		if strings.ContainsAny(att.Filename, "\r\n") {
+			return NewError(http.StatusBadRequest, "invalid_attachment",
+				fmt.Sprintf("attachment #%d: filename must not contain CR or LF characters", i)).
+				WithDetails(ValidationErrorDetails{Fields: []FieldError{{
+					Location: fmt.Sprintf("body.attachments[%d].filename", i),
+					Message:  "must not contain CR or LF characters",
+				}}})
+		}
+		if strings.ContainsAny(att.ContentType, "\r\n") {
+			return NewError(http.StatusBadRequest, "invalid_attachment",
+				fmt.Sprintf("attachment %q: content_type must not contain CR or LF characters", name)).
+				WithDetails(ValidationErrorDetails{Fields: []FieldError{{
+					Location: fmt.Sprintf("body.attachments[%d].content_type", i),
+					Message:  "must not contain CR or LF characters",
+				}}})
 		}
 		clean := strings.Map(func(r rune) rune {
 			if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
