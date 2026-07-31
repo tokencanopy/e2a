@@ -603,11 +603,13 @@ async def test_contacts_account_level_crud_list_and_import():
                 try:
                     await client.contacts.delete(address)
                 except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
                     pass
             if batch_id:
                 try:
                     await client.contacts.delete_import(batch_id)
                 except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
                     pass
 
 
@@ -667,6 +669,7 @@ async def test_contacts_outreach_full_surface():
                 try:
                     await client.contacts.delete(address)
                 except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
                     pass
         finally:
             await client.agents.delete(email)
