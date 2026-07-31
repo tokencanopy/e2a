@@ -37,7 +37,7 @@ type ContactImportRow struct {
 
 // ImportContactsRequest is one upload.
 type ImportContactsRequest struct {
-	Contacts   []ContactImportRow `json:"contacts" required:"true" minItems:"1" maxItems:"1000" doc:"The rows to import. At most 1000 per request; paginate client-side for larger lists."`
+	Contacts   []ContactImportRow `json:"contacts" required:"true" nullable:"false" minItems:"1" maxItems:"1000" doc:"The rows to import. At most 1000 per request; paginate client-side for larger lists."`
 	OnConflict string             `json:"on_conflict,omitempty" enum:"merge,skip" default:"merge" doc:"What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone."`
 	AgentEmail string             `json:"agent_email,omitempty" maxLength:"320" doc:"Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved."`
 	Stage      string             `json:"stage,omitempty" maxLength:"128" doc:"Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage."`
@@ -131,6 +131,14 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 		if err != nil {
 			return nil, NewError(http.StatusBadRequest, "invalid_request", "agent_email must be a valid email address")
 		}
+	}
+	if len(in.Body.Contacts) == 0 {
+		// Defence in depth: the schema already rejects a missing, null, or
+		// empty array with 422 invalid_request, but a successful zero-row
+		// import reads as "it worked" while recording nothing — the worst
+		// possible answer to a bulk upload — so the bound is enforced here
+		// too, mirroring the row cap below.
+		return nil, NewError(http.StatusBadRequest, "invalid_request", "contacts must contain at least one row")
 	}
 	if len(in.Body.Contacts) > maxContactImportRows {
 		// Defence in depth: the schema already caps this, but the bound is what

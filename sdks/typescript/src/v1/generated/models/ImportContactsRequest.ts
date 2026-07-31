@@ -21,7 +21,7 @@ export class ImportContactsRequest {
     /**
     * The rows to import. At most 1000 per request; paginate client-side for larger lists.
     */
-    'contacts': Array<ContactImportRow> | null;
+    'contacts': Array<ContactImportRow>;
     /**
     * What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.
     */

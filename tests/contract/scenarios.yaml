@@ -1105,6 +1105,23 @@ scenarios:
         expect:
           status: 422
 
+      - id: null_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts: null
+        expect:
+          status: 422
+
+      - id: missing_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body: {}
+        expect:
+          status: 422
+
     cleanup:
       - action: request
         method: DELETE

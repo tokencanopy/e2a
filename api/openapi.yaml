@@ -1130,13 +1130,13 @@ components:
           format: int64
           type: integer
         contacts_retained:
-          description: How many contacts from this batch were deliberately kept because they have correspondence history.
+          description: "How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history."
           format: int64
           type: integer
         deleted:
           type: boolean
         engagements_deleted:
-          description: How many per-agent outreach enrolments created by this import were removed.
+          description: How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here.
           format: int64
           type: integer
       required:
@@ -2284,9 +2284,7 @@ components:
             $ref: "#/components/schemas/ContactImportRow"
           maxItems: 1000
           minItems: 1
-          type:
-            - array
-            - "null"
+          type: array
         on_conflict:
           default: merge
           description: What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.
@@ -6925,7 +6923,7 @@ paths:
       x-stability-level: beta
   /v1/contacts/imports/{batch_id}:
     delete:
-      description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category, and contacts_deleted + contacts_retained reconciles against what the batch created. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
       operationId: deleteImportBatch
       parameters:
         - in: path

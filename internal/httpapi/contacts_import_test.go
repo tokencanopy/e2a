@@ -264,12 +264,28 @@ func TestImportRejectsOversizeBatch(t *testing.T) {
 }
 
 // TestImportRejectsEmptyBatch pins that an empty upload is a clear error
-// rather than a successful no-op the user misreads as "it worked".
+// rather than a successful no-op the user misreads as "it worked". Missing,
+// explicit null, and [] are the same failure — the canonical invalid_request
+// envelope — and a one-row upload still succeeds, so the guard rejects only
+// the degenerate shapes.
 func TestImportRejectsEmptyBatch(t *testing.T) {
 	srv := newContactsServer(t, nil)
-	code, body := importBody(t, srv, map[string]any{"contacts": []any{}})
-	if code != http.StatusUnprocessableEntity && code != http.StatusBadRequest {
-		t.Errorf("empty import = %d %v; want 4xx", code, body)
+	cases := map[string]map[string]any{
+		"missing": {},
+		"null":    {"contacts": nil},
+		"empty":   {"contacts": []any{}},
+	}
+	for name, body := range cases {
+		code, resp := importBody(t, srv, body)
+		if (code != http.StatusUnprocessableEntity && code != http.StatusBadRequest) || errCode(resp) != "invalid_request" {
+			t.Errorf("%s contacts import = %d %v; want 4xx invalid_request", name, code, resp)
+		}
+	}
+	code, body := importBody(t, srv, map[string]any{
+		"contacts": []any{map[string]any{"address": "partner@imp.vc"}},
+	})
+	if code != http.StatusOK {
+		t.Errorf("one-row import = %d %v, want 200", code, body)
 	}
 }
 

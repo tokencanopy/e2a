@@ -19,12 +19,12 @@ export class DeleteImportBatchResult {
     */
     'contactsDeleted': number;
     /**
-    * How many contacts from this batch were deliberately kept because they have correspondence history.
+    * How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history.
     */
     'contactsRetained': number;
     'deleted': boolean;
     /**
-    * How many per-agent outreach enrolments created by this import were removed.
+    * How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here.
     */
     'engagementsDeleted': number;
 

@@ -28,9 +28,9 @@ class DeleteImportBatchResult(BaseModel):
     """ # noqa: E501
     batch_id: StrictStr
     contacts_deleted: StrictInt = Field(description="How many contacts this reversal removed.")
-    contacts_retained: StrictInt = Field(description="How many contacts from this batch were deliberately kept because they have correspondence history.")
+    contacts_retained: StrictInt = Field(description="How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history.")
     deleted: StrictBool
-    engagements_deleted: StrictInt = Field(description="How many per-agent outreach enrolments created by this import were removed.")
+    engagements_deleted: StrictInt = Field(description="How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["batch_id", "contacts_deleted", "contacts_retained", "deleted", "engagements_deleted"]
 
