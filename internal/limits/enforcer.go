@@ -131,16 +131,39 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 // invalidation generation, so any fill already in flight (one that read
 // account_limits before the caller's write committed) is discarded by
 // cachePut rather than stored with a fresh TTL.
+//
+// The generation advances even for a user with NO cached entry. That is
+// deliberate and load-bearing: an uncached user is precisely the racing
+// case (miss → DB read → invalidate → cachePut), so skipping the
+// tombstone when the key is absent would reintroduce the exact bug this
+// guard exists to fix — the fill would come back at gen 0, match, and
+// cache the pre-write limits. The cost is that a caller can mint a map
+// entry for any key, so callers must bound what they pass;
+// handleInvalidateLimits validates the user-id shape for that reason.
 func (e *DBEnforcer) Invalidate(userID string) {
 	if e.cacheTTL <= 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.ensureCacheLocked()
 	// Leave a tombstone rather than deleting: the bumped generation has
 	// to survive so a racing cachePut can see that it lost. expires is
 	// left zero, which cacheGet reads as already-expired (a miss).
 	e.cache[userID] = cachedLimits{gen: e.cache[userID].gen + 1}
+}
+
+// ensureCacheLocked lazily allocates the cache map. Both write paths
+// (Invalidate, cachePut) call it because writing to a nil map panics, and
+// Invalidate became a WRITE in the generation change — before it, it only
+// deleted, which is safe on a nil map. The constructors always allocate, so
+// this only covers a zero-value DBEnforcer built inside the package (the
+// fields are unexported, so no external package can construct one that way).
+// Caller must hold e.mu.
+func (e *DBEnforcer) ensureCacheLocked() {
+	if e.cache == nil {
+		e.cache = make(map[string]cachedLimits)
+	}
 }
 
 func (e *DBEnforcer) CheckAgentCreate(ctx context.Context, userID string) error {
@@ -270,6 +293,7 @@ func (e *DBEnforcer) cachePut(userID string, l Limits, gen uint64) {
 	if e.cache[userID].gen != gen {
 		return
 	}
+	e.ensureCacheLocked()
 	e.cache[userID] = cachedLimits{limits: l, expires: time.Now().Add(e.cacheTTL), gen: gen}
 }
 

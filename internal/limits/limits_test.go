@@ -483,3 +483,55 @@ type wrappedErr struct{ inner error }
 
 func (w *wrappedErr) Error() string { return "wrapped: " + w.inner.Error() }
 func (w *wrappedErr) Unwrap() error { return w.inner }
+
+// TestEnforcer_InvalidateAdvancesGenerationForUncachedUser pins the trap in
+// the growth-bounding fix. It is tempting to bound the cache map by only
+// tombstoning when an entry already exists — that would be WRONG. A user with
+// no cached entry is exactly the racing case: the fill is in flight at gen 0,
+// and if Invalidate no-ops the fill comes back, matches gen 0, and caches the
+// pre-write limits with a fresh TTL — the original bug, restored. The
+// generation must advance for unknown users; the growth bound belongs at the
+// HTTP edge (handleInvalidateLimits validates the user-id shape).
+func TestEnforcer_InvalidateAdvancesGenerationForUncachedUser(t *testing.T) {
+	store := &fakeStore{row: raceOldRow, found: true}
+	e := newEnforcerWithReader(store, &fakeCounter{}, defaultsForTest(), time.Minute)
+
+	// No prior Get: "user1" has never been cached, so there is no entry for
+	// Invalidate to find.
+	store.onGet = func(callNo int) {
+		if callNo != 1 {
+			return
+		}
+		store.setRow(raceNewRow)
+		e.Invalidate("user1")
+	}
+
+	if _, err := e.Get(context.Background(), "user1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, err := e.Get(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("second Get: %v", err)
+	}
+	if got != raceNewRow {
+		t.Errorf("second Get = %+v, want %+v — the invalidate of an UNCACHED user must still advance the generation", got, raceNewRow)
+	}
+}
+
+// TestEnforcer_ZeroValueInvalidateDoesNotPanic pins the nil-map invariant.
+// Invalidate became a map WRITE in the generation change (it only deleted
+// before, which is safe on a nil map), so a DBEnforcer built as a zero value
+// would panic without either the cacheTTL<=0 early return or lazy init.
+func TestEnforcer_ZeroValueInvalidateDoesNotPanic(t *testing.T) {
+	// cacheTTL <= 0: the early return covers it (this is the shape the
+	// apiserver tests construct).
+	(&DBEnforcer{}).Invalidate("user1")
+
+	// cacheTTL > 0 with a nil map: only lazy init saves this.
+	e := &DBEnforcer{cacheTTL: time.Minute}
+	e.Invalidate("user1")
+	e.cachePut("user2", raceNewRow, 0)
+	if got, _, ok := e.cacheGet("user2"); !ok || got != raceNewRow {
+		t.Fatalf("cachePut on a lazily-initialized map: got %+v ok=%v", got, ok)
+	}
+}

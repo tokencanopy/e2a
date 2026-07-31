@@ -106,9 +106,44 @@ func (a *API) handleInvalidateLimits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
+	// Bound what can enter the enforcer's cache map. Invalidate now records a
+	// generation tombstone for whatever key it is handed — it MUST, because a
+	// user with no cached entry is exactly the case the invalidate/fill race
+	// guard exists to cover: the generation has to advance so an in-flight
+	// fill can see it lost. That makes an unvalidated user_id an unbounded
+	// map-growth vector (the map has no TTL sweep), so the bound belongs here,
+	// at the edge, rather than in Invalidate where it would silently
+	// reintroduce the race.
+	if !isUserID(req.UserID) {
+		http.Error(w, "user_id is malformed", http.StatusBadRequest)
+		return
+	}
 
 	a.enforcer.Invalidate(req.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// userIDLen is the length of an identity user id: identity.generateID emits
+// 16 random bytes hex-encoded. NOTE it is NOT a UUID — validating as one would
+// reject every real user and take the endpoint down.
+const userIDLen = 32
+
+// isUserID reports whether s has the shape of an identity user id: exactly
+// userIDLen lowercase hex characters. A shape check, not an existence check —
+// confirming existence would mean a DB round trip on a path whose whole purpose
+// is to avoid one, and a well-formed id for a deleted user is harmless (it
+// tombstones a key nothing will ever read).
+func isUserID(s string) bool {
+	if len(s) != userIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func hmacHexSHA256(key, body []byte) string {
