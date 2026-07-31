@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/mail"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -63,11 +64,30 @@ func (s *Store) recordThreadResolution(source string, count int) {
 	}
 }
 
+func (s *Store) recordThreadResolutionTx(tx pgx.Tx, source string, count int) {
+	if s.threadIdentityMetrics == nil || source == "" || count <= 0 {
+		return
+	}
+	registerPostCommit(tx, func() {
+		s.recordThreadResolution(source, count)
+	})
+}
+
 func (s *Store) recordThreadAssignment(assignment messageThreadAssignment) {
 	s.recordThreadResolution(assignment.resolutionSource, 1)
 	for _, source := range assignment.diagnosticSources {
 		s.recordThreadResolution(source, 1)
 	}
+}
+
+func (s *Store) recordThreadAssignmentTx(tx pgx.Tx, assignment messageThreadAssignment) {
+	if s.threadIdentityMetrics == nil {
+		return
+	}
+	assignment.diagnosticSources = append([]string(nil), assignment.diagnosticSources...)
+	registerPostCommit(tx, func() {
+		s.recordThreadAssignment(assignment)
+	})
 }
 
 // RFCMessageIDCandidate preserves the exact wire token for legacy exact-match
@@ -160,7 +180,7 @@ func (s *Store) EnsureThreadTx(ctx context.Context, tx pgx.Tx, agentID, messageI
 		return "", err
 	}
 	if lazilyAdopted {
-		s.recordThreadResolution("lazy_legacy_anchor", 1)
+		s.recordThreadResolutionTx(tx, "lazy_legacy_anchor", 1)
 	}
 	return threadID, nil
 }
@@ -189,7 +209,7 @@ func (s *Store) CreateOutboundMessageThreadedTx(
 		envelopeFrom, sentAs,
 	)
 	if err == nil {
-		s.recordThreadAssignment(assignment)
+		s.recordThreadAssignmentTx(tx, assignment)
 	}
 	return message, err
 }
@@ -223,6 +243,17 @@ type threadAnchorRow struct {
 	threadID string
 }
 
+// MaxThreadAnchorMatches is the largest exact-match set the synchronous
+// resolver will inspect for one RFC identifier. The N+1 lookup detects
+// overflow; an overflowing identifier is ambiguous and resolution continues
+// to an older candidate. Normal platform twins need two rows.
+const MaxThreadAnchorMatches = 16
+
+type sourcedThreadCandidate struct {
+	RFCMessageIDCandidate
+	source string
+}
+
 // resolveInboundThreadTx applies immediate-parent then References precedence.
 // It never merges established threads and only assigns a direct parent when a
 // single exact row was selected.
@@ -243,40 +274,31 @@ func (s *Store) resolveInboundThreadTx(ctx context.Context, tx pgx.Tx, agentID, 
 		}
 	}
 
-	type sourcedCandidate struct {
-		RFCMessageIDCandidate
-		source string
+	candidates := prepareInboundThreadCandidates(evidence)
+	initialMatches, err := s.findThreadAnchorsBatchTx(ctx, tx, agentID, candidates)
+	if err != nil {
+		return messageThreadAssignment{}, err
 	}
-	candidates := make([]sourcedCandidate, 0, len(evidence.InReplyTo)+len(evidence.References))
-	for i := len(evidence.InReplyTo) - 1; i >= 0; i-- {
-		candidates = append(candidates, sourcedCandidate{
-			RFCMessageIDCandidate: evidence.InReplyTo[i],
-			source:                "rfc_in_reply_to",
-		})
+	if err := lockInitiallyThreadlessAnchorsTx(ctx, tx, agentID, initialMatches); err != nil {
+		return messageThreadAssignment{}, err
 	}
-	for i := len(evidence.References) - 1; i >= 0; i-- {
-		candidates = append(candidates, sourcedCandidate{
-			RFCMessageIDCandidate: evidence.References[i],
-			source:                "rfc_references",
-		})
+	// Re-read after the deterministic lock. A concurrent EnsureThreadTx that
+	// started first may have changed a null row while we waited; consensus must
+	// use that committed value rather than the initial snapshot.
+	matches, err := s.findThreadAnchorsBatchTx(ctx, tx, agentID, candidates)
+	if err != nil {
+		return messageThreadAssignment{}, err
 	}
 
-	for _, candidate := range candidates {
-		canonical, err := rfcmessageid.Canonicalize(candidate.Canonical)
-		if err != nil {
-			continue
-		}
-		rows, err := s.findCanonicalThreadAnchorsTx(ctx, tx, agentID, canonical)
-		if err != nil {
-			return messageThreadAssignment{}, err
-		}
-		legacyRows, err := s.findLegacyThreadAnchorsTx(ctx, tx, agentID, candidate.Original, canonical)
-		if err != nil {
-			return messageThreadAssignment{}, err
-		}
-		rows = mergeThreadAnchorRows(rows, legacyRows)
+	for i, candidate := range candidates {
+		rows := matches[i]
 		if len(rows) == 0 {
 			diagnostics = append(diagnostics, "legacy_anchor_unmatched")
+			continue
+		}
+		if len(rows) > MaxThreadAnchorMatches {
+			diagnostics = append(diagnostics, "ambiguous_anchor")
+			maybeLogThreadAmbiguity(time.Now(), len(rows), countAnchorThreads(rows))
 			continue
 		}
 
@@ -351,6 +373,45 @@ func (s *Store) resolveInboundThreadTx(ctx context.Context, tx pgx.Tx, agentID, 
 	assignment.resolutionSource = "no_anchor"
 	assignment.diagnosticSources = diagnostics
 	return assignment, nil
+}
+
+func prepareInboundThreadCandidates(evidence InboundThreadEvidence) []sourcedThreadCandidate {
+	capacity := min(len(evidence.InReplyTo), rfcmessageid.MaxTokens) +
+		min(len(evidence.References), rfcmessageid.MaxTokens)
+	candidates := make([]sourcedThreadCandidate, 0, capacity)
+	appendField := func(field []RFCMessageIDCandidate, source string) {
+		seen := make(map[string]struct{}, min(len(field), rfcmessageid.MaxTokens))
+		first := max(0, len(field)-rfcmessageid.MaxTokens)
+		for i := len(field) - 1; i >= first && len(seen) < rfcmessageid.MaxTokens; i-- {
+			candidate := field[i]
+			canonical, err := rfcmessageid.Canonicalize(candidate.Canonical)
+			if err != nil {
+				continue
+			}
+			if _, duplicate := seen[canonical]; duplicate {
+				continue
+			}
+			seen[canonical] = struct{}{}
+			candidate.Canonical = canonical
+			candidates = append(candidates, sourcedThreadCandidate{
+				RFCMessageIDCandidate: candidate,
+				source:                source,
+			})
+		}
+	}
+	appendField(evidence.InReplyTo, "rfc_in_reply_to")
+	appendField(evidence.References, "rfc_references")
+	return candidates
+}
+
+func countAnchorThreads(rows []threadAnchorRow) int {
+	threads := make(map[string]struct{})
+	for _, row := range rows {
+		if row.threadID != "" {
+			threads[row.threadID] = struct{}{}
+		}
+	}
+	return len(threads)
 }
 
 func (s *Store) resolveAuthenticatedDeliveryTwinTx(ctx context.Context, tx pgx.Tx, agentID, recipient, ownKey string, auth InboundAuth, sourceMessageID string) (messageThreadAssignment, bool, error) {
@@ -445,92 +506,123 @@ func containsNormalizedAddress(addresses []string, target string) bool {
 	return false
 }
 
-func (s *Store) findCanonicalThreadAnchorsTx(ctx context.Context, tx pgx.Tx, agentID, canonical string) ([]threadAnchorRow, error) {
+// findThreadAnchorsBatchTx resolves every requested RFC candidate in one SQL
+// round trip. Each of the canonical, legacy-inbound, and legacy-outbound exact
+// index probes is capped at N+1, then their union is deduplicated and capped at
+// N+1 again. Returning N+1 rows marks that candidate ambiguous without ever
+// materializing an attacker-controlled duplicate set.
+func (s *Store) findThreadAnchorsBatchTx(ctx context.Context, tx pgx.Tx, agentID string, candidates []sourcedThreadCandidate) ([][]threadAnchorRow, error) {
+	matches := make([][]threadAnchorRow, len(candidates))
+	if len(candidates) == 0 {
+		return matches, nil
+	}
+	ordinals := make([]int32, len(candidates))
+	originals := make([]string, len(candidates))
+	canonicals := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		ordinals[i] = int32(i)
+		originals[i] = candidate.Original
+		canonicals[i] = candidate.Canonical
+	}
 	rows, err := tx.Query(ctx,
-		`SELECT id, COALESCE(thread_id, '')
-		   FROM messages
-		  WHERE agent_id = $1 AND rfc_message_id_key = $2
-		  ORDER BY created_at, id`,
-		agentID, canonical,
+		`WITH requested AS (
+		   SELECT *
+		     FROM unnest($2::integer[], $3::text[], $4::text[])
+		          AS input(ordinal, original, canonical)
+		 )
+		 SELECT requested.ordinal, matched.id, matched.thread_id
+		   FROM requested
+		   CROSS JOIN LATERAL (
+		     SELECT candidate.id, candidate.thread_id
+		       FROM (
+		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+		            FROM messages m
+		           WHERE m.agent_id = $1
+		             AND m.rfc_message_id_key = requested.canonical
+		           LIMIT $5)
+		         UNION ALL
+		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+		            FROM messages m
+		           WHERE m.agent_id = $1
+		             AND m.direction = 'inbound'
+		             AND m.email_message_id <> ''
+		             AND (m.email_message_id = requested.original
+		                  OR m.email_message_id = requested.canonical)
+		           LIMIT $5)
+		         UNION ALL
+		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+		            FROM messages m
+		           WHERE m.agent_id = $1
+		             AND m.direction = 'outbound'
+		             AND m.provider_message_id <> ''
+		             AND (m.provider_message_id = requested.original
+		                  OR m.provider_message_id = requested.canonical)
+		           LIMIT $5)
+		       ) AS candidate
+		      GROUP BY candidate.id, candidate.thread_id
+		      ORDER BY candidate.id
+		      LIMIT $5
+		   ) AS matched
+		  ORDER BY requested.ordinal, matched.id`,
+		agentID, ordinals, originals, canonicals, MaxThreadAnchorMatches+1,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanThreadAnchorRows(rows)
-}
-
-func (s *Store) findLegacyThreadAnchorsTx(ctx context.Context, tx pgx.Tx, agentID, original, canonical string) ([]threadAnchorRow, error) {
-	keys := []string{original}
-	if canonical != original {
-		keys = append(keys, canonical)
-	}
-	found := make(map[string]threadAnchorRow)
-	for _, query := range []string{
-		`SELECT id, COALESCE(thread_id, '')
-		   FROM messages
-		  WHERE agent_id = $1
-		    AND direction = 'inbound'
-		    AND email_message_id <> ''
-		    AND email_message_id = ANY($2)
-		  ORDER BY created_at, id`,
-		`SELECT id, COALESCE(thread_id, '')
-		   FROM messages
-		  WHERE agent_id = $1
-		    AND direction = 'outbound'
-		    AND provider_message_id <> ''
-		    AND provider_message_id = ANY($2)
-		  ORDER BY created_at, id`,
-	} {
-		rows, err := tx.Query(ctx, query, agentID, keys)
-		if err != nil {
-			return nil, err
-		}
-		scanned, scanErr := scanThreadAnchorRows(rows)
-		rows.Close()
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		for _, row := range scanned {
-			found[row.id] = row
-		}
-	}
-	out := make([]threadAnchorRow, 0, len(found))
-	for _, row := range found {
-		out = append(out, row)
-	}
-	return out, nil
-}
-
-type threadAnchorRows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Err() error
-}
-
-func scanThreadAnchorRows(rows threadAnchorRows) ([]threadAnchorRow, error) {
-	var out []threadAnchorRow
 	for rows.Next() {
+		var ordinal int
 		var row threadAnchorRow
-		if err := rows.Scan(&row.id, &row.threadID); err != nil {
+		if err := rows.Scan(&ordinal, &row.id, &row.threadID); err != nil {
 			return nil, err
 		}
-		out = append(out, row)
+		if ordinal < 0 || ordinal >= len(matches) {
+			return nil, fmt.Errorf("thread anchor lookup returned invalid ordinal %d", ordinal)
+		}
+		matches[ordinal] = append(matches[ordinal], row)
 	}
-	return out, rows.Err()
+	return matches, rows.Err()
 }
 
-func mergeThreadAnchorRows(groups ...[]threadAnchorRow) []threadAnchorRow {
-	seen := make(map[string]struct{})
-	var out []threadAnchorRow
-	for _, group := range groups {
-		for _, row := range group {
-			if _, ok := seen[row.id]; ok {
-				continue
+func lockInitiallyThreadlessAnchorsTx(ctx context.Context, tx pgx.Tx, agentID string, matches [][]threadAnchorRow) error {
+	unique := make(map[string]struct{})
+	for _, candidateRows := range matches {
+		if len(candidateRows) > MaxThreadAnchorMatches {
+			continue
+		}
+		for _, row := range candidateRows {
+			if row.threadID == "" {
+				unique[row.id] = struct{}{}
 			}
-			seen[row.id] = struct{}{}
-			out = append(out, row)
 		}
 	}
-	return out
+	if len(unique) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	rows, err := tx.Query(ctx,
+		`SELECT id
+		   FROM messages
+		  WHERE agent_id = $1
+		    AND id = ANY($2)
+		    AND thread_id IS NULL
+		  ORDER BY id
+		  FOR UPDATE`,
+		agentID, ids,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }

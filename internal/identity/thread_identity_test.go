@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/tokencanopy/e2a/internal/rfcmessageid"
 )
 
 func TestNewThreadID(t *testing.T) {
@@ -60,5 +62,29 @@ func TestMessageThreadFieldsStayOutOfInternalJSON(t *testing.T) {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("internal Message JSON unexpectedly contains %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestPrepareInboundThreadCandidatesBoundsRawEvidenceInspection(t *testing.T) {
+	t.Parallel()
+
+	field := make([]RFCMessageIDCandidate, rfcmessageid.MaxTokens+1)
+	field[0] = RFCMessageIDCandidate{
+		Original:  "<outside-budget@example.net>",
+		Canonical: "<outside-budget@example.net>",
+	}
+	for i := 1; i < len(field); i++ {
+		field[i] = RFCMessageIDCandidate{
+			Original:  "<nearest@example.net>",
+			Canonical: "<nearest@example.net>",
+		}
+	}
+
+	got := prepareInboundThreadCandidates(InboundThreadEvidence{InReplyTo: field})
+	if len(got) != 1 {
+		t.Fatalf("candidate count = %d, want 1 from the nearest %d raw entries", len(got), rfcmessageid.MaxTokens)
+	}
+	if got[0].Canonical != "<nearest@example.net>" {
+		t.Fatalf("candidate = %q, want nearest raw candidate", got[0].Canonical)
 	}
 }

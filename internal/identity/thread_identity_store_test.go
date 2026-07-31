@@ -4,14 +4,17 @@ package identity_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/rfcmessageid"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/migrations"
 )
@@ -60,6 +63,8 @@ func TestThreadIdentityMigrationsDoNotBackfillExistingMessages(t *testing.T) {
 		"087_messages_agent_rfc_message_id_idx.sql",
 		"088_messages_thread_parent_idx.sql",
 		"089_messages_agent_inbound_message_id_idx.sql",
+		"090_messages_thread_parent_id_idx.sql",
+		"091_drop_messages_thread_parent_idx.sql",
 	} {
 		sql, err := migrations.FS.ReadFile(name)
 		if err != nil {
@@ -552,6 +557,182 @@ func TestInboundAllNullDuplicateAnchorsRemainUntouchedAndStartFresh(t *testing.T
 	}
 	if adopted != 0 {
 		t.Fatalf("%d ambiguous all-null anchors were adopted", adopted)
+	}
+}
+
+func TestInboundAnchorOverflowFallsBackToOlderReference(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	agentID := convoTestSetup(t, store, "inbound-anchor-overflow")
+
+	first, err := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+		"<overflow@example.net>", "Overflow", "", "unread", nil, nil, nil,
+		false, "", nil, nil, nil, identity.InboundScreening{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < identity.MaxThreadAnchorMatches+1; i++ {
+		duplicate, createErr := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+			"<overflow@example.net>", "Overflow", "", "unread", nil, nil, nil,
+			false, "", nil, nil, nil, identity.InboundScreening{})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, updateErr := pool.Exec(ctx, `UPDATE messages SET thread_id=$2 WHERE id=$1`, duplicate.ID, first.ThreadID); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	fallback, err := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+		"<fallback@example.net>", "Fallback", "", "unread", nil, nil, nil,
+		false, "", nil, nil, nil, identity.InboundScreening{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reply *identity.Message
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		var txErr error
+		reply, txErr = store.CreateInboundMessageAuthenticatedThreadedInTx(
+			ctx, tx, "", agentID, identity.InboundAuth{HeaderFrom: "sender@example.net"},
+			agentID, "<overflow-reply@example.net>", "Re", "", "unread", nil, false, "",
+			nil, nil, nil, identity.InboundScreening{},
+			identity.InboundThreadEvidence{
+				InReplyTo: []identity.RFCMessageIDCandidate{{
+					Original: "<overflow@example.net>", Canonical: "<overflow@example.net>",
+				}},
+				References: []identity.RFCMessageIDCandidate{{
+					Original: "<fallback@example.net>", Canonical: "<fallback@example.net>",
+				}},
+			},
+		)
+		return txErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reply.ThreadID != fallback.ThreadID || reply.ThreadParentID != fallback.ID {
+		t.Fatalf("overflow candidate resolved to %q/%q, want fallback %q/%q",
+			reply.ThreadID, reply.ThreadParentID, fallback.ThreadID, fallback.ID)
+	}
+}
+
+func TestInboundCandidateCapPreservesReferencesFallback(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	agentID := convoTestSetup(t, store, "inbound-candidate-cap")
+	fallback, err := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+		"<cap-fallback@example.net>", "Fallback", "", "unread", nil, nil, nil,
+		false, "", nil, nil, nil, identity.InboundScreening{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inReplyTo := make([]identity.RFCMessageIDCandidate, rfcmessageid.MaxTokens)
+	for i := range inReplyTo {
+		id := fmt.Sprintf("<unmatched-%03d@example.net>", i)
+		inReplyTo[i] = identity.RFCMessageIDCandidate{Original: id, Canonical: id}
+	}
+	var reply *identity.Message
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		var txErr error
+		reply, txErr = store.CreateInboundMessageAuthenticatedThreadedInTx(
+			ctx, tx, "", agentID, identity.InboundAuth{HeaderFrom: "sender@example.net"},
+			agentID, "<cap-reply@example.net>", "Re", "", "unread", nil, false, "",
+			nil, nil, nil, identity.InboundScreening{},
+			identity.InboundThreadEvidence{
+				InReplyTo: inReplyTo,
+				References: []identity.RFCMessageIDCandidate{{
+					Original: "<cap-fallback@example.net>", Canonical: "<cap-fallback@example.net>",
+				}},
+			},
+		)
+		return txErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reply.ThreadID != fallback.ThreadID || reply.ThreadParentID != fallback.ID {
+		t.Fatalf("candidate cap dropped References fallback: got %q/%q want %q/%q",
+			reply.ThreadID, reply.ThreadParentID, fallback.ThreadID, fallback.ID)
+	}
+}
+
+func TestInboundConsensusRevalidatesConcurrentNullAnchorAdoption(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	agentID := convoTestSetup(t, store, "inbound-consensus-revalidation")
+
+	established, err := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+		"<concurrent-duplicate@example.net>", "Established", "", "unread", nil, nil, nil,
+		false, "", nil, nil, nil, identity.InboundScreening{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutable, err := store.CreateInboundMessage(ctx, "", agentID, "sender@example.net", agentID,
+		"<concurrent-duplicate@example.net>", "Mutable", "", "unread", nil, nil, nil,
+		false, "", nil, nil, nil, identity.InboundScreening{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET thread_id=NULL WHERE id=$1`, mutable.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	adopter, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adopter.Rollback(ctx)
+	adoptedThread := identity.NewThreadID()
+	if _, err := adopter.Exec(ctx,
+		`UPDATE messages SET thread_id=$2 WHERE id=$1`,
+		mutable.ID, adoptedThread,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		message *identity.Message
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var reply *identity.Message
+		err := store.WithTx(ctx, func(tx pgx.Tx) error {
+			var txErr error
+			reply, txErr = store.CreateInboundMessageAuthenticatedThreadedInTx(
+				ctx, tx, "", agentID, identity.InboundAuth{HeaderFrom: "sender@example.net"},
+				agentID, "<concurrent-consensus-reply@example.net>", "Re", "", "unread",
+				nil, false, "", nil, nil, nil, identity.InboundScreening{},
+				identity.InboundThreadEvidence{InReplyTo: []identity.RFCMessageIDCandidate{{
+					Original:  "<concurrent-duplicate@example.net>",
+					Canonical: "<concurrent-duplicate@example.net>",
+				}}},
+			)
+			return txErr
+		})
+		done <- result{message: reply, err: err}
+	}()
+
+	select {
+	case early := <-done:
+		t.Fatalf("resolver did not wait for concurrent null-anchor adoption: message=%+v err=%v", early.message, early.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := adopter.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved := <-done
+	if resolved.err != nil {
+		t.Fatal(resolved.err)
+	}
+	if resolved.message.ThreadID == established.ThreadID || resolved.message.ThreadID == adoptedThread {
+		t.Fatalf("concurrent conflicting anchors resolved to established thread %q", resolved.message.ThreadID)
+	}
+	if resolved.message.ThreadParentID != "" {
+		t.Fatalf("concurrent conflicting anchors selected parent %q", resolved.message.ThreadParentID)
 	}
 }
 

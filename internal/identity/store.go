@@ -2099,11 +2099,10 @@ func NewMessageID() string {
 	return "msg_" + generateID()
 }
 
-// NewConversationID returns a fresh conversation (thread) ID. An outbound send
-// that omits a conversation_id gets one minted here so the message becomes a
-// thread anchor: external replies reference this message's Message-ID, and the
-// relay's In-Reply-To lookup recovers the conversation_id from it. Without an
-// anchor the lookup finds an empty id and the thread fragments (#328).
+// NewConversationID returns a fresh application conversation/grouping ID. An
+// outbound send that omits conversation_id gets one minted here so external
+// replies can recover the grouping from the referenced outbound message.
+// Email reply topology is tracked independently by thread_id and RFC headers.
 func NewConversationID() string {
 	return "conv_" + generateID()
 }
@@ -2169,12 +2168,14 @@ func (s *Store) CreateInboundMessageAuthenticated(ctx context.Context, id, agent
 //
 // The relay handler is the primary v1 caller; future trigger sites
 // (slice 4 outbound + HITL) reuse the same helper. Keeps callers from
-// having to import pgxpool directly.
+// having to import pgxpool directly. Store-owned in-memory side effects may
+// register on the wrapped transaction and run only after a successful commit.
 func (s *Store) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+	rawTx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
+	tx := newPostCommitTx(rawTx, nil)
 	defer tx.Rollback(ctx)
 	if err := fn(tx); err != nil {
 		return err
@@ -2195,7 +2196,7 @@ func (s *Store) CreateInboundMessageInTx(ctx context.Context, tx pgx.Tx, id, age
 	assignment.resolutionSource = "no_anchor"
 	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
 	if err == nil {
-		s.recordThreadAssignment(assignment)
+		s.recordThreadAssignmentTx(tx, assignment)
 	}
 	return message, err
 }
@@ -2205,7 +2206,7 @@ func (s *Store) CreateInboundMessageAuthenticatedInTx(ctx context.Context, tx pg
 	assignment.resolutionSource = "no_anchor"
 	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
 	if err == nil {
-		s.recordThreadAssignment(assignment)
+		s.recordThreadAssignmentTx(tx, assignment)
 	}
 	return message, err
 }
@@ -2217,7 +2218,7 @@ func (s *Store) CreateInboundMessageAuthenticatedThreadedInTx(ctx context.Contex
 	}
 	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
 	if err == nil {
-		s.recordThreadAssignment(assignment)
+		s.recordThreadAssignmentTx(tx, assignment)
 	}
 	return message, err
 }
@@ -2236,7 +2237,7 @@ func (s *Store) CreateInboundMessageAuthenticatedTwinInTx(ctx context.Context, t
 	assignment.resolutionSource = "self_twin"
 	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
 	if err == nil {
-		s.recordThreadAssignment(assignment)
+		s.recordThreadAssignmentTx(tx, assignment)
 	}
 	return message, err
 }
@@ -2760,7 +2761,7 @@ func (s *Store) CreatePendingOutboundMessageManagedThreadedTx(ctx context.Contex
 		return nil, err
 	}
 	m.LifecycleTransitions = []messagelifecycle.MessageLifecycleTransition{hold}
-	s.recordThreadAssignment(assignment)
+	s.recordThreadAssignmentTx(tx, assignment)
 	return m, nil
 }
 
@@ -4395,6 +4396,48 @@ func (s *Store) UpdateMessageDeliveryStatus(ctx context.Context, messageID, agen
 // const) so tests can shrink it to exercise the multi-batch loop cheaply.
 var expiredDeleteBatch int64 = 5000
 
+// threadChildDetachBatch bounds the number of parent-pointer rows rewritten by
+// one statement. DeleteExpiredMessages executes at most one such statement per
+// transaction; a high-fanout parent remains in trash and is resumed by the next
+// transaction until no children point at it. PurgeMessage keeps its stronger
+// message-delete/job-cancellation atomicity by draining multiple bounded
+// statements in its single caller transaction.
+var threadChildDetachBatch int64 = 5000
+
+// detachThreadChildrenBatchTx clears at most limit direct-parent pointers.
+// ORDER BY makes overlapping callers acquire child locks deterministically.
+// Periodic maintenance uses skipLocked so contention is resumed next sweep;
+// explicit purge blocks because a successful synchronous delete cannot leave a
+// surviving child pointing at the removed parent.
+func detachThreadChildrenBatchTx(ctx context.Context, tx pgx.Tx, parentIDs []string, limit int64, skipLocked bool) (int64, error) {
+	if len(parentIDs) == 0 || limit <= 0 {
+		return 0, nil
+	}
+	lockClause := "FOR UPDATE"
+	if skipLocked {
+		lockClause += " SKIP LOCKED"
+	}
+	tag, err := tx.Exec(ctx,
+		`WITH children AS (
+		   SELECT id, thread_parent_id
+		     FROM messages
+		    WHERE thread_parent_id = ANY($1)
+		    ORDER BY thread_parent_id, id
+		    LIMIT $2
+		    `+lockClause+`
+		 )
+		 UPDATE messages AS m
+		    SET thread_parent_id = NULL
+		   FROM children
+		  WHERE m.id = children.id`,
+		parentIDs, limit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteExpiredMessages purges message rows whose TrashRetention window has
 // lapsed. Live rows are retained indefinitely. Messages belonging to an agent
 // in trash are removed by PurgeDeletedAgents when that agent reaches the same
@@ -4402,7 +4445,7 @@ var expiredDeleteBatch int64 = 5000
 func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 	var total int64
 	for {
-		var deleted int64
+		var selected, detached, deleted int64
 		err := s.WithTx(ctx, func(tx pgx.Tx) error {
 			rows, err := tx.Query(ctx,
 				`SELECT m.id,
@@ -4412,6 +4455,7 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 				   FROM messages m
 				  WHERE m.deleted_at IS NOT NULL
 				    AND m.deleted_at <= now() - make_interval(secs => $2)
+				  ORDER BY m.id
 				  LIMIT $1
 				  FOR UPDATE SKIP LOCKED`,
 				expiredDeleteBatch, TrashRetention.Seconds())
@@ -4421,7 +4465,7 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 			defer rows.Close()
 
 			messageIDs := make([]string, 0, expiredDeleteBatch)
-			jobIDs := make([]int64, 0)
+			jobIDByMessage := make(map[string]int64)
 			for rows.Next() {
 				var messageID string
 				var jobID *int64
@@ -4430,32 +4474,68 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 				}
 				messageIDs = append(messageIDs, messageID)
 				if jobID != nil {
-					jobIDs = append(jobIDs, *jobID)
+					jobIDByMessage[messageID] = *jobID
 				}
 			}
 			if err := rows.Err(); err != nil {
 				return err
 			}
 			rows.Close()
-			if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
-				return err
-			}
 			if len(messageIDs) == 0 {
 				return nil
 			}
+			selected = int64(len(messageIDs))
 			// A hard-deleted parent cannot remain as a dangling internal pointer
-			// on a surviving child. Children that are part of this same purge
-			// batch need no update because they are deleted immediately below.
-			if _, err := tx.Exec(ctx,
-				`UPDATE messages
-				    SET thread_parent_id = NULL
-				  WHERE thread_parent_id = ANY($1)
-				    AND NOT (id = ANY($1))`,
-				messageIDs,
-			); err != nil {
+			// on a surviving child. Only one bounded child batch is detached in
+			// this transaction. Parents with remaining children stay in trash,
+			// so a later transaction (or janitor run) can resume safely.
+			detached, err = detachThreadChildrenBatchTx(
+				ctx, tx, messageIDs, threadChildDetachBatch, true,
+			)
+			if err != nil {
 				return err
 			}
-			tag, err := tx.Exec(ctx, `DELETE FROM messages WHERE id = ANY($1)`, messageIDs)
+
+			deletableRows, err := tx.Query(ctx,
+				`SELECT parent.id
+				   FROM messages AS parent
+				  WHERE parent.id = ANY($1)
+				    AND NOT EXISTS (
+				      SELECT 1
+				        FROM messages AS child
+				       WHERE child.thread_parent_id = parent.id
+				    )
+				  ORDER BY parent.id`,
+				messageIDs,
+			)
+			if err != nil {
+				return err
+			}
+			deletableIDs := make([]string, 0, len(messageIDs))
+			deletableJobs := make([]int64, 0, len(jobIDByMessage))
+			for deletableRows.Next() {
+				var messageID string
+				if err := deletableRows.Scan(&messageID); err != nil {
+					deletableRows.Close()
+					return err
+				}
+				deletableIDs = append(deletableIDs, messageID)
+				if jobID, ok := jobIDByMessage[messageID]; ok {
+					deletableJobs = append(deletableJobs, jobID)
+				}
+			}
+			if err := deletableRows.Err(); err != nil {
+				deletableRows.Close()
+				return err
+			}
+			deletableRows.Close()
+			if len(deletableIDs) == 0 {
+				return nil
+			}
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, deletableJobs); err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, `DELETE FROM messages WHERE id = ANY($1)`, deletableIDs)
 			if err != nil {
 				return err
 			}
@@ -4466,7 +4546,13 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 			return total, err
 		}
 		total += deleted
-		if deleted < expiredDeleteBatch {
+		switch {
+		case selected == 0:
+			return total, nil
+		case detached == 0 && deleted == 0:
+			// Every selected row is currently blocked by a surviving child
+			// that SKIP LOCKED could not claim. Leave the parent intact and let
+			// the next periodic sweep resume instead of spinning.
 			return total, nil
 		}
 	}
@@ -4576,14 +4662,16 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE messages
-			    SET thread_parent_id = NULL
-			  WHERE agent_id = $2
-			    AND thread_parent_id = $1`,
-			messageID, agentID,
-		); err != nil {
-			return err
+		for {
+			detached, err := detachThreadChildrenBatchTx(
+				ctx, tx, []string{messageID}, threadChildDetachBatch, false,
+			)
+			if err != nil {
+				return err
+			}
+			if detached < threadChildDetachBatch {
+				break
+			}
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM messages WHERE id = $1`, messageID)
 		return err

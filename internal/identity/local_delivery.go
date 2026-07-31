@@ -95,10 +95,11 @@ func (s *Store) ApproveAndDeliverLocal(
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
 	defer cancel()
 
-	tx, err := s.pool.Begin(txCtx)
+	rawTx, err := s.pool.Begin(txCtx)
 	if err != nil {
 		return nil, err
 	}
+	tx := newPostCommitTx(rawTx, nil)
 	committed := false
 	defer func() {
 		if !committed {
@@ -178,10 +179,11 @@ func (s *Store) ExpireAndDeliverLocal(
 	txCtx, cancel := context.WithTimeout(ctx, approvalTxTimeout)
 	defer cancel()
 
-	tx, err := s.pool.Begin(txCtx)
+	rawTx, err := s.pool.Begin(txCtx)
 	if err != nil {
 		return nil, err
 	}
+	tx := newPostCommitTx(rawTx, nil)
 	committed := false
 	defer func() {
 		if !committed {
@@ -317,7 +319,7 @@ func (s *Store) finalizeLocalDeliveryTx(
 	if err != nil {
 		return nil, fmt.Errorf("local delivery inbound row: %w", err)
 	}
-	s.recordThreadResolution("self_twin", 1)
+	s.recordThreadResolutionTx(tx, "self_twin", 1)
 	if _, err := tx.Exec(ctx, `UPDATE messages SET method='loopback' WHERE id=$1`, inbound.ID); err != nil {
 		return nil, fmt.Errorf("local delivery inbound method: %w", err)
 	}

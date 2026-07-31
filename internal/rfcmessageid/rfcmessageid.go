@@ -22,11 +22,18 @@ const (
 	// angle brackets. A msg-id cannot fold internally, so RFC 5322's maximum
 	// physical line length provides a conservative wire-format bound.
 	MaxIdentifierBytes = 998
+
+	// MaxTokens is the maximum number of nearest, distinct identifiers returned
+	// from one field. The byte bound protects parsing; this independent count
+	// bound protects downstream exact-anchor resolution from turning one long
+	// References field into thousands of database probes.
+	MaxTokens = 256
 )
 
 var (
-	// ErrInvalidSyntax reports a value that is not a sequence of bracketed
-	// RFC message identifiers separated by comments or folding whitespace.
+	// ErrInvalidSyntax reports a value that does not contain a valid sequence
+	// of bracketed RFC message identifiers (optionally surrounded by obsolete
+	// reply-header phrase syntax).
 	ErrInvalidSyntax = errors.New("invalid RFC message-id syntax")
 
 	// ErrInputTooLarge reports a header value or individual identifier that
@@ -42,8 +49,8 @@ type Token struct {
 	Canonical string
 }
 
-// Parse extracts canonical msg-id tokens from a Message-ID, In-Reply-To, or
-// References-style field value.
+// Parse extracts canonical msg-id tokens from an In-Reply-To or
+// References-style field value, including obsolete phrase wrappers.
 //
 // Tokens are returned with angle brackets, in wire order. The identifier-left
 // bytes are preserved exactly and ASCII uppercase bytes in the identifier-right
@@ -68,13 +75,17 @@ func Parse(value string) ([]string, error) {
 // ParseTokens extracts msg-id tokens while retaining each exact bracketed
 // token alongside its canonical lookup form. Duplicate identity is determined
 // by Canonical, and the Token from the last occurrence is retained in wire
-// order.
+// order. At most MaxTokens nearest (rightmost) distinct tokens are returned.
 func ParseTokens(value string) ([]Token, error) {
-	tokens, err := scanTokens(value)
+	tokens, err := scanTokens(value, true)
 	if err != nil {
 		return nil, err
 	}
-	return keepLastDuplicates(tokens), nil
+	tokens = keepLastDuplicates(tokens)
+	if len(tokens) > MaxTokens {
+		tokens = tokens[len(tokens)-MaxTokens:]
+	}
+	return tokens, nil
 }
 
 // Canonicalize validates a field value containing exactly one msg-id token,
@@ -83,7 +94,7 @@ func ParseTokens(value string) ([]Token, error) {
 // adapters that have one provider-qualified wire identifier rather than a
 // References chain.
 func Canonicalize(value string) (string, error) {
-	tokens, err := scanTokens(value)
+	tokens, err := scanTokens(value, false)
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +104,7 @@ func Canonicalize(value string) (string, error) {
 	return tokens[0].Canonical, nil
 }
 
-func scanTokens(value string) ([]Token, error) {
+func scanTokens(value string, allowObsoletePhrases bool) ([]Token, error) {
 	if len(value) > MaxInputBytes {
 		return nil, ErrInputTooLarge
 	}
@@ -102,6 +113,7 @@ func scanTokens(value string) ([]Token, error) {
 	}
 
 	var tokens []Token
+	sawObsoletePhrase := false
 	for offset := 0; ; {
 		next, err := skipCFWS(value, offset)
 		if err != nil {
@@ -109,10 +121,22 @@ func scanTokens(value string) ([]Token, error) {
 		}
 		offset = next
 		if offset == len(value) {
+			if len(tokens) == 0 && sawObsoletePhrase {
+				return nil, ErrInvalidSyntax
+			}
 			return tokens, nil
 		}
 		if value[offset] != '<' {
-			return nil, invalidAt(offset)
+			if !allowObsoletePhrases {
+				return nil, invalidAt(offset)
+			}
+			next, err := skipObsoletePhrase(value, offset)
+			if err != nil {
+				return nil, err
+			}
+			sawObsoletePhrase = true
+			offset = next
+			continue
 		}
 
 		token, next, err := parseToken(value, offset)
@@ -127,7 +151,15 @@ func scanTokens(value string) ([]Token, error) {
 func parseToken(value string, start int) (Token, int, error) {
 	offset := start + 1
 	leftStart := offset
-	offset = consumeDotAtomText(value, offset)
+	if offset < len(value) && value[offset] == '"' {
+		var err error
+		offset, err = consumeQuotedString(value, offset)
+		if err != nil {
+			return Token{}, 0, err
+		}
+	} else {
+		offset = consumeDotAtomText(value, offset)
+	}
 	if offset == leftStart || offset >= len(value) || value[offset] != '@' {
 		return Token{}, 0, invalidAt(offset)
 	}
@@ -165,6 +197,35 @@ func parseToken(value string, start int) (Token, int, error) {
 		Original:  value[start:offset],
 		Canonical: "<" + left + "@" + lowerASCII(right) + ">",
 	}, offset, nil
+}
+
+func consumeQuotedString(value string, start int) (int, error) {
+	for offset := start + 1; offset < len(value); {
+		switch value[offset] {
+		case '"':
+			return offset + 1, nil
+		case '\\':
+			offset++
+			if offset >= len(value) || !isQuotedPair(value[offset]) {
+				return 0, invalidAt(offset)
+			}
+			offset++
+		case '\r':
+			// validateControls proved CRLF followed by WSP.
+			offset += 2
+		default:
+			if !isQuotedStringText(value[offset]) {
+				return 0, invalidAt(offset)
+			}
+			offset++
+		}
+	}
+	return 0, invalidAt(len(value))
+}
+
+func isQuotedStringText(b byte) bool {
+	return b == ' ' || b == '\t' ||
+		(b >= 33 && b <= 126 && b != '"' && b != '\\')
 }
 
 func consumeDotAtomText(value string, offset int) int {
@@ -224,6 +285,40 @@ func skipCFWS(value string, offset int) (int, error) {
 			offset = next
 		default:
 			return offset, nil
+		}
+	}
+	return offset, nil
+}
+
+// skipObsoletePhrase accepts the RFC 5322 obs-in-reply-to/obs-references
+// envelope around msg-id tokens. The topology-bearing identifiers themselves
+// remain strictly parsed; printable phrase text is ignored, stray closing
+// brackets are rejected, and quoted strings/comments are bounded by the same
+// field-size and control validation as the rest of the parser.
+func skipObsoletePhrase(value string, offset int) (int, error) {
+	for offset < len(value) && value[offset] != '<' {
+		switch value[offset] {
+		case '>':
+			return 0, invalidAt(offset)
+		case '"':
+			next, err := consumeQuotedString(value, offset)
+			if err != nil {
+				return 0, err
+			}
+			offset = next
+		case '(':
+			next, err := skipComment(value, offset)
+			if err != nil {
+				return 0, err
+			}
+			offset = next
+		case '\r':
+			offset += 2
+		default:
+			if value[offset] < 32 || value[offset] == 127 {
+				return 0, invalidAt(offset)
+			}
+			offset++
 		}
 	}
 	return offset, nil

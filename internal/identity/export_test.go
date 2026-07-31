@@ -9,3 +9,12 @@ func SetExpiredDeleteBatchForTest(n int64) (restore func()) {
 	expiredDeleteBatch = n
 	return func() { expiredDeleteBatch = prev }
 }
+
+// SetThreadChildDetachBatchForTest shrinks the per-statement child-pointer
+// rewrite bound so integration tests can prove a high-fanout parent drains
+// across several committed maintenance transactions.
+func SetThreadChildDetachBatchForTest(n int64) (restore func()) {
+	prev := threadChildDetachBatch
+	threadChildDetachBatch = n
+	return func() { threadChildDetachBatch = prev }
+}

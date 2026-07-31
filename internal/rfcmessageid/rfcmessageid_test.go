@@ -2,6 +2,7 @@ package rfcmessageid
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,6 +29,31 @@ func TestParseAcceptsCFWSAroundTokens(t *testing.T) {
 	want := []string{"<one@example.com>", "<two@[ipv6:abcd::1]>"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse = %v, want %v", got, want)
+	}
+}
+
+func TestParseAcceptsObsoleteReplyPhrasesAroundTokens(t *testing.T) {
+	got, err := ParseTokens(`answer to "the earlier note" <one@EXAMPLE.COM> and then <two@example.com>`)
+	if err != nil {
+		t.Fatalf("ParseTokens: %v", err)
+	}
+	want := []Token{
+		{Original: "<one@EXAMPLE.COM>", Canonical: "<one@example.com>"},
+		{Original: "<two@example.com>", Canonical: "<two@example.com>"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseTokens = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAcceptsObsoleteQuotedIdentifierLeft(t *testing.T) {
+	got, err := Parse(`<"Case Sensitive"@MAIL.EXAMPLE.COM>`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{`<"Case Sensitive"@mail.example.com>`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %#v, want %#v", got, want)
 	}
 }
 
@@ -157,6 +183,27 @@ func TestParseAcceptsIdentifierAtSizeLimit(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != value {
 		t.Fatalf("Parse(identifier at limit) returned %d unexpected tokens", len(got))
+	}
+}
+
+func TestParseTokensKeepsOnlyNearestIdentifiersAtTokenLimit(t *testing.T) {
+	var value strings.Builder
+	for i := 0; i < MaxTokens+5; i++ {
+		fmt.Fprintf(&value, "<id-%03d@example.com>", i)
+	}
+
+	got, err := ParseTokens(value.String())
+	if err != nil {
+		t.Fatalf("ParseTokens: %v", err)
+	}
+	if len(got) != MaxTokens {
+		t.Fatalf("ParseTokens returned %d tokens, want hard cap %d", len(got), MaxTokens)
+	}
+	if got[0].Canonical != "<id-005@example.com>" {
+		t.Fatalf("first retained token = %q, want oldest token inside nearest-ID window", got[0].Canonical)
+	}
+	if got[len(got)-1].Canonical != fmt.Sprintf("<id-%03d@example.com>", MaxTokens+4) {
+		t.Fatalf("last retained token = %q, want rightmost wire token", got[len(got)-1].Canonical)
 	}
 }
 

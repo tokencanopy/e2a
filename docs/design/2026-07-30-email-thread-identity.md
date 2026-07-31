@@ -223,9 +223,18 @@ whole-agent and retention purges. The write transaction enforces same-agent
 parent/thread consistency. An individual permanent purge clears pointers from
 surviving children in the same transaction. The routine
 `DeleteExpiredMessages` retention batch does the same for children that are not
-part of that delete batch, using `messages_thread_parent_idx`; a whole-agent
-purge deletes the mailbox without first updating children. A periodic invariant
-audit detects unexpected dangling or cross-agent pointers.
+part of that delete batch, using `messages_thread_parent_id_idx`. Each retention
+transaction locks at most 5,000 expired parents, clears at most 5,000 surviving
+child pointers in one statement, and deletes only selected parents that then
+have no remaining children. It repeats in fresh transactions while either
+detach or delete work makes progress; if contention prevents progress, a later
+sweep resumes it. An individual permanent purge likewise limits each
+child-pointer clearing statement to 5,000 rows, but retains its existing
+single-transaction atomicity for all children, outbound-job cancellation, and
+the parent delete; its total transaction size therefore remains proportional
+to that one parent's fanout. A whole-agent purge deletes the mailbox without
+first updating children. A periodic invariant audit detects unexpected
+dangling or cross-agent pointers.
 
 ### Why columns on `messages`
 
@@ -265,8 +274,8 @@ create index concurrently if not exists messages_agent_rfc_message_id_idx
     on messages (agent_id, rfc_message_id_key, created_at, id)
     where rfc_message_id_key is not null;
 
-create index concurrently if not exists messages_thread_parent_idx
-    on messages (thread_parent_id)
+create index concurrently if not exists messages_thread_parent_id_idx
+    on messages (thread_parent_id, id)
     where thread_parent_id is not null;
 
 create index concurrently if not exists messages_agent_inbound_message_id_idx
@@ -276,7 +285,9 @@ create index concurrently if not exists messages_agent_inbound_message_id_idx
 
 `messages_agent_thread_created_idx` supports the bounded invariant-audit and
 observability queries defined below. It does not imply or pre-build a public
-thread-enumeration API.
+thread-enumeration API. The trailing `id` in `messages_thread_parent_id_idx`
+supports ordered, 5,000-row child-detach batches so a high-fanout parent does
+not require an unbounded scan, sort, or lock set.
 
 Do not add a unique constraint on `rfc_message_id_key`. Duplicate wire IDs,
 delivery twins, imported mail, and historical data make uniqueness invalid.
@@ -314,6 +325,22 @@ whitespace. It must:
 6. store the canonical form with angle brackets;
 7. return tokens in wire order, with duplicates removed while preserving the
    last occurrence needed for right-to-left resolution.
+
+The operational bounds are part of the parser contract:
+
+- inspect at most 64 KiB per header field;
+- accept at most 998 bytes in one bracketed identifier;
+- after canonical keep-last deduplication, retain only the nearest (rightmost)
+  256 distinct identifiers from each header.
+
+Obsolete compatibility is deliberately narrow. The parser tolerates bounded
+printable `obs-in-reply-to` / `obs-references` phrase text, including quoted
+strings and comments, around strict bracketed identifiers. It also accepts a
+single quoted-string unit as a token's obsolete identifier-left and preserves
+its bytes exactly. It does not implement the full obsolete `obs-local-part` or
+`obs-domain` grammar with CFWS inside a `msg-id`. Phrase-only fields, stray
+`>` characters, control characters, malformed identifiers, and values outside
+the bounds fail parsing.
 
 For example:
 
@@ -490,23 +517,44 @@ For a normal inbound message:
    `rfc_message_id_key`;
 2. examine valid `In-Reply-To` candidates from right to left;
 3. if none resolves, examine valid `References` candidates from right to left;
-4. for each candidate, query all existing messages for the same `agent_id`,
-   regardless of `created_at`, including held and soft-deleted rows;
-5. query canonical `rfc_message_id_key` first, followed by the exact
-   direction-aware legacy fallback described above;
-6. compute consensus over distinct non-null thread IDs only; if exactly one
+4. retain at most 256 nearest candidates from each field, for at most 512
+   candidates total; all retained `In-Reply-To` candidates keep precedence,
+   but a saturated or entirely unmatched `In-Reply-To` field does not consume
+   or erase the independent `References` fallback budget;
+5. resolve every retained candidate in one batched exact lookup for the same
+   `agent_id`, regardless of `created_at`, including held and soft-deleted
+   rows; the batch combines canonical `rfc_message_id_key` matches with the
+   exact direction-aware inbound and outbound legacy fallbacks described
+   above, with no SQL query per candidate;
+6. for each candidate key, inspect at most 16 distinct matching rows; each
+   canonical or legacy index branch and their distinct union fetches at most
+   17 rows (`N+1`) so overflow is detected without materializing an
+   attacker-controlled duplicate set; an overflow is ambiguity and resolution
+   continues to the next candidate;
+7. deterministically lock every initially threadless match from non-overflow
+   candidates in ascending internal `messages.id` order, then re-read all
+   candidate matches in one second batched lookup before computing consensus;
+8. compute consensus over distinct non-null thread IDs only; if exactly one
    established thread is present, inherit it even when other matching rows
    remain null;
-7. if matching rows have multiple established thread IDs, record ambiguity and
+9. if matching rows have multiple established thread IDs, record ambiguity and
    continue to the next candidate;
-8. if exactly one matching row exists and its `thread_id` is null, lock it
+10. if exactly one matching row exists and its `thread_id` is null, lock it
    through `EnsureThreadTx`, lazily mint its thread, and inherit the returned
    value;
-9. if several matching rows all have null thread IDs, treat the candidate as
+11. if several matching rows all have null thread IDs, treat the candidate as
    ambiguous rather than choosing one arbitrarily; leave every null row
    unchanged;
-10. set `thread_parent_id` only when one exact parent row was selected;
-11. if no candidate resolves, mint a new thread.
+12. set `thread_parent_id` only when one exact parent row was selected;
+13. if no candidate resolves, mint a new thread.
+
+The synchronous resolution path therefore uses up to three fixed SQL calls
+independent of candidate count: one batched match lookup, one optional
+deterministic lock query, and one batched revalidation lookup. It never issues
+SQL per candidate. At most 512 candidates and 16 non-overflow rows per
+candidate can contribute initially threadless lock targets (8,192 before
+row-ID deduplication). Any key that reaches the seventeenth distinct row fails
+closed as ambiguous even if the first 16 rows appear to agree.
 
 The immediate `In-Reply-To` relationship has precedence over older
 `References`. Within a header, the rightmost usable identifier is the nearest
@@ -576,9 +624,13 @@ resolution use this same lock, so concurrent adoption converges on one value.
 RFC parsing and candidate preparation may occur before the write transaction,
 but the selected candidate set, consensus, row ownership, and null-to-thread
 transition are revalidated inside the persistence transaction. Lock in one
-order—selected anchor before new-message insert—and lock at most one unique
-parent row per message. Indexed exact lookups and bounded parser input keep the
-extra work finite on the synchronous pre-`250` path.
+order—initially threadless exact anchors by ascending internal `messages.id`,
+then any selected anchor, then the new-message insert. The second batched
+lookup occurs after those deterministic locks, so a concurrent lazy adoption
+that committed while this transaction waited contributes its established
+thread to final consensus. Indexed exact lookups, the
+256-candidates-per-field (512 total) budget, and the 16-row-per-key limit keep
+the extra work finite on the synchronous pre-`250` path.
 
 ## Conversation identity remains separate
 
@@ -615,6 +667,13 @@ This feature does not introduce a `References` count or byte cap. Trimming a
 long chain can remove a mid-chain anchor needed by a participant who did not
 receive the immediate parent, so any future header-budget policy requires its
 own provider evidence, compatibility analysis, and wire-level review.
+
+That statement governs outbound `References` construction. Inbound topology
+resolution remains bounded by the parser contract above: parsing retains at
+most 256 identifiers from each received field, and resolution examines at most
+512 candidates total. Every retained `In-Reply-To` candidate precedes every
+retained `References` candidate, without one field consuming the other's
+256-candidate budget.
 
 ### Outbound messages without a wire anchor
 
@@ -814,12 +873,14 @@ during rollback without a new capability endpoint.
 | Duplicate RFC ID rows contain one established thread plus null rows | Join the established thread; leave null rows unchanged and omit direct parent | Null rows are non-votes |
 | Duplicate RFC ID rows all remain null | Do not adopt any; try another ancestor or mint | Ambiguity remains until exact evidence changes |
 | Duplicate RFC ID rows span several threads | Do not merge; try another ancestor or mint | Ambiguity recorded |
+| One RFC candidate has more than 16 distinct matching rows | Do not inspect beyond the N+1 overflow proof; try another ancestor or mint | Fails closed as ambiguity |
 | `In-Reply-To` and `References` point to established different threads | Prefer unambiguous immediate parent; never merge the other thread | Conflict logged |
 | A late unknown ancestor arrives after descendants were split | No automatic merge/rewrite | Possible conservative split remains |
 | Mailing list or forwarder rewrites topology | New thread when no valid known anchor survives | Provider-dependent |
 | Subject is edited during approved reply | Same internal thread | Some clients may split despite headers |
 | Inbound root lacks `Message-ID` | Mint a thread; API reply inherits by resource | Recipient-side reply threading is not guaranteed |
-| `References` grows very long | Internal thread is unchanged | Preserve existing chain construction/folding in this feature |
+| Outbound `References` grows very long | Internal thread is unchanged | Preserve existing chain construction/folding in this feature |
+| Inbound reply headers exceed the candidate budget | Examine only the nearest bounded candidates; mint when none resolves | No per-candidate query or unbounded pre-`250` work |
 
 ## Conflict and abuse handling
 
@@ -958,6 +1019,12 @@ Add counters by resolution source:
 - `no_anchor`
 - `cycle_detected`
 
+Resolution counters describe committed topology decisions, not attempts. Buffer
+the final source and any accompanying diagnostics during the write transaction,
+and emit them only after that transaction commits successfully. A rollback,
+serialization retry, transient SMTP failure, or idempotency replay that creates
+no new committed decision must not increment the counters.
+
 Add gauges or periodic measurements for:
 
 - post-assignment messages with null `thread_id`, by bounded age bucket;
@@ -971,10 +1038,14 @@ separate; they are not error metrics.
 
 Periodic measurements must use bounded age windows or sampling rather than an
 unbounded full-table aggregate. The thread index exists in part to support
-those bounded scans. Before shipping retention pointer clearing, measure the
-cost of updating surviving children in 5,000-row purge batches: every message
-`UPDATE` invokes the storage-metering trigger even when body byte counts do not
-change.
+those bounded scans. Retention cleanup selects at most 5,000 expired parents
+and detaches at most 5,000 surviving children in one statement and transaction
+before committing and continuing. This bounds locks, trigger executions, and
+WAL per retention transaction; every message `UPDATE` invokes the
+storage-metering trigger even when body byte counts do not change. Individual
+purge keeps one-parent atomicity and uses the same 5,000-child statement bound,
+but its total transaction remains proportional to the purged parent's fanout
+and must be tracked as a residual operational risk.
 
 Trace/log fields may include internal `message_id`, `thread_id`, agent ID, and
 resolution source. Hash RFC IDs and omit subjects, bodies, and recipient
@@ -985,11 +1056,14 @@ addresses from routine logs.
 ### Unit tests
 
 - RFC token parsing, comments, folding, malformed input, bounds, case rules,
-  and duplicate removal.
+  obsolete-form compatibility limits, nearest-256-per-field retention, and
+  duplicate removal.
 - Right-to-left candidate precedence.
-- Ambiguous duplicate-ID handling.
+- Fixed-count batched lookup with no per-candidate SQL, N+1 overflow at 17
+  rows, and ambiguous duplicate-ID handling.
 - immutable assignment and compare-and-set behavior.
-- lazy old-anchor locking and concurrent adoption.
+- deterministic initially-null-anchor locking, post-lock batched revalidation,
+  lazy old-anchor locking, and concurrent adoption.
 - direction-specific RFC key provenance.
 - `References` construction and legal folding remain byte-compatible.
 - terminal outbound replies without a usable anchor retain their existing
@@ -1009,8 +1083,11 @@ Every direct SQL message writer must assert `thread_id` behavior. Cover:
   leave it unchanged;
 - soft delete, individual permanent purge, retention-batch purge, and
   whole-agent purge;
+- retention cleanup never locks more than 5,000 parent candidates or detaches
+  more than 5,000 surviving children in one transaction; individual purge
+  bounds each detach statement to 5,000 children before deleting its parent;
 - duplicate canonical RFC IDs, including established-plus-null and all-null
-  candidate sets;
+  candidate sets and seventeenth-row overflow;
 - TTL-approved replies retain reply headers while TTL-approved forwards emit
   none.
 
