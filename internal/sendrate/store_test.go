@@ -195,6 +195,53 @@ func TestReservePrunesExpiredEntries(t *testing.T) {
 	}
 }
 
+// TestReserveWindowBoundaryKeepsOnlyInsideEvents pins the pruning edge: an
+// event inside the window counts against the limit (and anchors RetryAt)
+// while one past the edge is dropped — the strict `at.After(cutoff)` call in
+// Reserve. Both margins are 5s against a 1h window, so the µs-scale gap
+// between the seed read and the Reserve statement's clock_timestamp() cannot
+// flip either side.
+func TestReserveWindowBoundaryKeepsOnlyInsideEvents(t *testing.T) {
+	pool := testutil.TestDB(t)
+	agentID := seedAgent(t, pool, "boundary")
+	window := time.Hour
+	store := sendrate.NewStore(pool, window, 1)
+	ctx := context.Background()
+
+	var dbNow time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
+		t.Fatal(err)
+	}
+	inside := dbNow.Add(-window + 5*time.Second)  // 5s inside the window edge
+	outside := dbNow.Add(-window - 5*time.Second) // 5s past it
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_send_rate_windows (agent_id, events) VALUES ($1, $2)`,
+		agentID, []time.Time{outside, inside}); err != nil {
+		t.Fatalf("seed boundary events: %v", err)
+	}
+
+	// limit=1 and the inside event still counts → the reservation defers,
+	// anchored on the inside event, and the outside event is pruned away.
+	d := reserve(t, store, agentID)
+	if d.Allowed {
+		t.Fatal("inside-boundary event must still count against the limit")
+	}
+	var events []time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT events FROM agent_send_rate_windows WHERE agent_id=$1`, agentID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1 (past-edge event pruned)", len(events))
+	}
+	if got := events[0]; got.Before(inside.Add(-time.Second)) || got.After(inside.Add(time.Second)) {
+		t.Errorf("surviving event = %s, want the inside seed ~%s (not the past-edge one)", got, inside)
+	}
+	if want := events[0].Add(window); !d.RetryAt.Equal(want) {
+		t.Errorf("RetryAt = %s, want surviving event + window = %s", d.RetryAt, want)
+	}
+}
+
 // TestStoreWindowExposesConstructorWindow pins Window() so the send worker's
 // snooze clamp reads the limiter's real window (and so the coverage floor
 // doesn't depend on cross-package exercise).

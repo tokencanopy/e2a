@@ -3,11 +3,13 @@ package outboundsend_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 )
 
@@ -136,8 +138,35 @@ func TestSendWorker_RateLimitedJitterDeterministicPerMessage(t *testing.T) {
 	if d1, d2 := snoozeFor("msg_1"), snoozeFor("msg_1"); diff(d1, d2) > 100*time.Millisecond {
 		t.Errorf("same message jittered differently across drives: %s vs %s", d1, d2)
 	}
-	if d1, d2 := snoozeFor("msg_1"), snoozeFor("msg_2"); d1 == d2 {
-		t.Errorf("different messages got identical jitter %s — herd not spread", d1)
+
+	// Cross-message fan-out: all drives share ONE fixed RetryAt, so the base
+	// term time.Until(RetryAt) varies only by execution drift (µs) and any
+	// spread beyond that can only come from the per-message jitter — the
+	// previous per-drive RetryAt made inequality vacuous (base drift alone
+	// guaranteed it, even if rateJitter always returned 0).
+	retryAt := time.Now().Add(30 * time.Second)
+	snoozeShared := func(messageID string) time.Duration {
+		st := &fakeStore{job: acceptedJob(messageID)}
+		gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: retryAt}}
+		w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+		return requireSnooze(t, w.Work(context.Background(), job(messageID, 1)))
+	}
+	distinct := map[time.Duration]bool{}
+	var lo, hi time.Duration
+	for i := 1; i <= 8; i++ {
+		d := snoozeShared(fmt.Sprintf("msg_%d", i))
+		distinct[d] = true
+		if lo == 0 || d < lo {
+			lo = d
+		}
+		if d > hi {
+			hi = d
+		}
+	}
+	// 8 sequential drives drift the base by well under 1ms; the jitter range
+	// is window/4 = 15s. A spread >100ms proves the burst actually fans out.
+	if len(distinct) < 2 || hi-lo < 100*time.Millisecond {
+		t.Errorf("jitter did not fan out across messages: spread=%s distinct=%d — herd not spread", hi-lo, len(distinct))
 	}
 }
 
@@ -183,18 +212,23 @@ func TestSendWorker_RateGateErrorFailsClosedAndSnoozes(t *testing.T) {
 
 // TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally: a message that
 // has been deferring past the 72h retry horizon takes the standard guarded
-// terminal-failure path instead of snoozing forever.
+// terminal-failure path instead of snoozing forever. The failure keeps its
+// send_rate_timeout provenance (docs/observability.md tells operators to
+// look for exactly that detail) and, for a ramp-eligible send, releases the
+// ramp reservation the job still holds.
 func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 	j := acceptedJob("msg_1")
 	j.AcceptedAt = time.Now().Add(-73 * time.Hour)
+	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
 	st := &fakeStore{job: j}
 	dl := &fakeDeliverer{}
+	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
 	gate := &fakeRateGate{decision: outboundsend.RateDecision{
 		Allowed: false,
 		RetryAt: time.Now().Add(30 * time.Second),
 	}}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, dl, ramp).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -210,6 +244,13 @@ func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 	if len(st.failed) != 1 {
 		t.Fatalf("failed = %+v, want one terminal write", st.failed)
 	}
+	if got := st.failed[0]; got.detail != "send_rate_timeout" || got.source != delivery.FailureSourceLocal {
+		t.Errorf("terminal = {detail %q, source %v}, want {send_rate_timeout, local}",
+			got.detail, got.source)
+	}
+	if len(ramp.released) != 1 || ramp.released[0] != "msg_1" {
+		t.Errorf("ramp releases = %v, want [msg_1] (timeout releases the reservation)", ramp.released)
+	}
 	if !stringsEqual(rec.terminals, []string{"failed_local_retries"}) {
 		t.Errorf("terminals = %v, want [failed_local_retries]", rec.terminals)
 	}
@@ -223,10 +264,12 @@ func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 func TestSendWorker_RateGateErrorPastRetryHorizonFailsTerminally(t *testing.T) {
 	j := acceptedJob("msg_1")
 	j.AcceptedAt = time.Now().Add(-73 * time.Hour)
+	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
 	st := &fakeStore{job: j}
+	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
 	gate := &fakeRateGate{err: errors.New("rate store down")}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}, ramp).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -238,6 +281,40 @@ func TestSendWorker_RateGateErrorPastRetryHorizonFailsTerminally(t *testing.T) {
 	}
 	if len(st.failed) != 1 {
 		t.Fatalf("failed = %+v, want one terminal write", st.failed)
+	}
+	if got := st.failed[0]; got.detail != "send_rate_timeout: rate store down" || got.source != delivery.FailureSourceLocal {
+		t.Errorf("terminal = {detail %q, source %v}, want {send_rate_timeout: rate store down, local}",
+			got.detail, got.source)
+	}
+	if len(ramp.released) != 1 || ramp.released[0] != "msg_1" {
+		t.Errorf("ramp releases = %v, want [msg_1] (timeout releases the reservation)", ramp.released)
+	}
+}
+
+// TestSendWorker_RateLimitedDeferralKeepsRampReservation pins the complement
+// of the horizon path: an ordinary deferral releases the SEND CLAIM but keeps
+// the ramp reservation — same-message Reserve is idempotent, while a released
+// reservation is terminal and cannot be re-reserved.
+func TestSendWorker_RateLimitedDeferralKeepsRampReservation(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
+	st := &fakeStore{job: j}
+	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
+	gate := &fakeRateGate{decision: outboundsend.RateDecision{
+		Allowed: false,
+		RetryAt: time.Now().Add(30 * time.Second),
+	}}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}, ramp).WithRateGate(gate)
+
+	requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
+	if len(ramp.calls) != 1 {
+		t.Errorf("ramp reserves = %d, want 1 (taken before the rate gate)", len(ramp.calls))
+	}
+	if len(ramp.released) != 0 {
+		t.Errorf("ramp releases = %v, want none — a deferral keeps the reservation", ramp.released)
+	}
+	if len(st.released) != 1 || st.released[0] != "msg_1" {
+		t.Errorf("send-claim releases = %v, want [msg_1]", st.released)
 	}
 }
 
