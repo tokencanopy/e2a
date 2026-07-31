@@ -20,32 +20,37 @@ import (
 type Prom struct {
 	reg *prometheus.Registry
 
-	httpRequests      *prometheus.CounterVec
-	httpDuration      *prometheus.HistogramVec
-	smtpInbound       *prometheus.CounterVec
-	smtpDuration      prometheus.Histogram
-	outQueueWait      prometheus.Histogram
-	outTerminal       *prometheus.CounterVec
-	outTerminalLat    prometheus.Histogram
-	outAttempts       *prometheus.CounterVec
-	outAttemptDur     prometheus.Histogram
-	whAttempts        *prometheus.CounterVec
-	whAttemptDur      prometheus.Histogram
-	whTerminal        *prometheus.CounterVec
-	whExpiredPending  prometheus.Counter
-	whFanOutRescued   prometheus.Counter
-	whDeliveryRescued prometheus.Counter
-	whFirstTryLat     prometheus.Histogram
-	wsConnects        prometheus.Counter
-	wsDisconnects     *prometheus.CounterVec
-	wsRejected        *prometheus.CounterVec
-	wsDrained         prometheus.Counter
-	wsSendFailures    prometheus.Counter
-	wsActive          prometheus.Gauge
-	inboundProcess    *prometheus.CounterVec
-	inboundDuration   prometheus.Histogram
-	queueDepth        *prometheus.GaugeVec
-	queueOldestAge    *prometheus.GaugeVec
+	httpRequests       *prometheus.CounterVec
+	httpDuration       *prometheus.HistogramVec
+	smtpInbound        *prometheus.CounterVec
+	smtpDuration       prometheus.Histogram
+	outQueueWait       prometheus.Histogram
+	outTerminal        *prometheus.CounterVec
+	outTerminalLat     prometheus.Histogram
+	outAttempts        *prometheus.CounterVec
+	outAttemptDur      prometheus.Histogram
+	whAttempts         *prometheus.CounterVec
+	whAttemptDur       prometheus.Histogram
+	whTerminal         *prometheus.CounterVec
+	whExpiredPending   prometheus.Counter
+	whFanOutRescued    prometheus.Counter
+	whDeliveryRescued  prometheus.Counter
+	whFirstTryLat      prometheus.Histogram
+	wsConnects         prometheus.Counter
+	wsDisconnects      *prometheus.CounterVec
+	wsRejected         *prometheus.CounterVec
+	wsDrained          prometheus.Counter
+	wsSendFailures     prometheus.Counter
+	wsActive           prometheus.Gauge
+	inboundProcess     *prometheus.CounterVec
+	inboundDuration    prometheus.Histogram
+	queueDepth         *prometheus.GaugeVec
+	queueOldestAge     *prometheus.GaugeVec
+	threadResolution   *prometheus.CounterVec
+	threadHeaderParse  *prometheus.CounterVec
+	threadNull         *prometheus.GaugeVec
+	threadViolations   *prometheus.GaugeVec
+	threadRelationship *prometheus.GaugeVec
 
 	// legacy outbox instruments (same events the Log backend emits)
 	outboxPublished *prometheus.CounterVec
@@ -99,6 +104,22 @@ var (
 	tableSet = set("webhook_events", "webhook_subscriber_deliveries",
 		"webhook_deliveries", "messages", "agent_identities",
 		"user_sessions", "oauth")
+	threadResolutionSet = set(
+		"api_reply", "fresh_send", "forward", "rfc_in_reply_to",
+		"rfc_references", "self_twin", "authenticated_delivery_twin",
+		"lazy_legacy_anchor", "anchor_found_without_thread",
+		"legacy_anchor_unmatched", "ambiguous_anchor", "no_anchor",
+		"cycle_detected",
+	)
+	threadHeaderSet    = set("in_reply_to", "references")
+	threadNullAgeSet   = set("lt_1h", "1h_6h", "6h_24h")
+	threadViolationSet = set(
+		"dangling_parent", "cross_agent_parent", "thread_mismatch",
+		"cycle", "cycle_depth_limit",
+	)
+	threadRelationshipSet = set(
+		"threads_multi_conversation", "conversations_multi_thread",
+	)
 )
 
 func set(vals ...string) map[string]struct{} {
@@ -282,6 +303,26 @@ func NewProm(build string) *Prom {
 			Name: "e2a_queue_oldest_age_seconds",
 			Help: "Age of the oldest runnable (available) job per queue.",
 		}, []string{"queue"}),
+		threadResolution: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_thread_resolution_total",
+			Help: "Mailbox-local thread identity decisions, by bounded resolution source.",
+		}, []string{"source"}),
+		threadHeaderParse: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_thread_header_parse_failures_total",
+			Help: "Inbound RFC threading headers rejected by the strict parser.",
+		}, []string{"header"}),
+		threadNull: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_null_messages",
+			Help: "Recent sampled messages without a materialized thread ID, by age bucket.",
+		}, []string{"age_bucket"}),
+		threadViolations: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_invariant_violations",
+			Help: "Current thread-topology violations found in the bounded audit sample.",
+		}, []string{"kind"}),
+		threadRelationship: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_relationship_percent",
+			Help: "Sampled mailbox-local thread/conversation relationship percentages.",
+		}, []string{"kind"}),
 
 		outboxPublished: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_outbox_events_published_total",
@@ -333,6 +374,7 @@ func NewProm(build string) *Prom {
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
+		p.threadResolution, p.threadHeaderParse, p.threadNull, p.threadViolations, p.threadRelationship,
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
 		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
@@ -461,6 +503,38 @@ func (p *Prom) SetQueueDepth(queue, state string, n int) {
 
 func (p *Prom) SetQueueOldestAge(queue string, seconds float64) {
 	p.queueOldestAge.WithLabelValues(enum(queueSet, queue)).Set(seconds)
+}
+
+func (p *Prom) ThreadResolution(source string, count int) {
+	if count > 0 {
+		p.threadResolution.WithLabelValues(enum(threadResolutionSet, source)).Add(float64(count))
+	}
+}
+
+func (p *Prom) ThreadHeaderParseFailure(header string) {
+	p.threadHeaderParse.WithLabelValues(enum(threadHeaderSet, header)).Inc()
+}
+
+func (p *Prom) SetThreadNullMessages(ageBucket string, count int) {
+	p.threadNull.WithLabelValues(enum(threadNullAgeSet, ageBucket)).Set(float64(max(count, 0)))
+}
+
+func (p *Prom) SetThreadInvariantViolations(kind string, count int) {
+	p.threadViolations.WithLabelValues(enum(threadViolationSet, kind)).Set(float64(max(count, 0)))
+}
+
+func (p *Prom) SetThreadRelationshipPercent(kind string, percent float64) {
+	p.threadRelationship.WithLabelValues(enum(threadRelationshipSet, kind)).Set(clampPercent(percent))
+}
+
+func clampPercent(percent float64) float64 {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 // --- legacy outbox instruments ---

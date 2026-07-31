@@ -16,10 +16,12 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/oauth"
 )
@@ -39,6 +41,7 @@ type MessagePruner interface {
 	DeleteExpiredMessages(ctx context.Context) (int64, error)
 	DeleteExpiredUserSessions(ctx context.Context) (int64, error)
 	PurgeDeletedAgents(ctx context.Context) (int64, error)
+	AuditThreadIdentity(ctx context.Context, afterID string) (identity.ThreadIdentityAuditResult, error)
 }
 
 // DeliveryPruner prunes expired webhook delivery records (*webhook.DeliveryStore).
@@ -83,6 +86,10 @@ type Metrics interface {
 	// rows are e2a-attributable failures; the batched prune does not retain
 	// per-row scope, so they use the conservative "unknown" scope.
 	WebhookTerminal(outcome, scope string, count int)
+	ThreadResolution(source string, count int)
+	SetThreadNullMessages(ageBucket string, count int)
+	SetThreadInvariantViolations(kind string, count int)
+	SetThreadRelationshipPercent(kind string, percent float64)
 }
 
 // Janitor holds the prune dependencies and runs the cleanup sweep. All fields
@@ -96,6 +103,13 @@ type Janitor struct {
 	oauth        OAuthPruner // optional; nil when OAuth is not configured
 	idempotency  IdempotencyPruner
 	metrics      Metrics
+
+	// River can overlap hourly sweeps after an exceptional >1h run. Serialize
+	// only the bounded topology audit so its rotating cursor cannot regress or
+	// audit the same sample concurrently; the independent idempotent prunes
+	// retain their existing overlap behavior.
+	threadAuditMu     sync.Mutex
+	threadAuditCursor string
 }
 
 // New builds the Janitor. oauth may be nil (interface, not a typed-nil pointer)
@@ -207,7 +221,65 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 		log.Printf("Swept %d idempotency key(s) past TTL", deleted)
 	}
 
+	if err := j.auditThreadIdentity(ctx); err != nil {
+		log.Printf("Failed to audit thread identity: %v", err)
+		errs = append(errs, err)
+	}
+
 	return errors.Join(errs...)
+}
+
+func (j *Janitor) auditThreadIdentity(ctx context.Context) error {
+	j.threadAuditMu.Lock()
+	defer j.threadAuditMu.Unlock()
+
+	result, err := j.messages.AuditThreadIdentity(ctx, j.threadAuditCursor)
+	if err != nil {
+		return err
+	}
+	j.threadAuditCursor = result.NextCursor
+
+	j.metrics.SetThreadNullMessages("lt_1h", result.NullThreadsByAge.LessThanOneHour)
+	j.metrics.SetThreadNullMessages("1h_6h", result.NullThreadsByAge.OneToSixHours)
+	j.metrics.SetThreadNullMessages("6h_24h", result.NullThreadsByAge.SixToTwentyFourHours)
+
+	j.metrics.SetThreadInvariantViolations("dangling_parent", result.Violations.DanglingParent)
+	j.metrics.SetThreadInvariantViolations("cross_agent_parent", result.Violations.CrossAgentParent)
+	j.metrics.SetThreadInvariantViolations("thread_mismatch", result.Violations.ThreadMismatch)
+	j.metrics.SetThreadInvariantViolations("cycle", result.Violations.Cycle)
+	j.metrics.SetThreadInvariantViolations("cycle_depth_limit", result.Violations.CycleDepthLimit)
+	if result.Violations.Cycle > 0 {
+		j.metrics.ThreadResolution("cycle_detected", result.Violations.Cycle)
+	}
+
+	j.metrics.SetThreadRelationshipPercent(
+		"threads_multi_conversation",
+		percentage(result.MultiConversationThreads, result.ThreadsSampled),
+	)
+	j.metrics.SetThreadRelationshipPercent(
+		"conversations_multi_thread",
+		percentage(result.MultiThreadConversations, result.ConversationsSampled),
+	)
+
+	totalViolations := result.Violations.DanglingParent +
+		result.Violations.CrossAgentParent +
+		result.Violations.ThreadMismatch +
+		result.Violations.Cycle +
+		result.Violations.CycleDepthLimit
+	if totalViolations > 0 || result.RepairedParentPointers > 0 {
+		log.Printf(
+			"Thread identity audit scanned=%d violations=%d repaired_parent_pointers=%d",
+			result.Scanned, totalViolations, result.RepairedParentPointers,
+		)
+	}
+	return nil
+}
+
+func percentage(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return 100 * float64(numerator) / float64(denominator)
 }
 
 // JanitorArgs drives the periodic cleanup sweep. No fields — each run prunes

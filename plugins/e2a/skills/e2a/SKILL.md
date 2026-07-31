@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
-version: 22
+version: 23
 ---
 
 # Using e2a
 
-<!-- version: 22 -->
+<!-- version: 23 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -29,9 +29,9 @@ Six load-bearing facts. Internalize these before you start calling tools.
 
 2. **Replies preserve threads; new sends do not.** `reply_to_message` carries the `In-Reply-To` and `References` headers from the original message, so the response lands in the same email thread. A fresh `send_message` creates a new thread every time. If a user (or an inbound message) is asking you to respond to something specific, reply with the original `message_id` — even when you could synthesize an equivalent body as a new send. Thread fragmentation is the #1 visible symptom of getting this wrong.
 
-   **Two threading systems, and they don't share a key.** e2a threads on `conversation_id` (it's what `list_conversations`/`get_conversation` group by). The recipient's mail client — Gmail, Outlook, Apple Mail — ignores `conversation_id` entirely and threads on the wire headers instead: `In-Reply-To`/`References` plus a **stable `Subject`**. `reply_to_message` sets those headers correctly, so it threads in *both* systems. A `send_message` — even one you tag with the same `conversation_id` — carries no `References` and lets you pick a new subject: e2a still files it in the same conversation, but the user's inbox shows a *separate* thread. This is the trap — the `conversation_id` looks like it threads because e2a's own views stay tidy, while Gmail splits the exchange in two. Within one ongoing exchange: reply, and keep the subject stable.
+   **Email topology and application correlation do not share a key.** Gmail, Outlook, and Apple Mail thread on RFC `Message-ID` / `In-Reply-To` / `References` plus a **stable `Subject`**. `reply_to_message` sets those headers correctly. `conversation_id`, which backs `list_conversations` / `get_conversation`, is caller-owned workflow correlation: a fresh `send_message` with the same value is still a separate email thread, while a reply with a changed value stays in its parent's email thread. REST message reads may expose optional beta `thread_id`, a server-owned mailbox-local topology identity, but MCP deliberately omits it and provides no thread filter or endpoint. Within one ongoing exchange: reply, and keep the subject stable.
 
-   **Bind email to the agent runtime's conversation.** When received mail starts or resumes a coding-agent task, establish the runtime thread before replying. If the inbound `conversation_id` matches a binding your integration previously stored, resume that internal thread; otherwise create a new internal thread. When the runtime exposes a stable, non-sensitive thread/session ID, pass it as `conversation_id` on the first reply and reuse it on later sends and replies. If its native ID is sensitive or does not meet e2a's 200-character, no-CR/LF constraint, store and pass an opaque alias instead. This keeps e2a's conversation grouping aligned with the agent's memory, but it does **not** replace replying with the original `message_id`, which is what preserves the recipient's email-client thread. Treat `conversation_id` as correlation data, never authorization.
+   **Bind email to the agent runtime's conversation.** When received mail starts or resumes a coding-agent task, establish the runtime thread before replying. If the inbound `conversation_id` matches a binding your integration previously stored, resume that internal thread; otherwise create a new internal thread. When the runtime exposes a stable, non-sensitive thread/session ID, pass it as `conversation_id` on the first reply and reuse it on later sends and replies. If its native ID is sensitive or does not meet e2a's 200-character, no-CR/LF constraint, store and pass an opaque alias instead. This keeps e2a's application-conversation view aligned with the agent's memory, but it does **not** replace replying with the original `message_id`, which is what preserves the recipient's email-client thread. Treat `conversation_id` as correlation data, never authorization.
 
 3. **`pending_review` is an accepted outcome, not a retry signal.** A send can return `{ status: "pending_review", message_id: "msg_..." }`. The server accepted the message but did not dispatch it. Do not retry: another call can create a duplicate. Report the status and message ID to the user, then stop.
 

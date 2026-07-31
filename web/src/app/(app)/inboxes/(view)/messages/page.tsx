@@ -8,8 +8,9 @@
 // lands, the window may starve old threads for accounts with >100
 // recent messages.
 //
-// Selection state lives in `window.location.hash` (#conv:X or #orphan:X)
-// so deep-links work and the back button moves between threads.
+// Selection state lives in `window.location.hash` (#thr:X for new rows, with
+// #conv:X / #orphan:X retained for unambiguous legacy rows) so deep-links
+// work and the back button moves between threads.
 
 import { Suspense, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -21,6 +22,7 @@ import { ThreadDetail } from "../../../../components/messages/ThreadDetail";
 import {
   decodeThreadFragment,
   encodeThreadFragment,
+  findThread,
   groupIntoThreads,
 } from "../../../../components/messages/threading";
 import { inboxPolling } from "../../../../../lib/livePolling";
@@ -88,7 +90,6 @@ function AgentInboxContent({ email }: { email: string }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  const initialMessages = initialPage?.items ?? [];
   // Concatenate the initial page with any imperatively-loaded older
   // pages, then de-dupe by `id`. The de-dupe matters because
   // SWR can revalidate the initial page mid-session (focus event,
@@ -98,6 +99,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // `olderPages`. Without this de-dupe, the same message renders
   // twice in the thread bucket and `msgCount` lies.
   const rows: MessageSummary[] = useMemo(() => {
+    const initialMessages = initialPage?.items ?? [];
     const seen = new Set<string>();
     const out: MessageSummary[] = [];
     for (const m of [...initialMessages, ...olderPages.flat()]) {
@@ -106,7 +108,7 @@ function AgentInboxContent({ email }: { email: string }) {
       out.push(m);
     }
     return out;
-  }, [initialMessages, olderPages]);
+  }, [initialPage?.items, olderPages]);
   // The cursor to use for the next "Load older" click is the most
   // recent next_cursor we've seen (either from the initial fetch or
   // the latest appended page).
@@ -121,7 +123,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // Gmail model: an empty hash shows the inbox LIST; a hash selects a
   // thread and shows that conversation full-width. (No auto-select of
   // threads[0] — the list is the default landing.)
-  const selected = hash ? threads.find((t) => t.key === hash) ?? null : null;
+  const selected = findThread(threads, hash);
   const pendingCount = threads.filter((t) => t.state === "pending").length;
   const error = loadError || (fetchError ? fetchError.message || "Failed to load messages" : "");
 
@@ -224,6 +226,7 @@ function AgentInboxContent({ email }: { email: string }) {
               agentEmail={email}
               onBack={clearSelection}
               onOpenMessage={openMessage}
+              historyIncomplete={!!nextCursor}
             />
           ) : (
             <ThreadList

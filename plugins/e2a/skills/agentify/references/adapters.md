@@ -23,7 +23,7 @@ Operations: `notify(ref, stage, slots)`, `poll_replies()`,
 
 | impl | status | how |
 |---|---|---|
-| **e2a** | ✅ v0 (slice 2) | `reply_to_message`/`send_message` out; `list_messages`+`get_message` in. **Verified reply** = `conversation_id` matches a ticket's `comms_ref`/`approval.conversation_id`, `authentication.dmarc.status == "pass"`, AND `header_from` equals the address on file. `resolve_contact` is a no-op — the e2a conversation IS the contact store, the address never leaves e2a. |
+| **e2a** | ✅ v0 (slice 2) | `reply_to_message`/`send_message` out; `list_messages`+`get_message` in. **Verified reply** = caller-owned `conversation_id` matches a ticket's `comms_ref`/`approval.conversation_id`, `authentication.dmarc.status == "pass"`, AND `header_from` equals the address on file. `resolve_contact` is a no-op — the application-conversation view carries the contact correlation, and the address never leaves e2a. |
 | **smtp** | ⏳ | plain SMTP send + IMAP poll; the adopter implements verified-sender matching. |
 | **none** | ⏳ | no email — the public GitHub issue thread is the comms channel (filers are GitHub users). |
 

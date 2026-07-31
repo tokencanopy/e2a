@@ -230,6 +230,7 @@ func TestRestoreMessage(t *testing.T) {
 			return &identity.Message{
 				ID: messageID, AgentID: agentID, Direction: "inbound",
 				Sender: "alice@gmail.com", Subject: "restored",
+				ThreadID:  assignedThreadID,
 				CreatedAt: time.Unix(1700000000, 0).UTC(),
 			}, nil
 		}
@@ -246,6 +247,9 @@ func TestRestoreMessage(t *testing.T) {
 	}
 	if _, present := body["deleted_at"]; present {
 		t.Fatalf("restored view must omit deleted_at, got %v", body["deleted_at"])
+	}
+	if _, present := body["thread_id"]; present {
+		t.Fatalf("restore response must omit thread_id, got %v", body["thread_id"])
 	}
 }
 

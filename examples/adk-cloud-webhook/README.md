@@ -2,7 +2,7 @@
 
 A minimal end-to-end example: a Google [Agent Development Kit](https://adk.dev/)
 agent receives email through an [e2a](https://e2a.dev) webhook subscription,
-runs a turn, and replies — keeping a per-thread conversation memory by
+runs a turn, and replies — keeping application conversation memory by
 mapping e2a's `conversation_id` to ADK's `session_id`.
 
 ```
@@ -100,10 +100,11 @@ generate a reply, and the reply post back to e2a. Reply to the agent's
 message from your inbox and you'll see ADK reuse the same session — the
 agent remembers the prior turn.
 
-## How `conversation_id` keeps memory across turns
+## How `conversation_id` keeps application memory across turns
 
-Email is stateless at the SMTP layer. e2a re-creates threading by
-propagating an opaque `conversation_id` through each round-trip:
+`conversation_id` is caller-owned application correlation, not an RFC email
+thread key. This example propagates it through each round-trip solely to bind
+mail to one ADK session:
 
 1. **First inbound** has `conversation_id = None` (the human just
    started a thread). The webhook derives a stable `conv_<full-event-id-suffix>`
@@ -121,8 +122,19 @@ propagating an opaque `conversation_id` through each round-trip:
    gets back the existing ADK session, so the agent sees full prior
    context on the next `runner.run_async` call.
 
-This is the entire trick. The webhook is ~30 lines of business logic;
-ADK does the actual memory work, e2a does the actual email work.
+The actual email thread is preserved because `email.reply(...)` references the
+original e2a message and emits RFC `In-Reply-To` / `References` headers. A
+fresh send with the same `conversation_id` would still start a separate email
+thread.
+
+Authenticated message list/detail reads may expose optional beta `thread_id`,
+the server-owned mailbox-local topology identity. Webhook events deliberately
+omit it, so this example neither reads nor writes it. There is no `thread_id`
+request field, filter, or thread endpoint.
+
+This is the entire application-memory trick. The webhook is ~30 lines of
+business logic; ADK does the memory work, while e2a handles email and reply
+topology.
 
 e2a delivers webhooks at least once. The example claims each event ID before
 running ADK and reuses that ID as the reply's `Idempotency-Key`, so a timed-out

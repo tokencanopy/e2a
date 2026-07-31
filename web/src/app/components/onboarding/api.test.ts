@@ -83,6 +83,34 @@ describe("listAgents", () => {
 });
 
 describe("message projection (v1 contract)", () => {
+  it("preserves the optional beta thread_id on message summaries", async () => {
+    mockFetch.mockImplementation((url: string) =>
+      url.includes("/messages")
+        ? okJson({
+            items: [
+              {
+                id: "m_threaded",
+                thread_id: "thread_A",
+                direction: "inbound",
+                header_from: "sender@x.com",
+                envelope_from: null,
+                verified_domain: "x.com",
+                to: ["agent@y.com"],
+                delivered_to: "agent@y.com",
+                subject: "Threaded",
+                created_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          })
+        : notFound(),
+    );
+
+    const res = await listAgentMessages("agent@y.com");
+
+    expect(res.items[0].thread_id).toBe("thread_A");
+  });
+
   it("maps v1 review_status/delivery_status onto the app fields", async () => {
     mockFetch.mockImplementation((url: string) =>
       url.includes("/messages")
@@ -257,6 +285,7 @@ const REVIEW_WIRE: MessageViewWire = {
 // (GET /v1/agents/{address}/messages/{id}) for an inbound row.
 const INBOUND_WIRE: MessageViewWire = {
   id: "msg_in",
+  thread_id: "thread_in",
   direction: "inbound",
   header_from: "james@x.com",
   envelope_from: "bounce@x.com",
@@ -315,6 +344,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
     expect(d.header_from).toBe("james@x.com");
     expect(d.envelope_from).toBe("bounce@x.com");
     expect(d.parsed?.text).toBe("plain body");
+    expect(d.thread_id).toBe("thread_in");
   });
 
   it("projectInbound defaults absent list/scalar fields instead of leaking undefined", () => {

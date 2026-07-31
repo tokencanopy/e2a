@@ -425,23 +425,29 @@ trashed agents):
 await client.agents.delete("bot@agents.e2a.dev", { permanent: true });
 ```
 
-## Conversation threading
+## Application correlation and email threads
 
-`conversationId` is an opaque string that ties multiple emails to one thread
-across the email boundary. Pass it on any `send` / `reply` and e2a surfaces it
-on the recipient's inbound — via `In-Reply-To` for humans, or a forge-resistant
-`X-E2A-Conversation-Id` header for same-platform agent-to-agent mail. It is not
-a security boundary; for sender identity require
+`conversationId` is an optional, caller-owned opaque value for correlating mail
+with an application workflow, ticket, or agent session. Pass it on `send` /
+`reply`; e2a preserves its existing minting, inheritance, and
+delivery-correlation behavior. It does not define RFC email topology: reusing
+one value on fresh sends does not join their email threads, and changing it
+during a reply does not split the reply from its parent.
+
+Create the agent runtime's internal session before replying, then pass its
+stable, non-sensitive ID (or an opaque stored alias) as `conversationId`. If a
+later inbound value matches a binding you stored, resume that application
+session. Keep replying by the original message ID—the reply endpoint sets the
+`In-Reply-To` / `References` headers Gmail and Outlook use. Scope bindings to
+the inbox and sender, and never use `conversationId` as authorization.
+For sender-domain authentication, separately require
 `message.authentication?.dmarc.status === "pass"` and compare the literal
-`message.headerFrom` address separately. On first
-contact from a human it arrives `null`. Create the agent runtime's internal
-thread before replying, then pass its stable, non-sensitive thread/session ID
-(or an opaque stored alias) as `conversationId`; reuse it on every later send
-or reply. If a later inbound ID matches a binding you previously stored, resume
-that internal thread. Keep replying by the original message ID as well — the
-conversation ID aligns e2a grouping with agent memory, while the reply endpoint
-sets the email headers Gmail/Outlook use. Scope bindings to the inbox and sender,
-and never use the conversation ID as authorization.
+`message.headerFrom`.
+
+Message list and detail models may expose `message.threadId`, an optional beta,
+server-owned, read-only identity for the mailbox-local reply graph. Legacy
+messages can omit it. There is no `threadId` request field, list filter, thread
+endpoint, or complete-thread retrieval method.
 
 ## License
 

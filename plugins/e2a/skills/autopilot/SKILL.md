@@ -205,8 +205,9 @@ Until then, treat the bounce as required.)*
    see the shared-domain caveat above; a shared-domain sender will (correctly, per that
    caveat) fail to trigger and can look like a bug in this skill when it isn't one.
 4. Watch the log for `spawning session for <id>` then `session for <id> exited 0`.
-5. Confirm the reply actually landed **threaded** (same conversation, `Re:` subject) in the
-   sender's inbox — check the real mailbox, not just the log.
+5. Confirm the reply actually landed in the **same email thread** (`Re:` subject
+   and reply placement) in the sender's real mailbox—not merely under the same
+   application `conversation_id` or in the log.
 6. **Send a test from a non-allowlisted address and confirm nothing spawns** — the log
    should show `untrusted sender, leaving for human triage` and the message should remain
    in the inbox unread by the daemon. This negative test matters as much as the positive

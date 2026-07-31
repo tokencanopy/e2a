@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpClient, SendOpts } from "../client.js";
-import type { MessageView } from "@e2a/sdk/v1";
+import type { MessageSummaryView, MessageView } from "@e2a/sdk/v1";
 import { z } from "zod";
 import { runTool, strictInputSchema, paginationInput, emailSelector } from "./util.js";
 import { attachmentsArraySchema, type AttachmentInput } from "./attachments.js";
@@ -62,6 +62,39 @@ export function messageViewForTool(email: MessageView) {
       content_type: a.contentType,
       size_bytes: a.sizeBytes,
     })),
+  };
+}
+
+// MessageSummaryView → the frozen MCP list_messages shape. Keep this an
+// explicit projection rather than passing generated SDK models through: beta
+// REST/SDK fields such as threadId must not silently expand MCP output.
+export function messageSummaryViewForTool(message: MessageSummaryView) {
+  return {
+    id: message.id,
+    direction: message.direction,
+    header_from: message.headerFrom,
+    envelope_from: message.envelopeFrom,
+    verified_domain: message.verifiedDomain,
+    to: message.to,
+    cc: message.cc,
+    reply_to: message.replyTo,
+    delivered_to: message.deliveredTo,
+    subject: message.subject,
+    conversation_id: message.conversationId,
+    read_status: message.readStatus,
+    review_status: message.reviewStatus,
+    webhook_status: message.webhookStatus,
+    webhook_error: message.webhookError,
+    delivery_status: message.deliveryStatus,
+    delivery_detail: message.deliveryDetail,
+    sent_as: message.sentAs,
+    scheduled_at: message.scheduledAt,
+    flagged: message.flagged,
+    flag_reason: message.flagReason,
+    size_bytes: message.sizeBytes,
+    labels: message.labels,
+    created_at: message.createdAt,
+    deleted_at: message.deletedAt,
   };
 }
 
@@ -260,7 +293,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .string()
           .optional()
           .describe(
-            "Optional conversation grouping ID. A forward is a new thread by default — set this only to bind it to an existing thread explicitly.",
+            "Optional application conversation/grouping ID. A forward always starts a new email thread; setting this value only groups it with related application activity. Maximum 200 characters; no CR/LF.",
           ),
         reply_to: z
           .string()
@@ -348,7 +381,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "List conversations for the agent",
       annotations: { readOnlyHint: true },
       description:
-        "Lists the agent's conversations — groups of messages sharing a `conversation_id` — one row per conversation, sorted by most recent activity. Each row carries `message_count`, `inbound_count`, `outbound_count`, `has_unread`, and the latest message's subject + sender so you can render an inbox without drilling into each thread. **Cursor-paginated:** returns one page in `conversations` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page. To read a single conversation's messages, call `get_conversation`.",
+        "Lists the agent's application conversations — groups of messages sharing a `conversation_id` — one row per group, sorted by most recent activity. `conversation_id` is independent of email thread topology. Each row carries `message_count`, `inbound_count`, `outbound_count`, `has_unread`, and the latest message's subject + sender so you can render grouped activity without loading every message. **Cursor-paginated:** returns one page in `conversations` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page. To read a single conversation's messages, call `get_conversation`.",
       inputSchema: strictInputSchema({
         ...paginationInput,
         since: z
@@ -384,10 +417,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
   server.registerTool(
     "get_conversation",
     {
-      title: "Get a single conversation with all member messages",
+      title: "Get an application conversation with all member messages",
       annotations: { readOnlyHint: true },
       description:
-        "Returns the full thread — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full thread.",
+        "Returns the full application conversation group — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). This groups by `conversation_id`, which is independent of email thread topology. Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full group.",
       inputSchema: strictInputSchema({
         conversation_id: z.string(),
         email: emailSelector,
@@ -437,7 +470,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .string()
           .max(200)
           .optional()
-          .describe("Exact match on the thread/conversation id."),
+          .describe("Exact match on the application conversation/grouping id."),
         since: z
           .string()
           .optional()
@@ -484,7 +517,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           ...(args.deleted !== undefined ? { deleted: args.deleted } : {}),
           ...(args.email !== undefined ? { explicitAddress: args.email } : {}),
         });
-        return { messages: page.items, ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}) };
+        return {
+          messages: page.items.map(messageSummaryViewForTool),
+          ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}),
+        };
       }),
   );
 

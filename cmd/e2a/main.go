@@ -228,6 +228,7 @@ func main() {
 		promBackend = telemetry.NewProm(cfg.Metrics.Build)
 		metrics = promBackend
 	}
+	store.SetThreadMetrics(metrics)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)

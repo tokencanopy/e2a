@@ -22,8 +22,8 @@ Both webhooks:
 3. ignore non-`email.received` events and claim `event.id` before processing;
 4. hydrate the ergonomic facade with `client.inbound.from_event(event)` or
    `client.inbound.fromEvent(event)`;
-5. reuse the email conversation ID, or derive a collision-safe, retry-stable
-   conversation anchor for first contact;
+5. reuse the caller-owned application `conversation_id`, or derive a
+   collision-safe, retry-stable correlation value for first contact;
 6. project normalized fields into an untrusted model prompt;
 7. send through the bound `email.reply(...)`, using `event.id` as the
    idempotency key; and
@@ -187,10 +187,10 @@ blocks before calling `email.reply(...)`.
 
 Install `google-adk` (Python) or `@google/adk` (TypeScript), replace the OpenAI
 agent implementation, and validate the Gemini API key or Vertex AI
-configuration at startup. Use the effective e2a conversation ID as ADK's
-`sessionId` and an opaque, inbox-scoped sender identity as `userId`. Then run
-the safe prompt through the session and take text only from the final response
-event:
+configuration at startup. Use the effective e2a application conversation ID
+as ADK's `sessionId` and an opaque, inbox-scoped sender identity as `userId`.
+Then run the safe prompt through the session and take text only from the final
+response event:
 
 ```python
 async for agent_event in runner.run_async(
@@ -207,3 +207,9 @@ Create or load the session before running it. The expanded
 sender identities, first-contact conversation mapping, and durable session
 storage. See the official ADK [Python](https://adk.dev/get-started/python/)
 and [TypeScript](https://adk.dev/get-started/typescript/) documentation.
+
+This `conversation_id` → session mapping is application correlation. The
+bound `email.reply(...)` call preserves the actual email thread through the
+original message resource and RFC reply headers. Optional beta `thread_id` is
+read-only message-list/detail metadata; webhook events do not carry it, and
+there is no `thread_id` request field, filter, or thread endpoint.

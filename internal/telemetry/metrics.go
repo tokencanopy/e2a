@@ -96,6 +96,10 @@ type Metrics interface {
 	// processing time (0 for RCPT-stage rejections).
 	SMTPInbound(outcome string, seconds float64)
 
+	// ThreadHeaderParseFailure counts an inbound RFC threading header that
+	// failed strict parsing. header is one of {in_reply_to, references}.
+	ThreadHeaderParseFailure(header string)
+
 	// OutboundQueueWait records due→pickup latency for one outbound
 	// send attempt (River attempted_at − scheduled_at; created_at would
 	// count each retry's full backoff as queue wait).
@@ -195,6 +199,25 @@ type Metrics interface {
 	// are not keeping up.
 	SetQueueDepth(queue, state string, n int)
 	SetQueueOldestAge(queue string, seconds float64)
+
+	// ThreadResolution counts thread-identity decisions by bounded source.
+	// The lazy_legacy_anchor source is the adoption counter; use rate() over
+	// a one-hour range to monitor the compatibility tail.
+	ThreadResolution(source string, count int)
+
+	// SetThreadNullMessages samples recent messages that still have no
+	// materialized thread ID. ageBucket ∈ {lt_1h, 1h_6h, 6h_24h}.
+	SetThreadNullMessages(ageBucket string, count int)
+
+	// SetThreadInvariantViolations publishes the bounded audit's current
+	// findings. kind ∈ {dangling_parent, cross_agent_parent,
+	// thread_mismatch, cycle, cycle_depth_limit}.
+	SetThreadInvariantViolations(kind string, count int)
+
+	// SetThreadRelationshipPercent publishes sampled mailbox-local topology
+	// ratios. kind ∈ {threads_multi_conversation,
+	// conversations_multi_thread}; percent is clamped to [0,100].
+	SetThreadRelationshipPercent(kind string, percent float64)
 }
 
 // NoOp swallows every call. Default for tests that don't care.
@@ -211,27 +234,32 @@ func (NoOp) ContactDueFailed(int)           {}
 func (NoOp) NotifyMissed()                  {}
 func (NoOp) SetPublisherLag(float64)        {}
 
-func (NoOp) HTTPRequest(string, string, string, float64) {}
-func (NoOp) SMTPInbound(string, float64)                 {}
-func (NoOp) OutboundQueueWait(float64)                   {}
-func (NoOp) OutboundTerminal(string)                     {}
-func (NoOp) OutboundTerminalLatency(float64)             {}
-func (NoOp) OutboundAttempt(string, float64)             {}
-func (NoOp) WebhookAttempt(string, string, float64)      {}
-func (NoOp) WebhookTerminal(string, string, int)         {}
-func (NoOp) WebhookExpiredPending(int)                   {}
-func (NoOp) WebhookFanOutRescued(int)                    {}
-func (NoOp) WebhookDeliveryRescued(int)                  {}
-func (NoOp) WebhookFirstAttemptLatency(float64)          {}
-func (NoOp) WSConnected()                                {}
-func (NoOp) WSDisconnected(string)                       {}
-func (NoOp) WSHandshakeRejected(string)                  {}
-func (NoOp) WSDrained(int)                               {}
-func (NoOp) WSSendFailure()                              {}
-func (NoOp) SetWSActive(int)                             {}
-func (NoOp) InboundProcess(string, float64)              {}
-func (NoOp) SetQueueDepth(string, string, int)           {}
-func (NoOp) SetQueueOldestAge(string, float64)           {}
+func (NoOp) HTTPRequest(string, string, string, float64)  {}
+func (NoOp) SMTPInbound(string, float64)                  {}
+func (NoOp) ThreadHeaderParseFailure(string)              {}
+func (NoOp) OutboundQueueWait(float64)                    {}
+func (NoOp) OutboundTerminal(string)                      {}
+func (NoOp) OutboundTerminalLatency(float64)              {}
+func (NoOp) OutboundAttempt(string, float64)              {}
+func (NoOp) WebhookAttempt(string, string, float64)       {}
+func (NoOp) WebhookTerminal(string, string, int)          {}
+func (NoOp) WebhookExpiredPending(int)                    {}
+func (NoOp) WebhookFanOutRescued(int)                     {}
+func (NoOp) WebhookDeliveryRescued(int)                   {}
+func (NoOp) WebhookFirstAttemptLatency(float64)           {}
+func (NoOp) WSConnected()                                 {}
+func (NoOp) WSDisconnected(string)                        {}
+func (NoOp) WSHandshakeRejected(string)                   {}
+func (NoOp) WSDrained(int)                                {}
+func (NoOp) WSSendFailure()                               {}
+func (NoOp) SetWSActive(int)                              {}
+func (NoOp) InboundProcess(string, float64)               {}
+func (NoOp) SetQueueDepth(string, string, int)            {}
+func (NoOp) SetQueueOldestAge(string, float64)            {}
+func (NoOp) ThreadResolution(string, int)                 {}
+func (NoOp) SetThreadNullMessages(string, int)            {}
+func (NoOp) SetThreadInvariantViolations(string, int)     {}
+func (NoOp) SetThreadRelationshipPercent(string, float64) {}
 
 // Log emits a structured log line for every metric call. Cheap and
 // portable; production aggregators (Loki, CloudWatch, Datadog) can
@@ -410,6 +438,23 @@ func (l *Log) SetQueueOldestAge(queue string, seconds float64) {
 	}
 	log.Printf("[metrics] gauge=queue.oldest_age_seconds queue=%s value=%.2f", queue, seconds)
 }
+
+func (l *Log) ThreadResolution(source string, count int) {
+	if count > 0 {
+		log.Printf("[metrics] event=thread.resolution source=%s count=%d",
+			enum(threadResolutionSet, source), count)
+	}
+}
+
+func (l *Log) ThreadHeaderParseFailure(header string) {
+	log.Printf("[metrics] event=thread.header_parse_failure header=%s",
+		enum(threadHeaderSet, header))
+}
+
+// Periodic gauges are Prom-only, matching the other sampled gauge families.
+func (l *Log) SetThreadNullMessages(string, int)            {}
+func (l *Log) SetThreadInvariantViolations(string, int)     {}
+func (l *Log) SetThreadRelationshipPercent(string, float64) {}
 
 // Compile guard.
 var _ Metrics = NoOp{}

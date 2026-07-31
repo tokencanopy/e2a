@@ -72,6 +72,19 @@ func TestExtractThreadInfoWithReplyHeaders(t *testing.T) {
 	}
 }
 
+func TestExtractThreadInfoReportsMalformedThreadHeaders(t *testing.T) {
+	raw := []byte("In-Reply-To: not-a-message-id\r\nReferences: phrase-without-a-token\r\nFrom: alice@example.com\r\n\r\nbody\r\n")
+
+	info := extractThreadInfo(raw)
+
+	if len(info.MalformedThreadHeaders) != 2 || info.MalformedThreadHeaders[0] != "in_reply_to" || info.MalformedThreadHeaders[1] != "references" {
+		t.Fatalf("MalformedThreadHeaders = %v, want [in_reply_to references]", info.MalformedThreadHeaders)
+	}
+	if info.ThreadInReplyTo != nil || info.ThreadReferences != nil {
+		t.Fatalf("malformed headers must fail closed, got in_reply_to=%v references=%v", info.ThreadInReplyTo, info.ThreadReferences)
+	}
+}
+
 func TestExtractThreadInfoReplyTo(t *testing.T) {
 	// Outbound messages from the e2a relay set From: to the platform alias and
 	// Reply-To: to the real agent address. Inbound should surface Reply-To.

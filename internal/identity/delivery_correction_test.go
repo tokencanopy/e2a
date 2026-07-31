@@ -74,6 +74,118 @@ func readRow(t *testing.T, store *identity.Store, msgID string) (status, detail,
 	return
 }
 
+func TestThreadProviderKeyProvenance(t *testing.T) {
+	t.Run("qualified normal provider result writes canonical key", func(t *testing.T) {
+		pool := testutil.TestDB(t)
+		store := identity.NewStore(pool)
+		ctx := context.Background()
+		agentID := convoTestSetup(t, store, "thread-provider-qualified")
+		msgID := seedOutboundRow(t, store, agentID, []string{"alice@example.net"}, nil, nil, "thread-provider-qualified")
+
+		if _, err := pool.Exec(ctx, `UPDATE messages SET delivery_status='sending' WHERE id=$1`, msgID); err != nil {
+			t.Fatalf("mark sending: %v", err)
+		}
+		if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+			info, err := store.MarkOutboundSentTx(ctx, tx, msgID, "<CaseSensitive.Left@MAIL.Example.COM>")
+			if err != nil {
+				return err
+			}
+			if info == nil {
+				t.Fatal("MarkOutboundSentTx returned nil for live sending row")
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("MarkOutboundSentTx: %v", err)
+		}
+
+		var key string
+		if err := pool.QueryRow(ctx,
+			`SELECT COALESCE(rfc_message_id_key, '') FROM messages WHERE id=$1`,
+			msgID,
+		).Scan(&key); err != nil {
+			t.Fatalf("read RFC key: %v", err)
+		}
+		if key != "<CaseSensitive.Left@mail.example.com>" {
+			t.Fatalf("qualified provider key = %q, want canonical qualified Message-ID", key)
+		}
+	})
+
+	t.Run("bare normal provider result cannot become RFC key", func(t *testing.T) {
+		pool := testutil.TestDB(t)
+		store := identity.NewStore(pool)
+		ctx := context.Background()
+		agentID := convoTestSetup(t, store, "thread-provider-bare-normal")
+		msgID := seedOutboundRow(t, store, agentID, []string{"bob@example.net"}, nil, nil, "thread-provider-bare-normal")
+
+		if _, err := pool.Exec(ctx, `UPDATE messages SET delivery_status='sending' WHERE id=$1`, msgID); err != nil {
+			t.Fatalf("mark sending: %v", err)
+		}
+		if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+			_, err := store.MarkOutboundSentTx(ctx, tx, msgID, "ses-bare-normal-id")
+			return err
+		}); err != nil {
+			t.Fatalf("MarkOutboundSentTx: %v", err)
+		}
+
+		var keyIsNull bool
+		if err := pool.QueryRow(ctx,
+			`SELECT rfc_message_id_key IS NULL FROM messages WHERE id=$1`,
+			msgID,
+		).Scan(&keyIsNull); err != nil {
+			t.Fatalf("read RFC key nullness: %v", err)
+		}
+		if !keyIsNull {
+			t.Fatal("bare provider result populated rfc_message_id_key")
+		}
+	})
+
+	t.Run("bare feedback and state-only resolution preserve null key", func(t *testing.T) {
+		pool := testutil.TestDB(t)
+		store := identity.NewStore(pool)
+		ctx := context.Background()
+		agentID := convoTestSetup(t, store, "thread-provider-feedback")
+		msgID := seedOutboundRow(t, store, agentID, []string{"carol@example.net"}, nil, nil, "thread-provider-feedback")
+
+		if err := store.RecordProviderAcceptEvidence(ctx, msgID, "ses-bare-feedback-id"); err != nil {
+			t.Fatalf("RecordProviderAcceptEvidence: %v", err)
+		}
+		var keyIsNull bool
+		if err := pool.QueryRow(ctx,
+			`SELECT rfc_message_id_key IS NULL FROM messages WHERE id=$1`,
+			msgID,
+		).Scan(&keyIsNull); err != nil {
+			t.Fatalf("read key after feedback: %v", err)
+		}
+		if !keyIsNull {
+			t.Fatal("bare provider feedback populated rfc_message_id_key")
+		}
+
+		if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+			info, providerID, err := store.ResolveOutboundProviderAcceptedTx(ctx, tx, msgID)
+			if err != nil {
+				return err
+			}
+			if info == nil || providerID != "ses-bare-feedback-id" {
+				t.Fatalf("state-only resolution = (%+v, %q), want sent info with preserved provider id", info, providerID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("ResolveOutboundProviderAcceptedTx: %v", err)
+		}
+
+		var status string
+		if err := pool.QueryRow(ctx,
+			`SELECT delivery_status, rfc_message_id_key IS NULL FROM messages WHERE id=$1`,
+			msgID,
+		).Scan(&status, &keyIsNull); err != nil {
+			t.Fatalf("read state-only resolution: %v", err)
+		}
+		if status != "sent" || !keyIsNull {
+			t.Fatalf("state-only resolution status/key = %q/null:%v, want sent/null", status, keyIsNull)
+		}
+	})
+}
+
 // TestCorrection_LocalFailedCorrectedByCorrelatedDelivered is the load-bearing
 // §3.1 regression: a locally inferred failed followed by authoritatively
 // correlated delivered evidence corrects the stored message AND the recipient

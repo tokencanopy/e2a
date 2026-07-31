@@ -171,6 +171,12 @@ before it is declared stable**.
 | `get_attachment` | Get one attachment's metadata + a short-lived `download_url` (fetch the bytes out of band); `inline: true` returns base64 `data` for small files (≤256 KB). |
 | `update_message_labels` | Add or remove labels on a message. |
 
+MCP message output intentionally omits the REST message-read beta `thread_id`
+field and adds no thread filter or endpoint. `list_conversations` /
+`get_conversation` remain caller-owned `conversation_id` application views,
+not RFC email-thread enumeration. Use `reply_to_message` with the original
+message ID to preserve wire topology.
+
 ### Human-in-the-loop approval
 
 `list_reviews`/`get_review` surface every account-scoped hold: outbound drafts

@@ -39,6 +39,9 @@ export type HoldReason = {
 
 export type PendingMessageSummary = {
   id: string;
+  // Server-owned email topology identity. Optional because review payloads
+  // and older servers omit it.
+  thread_id?: string;
   // Owning agent's email address. In `/v1` this is how detail/approve/
   // reject are addressed (the path's {address}). Displayed in the queue
   // row's "from" line.
@@ -159,6 +162,9 @@ export type EmailAuthentication = {
 // dashboard inbox uses this projection directly.
 export type MessageSummary = {
   id: string;
+  // Server-owned email topology identity (beta). Older servers and legacy
+  // rows omit it; those rows retain conversation/orphan grouping.
+  thread_id?: string;
   direction: "inbound" | "outbound";
   from: string;
   verified_domain?: string | null;
@@ -208,6 +214,9 @@ export type ListMessagesResponse = {
 // through `body.text`.
 export type InboundMessageDetail = {
   id: string;
+  // Server-owned email topology identity (beta). Optional for legacy rows
+  // and older servers.
+  thread_id?: string;
   direction: "inbound";
   header_from: string | null;
   envelope_from: string | null;

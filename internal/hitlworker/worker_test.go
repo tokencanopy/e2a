@@ -202,6 +202,36 @@ func TestWorkerAutoApproveCarriesReplyTo(t *testing.T) {
 	}
 }
 
+func TestWorkerAutoApproveForwardDoesNotEmitReplyHeaders(t *testing.T) {
+	w, store, pool, smtpDone := setupWorker(t)
+	ctx := context.Background()
+
+	agent := prepareAgent(t, store, "auto-approve-forward-thread", identity.HITLExpirationApprove)
+	msg, err := store.CreatePendingOutboundMessage(ctx, agent.ID,
+		[]string{"alice@example.com"}, nil, nil,
+		"Fwd: source", "forwarded body", "", nil,
+		"forward", "", "<source@example.net>", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backdateExpiry(t, pool, msg.ID)
+
+	w.RunOnce(ctx)
+
+	if msgs := smtpDone(); len(msgs) != 0 {
+		t.Fatalf("auto-approve submitted %d SMTP messages inline, want zero", len(msgs))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT raw_message FROM messages WHERE id=$1`, msg.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, header := range []string{"In-Reply-To:", "References:"} {
+		if strings.Contains(string(raw), header) {
+			t.Fatalf("TTL-approved forward unexpectedly contains %s\n%s", header, raw)
+		}
+	}
+}
+
 // TestWorkerAutoApproveSelfSendDeliversViaLoopback: a held self-send
 // whose TTL expires with the agent's hitl_expiration_action="approve"
 // must be auto-approved via the loopback path — outbound.Sender.Send
@@ -275,6 +305,39 @@ func TestWorkerAutoApproveSelfSendDeliversViaLoopback(t *testing.T) {
 		agent.ID).Scan(&inboundCount)
 	if inboundCount != 1 {
 		t.Errorf("inbound rows after self-send auto-approve = %d, want 1", inboundCount)
+	}
+	var outboundThread, outboundParent, outboundKey string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(thread_id, ''),
+		        COALESCE(thread_parent_id, ''),
+		        COALESCE(rfc_message_id_key, '')
+		   FROM messages
+		  WHERE id = $1`,
+		msg.ID,
+	).Scan(&outboundThread, &outboundParent, &outboundKey); err != nil {
+		t.Fatal(err)
+	}
+	var inboundThread, inboundParent, inboundKey string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(thread_id, ''),
+		        COALESCE(thread_parent_id, ''),
+		        COALESCE(rfc_message_id_key, '')
+		   FROM messages
+		  WHERE agent_id = $1
+		    AND direction = 'inbound'
+		    AND subject = 'self auto-approve'`,
+		agent.ID,
+	).Scan(&inboundThread, &inboundParent, &inboundKey); err != nil {
+		t.Fatal(err)
+	}
+	if !identity.IsValidThreadID(outboundThread) || inboundThread != outboundThread {
+		t.Errorf("TTL-approved physical twin threads = outbound %q inbound %q", outboundThread, inboundThread)
+	}
+	if outboundParent != "" || inboundParent != "" {
+		t.Errorf("TTL-approved physical twins became reply parents: outbound %q inbound %q", outboundParent, inboundParent)
+	}
+	if outboundKey == "" || inboundKey != outboundKey {
+		t.Errorf("TTL-approved physical twin RFC keys = outbound %q inbound %q", outboundKey, inboundKey)
 	}
 	var outcomeEvents int
 	if err := pool.QueryRow(ctx,

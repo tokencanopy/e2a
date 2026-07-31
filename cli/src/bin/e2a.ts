@@ -102,7 +102,7 @@ Usage:
         --body <text>              Plain-text body (or --body-file <f>)
         --html-file <f>            HTML body; text fallback derived if no --body
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
-        --conversation-id <id>     Thread id (alias: --conversation)
+        --conversation-id <id>     Application conversation/grouping id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent)
         --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
                                    status=scheduled, sent "not before" then. Direct self-send is unsupported;
@@ -257,11 +257,11 @@ function getFlagChecked(args: string[], flag: string): string | undefined {
  * INVERTED between commands — send preferred --conversation-id over
  * --conversation, while messages list and listen preferred --conversation
  * over --conversation-id. Passing both with different values therefore
- * threaded a send onto one conversation while the "same" filter on
- * messages list showed another — silent, opposite winners for one flag
- * pair. Identical values are harmless and accepted; different values are
- * an ambiguous invocation the caller must resolve, not a coin flip that
- * lands differently per command.
+ * grouped a send under one application conversation while the "same"
+ * filter on messages list showed another — silent, opposite winners for
+ * one flag pair. Identical values are harmless and accepted; different
+ * values are an ambiguous invocation the caller must resolve, not a coin
+ * flip that lands differently per command.
  */
 function getConversationId(args: string[]): string | undefined {
   const id = getFlagChecked(args, "--conversation-id");
