@@ -30,7 +30,7 @@ append-only `events` array; use `add-event` to extend it.
 
 ## Schema (v1)
 
-```json
+```jsonc
 {
   "schema": 1,
   "ticket": 123,                 // the issue number == the ticket id (github store)

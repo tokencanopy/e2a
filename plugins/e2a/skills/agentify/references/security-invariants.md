@@ -55,8 +55,9 @@ AND (later) a repo-write coding agent.
 
 5. **Capability minimization + bounded blast radius (not "secrets
    unreachable").** Each lane's tool allowlist is deliberately narrow:
-   triage gets the ticket-card helper, `gh issue` ONLY (not `gh` — which
-   would expose `gh auth token`; not `gh api` — the whole installation),
+   triage gets the ticket-card helper, `gh issue` plus read-only `gh pr
+   list`/`gh pr view` (never bare `gh` — which would expose `gh auth
+   token`; never `gh api` — the whole installation),
    `Read`, and the e2a **read** tools (no send). There is no `jq` tool (a
    raw `jq -rn env.X` reads secrets from the run env) and no raw shell.
    **Be honest about the limit:** this does not make the run-env secrets
