@@ -90,7 +90,6 @@ function AgentInboxContent({ email }: { email: string }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  const initialMessages = initialPage?.items ?? [];
   // Concatenate the initial page with any imperatively-loaded older
   // pages, then de-dupe by `id`. The de-dupe matters because
   // SWR can revalidate the initial page mid-session (focus event,
@@ -100,6 +99,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // `olderPages`. Without this de-dupe, the same message renders
   // twice in the thread bucket and `msgCount` lies.
   const rows: MessageSummary[] = useMemo(() => {
+    const initialMessages = initialPage?.items ?? [];
     const seen = new Set<string>();
     const out: MessageSummary[] = [];
     for (const m of [...initialMessages, ...olderPages.flat()]) {
@@ -108,7 +108,7 @@ function AgentInboxContent({ email }: { email: string }) {
       out.push(m);
     }
     return out;
-  }, [initialMessages, olderPages]);
+  }, [initialPage?.items, olderPages]);
   // The cursor to use for the next "Load older" click is the most
   // recent next_cursor we've seen (either from the initial fetch or
   // the latest appended page).
