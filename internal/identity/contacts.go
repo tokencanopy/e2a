@@ -574,16 +574,31 @@ func (s *Store) ImportContactsWithOptions(ctx context.Context, userID, batchID s
 //     provenance (a tag re-pointed by any past or future write path) unable to
 //     cause data loss.
 //   - an engagement additionally must carry no derived wire activity
-//     (first/last outbound, last inbound, last conversation, due notice).
-//   - a contact additionally must have no message history and NO surviving
-//     engagement — including one created independently of the import. The
-//     engagements this batch created are deleted first, so any engagement
-//     still present at this point is state the reversal must not destroy.
-//     This guard, not the contacts→engagements ON DELETE CASCADE, decides:
-//     reaching the cascade with a live engagement would silently delete it.
+//     (first/last outbound, last inbound, last conversation, due notice) and
+//     no message history between its agent and the address.
+//   - a contact additionally must have no message history (as sender or as a
+//     To/Cc/Bcc recipient) and NO surviving engagement — including one created
+//     independently of the import. The engagements this batch created are
+//     deleted first, so any engagement still present at this point is state
+//     the reversal must not destroy. This guard, not the
+//     contacts→engagements ON DELETE CASCADE, decides: reaching the cascade
+//     with a live engagement would silently delete it.
 //
-// A row failing any check is retained and counted, so created ==
-// deleted + retained always reconciles against the batch.
+// A row failing any check is retained and counted, so deleted + retained
+// accounts for every batch-created contact that still exists at reversal time
+// (a contact the account deleted by other means beforehand drops out of the
+// accounting entirely).
+//
+// LOCKING. The guards are only as good as the snapshot they read. Before
+// evaluating them, every batch-tagged contact and engagement is locked FOR
+// UPDATE — contacts first, matching the contact→engagement write order of
+// UpsertEngagement and ImportContactsWithOptions so the orders cannot
+// deadlock. Under READ COMMITTED each lock read waits for any in-flight
+// mutation of the row and then sees its newest version, and holds the row
+// against new mutations until this transaction commits. Without this, a PATCH
+// or enrolment racing the reversal could commit after a guard's statement
+// snapshot was taken, and the delete would proceed on a stale "untouched"
+// verdict (EPQ re-checks only the join qual, not the CTE predicates).
 func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (deleted int, retained int, engagementsDeleted int, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -600,6 +615,34 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 		return 0, 0, 0, ErrImportBatchNotFound
 	} else if err != nil {
 		return 0, 0, 0, err
+	}
+
+	// Lock the batch-tagged rows, newest versions. The selected ids are not
+	// read — the point is the locks and the post-wait fresh snapshot.
+	for _, lockSQL := range []string{
+		`SELECT id FROM contacts
+		  WHERE user_id = $1 AND import_batch_id = $2
+		  FOR UPDATE`,
+		`SELECT id FROM contact_engagements
+		  WHERE user_id = $1 AND import_batch_id = $2
+		  FOR UPDATE`,
+	} {
+		rows, err := tx.Query(ctx, lockSQL, userID, batchID)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, 0, 0, err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, 0, 0, err
+		}
+		rows.Close()
 	}
 
 	// Engagements first: only enrolments this batch created AND that nobody
@@ -622,7 +665,8 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 		         WHERE m.agent_id = ce.agent_id
 		           AND (lower(m.sender) = ce.address
 		            OR EXISTS (
-		                 SELECT 1 FROM unnest(m.to_recipients) AS r
+		                 SELECT 1
+		                   FROM unnest(COALESCE(m.to_recipients, '{}') || COALESCE(m.cc, '{}') || COALESCE(m.bcc, '{}')) AS r
 		                  WHERE lower(r) = ce.address))
 		    )`,
 		userID, batchID)
@@ -649,7 +693,8 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 		                ON a.id = m.agent_id AND a.user_id = c.user_id
 		             WHERE lower(m.sender) = c.address
 		                OR EXISTS (
-		                     SELECT 1 FROM unnest(m.to_recipients) AS r
+		                     SELECT 1
+		                       FROM unnest(COALESCE(m.to_recipients, '{}') || COALESCE(m.cc, '{}') || COALESCE(m.bcc, '{}')) AS r
 		                      WHERE lower(r) = c.address)
 		      )
 		        AND NOT EXISTS (

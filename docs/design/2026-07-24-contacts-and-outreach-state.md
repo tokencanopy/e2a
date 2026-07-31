@@ -389,8 +389,9 @@ the reversal removes a tagged row only when it is verifiably untouched:
   reaching it with a live engagement would silently destroy that state.
 
 Anything failing a check is retained and counted, so
-`contacts_deleted + contacts_retained` always reconciles against what the
-batch created.
+`contacts_deleted + contacts_retained` accounts for every batch-created
+contact that still exists at reversal time (a contact deleted by other means
+beforehand drops out of the accounting).
 
 ### 3.4 Authorization and scope
 

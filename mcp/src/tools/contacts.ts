@@ -15,7 +15,8 @@ const contactAddress = z.string().email().describe("Contact email address.");
 // Bare date-times and date-only values are rejected rather than guessed at:
 // `new Date()` would read them in LOCAL time and silently shift the filter
 // across timezones. Same rule as scheduled sending (messages.ts sendAtField).
-const contactTimestamp = z.string().datetime({ offset: true });
+const contactTimestamp = z.string().datetime({ offset: true })
+  .describe("RFC 3339 date-time with an explicit UTC offset (Z or ±HH:MM), e.g. 2026-08-01T09:00:00Z or 2026-08-01T09:00:00-07:00. Date-only and offsetless values are rejected.");
 
 export function registerContactTools(server: McpServer, client: McpClient): void {
   server.registerTool(

@@ -304,7 +304,7 @@ describe("contacts commands", () => {
     // Without an explicit offset the instant is ambiguous: the JS Date
     // constructor reads a bare date-time in LOCAL time and a date-only value
     // as UTC midnight, so the filter would shift with the runner's timezone.
-    for (const stamp of ["2026-08-01", "2026-08-01T09:00:00"]) {
+    for (const stamp of ["2026-08-01", "2026-08-01T09:00:00", "2026-02-30T09:00:00Z"]) {
       await expect(contactsList({ createdAfter: stamp })).rejects.toThrow("process.exit");
       await expect(contactsList({ createdBefore: stamp })).rejects.toThrow("process.exit");
       await expect(outreachList({ nextActionBefore: stamp })).rejects.toThrow("process.exit");

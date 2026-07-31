@@ -66,8 +66,8 @@ Usage:
   e2a contacts list [options]        List account contacts
         --source import|manual|inbound   Filter by provenance
         --import-batch <id>          Filter to one upload
-        --created-after <ISO>        Added at or after timestamp
-        --created-before <ISO>       Added before timestamp
+        --created-after <rfc3339>     Added at or after timestamp (explicit offset)
+        --created-before <rfc3339>    Added before timestamp (explicit offset)
         --limit <n> --json           Bound output; JSON emits NDJSON
   e2a contacts get <address>         Show one contact
   e2a contacts create <address>      Create one contact
@@ -88,12 +88,12 @@ Usage:
         --stage <s>                  Exact opaque stage
         --replied true|false         Reply-state filter
         --suppressed true|false      Sendability filter
-        --next-action-before <ISO>   Due before timestamp
-        --last-outbound-before <ISO> Never contacted or stale before timestamp
+        --next-action-before <rfc3339>  Due before timestamp (explicit offset)
+        --last-outbound-before <rfc3339> Never contacted or stale before timestamp (explicit offset)
         --limit <n> --json           Bound output; JSON emits NDJSON
   e2a contacts outreach get <address>
   e2a contacts outreach set <address>
-        --stage <s>|--clear-stage --next-action <ISO|clear> --metadata <json>
+        --stage <s>|--clear-stage --next-action <rfc3339|clear> --metadata <json>
         --if-match <etag>            Reject stale outreach state
   e2a contacts outreach delete <address>
   e2a send [options]                Send an email as the agent
