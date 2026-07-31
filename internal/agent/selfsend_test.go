@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -499,6 +500,53 @@ func assertApprovedLoopbackLifecycleParity(t *testing.T, pool *pgxpool.Pool, out
 		messagelifecycle.ReasonReviewApproved,
 		messagelifecycle.ReasonSubmissionLocalLoopbackAccepted,
 	})
+}
+
+// TestSelfSend_FutureSendAtRejected: a self-send (direct loopback to the
+// agent's own address) is delivered immediately in-process — the scheduling
+// path (River ScheduledAt) never runs for it — so a future send_at would be
+// silently dropped. DeliverOutbound must refuse it with 400 invalid_request
+// rather than deliver early against intent, and persist nothing. This is the
+// behavioral pin for the contract the OpenAPI send_at docs describe
+// (previously only spec-text pinned).
+func TestSelfSend_FutureSendAtRejected(t *testing.T) {
+	api, store, pool := setupCoreAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "schedreject")
+
+	future := time.Now().Add(24 * time.Hour).UTC()
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{ag.EmailAddress()}, Subject: "scheduled self note", Body: "must not persist",
+		ScheduledAt: &future,
+	}, "send", "", nil, nil)
+	if res != nil {
+		t.Fatalf("scheduled self-send returned result %+v, want refusal", res)
+	}
+	if oerr == nil || oerr.Status != 400 || oerr.Code != "invalid_request" {
+		t.Fatalf("scheduled self-send error = %+v, want 400 invalid_request", oerr)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM messages WHERE agent_id=$1 AND subject='scheduled self note'`, ag.ID,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count refused self-send rows: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("refused scheduled self-send persisted %d message rows, want 0", rows)
+	}
+
+	// Sanity: the same self-send WITHOUT send_at still loopbacks — the refusal
+	// is specifically the scheduling combination, not self-send itself.
+	res, oerr = api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{ag.EmailAddress()}, Subject: "plain self note", Body: "hi me",
+	}, "send", "", nil, nil)
+	if oerr != nil {
+		t.Fatalf("plain self-send after refusal: status=%d code=%s msg=%s", oerr.Status, oerr.Code, oerr.Msg)
+	}
+	if res.Method != "loopback" {
+		t.Errorf("plain self-send method = %q, want loopback", res.Method)
+	}
 }
 
 // TestSelfSend_PreservesAttachmentsInMIME: a self-send with an attachment must

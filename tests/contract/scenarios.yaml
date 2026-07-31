@@ -923,6 +923,283 @@ scenarios:
             deleted: true
             email: "{agent_email}"
 
+  - name: scheduled_reply_fields
+    description: >
+      A future send_at on REPLY takes the same scheduled path as send: durably
+      accepted as status=scheduled, echoes the normalized scheduled_at instant,
+      and preserves scheduled_at on message detail and list projections.
+      wait=sent must return the scheduled result immediately rather than
+      waiting for the future instant. The reply target is an injected inbound
+      (a reply/forward parent the agent sent must first reach status=sent,
+      which the contract environment's upstream-less outbound cannot — so the
+      API alone cannot seed one; runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-reply-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: scheduled reply target
+    steps:
+      - id: schedule_reply
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply?wait=sent
+        body:
+          text: scheduled reply conformance
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_reply
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_reply_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_scheduled_reply_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_forward_fields
+    description: >
+      A future send_at on FORWARD takes the same scheduled path as send:
+      durably accepted as status=scheduled, echoes the normalized scheduled_at
+      instant, and preserves scheduled_at on message detail and list
+      projections. wait=sent must return the scheduled result immediately
+      rather than waiting for the future instant. The forward target is an
+      injected inbound (same seeding constraint as scheduled_reply_fields;
+      runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-forward-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: scheduled forward target
+    steps:
+      - id: schedule_forward
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/forward?wait=sent
+        body:
+          to:
+            - recipient@example.net
+          text: scheduled forward conformance
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_forward
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_forward
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_forward
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_forward_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_scheduled_forward_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_send_at_validation
+    description: >
+      send_at edge validation is identical across send, reply, and forward: a
+      value more than 90 days ahead is a 400 invalid_request that never
+      persists a message, and a value at/before now is treated as an ordinary
+      immediate send (202 accepted, no scheduled_at). The far-future and past
+      literals are deliberately fixed calendar instants — always >90 days out
+      and always in the past for any realistic run date. The reply/forward
+      target is an injected inbound (same seeding constraint as
+      scheduled_reply_fields; runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-validation-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: validation reply target
+    steps:
+      - id: send_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: over-horizon send
+          text: never persisted
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: reply_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply
+        body:
+          text: over-horizon reply
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: forward_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/forward
+        body:
+          to:
+            - recipient@example.net
+          text: over-horizon forward
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: past_send_at_is_immediate
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: past send_at sends now
+          text: immediate
+          send_at: "2020-01-01T00:00:00Z"
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+          body_excludes:
+            - scheduled_at
+        capture:
+          immediate_message_id: message_id
+
+      - id: past_send_at_projection_has_no_scheduled_at
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{immediate_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{immediate_message_id}"
+          body_excludes:
+            - scheduled_at
+
+    cleanup:
+      - id: delete_validation_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
   - name: info_unauthenticated_shape
     description: >
       GET /v1/info is the deployment-discovery endpoint — works

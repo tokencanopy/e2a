@@ -363,6 +363,43 @@ describe("E2AClient", () => {
     expect(result.scheduledAt).toEqual(sendAt);
   });
 
+  it("messages.reply serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled_reply",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.reply("bot@test.dev", "msg_1", {
+      text: "Scheduled reply",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
+  it("messages.forward serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled_forward",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.forward("bot@test.dev", "msg_1", {
+      to: ["recipient@example.net"],
+      text: "Scheduled forward",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
   it("messages.send uses a caller-supplied idempotency key", async () => {
     globalThis.fetch = mockFetch(200, { message_id: "msg_s2", status: "sent" });
     await client.messages.send(

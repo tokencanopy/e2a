@@ -94,6 +94,187 @@ func TestSend_SendAtBeyondHorizon_Rejected(t *testing.T) {
 	}
 }
 
+// TestReply_ScheduledFuture: a future send_at on REPLY takes the same
+// scheduled path as send — 202 status=scheduled with scheduled_at echoed, and
+// wait=sent returns immediately without polling. The referenced message is the
+// default fixture inbound msg_in1 (From: alice@x.com).
+func TestReply_ScheduledFuture(t *testing.T) {
+	polled := false
+	srv := testServer(t, scheduleEchoDeps(&polled))
+	at := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply?wait=sent", "good",
+		map[string]any{"text": "later reply", "send_at": at})
+	if code != 202 {
+		t.Fatalf("scheduled reply: want 202, got %d (%v)", code, body)
+	}
+	if body["status"] != "scheduled" {
+		t.Fatalf("want status=scheduled, got %v", body["status"])
+	}
+	if body["scheduled_at"] == nil || body["scheduled_at"] == "" {
+		t.Fatalf("want scheduled_at echoed, got %v", body["scheduled_at"])
+	}
+	if polled {
+		t.Fatal("wait=sent must NOT poll a scheduled reply")
+	}
+}
+
+// TestReply_PastSendAt_Immediate: a send_at at/before now on reply is an
+// ordinary immediate reply (status=accepted), never rejected.
+func TestReply_PastSendAt_Immediate(t *testing.T) {
+	srv := testServer(t, scheduleEchoDeps(nil))
+	at := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",
+		map[string]any{"text": "now reply", "send_at": at})
+	if code != 202 || body["status"] != "accepted" {
+		t.Fatalf("past send_at on reply: want 202 accepted (immediate), got %d %v", code, body)
+	}
+	if body["scheduled_at"] != nil {
+		t.Fatalf("immediate reply must not carry scheduled_at, got %v", body["scheduled_at"])
+	}
+}
+
+// TestReply_SendAtBeyondHorizon_Rejected: an over-horizon send_at on reply is a
+// 400 invalid_request before DeliverOutbound.
+func TestReply_SendAtBeyondHorizon_Rejected(t *testing.T) {
+	delivered := false
+	srv := testServer(t, func(d *Deps) {
+		scheduleEchoDeps(nil)(d)
+		d.DeliverOutbound = func(_ context.Context, _ *identity.User, _ *identity.AgentIdentity, _ outbound.SendRequest, _, _ string, _ *identity.Message, _ agent.AcceptIdemCompleter) (*agent.OutboundResult, *agent.OutboundError) {
+			delivered = true
+			return &agent.OutboundResult{MessageID: "msg_no", Status: "accepted"}, nil
+		}
+	})
+	at := time.Now().Add(100 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",
+		map[string]any{"text": "too far reply", "send_at": at})
+	if code != 400 || errCode(body) != "invalid_request" {
+		t.Fatalf("over-horizon send_at on reply: want 400 invalid_request, got %d %v", code, body)
+	}
+	if delivered {
+		t.Fatal("over-horizon send_at must be rejected before DeliverOutbound")
+	}
+}
+
+// TestForward_ScheduledFuture: a future send_at on FORWARD takes the same
+// scheduled path — 202 status=scheduled with scheduled_at echoed, and wait=sent
+// returns immediately without polling.
+func TestForward_ScheduledFuture(t *testing.T) {
+	polled := false
+	srv := testServer(t, scheduleEchoDeps(&polled))
+	at := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward?wait=sent", "good",
+		map[string]any{"to": []string{"x@y.com"}, "text": "later forward", "send_at": at})
+	if code != 202 {
+		t.Fatalf("scheduled forward: want 202, got %d (%v)", code, body)
+	}
+	if body["status"] != "scheduled" {
+		t.Fatalf("want status=scheduled, got %v", body["status"])
+	}
+	if body["scheduled_at"] == nil || body["scheduled_at"] == "" {
+		t.Fatalf("want scheduled_at echoed, got %v", body["scheduled_at"])
+	}
+	if polled {
+		t.Fatal("wait=sent must NOT poll a scheduled forward")
+	}
+}
+
+// TestForward_PastSendAt_Immediate: a send_at at/before now on forward is an
+// ordinary immediate forward (status=accepted), never rejected.
+func TestForward_PastSendAt_Immediate(t *testing.T) {
+	srv := testServer(t, scheduleEchoDeps(nil))
+	at := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
+		map[string]any{"to": []string{"x@y.com"}, "text": "now forward", "send_at": at})
+	if code != 202 || body["status"] != "accepted" {
+		t.Fatalf("past send_at on forward: want 202 accepted (immediate), got %d %v", code, body)
+	}
+	if body["scheduled_at"] != nil {
+		t.Fatalf("immediate forward must not carry scheduled_at, got %v", body["scheduled_at"])
+	}
+}
+
+// TestForward_SendAtBeyondHorizon_Rejected: an over-horizon send_at on forward
+// is a 400 invalid_request before DeliverOutbound.
+func TestForward_SendAtBeyondHorizon_Rejected(t *testing.T) {
+	delivered := false
+	srv := testServer(t, func(d *Deps) {
+		scheduleEchoDeps(nil)(d)
+		d.DeliverOutbound = func(_ context.Context, _ *identity.User, _ *identity.AgentIdentity, _ outbound.SendRequest, _, _ string, _ *identity.Message, _ agent.AcceptIdemCompleter) (*agent.OutboundResult, *agent.OutboundError) {
+			delivered = true
+			return &agent.OutboundResult{MessageID: "msg_no", Status: "accepted"}, nil
+		}
+	})
+	at := time.Now().Add(100 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
+		map[string]any{"to": []string{"x@y.com"}, "text": "too far forward", "send_at": at})
+	if code != 400 || errCode(body) != "invalid_request" {
+		t.Fatalf("over-horizon send_at on forward: want 400 invalid_request, got %d %v", code, body)
+	}
+	if delivered {
+		t.Fatal("over-horizon send_at must be rejected before DeliverOutbound")
+	}
+}
+
+// TestTrashRestoreScheduledMessage pins the thin HTTP seam over the scheduled
+// trash/restore store semantics (covered deeply in internal/identity and the
+// contract scenarios): a scheduled outbound message moves to trash with a 200
+// deletion receipt, and restoring BEFORE its scheduled_at returns the live
+// view with delivery_status=accepted and scheduled_at preserved.
+func TestTrashRestoreScheduledMessage(t *testing.T) {
+	at := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	deleted := false
+	msg := func() *identity.Message {
+		m := &identity.Message{
+			ID: "msg_sched", AgentID: "support@acme.com", Direction: "outbound",
+			Sender: "support@acme.com", Subject: "scheduled", DeliveryStatus: "accepted",
+			ScheduledAt: &at, CreatedAt: time.Unix(1700000000, 0).UTC(),
+		}
+		if deleted {
+			dt := time.Unix(1700001000, 0).UTC()
+			m.DeletedAt = &dt
+		}
+		return m
+	}
+	srv := testServer(t, func(d *Deps) {
+		d.DeleteMessage = func(_ context.Context, messageID, agentID string) error {
+			if messageID != "msg_sched" || agentID != "support@acme.com" {
+				return identity.ErrMessageNotFound
+			}
+			deleted = true
+			return nil
+		}
+		d.RestoreMessage = func(_ context.Context, messageID, agentID string) error {
+			if !deleted {
+				return identity.ErrNotInTrash
+			}
+			deleted = false
+			return nil
+		}
+		d.GetMessage = func(_ context.Context, messageID, agentID string) (*identity.Message, error) {
+			return msg(), nil // direct GET is intentionally any-state
+		}
+	})
+
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com/messages/msg_sched", "good", nil)
+	if code != 200 || body["deleted"] != true || body["id"] != "msg_sched" {
+		t.Fatalf("trash scheduled message: want 200 deletion receipt, got %d %v", code, body)
+	}
+
+	code, body = sendJSON(t, "POST", srv.URL+"/v1/agents/support%40acme.com/messages/msg_sched/restore", "good", nil)
+	if code != 200 {
+		t.Fatalf("restore scheduled message: want 200, got %d %v", code, body)
+	}
+	if body["id"] != "msg_sched" || body["delivery_status"] != "accepted" {
+		t.Fatalf("restored scheduled view = %v, want accepted rollup", body)
+	}
+	if body["scheduled_at"] != at.Format(time.RFC3339) {
+		t.Fatalf("restored view must preserve scheduled_at, got %v want %v", body["scheduled_at"], at.Format(time.RFC3339))
+	}
+	if _, present := body["deleted_at"]; present {
+		t.Fatalf("restored view must omit deleted_at, got %v", body["deleted_at"])
+	}
+}
+
 // TestScheduledInstant pins the edge validation/normalization directly.
 func TestScheduledInstant(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)

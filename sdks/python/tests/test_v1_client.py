@@ -502,6 +502,58 @@ async def test_send_serializes_send_at_and_parses_scheduled_result(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_reply_serializes_send_at_and_parses_scheduled_result(httpx_mock):
+    send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    httpx_mock.add_response(
+        status_code=202,
+        json={
+            "message_id": "msg_scheduled_reply",
+            "status": "scheduled",
+            "scheduled_at": send_at.isoformat(),
+        },
+    )
+    async with _client() as c:
+        result = await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "Scheduled reply", "send_at": send_at},
+        )
+
+    req = httpx_mock.get_requests()[-1]
+    assert "/v1/agents/bot%40test.dev/messages/msg_1/reply" in str(req.url)
+    wire_send_at = json.loads(req.content)["send_at"]
+    assert datetime.fromisoformat(wire_send_at.replace("Z", "+00:00")) == send_at
+    assert result.status == "scheduled"
+    assert result.scheduled_at == send_at
+
+
+@pytest.mark.anyio
+async def test_forward_serializes_send_at_and_parses_scheduled_result(httpx_mock):
+    send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    httpx_mock.add_response(
+        status_code=202,
+        json={
+            "message_id": "msg_scheduled_forward",
+            "status": "scheduled",
+            "scheduled_at": send_at.isoformat(),
+        },
+    )
+    async with _client() as c:
+        result = await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "Scheduled forward", "send_at": send_at},
+        )
+
+    req = httpx_mock.get_requests()[-1]
+    assert "/v1/agents/bot%40test.dev/messages/msg_1/forward" in str(req.url)
+    wire_send_at = json.loads(req.content)["send_at"]
+    assert datetime.fromisoformat(wire_send_at.replace("Z", "+00:00")) == send_at
+    assert result.status == "scheduled"
+    assert result.scheduled_at == send_at
+
+
+@pytest.mark.anyio
 async def test_reviews_approve_hits_reviews_path_no_email(httpx_mock):
     # The review queue is account-scoped + id-addressed: approve(id) must hit
     # /v1/reviews/{id}/approve, NOT the deprecated /v1/agents/{email}/... path.
