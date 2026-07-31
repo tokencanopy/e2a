@@ -26,7 +26,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 ---
 
 > [!IMPORTANT]
-> **The `/v1` API and SDKs are release candidates and are not yet stable. GA is planned by July 31, 2026; stable compatibility guarantees begin only with the explicitly announced GA release tag.** Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines. Pin your SDK versions and watch [Releases](https://github.com/tokencanopy/e2a/releases).
+> **The core `/v1` API and SDKs are stable and generally available (GA): no breaking changes within `/v1`.** A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
 e2a is an **authenticated email gateway for AI agents**. It receives inbound mail, evaluates SPF, every DKIM signature, and DMARC, and delivers structured authentication evidence over whichever channel fits your runtime. Outbound goes back out through an HTTP API, with an optional human-in-the-loop approval gate.
 

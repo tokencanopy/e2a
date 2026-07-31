@@ -4,7 +4,10 @@
 
 Additive only — no flag, output-field, or exit-code meaning changes to any
 command that shipped in 2.1.0. The new contacts and scheduled-sending
-surfaces are **beta** and may change before they are declared stable.
+surfaces are **beta** and may change before they are declared stable. The
+complete GA-vs-beta stability matrix for the whole `/v1` surface is
+documented in
+[docs/api.md → Stability: GA and beta surface](../docs/api.md#stability-ga-and-beta-surface).
 
 **Added:** `e2a contacts` (beta) — manage account-level contact identity and
 per-agent outreach state, with suppression visibility. Subcommands:

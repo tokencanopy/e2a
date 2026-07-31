@@ -19,6 +19,64 @@ MCP tool surface), see:
 - MCP server — [`mcp/README.md`](../mcp/README.md) (`@e2a/mcp-server`)
 - Webhook events & replay — [`events.md`](events.md)
 
+## Stability: GA and beta surface
+
+The core `/v1` surface is the **stable, generally-available (GA) contract**; a
+small, explicitly enumerated set of newer resources is **beta**. The
+machine-readable source of truth is **`x-stability-level`** in
+[`api/openapi.yaml`](../api/openapi.yaml): anything marked
+`x-stability-level: beta` may change before it is promoted to stable, and
+**everything not marked beta (or experimental) is GA**, covered by the
+[compatibility rules](#compatibility-rules) below. At the operation level that
+is currently 43 GA operations and 29 beta operations:
+
+| Resource group | Stability | Operations |
+| --- | --- | --- |
+| Account — whoami, export, delete, API keys, account-wide suppressions | **GA** | `getAccount`, `exportAccount`, `deleteAccount`, `listApiKeys`, `createApiKey`, `deleteApiKey`, `listSuppressions`, `deleteSuppression` |
+| Agents — CRUD, restore, test | **GA** | `listAgents`, `createAgent`, `getAgent`, `updateAgent`, `deleteAgent`, `restoreAgent`, `testAgent` |
+| Messages & attachments — send/reply/forward, list/get/update, trash/restore | **GA** | `sendMessage`, `replyToMessage`, `forwardMessage`, `listMessages`, `getMessage`, `updateMessage`, `deleteMessage`, `restoreMessage`, `getAttachment` |
+| Conversations | **GA** | `listConversations`, `getConversation` |
+| Domains — register, verify, delete | **GA** | `listDomains`, `registerDomain`, `getDomain`, `deleteDomain`, `verifyDomain` |
+| Webhooks — CRUD, secret rotation, deliveries, test | **GA** | `listWebhooks`, `createWebhook`, `getWebhook`, `updateWebhook`, `deleteWebhook`, `rotateWebhookSecret`, `listWebhookDeliveries`, `testWebhook` |
+| Events — durable log + redelivery | **GA** | `listEvents`, `getEvent`, `redeliverEvent` |
+| Meta — deployment discovery | **GA** | `getInfo` |
+| [Contacts & outreach](#contacts--outreach-v1contacts-v1agentsemailcontacts-beta) | **beta** | `createContact`, `listContacts`, `getContact`, `updateContact`, `deleteContact`, `importContacts`, `deleteImportBatch`, `listEngagements`, `getEngagement`, `upsertEngagement`, `deleteEngagement` |
+| [Templates & starter templates](#templates-v1templates-v1starter-templates-beta) | **beta** | `createTemplate`, `listTemplates`, `getTemplate`, `updateTemplate`, `deleteTemplate`, `validateTemplate`, `listStarterTemplates`, `getStarterTemplate` |
+| [Reviews (HITL queue)](#reviews-v1reviews-beta) | **beta** | `listReviews`, `getReview`, `approveReview`, `rejectReview` |
+| Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
+| Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
+| [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
+
+**Beta fields and capabilities on otherwise-GA operations** (property-level
+`x-stability-level: beta` in the spec):
+
+- **Scheduled sending** — the `send_at` request field, the `scheduled_at`
+  response field, and the `scheduled` send-result `status` value on
+  send/reply/forward.
+- **`thread_id`** on message list/detail reads (server-owned, read-only
+  email-topology identity).
+- **Template references on send** — the `template_id` / `template_alias` /
+  `template_data` request fields.
+- **Managed unsubscribe** — the `unsubscribe: {mode: "managed"}` request
+  object and its raw `GET|POST /u/{token}` confirmation flow.
+- **Review-hold projections** — `hold_reason`, the review-detail `protection`
+  evidence, and the `flagged` / `flag_reason` verdict fields.
+- **Account export interior schemas** — `GET /v1/account/export` is a GA
+  operation, but its interior record shapes are versioned by the export's
+  `schema_version` envelope field rather than the v1 freeze, and are
+  beta-marked to record that exemption.
+
+**Beta events:** `contact.due`, `agent.suppression_added`, and the payloads of
+the screening + review-hold event types (`email.flagged`, `email.blocked`,
+`email.review_requested`, `email.review_approved`, `email.review_rejected` —
+marked via `x-experimental-values` on the stable `type` field). The stable
+`error.code` vocabulary likewise marks only `blocked_by_policy` experimental.
+See [events.md](events.md).
+
+The exact operation-level list is repeated with methods and paths in
+[Beta operations](#beta-operations) below; everything else in this document is
+GA unless its heading or prose says `(beta)`.
+
 ## Conventions
 
 - **Base path.** Every endpoint below is under `/v1` unless explicitly noted

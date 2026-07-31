@@ -4,7 +4,9 @@
 
 Additive only. Every 5.4.0 call site keeps compiling and behaving identically.
 The new contacts/outreach and scheduled-sending surfaces are **beta** and may
-change before they are declared stable.
+change before they are declared stable. The complete GA-vs-beta stability
+matrix for the whole `/v1` surface is documented in
+[docs/api.md → Stability: GA and beta surface](../../docs/api.md#stability-ga-and-beta-surface).
 
 ### Added
 - **`client.contacts` — account contacts and per-agent outreach (beta).**

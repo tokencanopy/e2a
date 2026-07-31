@@ -255,11 +255,14 @@ a server-owned, read-only mailbox-local identity. Human-readable formats do
 not change, and there is no `threadId` request flag, filter, or thread
 endpoint.
 
-### `e2a contacts`
+### `e2a contacts` (beta)
 
 Manage account-level contact identity and per-agent outreach state, with
 suppression visibility. Contact identity operations require account scope;
 `outreach` also supports an agent-scoped credential for its bound inbox.
+The whole contacts surface is **beta and may change before it is declared
+stable** — it tracks the beta `/v1/contacts` and `/v1/agents/{email}/contacts`
+API resources.
 
 ```bash
 e2a contacts list --source import --limit 50 --json
