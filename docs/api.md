@@ -62,22 +62,28 @@ MCP tool surface), see:
     idempotency-store degradation or a mid-request crash the protection
     degrades to at-least-once — a keyed retry may re-execute the operation
     rather than replay the cached response.
-- **No NUL bytes.** No client-supplied string in a request may contain
-  `U+0000` — anywhere in the JSON body (at any depth, including object *keys*),
-  or in a path, query, or header parameter. Violations are `400
+- **No NUL bytes on `/v1`.** No client-supplied string in a `/v1` request may
+  contain `U+0000` — anywhere in the JSON body (at any depth, including object
+  *keys*), or in a path, query, or header parameter. Violations are `400
   invalid_request` with the offending field in `error.details.fields[].location`.
   The rule is blanket rather than per-field on purpose: a `NUL` cannot be stored
   in a text column at all, and a caller cannot tell from the outside which
   strings are persisted and which are only composed, so the answer is the same
   everywhere. In JSON, a `NUL` can only arrive as the `\u0000` escape.
+  (The guard is enforced on the `/v1` operations, which is the whole documented
+  client API. Non-`/v1` entry points — the dashboard's session-authenticated
+  `/api/*` routes, the public unsubscribe handler, and inbound SMTP — are
+  outside it and validate independently.)
 - **Conditional writes (`ETag` / `If-Match`).** Single-resource `GET`s return an
   `ETag`; pass it back as `If-Match` on the write to reject a lost update with
   `412 precondition_failed`. Three rules follow RFC 9110 §13.1.1 and are worth
   stating because they are easy to get wrong:
-  - Comparison is **strong**. Send the validator exactly as returned. A
-    `W/`-prefixed weak validator never matches and gets a `412` — weak
-    comparison means "semantically equivalent", which is not a basis for a
-    lost-update guard.
+  - Send the validator exactly as you received it. The `W/` weak prefix is
+    **tolerated** on input: `api.e2a.dev` is behind a CDN that can rewrite a
+    strong validator to its weak form in transit, and refusing it would mean a
+    permanent `412` that no retry clears. The comparison still covers the full
+    validator, which changes on every accepted write, so a stale tag never
+    matches.
   - `If-Match: *` means "if any current representation exists": it succeeds on
     an existing resource and is refused when there is none (it never creates).
   - Sending the header with an **empty value** is `400 invalid_request`, not an

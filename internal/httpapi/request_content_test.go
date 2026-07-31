@@ -3,8 +3,11 @@ package httpapi
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -255,7 +258,8 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scanValueForNUL(reflect.ValueOf(tc.in), "body")
+			scanner := nulScanner{path: []locSegment{{name: "body"}}}
+			got := scanner.scanValue(reflect.ValueOf(tc.in))
 			switch {
 			case tc.want == "" && got != nil:
 				t.Fatalf("want clean, got violation at %s", got.Location)
@@ -269,7 +273,8 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 
 	// A NUL in a map KEY reports the map, not the key, so raw bad input never
 	// lands in the response.
-	got := scanValueForNUL(reflect.ValueOf(body{Items: []nested{{Attrs: map[string]string{dirty: "v"}}}}), "body")
+	keyScanner := nulScanner{path: []locSegment{{name: "body"}}}
+	got := keyScanner.scanValue(reflect.ValueOf(body{Items: []nested{{Attrs: map[string]string{dirty: "v"}}}}))
 	if got == nil || got.Location != "body.items[0].attrs" || !strings.Contains(got.Message, "keys") {
 		t.Fatalf("map-key violation = %+v; want the map location with a key-specific message", got)
 	}
@@ -277,29 +282,82 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 
 // TestEveryOperationGoesThroughRegisterOp is the guard that keeps the request
 // -content rule global. registerOp is the only place the guard runs, so an
-// operation wired with huma.Register directly would silently opt out — and the
-// opt-out would be invisible until someone found the 500 in production, which
-// is exactly how the five NUL vectors above were found.
+// operation wired past it would silently opt out — and the opt-out would be
+// invisible until someone found the 500 in production, which is exactly how the
+// five NUL vectors above were found.
+//
+// It checks every registration entry point huma exports, not just Register:
+// Get/Post/Put/Patch/Delete are convenience wrappers that call Register
+// internally, and AutoRegister reflects over a struct's methods to register
+// whatever it finds. A future `huma.Post(...)` would bypass the guard and, if
+// this test only looked for `huma.Register(`, would pass while doing it. The
+// walk is recursive so a future sub-package is covered too.
 func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// Every huma entry point that ends in a registered operation.
+	forbidden := []string{
+		"huma.Register(",
+		"huma.AutoRegister(",
+		"huma.Get(",
+		"huma.Post(",
+		"huma.Put(",
+		"huma.Patch(",
+		"huma.Delete(",
+	}
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		if path == "request_content.go" {
+			// The wrapper itself is the one legitimate caller.
+			return nil
+		}
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, pattern := range forbidden {
+			if bytes.Contains(source, []byte(pattern)) {
+				t.Errorf("%s calls %s directly; use registerOp so the operation inherits the shared request-content guards", path, strings.TrimSuffix(pattern, "("))
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+}
+
+// BenchmarkScanCleanImportBody measures the guard on the shape it must never
+// slow down: a clean 1000-row contact import, the largest body the API accepts
+// by row count. Every location string the walk could build is thrown away on a
+// clean request, which is why locPath defers rendering.
+func BenchmarkScanCleanImportBody(b *testing.B) {
+	rows := make([]ContactImportRow, 1000)
+	for i := range rows {
+		name := fmt.Sprintf("Partner %d", i)
+		rows[i] = ContactImportRow{
+			Address:     fmt.Sprintf("partner%d@fund.vc", i),
+			DisplayName: &name,
+			Metadata:    map[string]any{"tier": "seed", "score": float64(i)},
 		}
-		if name == "request_content.go" {
-			// The wrapper itself is the one legitimate caller.
-			continue
-		}
-		source, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(source, []byte("huma.Register(")) {
-			t.Errorf("%s calls huma.Register directly; use registerOp so the operation inherits the shared request-content guards", name)
+	}
+	in := importContactsInput{
+		IdempotencyKey: "contacts:upload:sha256",
+		Body:           ImportContactsRequest{Contacts: rows, OnConflict: "merge"},
+	}
+	value := reflect.ValueOf(&in)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if bad := scanInputForNUL(value); bad != nil {
+			b.Fatalf("clean body flagged at %s", bad.Location)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,58 @@ func registerOp[I, O any](api huma.API, op huma.Operation, handler func(context.
 	})
 }
 
+// nulScanner carries the walk's current field path. The overwhelmingly common
+// case is a clean request, where every location string the walk could produce
+// is thrown away — and building them eagerly is not free: a 1000-row contact
+// import formatted ~14.7k throwaway strings (~350 KB) to describe fields that
+// turned out to be fine.
+//
+// So the path is kept as a stack of segments, pushed and popped as the walk
+// descends and unwinds, reusing one backing array for the whole request, and
+// rendered into a string only at the point a violation is actually found. A
+// linked list of nodes does NOT work here: the recursion makes Go's escape
+// analysis heap-allocate every node, which merely trades string allocations
+// for struct ones (measured: 350 KB → 352 KB, no win).
+//
+// Measured on the same 1000-row import (BenchmarkScanCleanImportBody):
+// 350 KB / 14.7k allocs → 64.5 KB / 4k. The path machinery itself is now
+// effectively free — the same body without metadata objects costs 438 B and 12
+// allocs — and the remainder is reflect's own map-iteration cost over the 1000
+// metadata maps, which is inherent to walking them at all.
+type nulScanner struct {
+	path []locSegment
+}
+
+// locSegment is one step of a field path: a named field/map key, or an index.
+type locSegment struct {
+	name    string
+	index   int
+	indexed bool
+}
+
+// location materializes the current path, e.g. body.contacts[417].display_name.
+// Called at most once per request, on the failure path.
+func (s *nulScanner) location() string {
+	var b strings.Builder
+	for i, seg := range s.path {
+		if seg.indexed {
+			b.WriteByte('[')
+			b.WriteString(strconv.Itoa(seg.index))
+			b.WriteByte(']')
+			continue
+		}
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(seg.name)
+	}
+	return b.String()
+}
+
+func (s *nulScanner) violation(message string) *nulViolation {
+	return &nulViolation{Location: s.location(), Message: message}
+}
+
 // scanInputForNUL walks a bound Huma input struct — body, path, query, header
 // and cookie fields alike — and reports the first string carrying a NUL.
 // Locations use Huma's own convention (body.contacts[3].display_name,
@@ -75,6 +128,8 @@ func scanInputForNUL(v reflect.Value) *nulViolation {
 		return nil
 	}
 	t := v.Type()
+	// One scanner, and therefore one path buffer, for the whole input.
+	var scanner nulScanner
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		if !field.IsExported() {
@@ -103,7 +158,8 @@ func scanInputForNUL(v reflect.Value) *nulViolation {
 			// RawBody and other untagged plumbing fields are not caller strings.
 			continue
 		}
-		if bad := scanValueForNUL(v.Field(i), prefix); bad != nil {
+		scanner.path = append(scanner.path[:0], locSegment{name: prefix})
+		if bad := scanner.scanValue(v.Field(i)); bad != nil {
 			return bad
 		}
 	}
@@ -112,48 +168,56 @@ func scanInputForNUL(v reflect.Value) *nulViolation {
 
 var timeType = reflect.TypeOf(time.Time{})
 
-// scanValueForNUL walks one bound value to arbitrary depth. Byte slices are
-// skipped: they are opaque payload bytes (RawBody, json.RawMessage), not
-// caller-authored strings, and the JSON decoder could not have produced a
-// string field from them.
-func scanValueForNUL(v reflect.Value, loc string) *nulViolation {
+// scanValue walks one bound value to arbitrary depth. Byte slices are skipped:
+// they are opaque payload bytes (RawBody, json.RawMessage), not caller-authored
+// strings, and the JSON decoder could not have produced a string field from
+// them.
+func (s *nulScanner) scanValue(v reflect.Value) *nulViolation {
 	switch v.Kind() {
 	case reflect.String:
 		if strings.IndexByte(v.String(), 0) >= 0 {
-			return &nulViolation{Location: loc, Message: nulValueMessage}
+			return s.violation(nulValueMessage)
 		}
 	case reflect.Pointer, reflect.Interface:
 		if v.IsNil() {
 			return nil
 		}
-		return scanValueForNUL(v.Elem(), loc)
+		return s.scanValue(v.Elem())
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return nil
 		}
 		fallthrough
 	case reflect.Array:
+		s.path = append(s.path, locSegment{})
+		last := len(s.path) - 1
 		for i := 0; i < v.Len(); i++ {
-			if bad := scanValueForNUL(v.Index(i), fmt.Sprintf("%s[%d]", loc, i)); bad != nil {
+			s.path[last] = locSegment{index: i, indexed: true}
+			if bad := s.scanValue(v.Index(i)); bad != nil {
 				return bad
 			}
 		}
+		s.path = s.path[:last]
 	case reflect.Map:
 		iter := v.MapRange()
 		for iter.Next() {
 			key := iter.Key()
-			child := loc
+			pushed := false
 			if key.Kind() == reflect.String {
 				if strings.IndexByte(key.String(), 0) >= 0 {
 					// The key itself is the offender; it is not echoed back into
 					// the location, since that would put raw bad input in the
 					// response the way FieldError deliberately avoids.
-					return &nulViolation{Location: loc, Message: nulKeyMessage}
+					return s.violation(nulKeyMessage)
 				}
-				child = loc + "." + key.String()
+				s.path = append(s.path, locSegment{name: key.String()})
+				pushed = true
 			}
-			if bad := scanValueForNUL(iter.Value(), child); bad != nil {
+			if bad := s.scanValue(iter.Value()); bad != nil {
 				return bad
+			}
+			if pushed {
+				s.path = s.path[:len(s.path)-1]
 			}
 		}
 	case reflect.Struct:
@@ -170,12 +234,16 @@ func scanValueForNUL(v reflect.Value, loc string) *nulViolation {
 			if name == "-" {
 				continue
 			}
-			child := loc
+			pushed := false
 			if name != "" {
-				child = loc + "." + name
+				s.path = append(s.path, locSegment{name: name})
+				pushed = true
 			}
-			if bad := scanValueForNUL(v.Field(i), child); bad != nil {
+			if bad := s.scanValue(v.Field(i)); bad != nil {
 				return bad
+			}
+			if pushed {
+				s.path = s.path[:len(s.path)-1]
 			}
 		}
 	}

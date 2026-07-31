@@ -1264,7 +1264,7 @@ export class ObservableContactsApi {
      * Update a contact (beta)
      * @param address
      * @param updateContactRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      */
     public updateContactWithHttpInfo(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: ConfigurationOptions): Observable<HttpInfo<ContactView>> {
         const _config = mergeConfiguration(this.configuration, _options);
@@ -1291,7 +1291,7 @@ export class ObservableContactsApi {
      * Update a contact (beta)
      * @param address
      * @param updateContactRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * @param [ifMatch] Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      */
     public updateContact(address: string, updateContactRequest: UpdateContactRequest, ifMatch?: string, _options?: ConfigurationOptions): Observable<ContactView> {
         return this.updateContactWithHttpInfo(address, updateContactRequest, ifMatch, _options).pipe(map((apiResponse: HttpInfo<ContactView>) => apiResponse.data));
@@ -1303,7 +1303,7 @@ export class ObservableContactsApi {
      * @param email
      * @param address
      * @param upsertEngagementRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      */
     public upsertEngagementWithHttpInfo(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, ifMatch?: string, _options?: ConfigurationOptions): Observable<HttpInfo<ContactEngagementView>> {
         const _config = mergeConfiguration(this.configuration, _options);
@@ -1331,7 +1331,7 @@ export class ObservableContactsApi {
      * @param email
      * @param address
      * @param upsertEngagementRequest
-     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * @param [ifMatch] Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      */
     public upsertEngagement(email: string, address: string, upsertEngagementRequest: UpsertEngagementRequest, ifMatch?: string, _options?: ConfigurationOptions): Observable<ContactEngagementView> {
         return this.upsertEngagementWithHttpInfo(email, address, upsertEngagementRequest, ifMatch, _options).pipe(map((apiResponse: HttpInfo<ContactEngagementView>) => apiResponse.data));

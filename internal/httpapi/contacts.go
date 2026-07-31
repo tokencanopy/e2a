@@ -147,7 +147,7 @@ type UpdateContactRequest struct {
 
 type updateContactInput struct {
 	Address string `path:"address"`
-	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."`
+	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."`
 	Body    UpdateContactRequest
 }
 
@@ -528,20 +528,34 @@ func emptyIfMatchError(ctx context.Context, ifMatch string) *ErrorEnvelope {
 // etagMatches implements the subset of RFC 9110 §13.1.1 this surface needs:
 // the wildcard, and a comma-separated list of candidate validators.
 //
-// Comparison is STRONG, which is what §13.1.1 requires of If-Match: a weak
-// validator never matches, and the W/ prefix exists only for If-None-Match.
-// This code used to strip the prefix and compare the rest, which meant
-// `W/"<current>"` succeeded and the write landed. That is not a cosmetic
-// deviation — weak comparison says "semantically equivalent", and a
-// lost-update guard needs "byte-identical representation" or it is not a guard.
-// It was also self-inconsistent: the prefix strip fired inconsistently between
-// the single-tag and comma-list paths, so the same tag could be accepted alone
-// and refused in a list.
+// THE W/ PREFIX IS TOLERATED ON INPUT ON PURPOSE. DO NOT "FIX" THIS TO A
+// STRICT STRONG COMPARISON. §13.1.1 does specify strong comparison for
+// If-Match, and reading only the RFC makes this look like a bug — it is not,
+// and the deviation is load-bearing in production:
+//
+//   - api.e2a.dev sits behind a Cloudflare proxy, and that edge actively
+//     transforms responses (br compression is confirmed live; our origin sets
+//     no `encode` directive in either Caddyfile, so the compression is the
+//     edge's own).
+//   - Cloudflare downgrades a strong ETag to a weak one whenever it transforms
+//     a response. "Respect Strong ETags" is an Enterprise-only setting and
+//     e2a.dev is on the Free plan, so we cannot turn that off.
+//   - So a client can legitimately GET `ETag: W/"abc"` for a row whose origin
+//     validator is `"abc"`, echo exactly what it was given as If-Match, and —
+//     under a strict comparison — receive a PERMANENT 412 that no retry ever
+//     clears. Every conditional write on this surface would break, in prod
+//     only: the staging host is DNS-only (unproxied), so the conformance gate
+//     structurally cannot observe it and a green gate proves nothing here.
+//
+// Tolerating the prefix is what makes optimistic concurrency work through a
+// transforming intermediary. The guard still holds: the compared body is the
+// full strong validator, which changes on every accepted write, so a stale
+// validator cannot match whether or not it arrived wearing a W/.
 //
 // The wildcard is deliberate and correct: `If-Match: *` means "if any current
 // representation exists". Both call sites load the resource before consulting
 // this function and answer 404/412 when it is absent, so `*` can only reach
-// here for a resource that does exist.
+// here for a resource that does exist — it never creates one.
 func etagMatches(ifMatch, current string) bool {
 	ifMatch = strings.TrimSpace(ifMatch)
 	// RFC 9110 grammar is `"*" / 1#entity-tag` — the wildcard stands alone and
@@ -550,11 +564,14 @@ func etagMatches(ifMatch, current string) bool {
 		return true
 	}
 	for _, candidate := range strings.Split(ifMatch, ",") {
+		// The strip happens per candidate, inside the loop, so a single tag and
+		// a comma list behave identically — an intermediary that weakens
+		// validators weakens them the same way however many the client sent.
+		// TrimPrefix is case-sensitive by design: RFC 9110 defines the weak
+		// prefix as exactly "W/", so a lowercase "w/" is not a weak validator
+		// and correctly fails to match.
 		candidate = strings.TrimSpace(candidate)
-		if strings.HasPrefix(candidate, "W/") {
-			// A weak validator can never satisfy a strong comparison.
-			continue
-		}
+		candidate = strings.TrimPrefix(candidate, "W/")
 		if candidate == current {
 			return true
 		}

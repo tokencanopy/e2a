@@ -1082,7 +1082,7 @@ export interface ContactsApiUpdateContactRequest {
      */
     updateContactRequest: UpdateContactRequest
     /**
-     * Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      * Defaults to: undefined
      * @type string
      * @memberof ContactsApiupdateContact
@@ -1112,7 +1112,7 @@ export interface ContactsApiUpsertEngagementRequest {
      */
     upsertEngagementRequest: UpsertEngagementRequest
     /**
-     * Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Comparison is strong (RFC 9110 §13.1.1): send the ETag exactly as returned — a W/-prefixed weak validator never matches and is rejected with 412. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
      * Defaults to: undefined
      * @type string
      * @memberof ContactsApiupsertEngagement

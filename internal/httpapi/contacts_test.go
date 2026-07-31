@@ -915,14 +915,23 @@ func TestPatchContactRejectsEmptyIfMatch(t *testing.T) {
 	}
 }
 
-// TestETagMatchesUsesStrongComparison pins RFC 9110 §13.1.1: If-Match compares
-// STRONGLY, so a weak validator never matches. Staging sha-32ce45dc stripped
-// the W/ prefix and compared the rest, so `W/"<current>"` returned 200 and the
-// write landed — weak comparison means "semantically equivalent", which is not
-// a basis for a lost-update guard. The stripping was also inconsistent between
-// the single-tag and comma-list paths, so the same tag could be accepted alone
-// and refused in a list.
-func TestETagMatchesUsesStrongComparison(t *testing.T) {
+// TestETagMatchesToleratesTheWeakPrefix pins a deviation from RFC 9110 §13.1.1
+// that is deliberate and load-bearing, so that a future reader who checks only
+// the RFC does not "fix" it into an outage.
+//
+// api.e2a.dev is behind a Cloudflare proxy that actively transforms responses
+// (br compression is confirmed live; our origin sets no `encode` directive, so
+// the compression is the edge's). Cloudflare downgrades a strong ETag to a weak
+// one whenever it transforms a response, and "Respect Strong ETags" is
+// Enterprise-only while e2a.dev is on the Free plan. A client can therefore be
+// handed `W/"abc"` for a row whose origin validator is `"abc"`, echo back
+// exactly what it received, and — under a strict comparison — get a PERMANENT
+// 412 no retry clears. Staging is DNS-only (unproxied), so the conformance gate
+// structurally cannot catch that; it would be a prod-only break.
+//
+// The guard is not weakened by this: the compared body is the full validator,
+// which moves on every accepted write, so a stale tag never matches.
+func TestETagMatchesToleratesTheWeakPrefix(t *testing.T) {
 	const current = `"88eba810c0136ae642cf65a30025858b"`
 	cases := []struct {
 		name    string
@@ -930,14 +939,21 @@ func TestETagMatchesUsesStrongComparison(t *testing.T) {
 		want    bool
 	}{
 		{"exact strong validator", current, true},
+		{"weak form of the current validator", `W/` + current, true},
+		{"weak form inside a comma list", `W/"other", W/` + current, true},
+		{"strong form inside a comma list", `"other", ` + current, true},
+		{"mixed weak and strong in a list", `W/"other", ` + current, true},
+		// Tolerating the prefix must not tolerate the wrong validator: a stale
+		// tag stays stale however it is dressed.
+		{"weak form of a different validator", `W/"deadbeef"`, false},
+		{"weak list with no matching member", `W/"aaa", W/"bbb"`, false},
+		{"unrelated strong validator", `"deadbeef"`, false},
+		// RFC 9110 spells the weak prefix "W/" exactly, so lowercase is not a
+		// weak validator and does not match.
+		{"lowercase w/ is not a weak prefix", `w/` + current, false},
 		{"wildcard", "*", true},
 		{"wildcard with surrounding space", "  *  ", true},
-		{"weak form of the current validator", `W/` + current, false},
-		{"lowercase weak prefix", `w/` + current, false},
-		{"weak inside a comma list", `"other", W/` + current, false},
-		{"strong inside a comma list", `"other", ` + current, true},
-		{"unrelated strong validator", `"deadbeef"`, false},
-		{"weak unrelated validator", `W/"deadbeef"`, false},
+		{"garbage", "garbage", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -948,9 +964,10 @@ func TestETagMatchesUsesStrongComparison(t *testing.T) {
 	}
 }
 
-// TestPatchContactRejectsWeakValidator is the wire-level half: a caller sending
-// the weak form of the CURRENT validator must get 412 and must not have written.
-func TestPatchContactRejectsWeakValidator(t *testing.T) {
+// TestPatchContactAcceptsAWeakenedValidator is the wire-level half: a client
+// whose validator was weakened in transit must still be able to complete its
+// conditional write, and a stale one must still be refused.
+func TestPatchContactAcceptsAWeakenedValidator(t *testing.T) {
 	srv := newContactsServer(t, nil)
 	seedContact(t, srv, "weak-etag@example.com", "Before")
 	path := "/v1/contacts/weak-etag%40example.com"
@@ -961,23 +978,27 @@ func TestPatchContactRejectsWeakValidator(t *testing.T) {
 		t.Fatalf("GET = %d ETag=%q; want 200 with an ETag", code, etag)
 	}
 
+	// The weak form of the CURRENT validator — what a client sees through a
+	// transforming CDN — still completes the write.
 	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
 		map[string]any{"display_name": "After"}, map[string]string{"If-Match": "W/" + etag})
-	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
-		t.Fatalf("PATCH with weak validator = %d %v; want 412 precondition_failed", code, body)
-	}
-	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
-	if code != http.StatusOK || after["display_name"] != "Before" {
-		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+	if code != http.StatusOK {
+		t.Fatalf("PATCH with a weakened current validator = %d %v; want 200 — a CDN-weakened ETag must not permanently 412", code, body)
 	}
 
-	// The strong form of the same validator still works, and `*` matches an
-	// existing representation.
+	// That write moved the validator, so re-sending the old one — weak or not —
+	// is now stale and must be refused.
 	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
-		map[string]any{"display_name": "After"}, map[string]string{"If-Match": etag})
-	if code != http.StatusOK {
-		t.Fatalf("PATCH with the strong validator = %d %v; want 200", code, body)
+		map[string]any{"display_name": "Stale"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PATCH with a weakened STALE validator = %d %v; want 412", code, body)
 	}
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["display_name"] != "After" {
+		t.Fatalf("GET after refused write = %d %v; want the row left at \"After\"", code, after)
+	}
+
+	// `*` matches any existing representation.
 	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
 		map[string]any{"display_name": "Star"}, map[string]string{"If-Match": "*"})
 	if code != http.StatusOK {

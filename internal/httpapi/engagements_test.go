@@ -633,10 +633,11 @@ func TestEngagementUpdateRejectsEmptyIfMatch(t *testing.T) {
 	}
 }
 
-// TestEngagementUpdateRejectsWeakValidator mirrors the contact case: on staging
-// sha-32ce45dc a W/-prefixed copy of the current validator was accepted and the
-// write landed (req_d85fa6c32bee6334e012a2a9). If-Match compares strongly.
-func TestEngagementUpdateRejectsWeakValidator(t *testing.T) {
+// TestEngagementUpdateAcceptsAWeakenedValidator mirrors the contact case: a
+// validator weakened by a transforming CDN must still complete the write (see
+// etagMatches for why that tolerance is deliberate), while a stale one is
+// still refused.
+func TestEngagementUpdateAcceptsAWeakenedValidator(t *testing.T) {
 	srv := newEngagementsServer(t, nil)
 	path := raisePath + "/partner%40fund.vc"
 	enrollVia(t, srv, "account", "partner@fund.vc", map[string]any{"stage": "touch1"})
@@ -648,18 +649,24 @@ func TestEngagementUpdateRejectsWeakValidator(t *testing.T) {
 	}
 
 	code, body, _ := sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
-		map[string]any{"stage": "weak"}, map[string]string{"If-Match": "W/" + etag})
-	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
-		t.Fatalf("PUT with weak validator = %d %v; want 412 precondition_failed", code, body)
-	}
-	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
-	if code != http.StatusOK || after["stage"] != "touch1" {
-		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+		map[string]any{"stage": "touch2"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusOK {
+		t.Fatalf("PUT with a weakened current validator = %d %v; want 200", code, body)
 	}
 
-	// `If-Match: *` still means "if any current representation exists": it
-	// succeeds here and, per the existing contract, refuses to enrol a missing
-	// record rather than creating one.
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "stale"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PUT with a weakened STALE validator = %d %v; want 412", code, body)
+	}
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["stage"] != "touch2" {
+		t.Fatalf("GET after refused write = %d %v; want the row left at touch2", code, after)
+	}
+
+	// `If-Match: *` means "if any current representation exists": it succeeds
+	// here and, per the existing contract, refuses to enrol a missing record
+	// rather than creating one.
 	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
 		map[string]any{"stage": "star"}, map[string]string{"If-Match": "*"})
 	if code != http.StatusOK {

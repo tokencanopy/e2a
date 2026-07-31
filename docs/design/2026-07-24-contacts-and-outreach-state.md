@@ -252,7 +252,7 @@ No comment needed to explain it. That is the bar.
 | `GET` | `/v1/contacts` | List. `PageParams`; filters `source`, `import_batch_id`, `created_after/before`. Sort `created_at DESC, id`. `Cache-Control: no-store`. |
 | `POST` | `/v1/contacts` | Create one → **201** + `Location`. Accepts `Idempotency-Key`. |
 | `GET` | `/v1/contacts/{address}` | Fetch by address. `ETag`. |
-| `PATCH` | `/v1/contacts/{address}` | Partial update of `display_name`, `metadata`. `If-Match` honored (STRONG comparison per RFC 9110 §13.1.1 — a `W/` weak validator never matches; a present-but-empty header is 400, not an unconditional write) → 412. |
+| `PATCH` | `/v1/contacts/{address}` | Partial update of `display_name`, `metadata`. `If-Match` honored (the `W/` weak prefix is tolerated on input — a transforming CDN may add it; a present-but-empty header is 400, not an unconditional write) → 412. |
 | `DELETE` | `/v1/contacts/{address}` | Requires `?confirm=DELETE`. Cascades engagements. **Does not clear suppressions.** |
 | `POST` | `/v1/contacts/import` | Bulk upsert (§3.3.1). |
 | `DELETE` | `/v1/contacts/imports/{batch_id}` | Reverse an import. `?confirm=DELETE`. |
