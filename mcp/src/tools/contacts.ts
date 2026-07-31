@@ -11,6 +11,12 @@ const metadata = z.record(
 
 const contactAddress = z.string().email().describe("Contact email address.");
 
+// RFC 3339 date-time with an explicit UTC offset (Z or ±HH:MM both accepted).
+// Bare date-times and date-only values are rejected rather than guessed at:
+// `new Date()` would read them in LOCAL time and silently shift the filter
+// across timezones. Same rule as scheduled sending (messages.ts sendAtField).
+const contactTimestamp = z.string().datetime({ offset: true });
+
 export function registerContactTools(server: McpServer, client: McpClient): void {
   server.registerTool(
     "list_contacts",
@@ -23,8 +29,8 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         ...paginationInput,
         source: z.enum(["import", "manual", "inbound"]).optional(),
         import_batch_id: z.string().optional(),
-        created_after: z.string().datetime().optional(),
-        created_before: z.string().datetime().optional(),
+        created_after: contactTimestamp.optional(),
+        created_before: contactTimestamp.optional(),
       }),
     },
     async (args) => runTool(async () => {
@@ -179,8 +185,8 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         stage: z.string().max(128).optional(),
         replied: z.boolean().optional(),
         suppressed: z.boolean().optional(),
-        next_action_before: z.string().datetime().optional(),
-        last_outbound_before: z.string().datetime().optional(),
+        next_action_before: contactTimestamp.optional(),
+        last_outbound_before: contactTimestamp.optional(),
       }),
     },
     async (args) => runTool(async () => {
@@ -222,7 +228,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         email: emailSelector,
         address: contactAddress,
         stage: z.string().max(128).optional(),
-        next_action_at: z.string().datetime().nullable().optional(),
+        next_action_at: contactTimestamp.nullable().optional(),
         metadata,
         if_match: z.string().optional(),
       }).refine(
