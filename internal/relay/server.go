@@ -167,6 +167,14 @@ func NewServer(cfg *config.Config, store *identity.Store, usage usage.UsageTrack
 	smtpSrv.WriteTimeout = 30 * time.Second
 	smtpSrv.MaxMessageBytes = 10 * 1024 * 1024 // 10MB
 	smtpSrv.MaxRecipients = 50
+	// go-smtp defaults MaxLineLength to 2000 bytes. Agent-generated mail
+	// (single-line JSON, unfolded HTML, unwrapped base64) routinely
+	// exceeds that — a customer's two agents bounced 30 messages to each
+	// other over three days on "too long a line in input stream" before
+	// reformatting (prod, 2026-07-18..20). The whole message is already
+	// capped by MaxMessageBytes above, so a 1MiB line cap bounds per-line
+	// memory without rejecting realistic agent payloads.
+	smtpSrv.MaxLineLength = 1 << 20
 	smtpSrv.AllowInsecureAuth = !cfg.IsProduction()
 
 	if cfg.SMTP.TLSCert != "" && cfg.SMTP.TLSKey != "" {
