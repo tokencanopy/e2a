@@ -466,6 +466,12 @@ declared stable.
   delete returns `409 send_in_progress` and must be retried.
   Restoring it before `scheduled_at` re-arms the existing job; restoring at or
   after `scheduled_at` restores the message but leaves the send canceled.
+  `scheduled_at` is a **"not before" bound, not an exact fire time**: provider
+  submission is capped at 60 messages/min/agent (a durable fire-time limit
+  shared with immediate sends), so a large burst scheduled for one instant
+  drains over minutes — e.g. 3,600 messages scheduled for 9:00 finish
+  submitting around 10:00 — with each message holding `delivery_status=
+  accepted` until its turn.
 - **`delivery_status`** on a message follows `accepted → sending → sent →
   delivered | deferred | bounced | complained | failed`. Note **`sent` ≠
   `delivered`**: `sent` means the upstream provider (SES) accepted the message,

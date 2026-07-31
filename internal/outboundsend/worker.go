@@ -623,9 +623,15 @@ func rateJitter(messageID string, window time.Duration) time.Duration {
 	if maxJitter <= 0 {
 		return 0
 	}
+	// Sub-millisecond-precision windows (tests) truncate to 0ms — guard the
+	// modulo against the divide-by-zero, not just the non-positive window.
+	ms := maxJitter.Milliseconds()
+	if ms <= 0 {
+		return 0
+	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(messageID))
-	return time.Duration(h.Sum32()%uint32(maxJitter.Milliseconds())) * time.Millisecond
+	return time.Duration(h.Sum32()%uint32(ms)) * time.Millisecond
 }
 
 func isPermanentRampError(err error) bool {

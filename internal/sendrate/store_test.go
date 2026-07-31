@@ -195,6 +195,16 @@ func TestReservePrunesExpiredEntries(t *testing.T) {
 	}
 }
 
+// TestStoreWindowExposesConstructorWindow pins Window() so the send worker's
+// snooze clamp reads the limiter's real window (and so the coverage floor
+// doesn't depend on cross-package exercise).
+func TestStoreWindowExposesConstructorWindow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	if got := sendrate.NewStore(pool, 400*time.Millisecond, 60).Window(); got != 400*time.Millisecond {
+		t.Errorf("Window() = %s, want 400ms", got)
+	}
+}
+
 func TestReserveRejectsEmptyAgentID(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := sendrate.NewStore(pool, time.Minute, 60)

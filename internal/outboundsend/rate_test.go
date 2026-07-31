@@ -12,10 +12,11 @@ import (
 )
 
 // fakeRateGate records the agent ids it was asked to reserve for and returns
-// a scripted decision/error.
+// a scripted decision/error. window defaults to time.Minute when unset.
 type fakeRateGate struct {
 	decision outboundsend.RateDecision
 	err      error
+	window   time.Duration
 	calls    []string
 }
 
@@ -24,7 +25,12 @@ func (f *fakeRateGate) Reserve(_ context.Context, agentID string) (outboundsend.
 	return f.decision, f.err
 }
 
-func (f *fakeRateGate) Window() time.Duration { return time.Minute }
+func (f *fakeRateGate) Window() time.Duration {
+	if f.window > 0 {
+		return f.window
+	}
+	return time.Minute
+}
 
 // requireSnooze asserts Work returned a River snooze (not an attempt-burning
 // error, not a cancel) and returns its duration.
@@ -132,6 +138,22 @@ func TestSendWorker_RateLimitedJitterDeterministicPerMessage(t *testing.T) {
 	}
 	if d1, d2 := snoozeFor("msg_1"), snoozeFor("msg_2"); d1 == d2 {
 		t.Errorf("different messages got identical jitter %s — herd not spread", d1)
+	}
+}
+
+// TestSendWorker_RateLimitedTinyWindowNoPanic: a gate window under 4ms
+// truncates maxJitter.Milliseconds() to 0 — the jitter modulo must not
+// divide by zero (found by review probe; test-shaped windows only, prod is
+// 1m).
+func TestSendWorker_RateLimitedTinyWindowNoPanic(t *testing.T) {
+	st := &fakeStore{job: acceptedJob("msg_1")}
+	gate := &fakeRateGate{
+		decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(30 * time.Second)},
+		window:   2 * time.Millisecond,
+	}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+	if d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1))); d != 2*time.Millisecond {
+		t.Errorf("snooze = %s, want the tiny window cap with zero jitter", d)
 	}
 }
 
