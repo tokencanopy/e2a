@@ -1395,7 +1395,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * Fetch a single conversation thread with its participants, labels, and member messages.
+     * Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
      * Get a conversation
      * @param param the request object
      */
@@ -1404,7 +1404,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * Fetch a single conversation thread with its participants, labels, and member messages.
+     * Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
      * Get a conversation
      * @param param the request object
      */
@@ -1413,7 +1413,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * List an agent\'s conversation threads (derived from messages.conversation_id).
+     * List an agent\'s application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
      * List conversations
      * @param param the request object
      */
@@ -1422,7 +1422,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * List an agent\'s conversation threads (derived from messages.conversation_id).
+     * List an agent\'s application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
      * List conversations
      * @param param the request object
      */

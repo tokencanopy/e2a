@@ -441,6 +441,29 @@ describe("e2a MCP server", () => {
     expect(replyProperties.conversation_id?.description).toMatch(/message_id still preserves/i);
   });
 
+  it("keeps application conversation grouping distinct from email thread topology", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    const forwardProperties = (byName.get("forward_message")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    })?.properties ?? {};
+    expect(forwardProperties.conversation_id?.description).toMatch(
+      /always starts a new email thread/i,
+    );
+    expect(forwardProperties.conversation_id?.description).toMatch(
+      /only groups it with related application activity/i,
+    );
+
+    for (const name of ["list_conversations", "get_conversation"]) {
+      const description = byName.get(name)?.description ?? "";
+      expect(description, `${name} description`).toMatch(/application conversation/i);
+      expect(description, `${name} description`).toMatch(
+        /independent of email thread topology/i,
+      );
+    }
+  });
+
   it("documents contact.due as a webhook event rather than a local-agent launcher", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));

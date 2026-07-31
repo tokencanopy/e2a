@@ -293,7 +293,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .string()
           .optional()
           .describe(
-            "Optional conversation grouping ID. A forward is a new thread by default — set this only to bind it to an existing thread explicitly.",
+            "Optional application conversation/grouping ID. A forward always starts a new email thread; setting this value only groups it with related application activity. Maximum 200 characters; no CR/LF.",
           ),
         reply_to: z
           .string()
@@ -381,7 +381,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "List conversations for the agent",
       annotations: { readOnlyHint: true },
       description:
-        "Lists the agent's conversations — groups of messages sharing a `conversation_id` — one row per conversation, sorted by most recent activity. Each row carries `message_count`, `inbound_count`, `outbound_count`, `has_unread`, and the latest message's subject + sender so you can render an inbox without drilling into each thread. **Cursor-paginated:** returns one page in `conversations` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page. To read a single conversation's messages, call `get_conversation`.",
+        "Lists the agent's application conversations — groups of messages sharing a `conversation_id` — one row per group, sorted by most recent activity. `conversation_id` is independent of email thread topology. Each row carries `message_count`, `inbound_count`, `outbound_count`, `has_unread`, and the latest message's subject + sender so you can render grouped activity without loading every message. **Cursor-paginated:** returns one page in `conversations` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page. To read a single conversation's messages, call `get_conversation`.",
       inputSchema: strictInputSchema({
         ...paginationInput,
         since: z
@@ -417,10 +417,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
   server.registerTool(
     "get_conversation",
     {
-      title: "Get a single conversation with all member messages",
+      title: "Get an application conversation with all member messages",
       annotations: { readOnlyHint: true },
       description:
-        "Returns the full thread — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full thread.",
+        "Returns the full application conversation group — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). This groups by `conversation_id`, which is independent of email thread topology. Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full group.",
       inputSchema: strictInputSchema({
         conversation_id: z.string(),
         email: emailSelector,
@@ -470,7 +470,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .string()
           .max(200)
           .optional()
-          .describe("Exact match on the thread/conversation id."),
+          .describe("Exact match on the application conversation/grouping id."),
         since: z
           .string()
           .optional()

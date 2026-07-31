@@ -60,7 +60,7 @@ class ConversationsApi:
     ) -> ConversationDetailView:
         """Get a conversation
 
-        Fetch a single conversation thread with its participants, labels, and member messages.
+        Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str
@@ -131,7 +131,7 @@ class ConversationsApi:
     ) -> ApiResponse[ConversationDetailView]:
         """Get a conversation
 
-        Fetch a single conversation thread with its participants, labels, and member messages.
+        Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str
@@ -202,7 +202,7 @@ class ConversationsApi:
     ) -> RESTResponseType:
         """Get a conversation
 
-        Fetch a single conversation thread with its participants, labels, and member messages.
+        Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str
@@ -339,7 +339,7 @@ class ConversationsApi:
     ) -> PageConversationSummaryView:
         """List conversations
 
-        List an agent's conversation threads (derived from messages.conversation_id).
+        List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str
@@ -422,7 +422,7 @@ class ConversationsApi:
     ) -> ApiResponse[PageConversationSummaryView]:
         """List conversations
 
-        List an agent's conversation threads (derived from messages.conversation_id).
+        List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str
@@ -505,7 +505,7 @@ class ConversationsApi:
     ) -> RESTResponseType:
         """List conversations
 
-        List an agent's conversation threads (derived from messages.conversation_id).
+        List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
 
         :param email: (required)
         :type email: str

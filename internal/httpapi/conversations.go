@@ -92,7 +92,7 @@ func (s *Server) registerConversations() {
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations",
 		Summary:     "List conversations",
-		Description: "List an agent's conversation threads (derived from messages.conversation_id).",
+		Description: "List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.",
 		Tags:        []string{"conversations"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListConversations)
@@ -102,7 +102,7 @@ func (s *Server) registerConversations() {
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations/{id}",
 		Summary:     "Get a conversation",
-		Description: "Fetch a single conversation thread with its participants, labels, and member messages.",
+		Description: "Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.",
 		Tags:        []string{"conversations"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleGetConversation)

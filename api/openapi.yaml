@@ -2211,7 +2211,7 @@ components:
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id override. This value is independent of email thread topology; a forward starts a new email thread. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
@@ -3617,7 +3617,7 @@ components:
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id override. This value is independent of email thread topology, which is derived from the referenced message. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
@@ -3786,7 +3786,7 @@ components:
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id. This value is independent of email thread topology. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
@@ -5492,7 +5492,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/conversations:
     get:
-      description: List an agent's conversation threads (derived from messages.conversation_id).
+      description: List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
       operationId: listConversations
       parameters:
         - in: path
@@ -5568,7 +5568,7 @@ paths:
         - conversations
   /v1/agents/{email}/conversations/{id}:
     get:
-      description: Fetch a single conversation thread with its participants, labels, and member messages.
+      description: Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
       operationId: getConversation
       parameters:
         - in: path
