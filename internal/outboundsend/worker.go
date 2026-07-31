@@ -34,6 +34,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendrate"
 )
 
 // sendRetryBackoffs is the per-attempt delay schedule for a failed outbound send —
@@ -58,6 +59,15 @@ const outageSnoozeInterval = 5 * time.Minute
 // rampErrorSnoozeInterval keeps a durable message queued when the ramp store is
 // temporarily unavailable. JobSnooze does not consume a River attempt.
 const rampErrorSnoozeInterval = time.Minute
+
+// rateErrorSnoozeInterval keeps a durable message queued when the fire-time
+// rate store is temporarily unavailable — mirroring rampErrorSnoozeInterval:
+// fail toward retry, never toward an unthrottled submit.
+const rateErrorSnoozeInterval = time.Minute
+
+// rateMinSnooze floors a rate deferral so a RetryAt at (or just past) now —
+// the window-boundary race — cannot hot-loop the queue.
+const rateMinSnooze = 250 * time.Millisecond
 
 // sendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
 // outage-snoozing job stops deferring and is declared terminally failed. 72h matches
@@ -176,6 +186,23 @@ type RampGate interface {
 	Resolve(ctx context.Context, messageID string) error
 }
 
+// RateDecision is the fire-time rate gate's answer for one submission slot:
+// Allowed=false carries RetryAt, the earliest the agent's window frees
+// capacity. Aliased to the storage type so a *sendrate.Store satisfies
+// RateGate directly — no adapter.
+type RateDecision = sendrate.Decision
+
+// RateGate reserves one slot in the per-agent fire-time submission budget
+// (internal/sendrate) — the durable counterpart to the acceptance-time
+// in-memory send limit, enforced immediately before provider submission so
+// scheduled-send bursts and multi-replica deployments cannot exceed it.
+// Unlike RampGate there is no Confirm/Release: the slot is consumed at
+// Reserve and ages out of the sliding window on its own (see the sendrate
+// package doc for the crash semantics). A nil gate allows everything.
+type RateGate interface {
+	Reserve(ctx context.Context, agentID string) (RateDecision, error)
+}
+
 // Store is the messages-store surface the worker needs. Implemented over
 // internal/identity in the binary. ClaimSend atomically checks that the message
 // and agent are live and persists delivery_status='sending' for the stamped River
@@ -221,10 +248,12 @@ type Store interface {
 // webhookdelivery.DeliverWorker.
 type SendWorker struct {
 	river.WorkerDefaults[OutboundSendArgs]
-	store     Store
-	deliverer Deliverer
-	ramp      RampGate
-	metrics   Metrics
+	store      Store
+	deliverer  Deliverer
+	ramp       RampGate
+	rate       RateGate
+	rateWindow time.Duration
+	metrics    Metrics
 }
 
 func NewSendWorker(store Store, deliverer Deliverer, ramp ...RampGate) *SendWorker {
@@ -240,6 +269,17 @@ func NewSendWorker(store Store, deliverer Deliverer, ramp ...RampGate) *SendWork
 func (w *SendWorker) WithMetrics(m Metrics) *SendWorker {
 	if m != nil {
 		w.metrics = m
+	}
+	return w
+}
+
+// WithRateGate injects the fire-time per-agent rate gate (internal/sendrate).
+// window is the gate's sliding window, used only to cap the deferral snooze.
+// Chainable; nil keeps the allow-all default (no gate wired).
+func (w *SendWorker) WithRateGate(g RateGate, window time.Duration) *SendWorker {
+	if g != nil {
+		w.rate = g
+		w.rateWindow = window
 	}
 	return w
 }
@@ -371,6 +411,60 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		}
 	}
 
+	// Fire-time per-agent rate gate (internal/sendrate): the durable,
+	// cross-replica counterpart of the acceptance-time in-memory send limit —
+	// scheduled sends accumulate as River jobs and would otherwise burst past
+	// the advertised 60/min/agent at the provider when they fire. Grouped with
+	// the other wait-gates: after the ramp reservation, before the final
+	// suppression check. A deferral RELEASES the send claim but KEEPS the ramp
+	// reservation (same invariant as the outage snooze above — same-message
+	// Reserve is idempotent, a released reservation is terminal), and snoozes
+	// WITHOUT burning an attempt, metering, or emitting lifecycle/terminal
+	// events: the message simply fires when the window frees capacity.
+	if w.rate != nil {
+		decision, rerr := w.rate.Reserve(ctx, j.AgentID)
+		observedAt = time.Now().UTC()
+		if rerr != nil {
+			// Fail toward retry, never toward an unthrottled submit: the
+			// provider is never exposed because the limiter is down.
+			if j.pastRetryHorizon() {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "send_rate_timeout: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+					return err
+				}
+				if w.ramp != nil && j.rampEligible() {
+					_ = w.ramp.Release(ctx, j.MessageID)
+				}
+				return river.JobCancel(fmt.Errorf("send rate gate unavailable past %s horizon: %w", sendRetryHorizon, rerr))
+			}
+			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
+				return fmt.Errorf("release outbound send claim after rate-gate failure: %w", err)
+			}
+			log.Printf("[outbound-send] rate gate unavailable for %s (snoozing): %v", j.MessageID, rerr)
+			return river.JobSnooze(rateErrorSnoozeInterval)
+		}
+		if !decision.Allowed {
+			if j.pastRetryHorizon() {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "send_rate_timeout", delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+					return err
+				}
+				if w.ramp != nil && j.rampEligible() {
+					if err := w.ramp.Release(ctx, j.MessageID); err != nil {
+						return fmt.Errorf("release ramp reservation after send-rate timeout: %w", err)
+					}
+				}
+				return river.JobCancel(fmt.Errorf("send rate deferred past %s horizon", sendRetryHorizon))
+			}
+			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
+				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
+			}
+			delay := clampRateSnooze(time.Until(decision.RetryAt), w.rateWindow)
+			w.metrics.OutboundRateDeferred()
+			// IDs only — never recipient data.
+			log.Printf("[outbound-send] rate_limited agent=%s msg=%s retry_in=%s", j.AgentID, j.MessageID, delay)
+			return river.JobSnooze(delay)
+		}
+	}
+
 	// Final suppression guard immediately before provider I/O: a suppression
 	// added after acceptance or while an allowed ramp reservation was in flight
 	// must still prevent delivery. A match is terminal; a store error fails
@@ -497,6 +591,22 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 
 func (j *SendJob) rampEligible() bool {
 	return j.SentAs == "own_address" && j.MessageType != "test"
+}
+
+// clampRateSnooze bounds a rate deferral to [rateMinSnooze, window]: the floor
+// avoids a hot loop when RetryAt lands on (or just past) now — the
+// window-boundary race — and the cap guarantees a deferred job re-fires within
+// ~1 window even if the decision's RetryAt is skewed. In the normal path
+// RetryAt = oldest-kept-event + window ≤ now + window already; the cap is a
+// backstop, not the common case.
+func clampRateSnooze(d, window time.Duration) time.Duration {
+	if d < rateMinSnooze {
+		return rateMinSnooze
+	}
+	if window > 0 && d > window {
+		return window
+	}
+	return d
 }
 
 func isPermanentRampError(err error) bool {

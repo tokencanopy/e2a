@@ -126,6 +126,14 @@ type Metrics interface {
 	// seconds is the submission duration.
 	OutboundAttempt(outcome string, seconds float64)
 
+	// OutboundRateDeferred records one outbound submission deferred by the
+	// per-agent fire-time rate limiter (internal/sendrate): the job snoozes
+	// and re-fires when the agent's sliding window frees capacity — it is
+	// NOT an attempt, NOT a terminal outcome, and is never metered. A
+	// sustained high rate means agents are queueing behind their own
+	// 60/min budget.
+	OutboundRateDeferred()
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -241,6 +249,7 @@ func (NoOp) OutboundQueueWait(float64)                    {}
 func (NoOp) OutboundTerminal(string)                      {}
 func (NoOp) OutboundTerminalLatency(float64)              {}
 func (NoOp) OutboundAttempt(string, float64)              {}
+func (NoOp) OutboundRateDeferred()                        {}
 func (NoOp) WebhookAttempt(string, string, float64)       {}
 func (NoOp) WebhookTerminal(string, string, int)          {}
 func (NoOp) WebhookExpiredPending(int)                    {}
@@ -359,6 +368,10 @@ func (l *Log) OutboundTerminalLatency(seconds float64) {
 
 func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 	log.Printf("[metrics] event=outbound.attempt outcome=%s duration=%.3f", outcome, seconds)
+}
+
+func (l *Log) OutboundRateDeferred() {
+	log.Printf("[metrics] event=outbound.rate_deferred")
 }
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {

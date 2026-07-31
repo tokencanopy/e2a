@@ -130,6 +130,7 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.OutboundTerminal("failed_cancelled")
 	p.OutboundTerminalLatency(240)
 	p.OutboundAttempt("success", 0.8)
+	p.OutboundRateDeferred()
 	p.WebhookAttempt("delivered", "2xx", 0.3)
 	p.WebhookAttempt("retryable_failure", "5xx", 0.2)
 	p.WebhookTerminal("delivered", "initial", 1)
@@ -157,6 +158,7 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="failed_cancelled"} 1`,
 		`e2a_outbound_terminal_latency_seconds_count 1`,
 		`e2a_outbound_attempts_total{outcome="success"} 1`,
+		`e2a_outbound_rate_deferred_total 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
 		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,

@@ -17,12 +17,14 @@ import (
 // injected via SetEnqueuer after jobs.New builds it (two-phase wiring, same as
 // webhookdelivery / senderidentity).
 type Jobs struct {
-	store     Store
-	deliverer Deliverer
-	ramp      RampGate
-	pool      *pgxpool.Pool
-	enq       jobs.Enqueuer
-	metrics   Metrics
+	store      Store
+	deliverer  Deliverer
+	ramp       RampGate
+	rate       RateGate
+	rateWindow time.Duration
+	pool       *pgxpool.Pool
+	enq        jobs.Enqueuer
+	metrics    Metrics
 }
 
 // NewJobs builds the integration with its dependencies (no client yet). pool
@@ -48,10 +50,22 @@ func (j *Jobs) WithMetrics(m Metrics) *Jobs {
 	return j
 }
 
+// WithRateGate injects the fire-time per-agent rate gate (internal/sendrate),
+// threaded to the SendWorker at RegisterJobs. window is the gate's sliding
+// window, used only to cap the deferral snooze. Chainable; nil keeps the
+// allow-all default.
+func (j *Jobs) WithRateGate(g RateGate, window time.Duration) *Jobs {
+	if g != nil {
+		j.rate = g
+		j.rateWindow = window
+	}
+	return j
+}
+
 // RegisterJobs adds the SendWorker and terminal-state safety net to the shared
 // client's bundle. Implements jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, NewSendWorker(j.store, j.deliverer, j.ramp).WithMetrics(j.metrics))
+	river.AddWorker(w, NewSendWorker(j.store, j.deliverer, j.ramp).WithMetrics(j.metrics).WithRateGate(j.rate, j.rateWindow))
 	river.AddWorker(w, NewTerminalReconcileWorker(j.pool, j.store, j.ramp).WithMetrics(j.metrics))
 	return []*river.PeriodicJob{
 		river.NewPeriodicJob(

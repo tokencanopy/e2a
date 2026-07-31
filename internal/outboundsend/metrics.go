@@ -28,6 +28,9 @@ type Metrics interface {
 	// OutboundAttempt records one submission attempt to the upstream relay.
 	// outcome ∈ {success, temporary_failure, permanent_failure}.
 	OutboundAttempt(outcome string, seconds float64)
+	// OutboundRateDeferred records one submission deferred by the per-agent
+	// fire-time rate gate — a snooze, not an attempt, and never terminal.
+	OutboundRateDeferred()
 }
 
 // The telemetry.Metrics label enums, pinned as constants so the worker and
@@ -52,6 +55,7 @@ func (noopMetrics) OutboundQueueWait(float64)       {}
 func (noopMetrics) OutboundTerminal(string)         {}
 func (noopMetrics) OutboundTerminalLatency(float64) {}
 func (noopMetrics) OutboundAttempt(string, float64) {}
+func (noopMetrics) OutboundRateDeferred()           {}
 
 // emitTerminal records one terminal outcome count AND its co-located
 // acceptance→terminal latency — the two instruments' exactly-once contract
