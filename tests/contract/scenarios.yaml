@@ -1169,6 +1169,13 @@ scenarios:
             display_name: Second, Edited
 
     cleanup:
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed first@imp.vc (404 here); after a mid-scenario failure this is
+      # what keeps the scenario self-cleaning for the next run.
+      - id: delete_first_contact_if_reversed
+        action: request
+        method: DELETE
+        path: /v1/contacts/first@imp.vc?confirm=DELETE
       - action: request
         method: DELETE
         path: /v1/contacts/second@imp.vc?confirm=DELETE

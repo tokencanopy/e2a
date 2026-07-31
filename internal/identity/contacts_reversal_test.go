@@ -504,9 +504,12 @@ func TestDeleteImportBatchWaitsForConcurrentEngagement(t *testing.T) {
 	}
 }
 
-// waitForBlockedLock polls until some backend in the test database is waiting
-// on a lock — proof the racing reversal has reached its lock point — so the
-// test's commit lands mid-reversal rather than before it starts.
+// waitForBlockedLock polls until some backend in THIS test database is
+// waiting on a lock — proof the racing reversal has reached its lock point —
+// so the test's commit lands mid-reversal rather than before it starts. The
+// database filter matters under `make test -p 4`: per-package derived DBs
+// share one server, and an unrelated blocked lock in another package would
+// satisfy an unscoped wait early, silently un-testing the interleaving.
 func waitForBlockedLock(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
@@ -514,7 +517,11 @@ func waitForBlockedLock(t *testing.T, pool *pgxpool.Pool) {
 	for time.Now().Before(deadline) {
 		var n int
 		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&n); err != nil {
+			`SELECT count(*)
+			   FROM pg_locks l
+			   JOIN pg_stat_activity a ON a.pid = l.pid
+			  WHERE NOT l.granted
+			    AND a.datname = current_database()`).Scan(&n); err != nil {
 			t.Fatalf("poll locks: %v", err)
 		}
 		if n > 0 {
@@ -523,4 +530,60 @@ func waitForBlockedLock(t *testing.T, pool *pgxpool.Pool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("reversal never blocked on the racing transaction's lock")
+}
+
+// TestDeleteImportBatchWaitsForKeyShareEnrolment covers the OTHER enrolment
+// interleaving: the skip-mode import path (ON CONFLICT DO NOTHING + an
+// unlocked read) never takes a contact row lock, so its engagement insert
+// holds only the FK's FOR KEY SHARE on the contact. That still conflicts with
+// the reversal's FOR UPDATE, so the reversal must wait and then retain both
+// rows — same guarantee as the update-lock variant, through a weaker lock.
+func TestDeleteImportBatchWaitsForKeyShareEnrolment(t *testing.T) {
+	pool, store, user, agent := newReversalRig(t, "keyshare")
+	ctx := context.Background()
+
+	if _, err := store.ImportContacts(ctx, user.ID, "imp_keyshare", []identity.ContactImportRow{
+		{Address: "partner@keyshare.vc"},
+	}, true); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	contact, err := store.GetContactByAddress(ctx, user.ID, "partner@keyshare.vc")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	// Stage the engagement WITHOUT touching the contact row — the FK check's
+	// KEY SHARE is the only lock this transaction holds on it.
+	enroll, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin enroll: %v", err)
+	}
+	if _, err := enroll.Exec(ctx,
+		`INSERT INTO contact_engagements
+		     (id, user_id, contact_id, agent_id, address, stage, metadata)
+		  VALUES ($1, $2, $3, $4, $5, 'discovery', '{}'::jsonb)`,
+		identity.NewEngagementID(), user.ID, contact.ID, agent, "partner@keyshare.vc"); err != nil {
+		t.Fatalf("enroll insert: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := store.DeleteImportBatch(ctx, user.ID, "imp_keyshare")
+		done <- err
+	}()
+
+	waitForBlockedLock(t, pool)
+	if err := enroll.Commit(ctx); err != nil {
+		t.Fatalf("enroll commit: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+
+	if _, err := store.GetEngagement(ctx, user.ID, agent, "partner@keyshare.vc"); err != nil {
+		t.Fatalf("key-share-only enrolment destroyed by racing reversal: %v", err)
+	}
+	if _, err := store.GetContactByAddress(ctx, user.ID, "partner@keyshare.vc"); err != nil {
+		t.Errorf("contact with a racing key-share enrolment deleted: %v", err)
+	}
 }
