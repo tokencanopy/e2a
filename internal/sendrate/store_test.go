@@ -203,6 +203,24 @@ func TestReserveRejectsEmptyAgentID(t *testing.T) {
 	}
 }
 
+// TestReserveDeniesAllWhenLimitNotPositive: a non-positive limit is
+// constructor misuse; the store fails closed (deny everything, retry a full
+// window out) rather than allowing exactly one reservation through the
+// empty-kept edge — and must not panic indexing an empty window.
+func TestReserveDeniesAllWhenLimitNotPositive(t *testing.T) {
+	pool := testutil.TestDB(t)
+	agentID := seedAgent(t, pool, "zerolimit")
+	store := sendrate.NewStore(pool, time.Minute, 0)
+	before := time.Now()
+	d := reserve(t, store, agentID)
+	if d.Allowed {
+		t.Fatal("limit=0 must deny every reservation")
+	}
+	if d.RetryAt.Before(before.Add(50 * time.Second)) {
+		t.Errorf("RetryAt = %s, want ~now+window", d.RetryAt)
+	}
+}
+
 // TestReserveClosedPoolErrors: a Reserve against an unusable pool surfaces
 // the BeginTx error instead of panicking or reporting a phantom decision —
 // the worker's fail-closed path depends on getting this error. Uses a

@@ -11,8 +11,10 @@
 // of recent reservation timestamps. Reserve serializes on the row lock
 // (SELECT ... FOR UPDATE), so the limit holds across replicas and concurrent
 // workers without SKIP LOCKED or multi-statement races. All timestamps come
-// from the DB server's now() — app clocks never enter the window math, so
-// replica clock skew cannot widen the budget.
+// from the DB server's clock (clock_timestamp() at statement execution —
+// never the app's, and never the transaction-start time, which would stamp
+// events early under lock contention) — app-clock skew never enters the
+// window math.
 //
 // Crash semantics: a slot is consumed at Reserve, BEFORE submission. A crash
 // between Reserve and Deliver burns one slot without a submission — the
@@ -76,13 +78,16 @@ func (s *Store) Reserve(ctx context.Context, agentID string) (Decision, error) {
 		ON CONFLICT (agent_id) DO NOTHING`, agentID); err != nil {
 		return Decision{}, err
 	}
-	// now() is the DB server's clock, never the app's: every replica prunes
-	// and appends against the same timeline (tx-scoped, so the prune cutoff
-	// and the appended timestamp are one consistent instant).
+	// clock_timestamp() is the DB server's clock at statement execution —
+	// i.e. approximately row-lock grant time — never the app's: every replica
+	// prunes and appends against the same timeline. (Plain now() would be the
+	// TRANSACTION-start time: under lock contention a queued txn would stamp
+	// its event early, letting it age out of the window early and widening
+	// the effective budget by the lock wait.)
 	var events []time.Time
 	var now time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT events, now() FROM agent_send_rate_windows
+		SELECT events, clock_timestamp() FROM agent_send_rate_windows
 		 WHERE agent_id = $1 FOR UPDATE`, agentID).Scan(&events, &now); err != nil {
 		return Decision{}, err
 	}
@@ -98,23 +103,29 @@ func (s *Store) Reserve(ctx context.Context, agentID string) (Decision, error) {
 		}
 	}
 
-	if len(kept) >= s.limit && len(kept) > 0 {
+	if len(kept) >= s.limit {
 		// Over budget: write back just the pruned window (keeps the row
-		// bounded) and report when the oldest kept event ages out.
+		// bounded) and report when the oldest kept event ages out. A
+		// non-positive limit (constructor misuse) denies everything and
+		// retries a full window out — kept may be empty, so don't index it.
 		if _, err := tx.Exec(ctx, `
-			UPDATE agent_send_rate_windows SET events = $2, updated_at = now()
+			UPDATE agent_send_rate_windows SET events = $2, updated_at = clock_timestamp()
 			 WHERE agent_id = $1`, agentID, kept); err != nil {
 			return Decision{}, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return Decision{}, err
 		}
-		return Decision{Allowed: false, RetryAt: kept[0].Add(s.window)}, nil
+		retryAt := now.Add(s.window)
+		if len(kept) > 0 {
+			retryAt = kept[0].Add(s.window)
+		}
+		return Decision{Allowed: false, RetryAt: retryAt}, nil
 	}
 
 	kept = append(kept, now)
 	if _, err := tx.Exec(ctx, `
-		UPDATE agent_send_rate_windows SET events = $2, updated_at = now()
+		UPDATE agent_send_rate_windows SET events = $2, updated_at = clock_timestamp()
 		 WHERE agent_id = $1`, agentID, kept); err != nil {
 		return Decision{}, err
 	}
@@ -123,3 +134,7 @@ func (s *Store) Reserve(ctx context.Context, agentID string) (Decision, error) {
 	}
 	return Decision{Allowed: true}, nil
 }
+
+// Window returns the store's sliding window — exposed so callers (the send
+// worker's snooze clamp) cannot diverge from the limiter's real window.
+func (s *Store) Window() time.Duration { return s.window }

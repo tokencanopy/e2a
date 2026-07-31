@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"strconv"
 	"strings"
@@ -199,8 +200,11 @@ type RateDecision = sendrate.Decision
 // Unlike RampGate there is no Confirm/Release: the slot is consumed at
 // Reserve and ages out of the sliding window on its own (see the sendrate
 // package doc for the crash semantics). A nil gate allows everything.
+// Window exposes the gate's sliding window so the deferral snooze clamp
+// cannot diverge from the limiter's real window.
 type RateGate interface {
 	Reserve(ctx context.Context, agentID string) (RateDecision, error)
+	Window() time.Duration
 }
 
 // Store is the messages-store surface the worker needs. Implemented over
@@ -248,12 +252,11 @@ type Store interface {
 // webhookdelivery.DeliverWorker.
 type SendWorker struct {
 	river.WorkerDefaults[OutboundSendArgs]
-	store      Store
-	deliverer  Deliverer
-	ramp       RampGate
-	rate       RateGate
-	rateWindow time.Duration
-	metrics    Metrics
+	store     Store
+	deliverer Deliverer
+	ramp      RampGate
+	rate      RateGate
+	metrics   Metrics
 }
 
 func NewSendWorker(store Store, deliverer Deliverer, ramp ...RampGate) *SendWorker {
@@ -274,12 +277,10 @@ func (w *SendWorker) WithMetrics(m Metrics) *SendWorker {
 }
 
 // WithRateGate injects the fire-time per-agent rate gate (internal/sendrate).
-// window is the gate's sliding window, used only to cap the deferral snooze.
 // Chainable; nil keeps the allow-all default (no gate wired).
-func (w *SendWorker) WithRateGate(g RateGate, window time.Duration) *SendWorker {
+func (w *SendWorker) WithRateGate(g RateGate) *SendWorker {
 	if g != nil {
 		w.rate = g
-		w.rateWindow = window
 	}
 	return w
 }
@@ -457,7 +458,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
 			}
-			delay := clampRateSnooze(time.Until(decision.RetryAt), w.rateWindow)
+			delay := clampRateSnooze(time.Until(decision.RetryAt), w.rate.Window()) + rateJitter(j.MessageID, w.rate.Window())
 			w.metrics.OutboundRateDeferred()
 			// IDs only — never recipient data.
 			log.Printf("[outbound-send] rate_limited agent=%s msg=%s retry_in=%s", j.AgentID, j.MessageID, delay)
@@ -607,6 +608,24 @@ func clampRateSnooze(d, window time.Duration) time.Duration {
 		return window
 	}
 	return d
+}
+
+// rateJitter spreads a deferred backlog's re-fire across a quarter-window.
+// Every job deferred by the same burst gets a near-identical RetryAt (their
+// blocking events were stamped ~simultaneously); without jitter the whole
+// backlog re-wakes in lockstep every window and serializes on the agent's one
+// hot rate row — a self-inflicted thundering herd of claim/reserve/release
+// txs, log lines, and metric increments. Deterministic per message (FNV over
+// the message id) so there is no RNG state and a given message's spread is
+// stable across workers and replicas.
+func rateJitter(messageID string, window time.Duration) time.Duration {
+	maxJitter := window / 4
+	if maxJitter <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(messageID))
+	return time.Duration(h.Sum32()%uint32(maxJitter.Milliseconds())) * time.Millisecond
 }
 
 func isPermanentRampError(err error) bool {

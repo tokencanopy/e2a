@@ -40,7 +40,7 @@ func newRateWorkerFixture(t *testing.T, window time.Duration, limit int) *rateWo
 	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-rate", SentAs: "relay"}}
 	rec := &recordingMetrics{}
 	w := outboundsend.NewSendWorker(adapter, dl).
-		WithRateGate(sendrate.NewStore(pool, window, limit), window).
+		WithRateGate(sendrate.NewStore(pool, window, limit)).
 		WithMetrics(rec)
 	return &rateWorkerFixture{fixture: f, worker: w, deliverer: dl, metrics: rec, pool: pool}
 }
@@ -107,8 +107,8 @@ func TestSendWorker_RateGateDefersOverLimitJobThenFiresAfterWindow(t *testing.T)
 	if !errors.As(err, &snooze) {
 		t.Fatalf("over-limit job must snooze (not error/cancel), got %v", err)
 	}
-	if snooze.Duration < 250*time.Millisecond || snooze.Duration > window {
-		t.Errorf("snooze = %s, want within [250ms, window=%s]", snooze.Duration, window)
+	if snooze.Duration < 250*time.Millisecond || snooze.Duration > window+window/4 {
+		t.Errorf("snooze = %s, want within [250ms, window+jitter=%s]", snooze.Duration, window+window/4)
 	}
 	if status, claimed := r.claimState(t, msgB); status != "accepted" || claimed {
 		t.Errorf("deferred msgB status=%q claimed=%v, want accepted with send_claimed_at NULL", status, claimed)

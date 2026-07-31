@@ -24,6 +24,8 @@ func (f *fakeRateGate) Reserve(_ context.Context, agentID string) (outboundsend.
 	return f.decision, f.err
 }
 
+func (f *fakeRateGate) Window() time.Duration { return time.Minute }
+
 // requireSnooze asserts Work returned a River snooze (not an attempt-burning
 // error, not a cancel) and returns its duration.
 func requireSnooze(t *testing.T, err error) time.Duration {
@@ -47,11 +49,12 @@ func TestSendWorker_RateLimitedReleasesClaimAndSnoozesWithoutProviderIO(t *testi
 		RetryAt: time.Now().Add(30 * time.Second),
 	}}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate, time.Minute).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate).WithMetrics(rec)
 
 	d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
-	if d < 250*time.Millisecond || d > time.Minute {
-		t.Errorf("snooze = %s, want within [250ms, window=1m]", d)
+	// Deferral = clamp(until RetryAt) + deterministic jitter < window/4.
+	if d < 250*time.Millisecond || d > time.Minute+time.Minute/4 {
+		t.Errorf("snooze = %s, want within [250ms, window+jitter=1m15s]", d)
 	}
 	if dl.calls != 0 {
 		t.Errorf("provider calls = %d, want 0", dl.calls)
@@ -76,24 +79,59 @@ func TestSendWorker_RateLimitedReleasesClaimAndSnoozesWithoutProviderIO(t *testi
 
 // TestSendWorker_RateLimitedSnoozeClamped pins the snooze bounds: a RetryAt in
 // the past floors at 250ms (no hot loop), a skewed far-future RetryAt caps at
-// the window (the job re-fires within ~1 window).
+// the window (the job re-fires within ~1 window) — each plus the deterministic
+// per-message jitter (< window/4) that keeps a deferred backlog from
+// re-waking in lockstep.
 func TestSendWorker_RateLimitedSnoozeClamped(t *testing.T) {
+	jitterBound := time.Minute / 4
 	for _, tc := range []struct {
 		name    string
 		retryAt time.Time
-		want    time.Duration
+		wantMin time.Duration
+		wantMax time.Duration
 	}{
-		{"past retry_at floors at 250ms", time.Now().Add(-time.Second), 250 * time.Millisecond},
-		{"far-future retry_at caps at the window", time.Now().Add(2 * time.Hour), time.Minute},
+		{"past retry_at floors at 250ms", time.Now().Add(-time.Second), 250 * time.Millisecond, 250*time.Millisecond + jitterBound},
+		{"far-future retry_at caps at the window", time.Now().Add(2 * time.Hour), time.Minute, time.Minute + jitterBound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &fakeStore{job: acceptedJob("msg_1")}
 			gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: tc.retryAt}}
-			w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate, time.Minute)
-			if d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1))); d != tc.want {
-				t.Errorf("snooze = %s, want %s", d, tc.want)
+			w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+			if d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1))); d < tc.wantMin || d > tc.wantMax {
+				t.Errorf("snooze = %s, want within [%s, %s]", d, tc.wantMin, tc.wantMax)
 			}
 		})
+	}
+}
+
+// TestSendWorker_RateLimitedJitterDeterministicPerMessage: the anti-herd
+// jitter must be stable for a given message (no RNG state drifting across
+// workers) but DIFFERENT across messages (a burst must fan out, not
+// re-wake in lockstep).
+func TestSendWorker_RateLimitedJitterDeterministicPerMessage(t *testing.T) {
+	snoozeFor := func(messageID string) time.Duration {
+		st := &fakeStore{job: acceptedJob(messageID)}
+		gate := &fakeRateGate{decision: outboundsend.RateDecision{
+			Allowed: false,
+			RetryAt: time.Now().Add(30 * time.Second),
+		}}
+		w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+		return requireSnooze(t, w.Work(context.Background(), job(messageID, 1)))
+	}
+	// The base delay (time.Until) moves at ns scale between drives; the
+	// jitter term is the deterministic part — equal within a small tolerance,
+	// whereas RNG jitter would differ by up to window/4 (15s).
+	diff := func(a, b time.Duration) time.Duration {
+		if a > b {
+			return a - b
+		}
+		return b - a
+	}
+	if d1, d2 := snoozeFor("msg_1"), snoozeFor("msg_1"); diff(d1, d2) > 100*time.Millisecond {
+		t.Errorf("same message jittered differently across drives: %s vs %s", d1, d2)
+	}
+	if d1, d2 := snoozeFor("msg_1"), snoozeFor("msg_2"); d1 == d2 {
+		t.Errorf("different messages got identical jitter %s — herd not spread", d1)
 	}
 }
 
@@ -105,7 +143,7 @@ func TestSendWorker_RateGateErrorFailsClosedAndSnoozes(t *testing.T) {
 	dl := &fakeDeliverer{}
 	gate := &fakeRateGate{err: errors.New("rate store down")}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate, time.Minute).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate).WithMetrics(rec)
 
 	if d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1))); d != time.Minute {
 		t.Errorf("snooze = %s, want the fixed 1m error interval", d)
@@ -134,7 +172,7 @@ func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 		RetryAt: time.Now().Add(30 * time.Second),
 	}}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate, time.Minute).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -166,7 +204,7 @@ func TestSendWorker_RateGateErrorPastRetryHorizonFailsTerminally(t *testing.T) {
 	st := &fakeStore{job: j}
 	gate := &fakeRateGate{err: errors.New("rate store down")}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate, time.Minute).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -187,7 +225,7 @@ func TestSendWorker_RateGateAllowsSubmission(t *testing.T) {
 	st := &fakeStore{job: acceptedJob("msg_1")}
 	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-1", SentAs: "relay"}}
 	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: true}}
-	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate, time.Minute)
+	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate)
 	if err := w.Work(context.Background(), job("msg_1", 1)); err != nil {
 		t.Fatalf("Work: %v", err)
 	}

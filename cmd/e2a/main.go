@@ -291,7 +291,7 @@ func main() {
 		// window, durable in Postgres): the cross-replica counterpart of the
 		// acceptance-time in-memory limiter, enforced immediately before
 		// provider submission so scheduled-send bursts can't exceed it.
-		WithRateGate(sendrate.NewStore(pool, time.Minute, 60), time.Minute)
+		WithRateGate(sendrate.NewStore(pool, time.Minute, 60))
 	registrars = append(registrars, outboundJobs)
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
