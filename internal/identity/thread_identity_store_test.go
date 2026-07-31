@@ -65,6 +65,7 @@ func TestThreadIdentityMigrationsDoNotBackfillExistingMessages(t *testing.T) {
 		"089_messages_agent_inbound_message_id_idx.sql",
 		"090_messages_thread_parent_id_idx.sql",
 		"092_messages_outbound_provider_agent_idx.sql",
+		"093_drop_messages_agent_thread_created_idx.sql",
 	} {
 		sql, err := migrations.FS.ReadFile(name)
 		if err != nil {
@@ -85,6 +86,13 @@ func TestThreadIdentityMigrationsDoNotBackfillExistingMessages(t *testing.T) {
 	}
 	if !threadNull || !parentNull || !keyNull {
 		t.Fatalf("migration backfilled legacy row: thread null=%v parent null=%v key null=%v", threadNull, parentNull, keyNull)
+	}
+	var groupingIndex *string
+	if err := conn.QueryRow(ctx, `SELECT to_regclass(current_schema() || '.messages_agent_thread_created_idx')`).Scan(&groupingIndex); err != nil {
+		t.Fatalf("check retired grouping index: %v", err)
+	}
+	if groupingIndex != nil {
+		t.Fatalf("retired grouping index still exists: %q", *groupingIndex)
 	}
 }
 
