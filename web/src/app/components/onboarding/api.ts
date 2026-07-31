@@ -21,9 +21,7 @@ import type {
 } from "../types";
 
 /** Thrown by `request` on any non-2xx HTTP response. Carries the raw
- *  status code so callers can branch on 404 vs 500 vs 401 (the
- *  messages focus page uses this to distinguish "fall back to inbound
- *  endpoint" from "surface the real server error"). */
+ *  status code so callers can branch on 404 vs 500 vs 401. */
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -670,14 +668,13 @@ type ReviewWire = {
   created_at: string;
 };
 
-// The pending-review queue: one account-scoped call to GET /v1/reviews
-// returns every hold (both directions) across the account's inboxes,
-// newest-first. (Replaces the old per-agent fan-out over /messages — the
-// dedicated /reviews resource is account-only, so agents can't see holds,
-// and held inbound is surfaced here without leaking onto the agent inbox.)
-export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
-  const page = await request<{ items?: ReviewWire[] | null }>("/v1/reviews");
-  return (page.items ?? []).map<PendingMessageSummary>((r) => ({
+type ReviewPageWire = {
+  items?: ReviewWire[] | null;
+  next_cursor?: string | null;
+};
+
+function pendingSummary(r: ReviewWire): PendingMessageSummary {
+  return {
     id: r.id,
     agent_email: r.agent_email,
     direction: r.direction,
@@ -689,7 +686,39 @@ export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
     status: r.review_status,
     created_at: r.created_at,
     hold_reason: r.hold_reason,
-  }));
+  };
+}
+
+// The pending-review queue: one account-scoped call to GET /v1/reviews
+// returns every hold (both directions) across the account's inboxes,
+// newest-first. (Replaces the old per-agent fan-out over /messages — the
+// dedicated /reviews resource is account-only, so agents can't see holds,
+// and held inbound is surfaced here without leaking onto the agent inbox.)
+export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
+  const page = await request<ReviewPageWire>("/v1/reviews");
+  return (page.items ?? []).map(pendingSummary);
+}
+
+// Resolve a notification deep link that points beyond the first queue page.
+// The detail endpoint does not carry agent_email, so walk the account-scoped
+// summaries until the target is found. Repeated cursors are treated as a
+// malformed terminal page rather than looping forever.
+export async function findPendingMessage(
+  id: string,
+): Promise<PendingMessageSummary | null> {
+  let cursor = "";
+  const seen = new Set<string>();
+  for (;;) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (cursor) query.set("cursor", cursor);
+    const page = await request<ReviewPageWire>(`/v1/reviews?${query}`);
+    const found = (page.items ?? []).find((item) => item.id === id);
+    if (found) return pendingSummary(found);
+    const next = page.next_cursor ?? "";
+    if (!next || seen.has(next)) return null;
+    seen.add(next);
+    cursor = next;
+  }
 }
 
 export type ApprovePayload = {

@@ -9,6 +9,7 @@ import {
   listAgents,
   listAgentMessages,
   listPendingMessages,
+  findPendingMessage,
   getInboxUnread,
   getMessageDetailWire,
   getReviewDetailWire,
@@ -188,6 +189,33 @@ describe("message projection (v1 contract)", () => {
     const urls = mockFetch.mock.calls.map((c) => c[0] as string);
     expect(urls).toEqual(["/v1/reviews"]);
   });
+
+  it("follows review cursors until it finds a deep-linked hold", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/v1/reviews?limit=100") {
+        return okJson({
+          items: [{ id: "newer", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "newer", review_status: "pending_review", created_at: "2026-01-02T00:00:00Z" }],
+          next_cursor: "page-2",
+        });
+      }
+      if (url === "/v1/reviews?limit=100&cursor=page-2") {
+        return okJson({
+          items: [{ id: "target", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "target hold", review_status: "pending_review", created_at: "2026-01-01T00:00:00Z" }],
+          next_cursor: null,
+        });
+      }
+      return notFound();
+    });
+
+    await expect(findPendingMessage("target")).resolves.toMatchObject({
+      id: "target",
+      subject: "target hold",
+    });
+    expect(mockFetch.mock.calls.map((c) => c[0])).toEqual([
+      "/v1/reviews?limit=100",
+      "/v1/reviews?limit=100&cursor=page-2",
+    ]);
+  });
 });
 
 // Every per-message SWR entry holds ONE shape — the raw MessageViewWire —
@@ -195,8 +223,8 @@ describe("message projection (v1 contract)", () => {
 // endpoints under one shared cache key (see lib/swrKeys.ts). That
 // invariant only holds if (a) both fetchers return the wire unprojected
 // and (b) the projectors stay pure functions applied at the point of use.
-// The tests below pin both halves; the cross-surface render tests in
-// inboxes/(view)/messages/view/page.test.tsx pin the consequence.
+// The tests below pin both halves; PendingRow and ThreadBubble render tests
+// pin the cross-surface consequence.
 
 // A MessageView as the REVIEW read returns it (GET /v1/reviews/{id}) —
 // the superset: it alone carries hold_reason + protection.
@@ -290,7 +318,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
   });
 
   it("projectInbound defaults absent list/scalar fields instead of leaking undefined", () => {
-    // The focus page and ThreadBubble index into these without guards
+    // PendingRow and ThreadBubble index into these without guards
     // (cc.join, attachments.map) — undefined here is
     // a crash there.
     const d = projectInbound({
@@ -317,7 +345,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
     const out = projectMessageDetail("support@acme.dev", REVIEW_WIRE, "inbound");
     expect(out.direction).toBe("outbound");
     // Outbound rows read the draft body; the discriminated union is what
-    // lets the focus page narrow safely.
+    // lets each consuming surface narrow safely.
     expect(out.direction === "outbound" && out.data.body_text).toBe(
       "Hello, your refund is on the way.",
     );

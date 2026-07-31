@@ -1,9 +1,12 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import useSWR, { mutate } from "swr";
-import { listPendingMessages } from "../../components/onboarding/api";
+import {
+  findPendingMessage,
+  listPendingMessages,
+} from "../../components/onboarding/api";
 import {
   invalidateAgents,
   invalidateAllAgentMessages,
@@ -63,9 +66,30 @@ function PendingContent() {
     isLoading,
   } = useSWR<PendingMessageSummary[]>(pendingMessagesKey, listPendingMessages);
   const loading = isLoading && messages.length === 0;
-  const error = swrError
-    ? swrError instanceof Error
-      ? swrError.message
+  const targetMissing =
+    Boolean(selectedId) &&
+    !isLoading &&
+    !messages.some((message) => message.id === selectedId);
+  const {
+    data: recoveredMessage,
+    error: recoveryError,
+  } = useSWR<PendingMessageSummary | null>(
+    targetMissing ? ["pending-review-deep-link", selectedId] : null,
+    () => findPendingMessage(selectedId),
+    { shouldRetryOnError: false },
+  );
+  const visibleMessages = useMemo(
+    () =>
+      recoveredMessage &&
+      !messages.some((message) => message.id === recoveredMessage.id)
+        ? [recoveredMessage, ...messages]
+        : messages,
+    [messages, recoveredMessage],
+  );
+  const combinedError = swrError ?? recoveryError;
+  const error = combinedError
+    ? combinedError instanceof Error
+      ? combinedError.message
       : "Failed to load pending messages"
     : "";
 
@@ -80,9 +104,9 @@ function PendingContent() {
   // After approve/reject: refetch the queue, collapse to a clean list,
   // and invalidate the derived caches (sidebar badge, agent cards, the
   // inbox views, the resolved message's lifecycle panel) so the resolved
-  // row drops everywhere — mirroring what the focus page used to do.
+  // row drops everywhere.
   const handleResolved = useCallback(async () => {
-    const resolved = messages.find((m) => m.id === selectedId);
+    const resolved = visibleMessages.find((m) => m.id === selectedId);
     void Promise.all([
       selectedId ? invalidateMessageDetail(selectedId) : Promise.resolve(),
       resolved
@@ -93,15 +117,15 @@ function PendingContent() {
     ]);
     select("");
     await mutate(pendingMessagesKey);
-  }, [select, selectedId, messages]);
+  }, [select, selectedId, visibleMessages]);
 
   return (
     <PageShell
       eyebrow="Review · Message holds"
       title={<>Pending review</>}
       subtitle={
-        messages.length > 0
-          ? `${messages.length} held ${messages.length === 1 ? "message" : "messages"} awaiting review`
+        visibleMessages.length > 0
+          ? `${visibleMessages.length} held ${visibleMessages.length === 1 ? "message" : "messages"} awaiting review`
           : "Inbound or outbound messages held by a review gate land here. Approve or reject each one."
       }
       maxWidth={900}
@@ -127,7 +151,7 @@ function PendingContent() {
         >
           Loading…
         </div>
-      ) : messages.length === 0 ? (
+      ) : visibleMessages.length === 0 ? (
         <div
           data-testid="pending-empty"
           className="p-12 text-center"
@@ -155,7 +179,7 @@ function PendingContent() {
             overflow: "hidden",
           }}
         >
-          {messages.map((m) => (
+          {visibleMessages.map((m) => (
             <PendingRow
               key={m.id}
               summary={m}

@@ -918,18 +918,6 @@ func (a *API) WWWAuthenticateChallenge(r *http.Request) string {
 	return a.authChallenge(r, err)
 }
 
-// resolveAgentForUser loads an agent by email address and verifies the user owns it.
-func (a *API) resolveAgentForUser(r *http.Request, email string, user *identity.User) (*identity.AgentIdentity, error) {
-	agent, err := a.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
-		return nil, fmt.Errorf("agent not found")
-	}
-	if agent.UserID != user.ID {
-		return nil, fmt.Errorf("forbidden")
-	}
-	return agent, nil
-}
-
 // --- Domain Management ---
 
 // dnsRecordCheck holds the per-record probe results for the verify

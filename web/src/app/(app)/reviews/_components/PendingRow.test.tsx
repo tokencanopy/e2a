@@ -209,7 +209,7 @@ describe("PendingRow", () => {
 //
 // The form fields were seeded only in SWR's `onSuccess`, which does NOT fire
 // when the value is served from cache — and the review queue now shares its
-// per-message cache entry with the focus page, so a warm entry is the common
+// per-message cache entry with inbox threads, so a warm entry is the common
 // case, not a corner. With the fields left empty, `diffApproveEdits` saw ""
 // against the real subject/body/recipients and emitted them as CHANGES;
 // the server treats a present field as "use this value", including empty
@@ -222,7 +222,7 @@ describe("PendingRow approve from a warm cache", () => {
     const { messageDetailKey } = jest.requireActual("../../../../lib/swrKeys");
 
     stage();
-    // Pre-populate the shared entry, exactly as the focus page would have.
+    // Pre-populate the shared entry, exactly as an inbox thread would have.
     await mutate(messageDetailKey("msg_1"), detailWire, { revalidate: false });
 
     const user = userEvent.setup();

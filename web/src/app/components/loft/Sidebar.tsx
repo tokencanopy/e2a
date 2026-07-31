@@ -112,7 +112,7 @@ const NAV_ITEMS: NavItem[] = [
     label: "Inboxes",
     icon: "grid",
     // Keep Inboxes lit when the user drills into a specific inbox's
-    // screens (messages, focus page, etc.). Note: we don't use `matchPrefix:
+    // screens (messages, settings, etc.). Note: we don't use `matchPrefix:
     // true` here because that would also light up Inboxes on
     // /reviews — Pending is a sibling top-level feature.
     matchPrefixes: ["/inboxes"],

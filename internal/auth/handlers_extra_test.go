@@ -215,6 +215,10 @@ func TestHandleDeleteAgent_NotFound(t *testing.T) {
 	}
 }
 
+// TestHandleDeleteAgent_NotOwned — an agent owned by another account is
+// refused as if it did not exist. It must NOT be a 403: that told any
+// signed-up user which arbitrary addresses are live agents on other
+// accounts. Same class as GHSA-jh7v-7hx6-2mc2 on the consent endpoint.
 func TestHandleDeleteAgent_NotOwned(t *testing.T) {
 	ua, store, token := setupUserAuth(t)
 	ctx := context.Background()
@@ -227,8 +231,87 @@ func TestHandleDeleteAgent_NotOwned(t *testing.T) {
 	w := httptest.NewRecorder()
 	ua.HandleDeleteAgent(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403 for an agent owned by another user", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (must not distinguish not-owned from nonexistent)", w.Code)
+	}
+	// The store's own message names the distinction ("agent not found or not
+	// owned by user"); echoing it would leak just as loudly as the status.
+	if strings.Contains(w.Body.String(), "not owned") {
+		t.Errorf("body must not reveal the ownership distinction: %q", w.Body.String())
+	}
+}
+
+// TestHandleDeleteAgent_NotEnumerable is the regression guard: a real agent
+// on another account and an address that does not exist at all must produce
+// byte-identical responses. Asserting each case's status separately would
+// not catch a change that keeps both at 404 but reintroduces distinct bodies.
+func TestHandleDeleteAgent_NotEnumerable(t *testing.T) {
+	ua, store, token := setupUserAuth(t)
+	ctx := context.Background()
+
+	other, _ := store.CreateOrGetUser(ctx, "other@del-enum.example.com", "Other", "google-other-del-enum")
+	store.ClaimOrCreateDomain(ctx, "del-enum-foreign.example.com", other.ID)
+	store.CreateAgent(ctx, "agent@del-enum-foreign.example.com", "del-enum-foreign.example.com", "", "https://example.com/webhook", "", other.ID)
+
+	probe := func(path string) (int, string) {
+		req := authedRequest("DELETE", "/api/dashboard/agents/"+path, token)
+		w := httptest.NewRecorder()
+		ua.HandleDeleteAgent(w, req)
+		return w.Code, w.Body.String()
+	}
+
+	existsStatus, existsBody := probe("agent%40del-enum-foreign.example.com")
+	missingStatus, missingBody := probe("agent%40del-enum-nowhere.example.com")
+
+	if existsStatus != missingStatus {
+		t.Errorf("status leaks existence: exists=%d missing=%d", existsStatus, missingStatus)
+	}
+	if existsBody != missingBody {
+		t.Errorf("body leaks existence:\n exists  = %q\n missing = %q", existsBody, missingBody)
+	}
+	if existsStatus != http.StatusNotFound {
+		t.Errorf("both cases should be 404, got %d", existsStatus)
+	}
+}
+
+// TestHandleUpdateAgent_NotEnumerable pins the same invariant on the update
+// route. The empty body is deliberate: the ownership check has to run before
+// the field-parsing branches, or a foreign agent falls through to the "no
+// recognized fields" 400 while a nonexistent one 404s — the same oracle by a
+// different route.
+func TestHandleUpdateAgent_NotEnumerable(t *testing.T) {
+	ua, store, token := setupUserAuth(t)
+	ctx := context.Background()
+
+	other, _ := store.CreateOrGetUser(ctx, "other@upd-enum.example.com", "Other", "google-other-upd-enum")
+	store.ClaimOrCreateDomain(ctx, "upd-enum-foreign.example.com", other.ID)
+	store.CreateAgent(ctx, "agent@upd-enum-foreign.example.com", "upd-enum-foreign.example.com", "", "https://example.com/webhook", "", other.ID)
+
+	probe := func(path, body string) (int, string) {
+		req := authedJSON("PUT", "/api/dashboard/agents/"+path, token, body)
+		w := httptest.NewRecorder()
+		ua.HandleUpdateAgent(w, req)
+		return w.Code, w.Body.String()
+	}
+
+	// The invalid-config body is the one that pins the ownership check's
+	// PLACEMENT. With the check above ValidateHITLConfig (correct), a foreign
+	// agent 404s like a nonexistent one. Move the check below validation — a
+	// plausible "validate input early" refactor — and this body alone
+	// reopens the oracle: the foreign agent returns 400 with the validation
+	// message while the nonexistent one still 404s. The two valid bodies
+	// cannot tell those orderings apart.
+	for _, body := range []string{`{}`, `{"hitl_ttl_seconds":3600}`, `{"hitl_ttl_seconds":-1}`} {
+		existsStatus, existsBody := probe("agent%40upd-enum-foreign.example.com", body)
+		missingStatus, missingBody := probe("agent%40upd-enum-nowhere.example.com", body)
+
+		if existsStatus != missingStatus || existsBody != missingBody {
+			t.Errorf("body %s leaks existence: exists=(%d,%q) missing=(%d,%q)",
+				body, existsStatus, existsBody, missingStatus, missingBody)
+		}
+		if existsStatus != http.StatusNotFound {
+			t.Errorf("body %s: both cases should be 404, got %d", body, existsStatus)
+		}
 	}
 }
 

@@ -235,6 +235,39 @@ a message's observed lifecycle transitions; flags: `--cursor` (continue from a
 prior page), `--limit` (page size, 1–100), `--agent`, `--json` (print the
 canonical lifecycle page as JSON).
 
+### `e2a contacts`
+
+Manage account-level contact identity and per-agent outreach state, with
+suppression visibility. Contact identity operations require account scope;
+`outreach` also supports an agent-scoped credential for its bound inbox.
+
+```bash
+e2a contacts list --source import --limit 50 --json
+e2a contacts get alice@example.com
+e2a contacts create alice@example.com --idempotency-key <uuid>
+e2a contacts update alice@example.com --metadata '{"tier":"gold"}' --if-match <etag>
+e2a contacts delete alice@example.com
+e2a contacts import contacts.csv --agent bot@acme.com --stage new --on-conflict merge
+e2a contacts imports delete <import-batch-id>
+e2a contacts outreach list --agent bot@acme.com --stage new --replied false
+e2a contacts outreach get alice@example.com --agent bot@acme.com
+e2a contacts outreach set alice@example.com --agent bot@acme.com --stage replied --next-action clear
+e2a contacts outreach delete alice@example.com --agent bot@acme.com
+```
+
+`contacts delete` removes the account contact and all of its per-agent outreach
+rows; suppression and consent records survive.
+
+`list`/`outreach list` flags: `--source` (`import`/`manual`/`inbound`),
+`--import-batch`, `--created-after`/`--created-before` (list) or
+`--stage`/`--replied`/`--suppressed`/`--next-action-before`/
+`--last-outbound-before` (outreach list), `--limit`, `--json` (NDJSON instead
+of TSV). `create`/`import` accept `--idempotency-key` to safely replay a
+timed-out request. `update`/`outreach set` accept `--if-match <etag>` to
+reject a stale edit. `import` reads an RFC 4180 CSV (`--email-column`,
+`--name-column`, `--on-conflict merge|skip`, `--dry-run` to preview without
+writing); `imports delete` reverses one import batch.
+
 ### `e2a listen`
 
 Stream inbound email for an agent over WebSocket in real time. The connection is

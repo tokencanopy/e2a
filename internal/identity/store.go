@@ -1567,7 +1567,10 @@ func (s *Store) UpdateAgentHITL(ctx context.Context, agentID, userID string, ttl
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("agent not found or not owned by user")
+		// Sentinel, not a fresh error with the same text: handlers map this
+		// to 404 (a lost race against the caller's own agent) rather than a
+		// 500, and they can only do that if it's matchable with errors.Is.
+		return ErrAgentNotFound
 	}
 	return nil
 }

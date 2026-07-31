@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"golang.org/x/oauth2"
@@ -267,8 +268,8 @@ func writeCLIHandoffPage(store *identity.Store, w http.ResponseWriter, r *http.R
 // CLI login params (cli_callback, cli_state) are encoded into the OAuth state
 // parameter so they survive the redirect through Google without relying on cookies.
 // return_to (optional) is a same-origin server path the user resumes on after
-// callback success — only paths under /oauth2/ are permitted, used to bounce
-// MCP OAuth clients back into /oauth2/authorize after a session is created.
+// callback success. MCP OAuth paths plus the dashboard's consolidated review
+// and threaded inbox routes are permitted.
 func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	cliCallback := r.URL.Query().Get("cli_callback")
 	cliState := r.URL.Query().Get("cli_state")
@@ -303,16 +304,12 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(EncodeOAuthState(state)), http.StatusFound)
 }
 
-// validateReturnToPath enforces the same-origin / known-prefix allow-list
+// validateReturnToPath enforces the same-origin / known-route allow-list
 // for return_to values. Accepting an arbitrary URL would turn /api/auth/login
 // into an open redirector that an attacker could chain with phishing-class
-// social engineering. Limiting to /oauth2/-prefixed server paths means
-// the bounce can only land inside the OAuth flow we own (Slice 5b renamed the
-// OAuth surface from /oauth2/* to /oauth2/*).
+// social engineering. The OAuth flow owns /oauth2/*; the two exact dashboard
+// routes preserve review-email and post-approval thread deep links.
 func validateReturnToPath(raw string) error {
-	if !strings.HasPrefix(raw, "/oauth2/") {
-		return errors.New("return_to must be a server path starting with /oauth2/")
-	}
 	if strings.ContainsAny(raw, "\\\n\r\x00") {
 		return errors.New("return_to contains forbidden characters")
 	}
@@ -324,6 +321,12 @@ func validateReturnToPath(raw string) error {
 	if u.Scheme != "" || u.Host != "" || u.User != nil {
 		return errors.New("return_to must be a path with no scheme or authority")
 	}
+	allowed := strings.HasPrefix(u.Path, "/oauth2/") ||
+		u.Path == "/reviews" ||
+		u.Path == "/inboxes/messages"
+	if !allowed {
+		return errors.New("return_to must target an allow-listed application route")
+	}
 	// Reject path traversal that survives the HasPrefix check by being
 	// collapsed by the browser. e.g. raw "/oauth2/../../dashboard"
 	// matches the prefix but http.Redirect emits a Location header that
@@ -331,7 +334,11 @@ func validateReturnToPath(raw string) error {
 	// path.Clean folds the "../" segments and we re-check the prefix on
 	// the normalized form.
 	cleaned := path.Clean(u.Path)
-	if !strings.HasPrefix(cleaned, "/oauth2/") && cleaned != "/oauth2" {
+	cleanedAllowed := strings.HasPrefix(cleaned, "/oauth2/") ||
+		cleaned == "/oauth2" ||
+		cleaned == "/reviews" ||
+		cleaned == "/inboxes/messages"
+	if !cleanedAllowed {
 		return errors.New("return_to escapes the allow-list after normalization")
 	}
 	// Also reject empty segments which a future router refactor might
@@ -632,14 +639,41 @@ func (ua *UserAuth) HandleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ANTI-ENUMERATION INVARIANT: a missing agent and one owned by another
+	// account MUST be indistinguishable — same status, same body. This route
+	// needs only a dashboard session, and the address comes from the URL, so
+	// a split response lets any signed-up user probe arbitrary addresses and
+	// map other accounts' inboxes. Same invariant as resolveOwnedAgent
+	// (internal/httpapi/operations.go), the WebSocket handshake, and
+	// HandleAgentActivity below; GetAgentByEmail is NOT user-scoped, so the
+	// ownership check has to be explicit here.
 	agent, err := ua.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// A store failure collapses into the same 404 as every other case —
+		// the caller must not learn the difference — but it must not vanish:
+		// without this, a database outage presents as "every agent 404s",
+		// including the caller's own, with nothing in the logs. Omits the
+		// address, which is caller-supplied and may name a third party.
+		log.Printf("[dashboard] agent lookup failed (delete): %v", err)
+	}
+	if err != nil || agent.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
 
 	if err := ua.store.SoftDeleteAgent(r.Context(), agent.ID, user.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		// Ownership is already established above, so this is not an
+		// enumeration path — but never echo err.Error() here: the store's
+		// message names the ownership distinction ("agent not found or not
+		// owned by user") and would reintroduce the leak verbatim.
+		// ErrAgentNotFound at this point means a lost race (the agent was
+		// trashed between the read and the write), which is a genuine 404.
+		if errors.Is(err, identity.ErrAgentNotFound) {
+			http.Error(w, "agent not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("[dashboard] soft-delete agent failed: %v", err)
+		http.Error(w, "failed to delete agent", http.StatusInternalServerError)
 		return
 	}
 
@@ -674,8 +708,19 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ANTI-ENUMERATION INVARIANT: see HandleDeleteAgent above — a missing
+	// agent and one owned by another account must be indistinguishable. The
+	// check has to sit here, before the field-parsing branches: an empty PUT
+	// against a foreign agent would otherwise fall through to the "no
+	// recognized fields" 400 while a nonexistent one 404s, which is the same
+	// oracle by a different route.
 	agnt, err := ua.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// See HandleDeleteAgent: collapse for the caller, but stay visible
+		// to the operator. Address deliberately omitted.
+		log.Printf("[dashboard] agent lookup failed (update): %v", err)
+	}
+	if err != nil || agnt.UserID != user.ID {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
@@ -695,8 +740,30 @@ func (ua *UserAuth) HandleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		if req.HITLExpirationAction != nil {
 			action = *req.HITLExpirationAction
 		}
-		if err := ua.store.UpdateAgentHITL(r.Context(), agnt.ID, user.ID, ttl, action); err != nil {
+		// Validate up front so the three error classes UpdateAgentHITL folds
+		// into one return value stay distinguishable HERE, where they map to
+		// different statuses. A config problem is the caller's fault (400)
+		// and its message is safe to echo — it describes the TTL/action, not
+		// ownership.
+		if err := identity.ValidateHITLConfig(ttl, action); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := ua.store.UpdateAgentHITL(r.Context(), agnt.ID, user.ID, ttl, action); err != nil {
+			// Past validation, the remaining cases are a zero-row update and
+			// a store failure. Zero rows is a lost race — the agent went away
+			// between the ownership check and the write — which is a 404, not
+			// a server fault; mapping it to 500 would page on ordinary
+			// concurrency. Matches HandleDeleteAgent above.
+			if errors.Is(err, identity.ErrAgentNotFound) {
+				http.Error(w, "agent not found", http.StatusNotFound)
+				return
+			}
+			// Never echo err.Error() on the remaining path: the store's
+			// zero-row text names the ownership distinction the check above
+			// exists to hide.
+			log.Printf("[dashboard] update agent HITL failed: %v", err)
+			http.Error(w, "failed to update agent", http.StatusInternalServerError)
 			return
 		}
 		touched = true

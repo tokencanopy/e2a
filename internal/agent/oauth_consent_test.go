@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -493,8 +494,12 @@ func TestHTTP_Consent_Allow_Existing(t *testing.T) {
 	}
 }
 
-// TestHTTP_Consent_Allow_Existing_NotOwned — picking an agent owned
-// by a different user is forbidden.
+// TestHTTP_Consent_Allow_Existing_NotOwned — picking an agent owned by a
+// different user is refused with the generic, non-revealing error. It must
+// NOT be a 403 "you do not own that agent": that told any logged-in user
+// which arbitrary addresses are live agents on other accounts
+// (GHSA-jh7v-7hx6-2mc2). See the anti-enumeration comment in
+// handleOAuthConsent.
 func TestHTTP_Consent_Allow_Existing_NotOwned(t *testing.T) {
 	f := newConsentFixture(t)
 	ctx := context.Background()
@@ -515,8 +520,78 @@ func TestHTTP_Consent_Allow_Existing_NotOwned(t *testing.T) {
 
 	resp := f.consentPOST(t, form)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (must not distinguish not-owned from nonexistent)", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact match, not a substring check: the message must be the generic
+	// one shared with the nonexistent-agent case, and nothing about
+	// ownership or existence may leak into it.
+	if got := strings.TrimSpace(string(body)); got != consentUnknownAgentMsg {
+		t.Errorf("body = %q, want the generic %q (must not reveal that the agent exists but belongs to another account)", got, consentUnknownAgentMsg)
+	}
+}
+
+// consentUnknownAgentMsg is the single response body both the "no such
+// agent" and "not your agent" paths must return — see the anti-enumeration
+// comment in handleOAuthConsent.
+const consentUnknownAgentMsg = "unknown or inaccessible agent"
+
+// TestHTTP_Consent_Allow_Existing_NotEnumerable is the actual regression
+// guard for GHSA-jh7v-7hx6-2mc2: probing a real agent owned by another
+// account and probing an address that does not exist at all must produce
+// byte-identical responses, so the endpoint cannot be used as an existence
+// oracle. Asserting each case's status separately would not catch a future
+// change that keeps both at 400 but reintroduces distinct bodies.
+func TestHTTP_Consent_Allow_Existing_NotEnumerable(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	store := identity.NewStore(f.pool)
+	other, err := store.CreateOrGetUser(ctx, "other-"+randHex8(t)+"@example.com", "Other", "google-other-"+randHex8(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real agent on another account, on the shared domain (which the
+	// fixture seeds verified via EnsureSharedDomain). Domain verification is
+	// not what this test turns on: handleOAuthConsent never consults
+	// DomainVerified, so the invariant it pins — existence must not be
+	// observable — holds for verified and unverified domains alike. That
+	// matters because the SMTP edge hides unverified-domain agents behind the
+	// same 550 it uses for unknown recipients (internal/relay/server.go), so
+	// this surface must not be the one that discloses them.
+	if _, err := store.CreateAgent(ctx, "realvictim@agents.e2a.dev", "agents.e2a.dev", "", "", "local", other.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := func(t *testing.T, address string) (int, string) {
+		t.Helper()
+		_, challenge := newPKCE(t)
+		form := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+		form.Set("action", "allow")
+		form.Set("agent_choice", "existing:"+address)
+		resp := f.consentPOST(t, form)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	existsStatus, existsBody := probe(t, "realvictim@agents.e2a.dev")
+	missingStatus, missingBody := probe(t, "no-such-agent-"+randHex8(t)+"@agents.e2a.dev")
+
+	if existsStatus != missingStatus {
+		t.Errorf("status leaks existence: exists=%d missing=%d", existsStatus, missingStatus)
+	}
+	if existsBody != missingBody {
+		t.Errorf("body leaks existence:\n exists  = %q\n missing = %q", existsBody, missingBody)
+	}
+	if existsStatus != http.StatusBadRequest {
+		t.Errorf("both cases should be 400, got %d", existsStatus)
 	}
 }
 
