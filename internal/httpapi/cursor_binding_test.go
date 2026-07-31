@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/webhook"
 )
 
 // Cursors are signed, so a tampered or garbage cursor was already rejected
@@ -82,6 +84,7 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 	events := cursorRows("evt", "", 3)
 	supps := cursorRows("sup", "@x.com", 3)
 	contacts := cursorRows("cnt", "", 3)
+	deliveries := cursorRows("dlv", "", 3)
 
 	srv := httptest.NewServer(New(Deps{
 		Authenticator: bearerGood,
@@ -157,6 +160,19 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 			}
 			return out, nil
 		},
+		GetWebhook: func(_ context.Context, id, userID string) (*identity.Webhook, error) {
+			return &identity.Webhook{ID: id, UserID: userID}, nil
+		},
+		ListDeliveries: func(_ context.Context, _, _ string, limit int, at time.Time, id string) ([]webhook.SubscriberDelivery, error) {
+			out := []webhook.SubscriberDelivery{}
+			for _, r := range page(deliveries, limit, at, id) {
+				out = append(out, webhook.SubscriberDelivery{
+					ID: r.id, WebhookID: "wh_1", EventType: "email.received",
+					Status: "delivered", CreatedAt: r.at,
+				})
+			}
+			return out, nil
+		},
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -177,6 +193,13 @@ var cursorBoundEndpoints = []struct {
 	{"events", "/v1/events?limit=1"},
 	{"account_suppressions", "/v1/account/suppressions?limit=1"},
 	{"contacts", "/v1/contacts?limit=1"},
+	// Both of these were ALSO accepting foreign cursors pre-fix and were
+	// missed by the original bug report's list of eight: deliveries with no
+	// status filter matched a foreign cursor's empty status, and
+	// starter-templates decoded a foreign cursor's absent alias as "" and
+	// silently re-served page 1. Verified against a clean origin/main.
+	{"webhook_deliveries", "/v1/webhooks/wh_1/deliveries?limit=1"},
+	{"starter_templates", "/v1/starter-templates?limit=1"},
 }
 
 // mint drives one real first-page request and returns its next_cursor.
@@ -308,5 +331,102 @@ func TestCursor_ResourceIsSignedNotJustTagged(t *testing.T) {
 	}
 	if out != pos {
 		t.Fatalf("round-trip mismatch: %+v want %+v", out, pos)
+	}
+}
+
+// --- parent binding on parameterized lists ---
+
+// deliveriesBindingServer serves a distinct delivery log per webhook, so a
+// cursor minted on one webhook can be replayed on the other.
+func deliveriesBindingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	perWebhook := map[string][]cursorRow{
+		"wh_a": cursorRows("dla", "", 3),
+		"wh_b": cursorRows("dlb", "", 3),
+	}
+	srv := httptest.NewServer(New(Deps{
+		Authenticator: bearerGood,
+		GetWebhook: func(_ context.Context, id, userID string) (*identity.Webhook, error) {
+			// BOTH webhooks are owned by the caller — this is a correctness
+			// bug, not a leak, and the fixture has to reflect that.
+			if _, ok := perWebhook[id]; !ok {
+				return nil, identity.ErrWebhookNotFound
+			}
+			return &identity.Webhook{ID: id, UserID: userID}, nil
+		},
+		ListDeliveries: func(_ context.Context, webhookID, status string, limit int, at time.Time, id string) ([]webhook.SubscriberDelivery, error) {
+			out := []webhook.SubscriberDelivery{}
+			for _, r := range page(perWebhook[webhookID], limit, at, id) {
+				out = append(out, webhook.SubscriberDelivery{
+					ID: r.id, WebhookID: webhookID, EventType: "email.received",
+					Status: "delivered", CreatedAt: r.at,
+				})
+			}
+			return out, nil
+		},
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestDeliveriesCursor_ForeignWebhookRejected: /v1/webhooks/{id}/deliveries is
+// parameterized, so the resource discriminator alone is not enough — it only
+// proves the cursor came from *some* deliveries list. Without the parent
+// webhook pinned, webhook A's keyset anchor was handed to webhook B's query.
+func TestDeliveriesCursor_ForeignWebhookRejected(t *testing.T) {
+	srv := deliveriesBindingServer(t)
+	cursorA := mint(t, srv, "/v1/webhooks/wh_a/deliveries?limit=1")
+
+	// Baseline: webhook B has rows of its own to return.
+	code, body := getJSON(t, srv.URL+"/v1/webhooks/wh_b/deliveries?limit=3", "good")
+	if code != http.StatusOK {
+		t.Fatalf("baseline wh_b status %d body %v", code, body)
+	}
+	if items, _ := body["items"].([]any); len(items) == 0 {
+		t.Fatalf("baseline wh_b returned no deliveries; the fixture is wrong")
+	}
+
+	code, body = getJSON(t, srv.URL+"/v1/webhooks/wh_b/deliveries?limit=3&cursor="+url.QueryEscape(cursorA), "good")
+	if code != http.StatusBadRequest || errCode(body) != "invalid_cursor" {
+		t.Fatalf("webhook A cursor on webhook B: want 400 invalid_cursor, got %d %v", code, body)
+	}
+}
+
+// TestDeliveriesCursor_OwnWebhookStillWalks is the counterweight: pinning the
+// parent must not break a normal walk of one webhook's own delivery log.
+func TestDeliveriesCursor_OwnWebhookStillWalks(t *testing.T) {
+	srv := deliveriesBindingServer(t)
+	ids := walkPages(t, srv, "/v1/webhooks/wh_a/deliveries?limit=1", "id")
+	assertNoDupes(t, ids, 3)
+	for _, id := range ids {
+		if !strings.HasPrefix(id, "dla_") {
+			t.Fatalf("wh_a walk returned a foreign row %q: %v", id, ids)
+		}
+	}
+}
+
+// TestDecodeKeyset_RejectsTrashViewCursor pins the L1 assertion: decodeKeyset
+// is the no-trash-view variant, so a Deleted cursor must be rejected rather
+// than silently treated as a live-list position. Unreachable today (agents is
+// the only trash-view collection and it uses decodeKeysetView); asserted so a
+// future ?deleted= endpoint that keeps calling decodeKeyset fails loudly
+// instead of silently losing its view binding.
+func TestDecodeKeyset_RejectsTrashViewCursor(t *testing.T) {
+	srv := &Server{deps: Deps{CursorSecret: "0123456789abcdef0123456789abcdef"}}
+	deleted, err := EncodeCursor(srv.deps.CursorSecret, cursorReviews,
+		keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "r_1", Deleted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.decodeKeyset(cursorReviews, deleted); err == nil {
+		t.Fatal("decodeKeyset accepted a trash-view cursor")
+	}
+	live, err := EncodeCursor(srv.deps.CursorSecret, cursorReviews,
+		keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "r_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, id, err := srv.decodeKeyset(cursorReviews, live); err != nil || id != "r_1" {
+		t.Fatalf("decodeKeyset rejected a live cursor: id=%q err=%v", id, err)
 	}
 }

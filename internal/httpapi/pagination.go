@@ -149,6 +149,13 @@ func (s *Server) decodeCursor(resource CursorResource, cursor string, dst any) e
 // decodeKeyset resolves a (created_at, id) continuation cursor into its keyset
 // position. An empty cursor is the first page (zero time, empty id). A malformed,
 // tampered, or foreign-collection cursor yields a 400 invalid_cursor envelope.
+//
+// This is the NO-trash-view variant, so a cursor carrying Deleted=true is
+// rejected. Today that is unreachable — agents is the only collection with a
+// trash view and it uses decodeKeysetView. It is asserted anyway because the
+// resource argument is compile-enforced while the view argument is not: a future
+// endpoint that grows a ?deleted= filter but keeps calling decodeKeyset would
+// silently lose its view binding with no compile error. Fail loudly instead.
 func (s *Server) decodeKeyset(resource CursorResource, cursor string) (time.Time, string, error) {
 	if cursor == "" {
 		return time.Time{}, "", nil
@@ -156,6 +163,10 @@ func (s *Server) decodeKeyset(resource CursorResource, cursor string) (time.Time
 	var cur keysetCursor
 	if err := s.decodeCursor(resource, cursor, &cur); err != nil {
 		return time.Time{}, "", err
+	}
+	if cur.Deleted {
+		return time.Time{}, "", NewError(http.StatusBadRequest, "invalid_cursor",
+			"cursor was created with a different view — start a new query without a cursor")
 	}
 	return cur.CreatedAt, cur.ID, nil
 }
