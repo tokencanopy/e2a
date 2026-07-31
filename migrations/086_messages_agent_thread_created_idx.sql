@@ -1,4 +1,3 @@
--- e2a:no-transaction
 -- Reserved migration number retained for databases that may have recorded the
 -- unreleased branch-only index. The index had no production reader, so fresh
 -- databases intentionally do not create it; migration 093 removes it from any
