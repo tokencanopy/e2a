@@ -128,7 +128,10 @@ func (s *Server) handleListAgentSuppressions(ctx context.Context, in *listAgentS
 	var afterAddress string
 	if in.Cursor != "" {
 		var cur agentSuppressionsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil || identity.NormalizeEmail(cur.AgentEmail) != ag.ID {
+		if err := s.decodeCursor(cursorAgentSuppressions, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if identity.NormalizeEmail(cur.AgentEmail) != ag.ID {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
 		}
 		afterCreatedAt, afterAddress = cur.CreatedAt, cur.Address
@@ -145,7 +148,7 @@ func (s *Server) handleListAgentSuppressions(ctx context.Context, in *listAgentS
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, agentSuppressionsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorAgentSuppressions, agentSuppressionsCursor{
 			CreatedAt: last.CreatedAt, Address: last.Address, AgentEmail: ag.ID,
 		})
 		if err != nil {

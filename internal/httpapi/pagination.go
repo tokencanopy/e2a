@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +51,63 @@ type PageParams struct {
 // it to a 400 with code "invalid_cursor".
 var ErrInvalidCursor = errors.New("invalid pagination cursor")
 
+// ErrCursorResourceMismatch is returned when a cursor verifies and decodes
+// but was minted by a DIFFERENT collection than the one now replaying it.
+// It wraps ErrInvalidCursor so `errors.Is(err, ErrInvalidCursor)` still
+// holds for callers that only care that the cursor is unusable, while
+// callers that want to explain *why* can branch on this.
+var ErrCursorResourceMismatch = fmt.Errorf("%w: minted by a different collection", ErrInvalidCursor)
+
+// CursorResource names the collection that minted a cursor. It is signed
+// into the cursor and re-checked on decode, so a cursor issued by one list
+// endpoint cannot be used as a keyset anchor by another.
+//
+// This exists because every account-level list shares the same
+// (created_at, id) cursor shape: a validly-signed cursor from, say,
+// /v1/contacts used to decode cleanly on /v1/events and be applied as a
+// real keyset anchor. Nothing leaked — the queries stayed account-scoped —
+// but the anchor was meaningless, so the endpoint returned an arbitrarily
+// truncated page (commonly `{"items":[]}`) and the client concluded "no
+// events" when there were plenty. A silent wrong answer is worse than a
+// 400. The agent-scoped lists (messages, conversations, engagements, agent
+// suppressions) already pinned their cursors to a filter fingerprint and
+// so already rejected foreign cursors; this generalizes that guarantee to
+// every collection, including the ones with no filters to fingerprint.
+//
+// The value is part of the signed payload, not just a client-visible tag:
+// a client cannot re-target a cursor without breaking the HMAC.
+type CursorResource string
+
+const (
+	cursorAgents              CursorResource = "agents"
+	cursorAPIKeys             CursorResource = "api_keys"
+	cursorAccountSuppressions CursorResource = "account_suppressions"
+	cursorAgentSuppressions   CursorResource = "agent_suppressions"
+	cursorContacts            CursorResource = "contacts"
+	cursorConversations       CursorResource = "conversations"
+	cursorDomains             CursorResource = "domains"
+	cursorEngagements         CursorResource = "engagements"
+	cursorEvents              CursorResource = "events"
+	cursorMessageLifecycle    CursorResource = "message_lifecycle"
+	cursorMessages            CursorResource = "messages"
+	cursorReviews             CursorResource = "reviews"
+	cursorStarterTemplates    CursorResource = "starter_templates"
+	cursorTemplates           CursorResource = "templates"
+	cursorWebhookDeliveries   CursorResource = "webhook_deliveries"
+	cursorWebhooks            CursorResource = "webhooks"
+)
+
+// cursorEnvelope is the on-the-wire cursor payload: the minting
+// collection plus that collection's own private position/filter struct.
+// Wrapping (rather than adding an `r` field to each of the sixteen cursor
+// structs) is what makes the binding impossible to forget — the resource
+// is a required argument of EncodeCursor/DecodeCursor, so a new list
+// endpoint cannot accidentally mint an unbound cursor.
+type cursorEnvelope struct {
+	Resource string          `json:"r"`
+	Payload  json.RawMessage `json:"p"`
+}
+
 // keysetCursor is the standard opaque continuation for a collection
 // keyset-paginated on (created_at, id) with no cursor-pinned filters — the
 // common case across the account-scoped lists (agents, domains, webhooks,
@@ -69,16 +127,35 @@ type keysetCursor struct {
 	Deleted bool `json:"dl,omitempty"`
 }
 
+// decodeCursor is the one place list handlers turn a client-supplied cursor
+// into their own cursor struct. It binds the cursor to `resource` and
+// converts every failure into the right 400 invalid_cursor envelope, so no
+// handler has to remember either step.
+//
+// An empty cursor is the first page: dst is left untouched and nil returned.
+func (s *Server) decodeCursor(resource CursorResource, cursor string, dst any) error {
+	err := DecodeCursor([]string{s.deps.CursorSecret}, resource, cursor, dst)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrCursorResourceMismatch):
+		return NewError(http.StatusBadRequest, "invalid_cursor",
+			"cursor was created by a different endpoint — start a new query without a cursor")
+	default:
+		return NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+	}
+}
+
 // decodeKeyset resolves a (created_at, id) continuation cursor into its keyset
-// position. An empty cursor is the first page (zero time, empty id). A malformed
-// or tampered cursor yields a 400 invalid_cursor envelope.
-func (s *Server) decodeKeyset(cursor string) (time.Time, string, error) {
+// position. An empty cursor is the first page (zero time, empty id). A malformed,
+// tampered, or foreign-collection cursor yields a 400 invalid_cursor envelope.
+func (s *Server) decodeKeyset(resource CursorResource, cursor string) (time.Time, string, error) {
 	if cursor == "" {
 		return time.Time{}, "", nil
 	}
 	var cur keysetCursor
-	if err := DecodeCursor([]string{s.deps.CursorSecret}, cursor, &cur); err != nil {
-		return time.Time{}, "", NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+	if err := s.decodeCursor(resource, cursor, &cur); err != nil {
+		return time.Time{}, "", err
 	}
 	return cur.CreatedAt, cur.ID, nil
 }
@@ -87,13 +164,13 @@ func (s *Server) decodeKeyset(cursor string) (time.Time, string, error) {
 // verifies the cursor was minted for the SAME view (live vs deleted), so a
 // live-list cursor replayed with ?deleted=true (or vice versa) is a 400
 // instead of a silently truncated other-view listing.
-func (s *Server) decodeKeysetView(cursor string, deleted bool) (time.Time, string, error) {
+func (s *Server) decodeKeysetView(resource CursorResource, cursor string, deleted bool) (time.Time, string, error) {
 	if cursor == "" {
 		return time.Time{}, "", nil
 	}
 	var cur keysetCursor
-	if err := DecodeCursor([]string{s.deps.CursorSecret}, cursor, &cur); err != nil {
-		return time.Time{}, "", NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+	if err := s.decodeCursor(resource, cursor, &cur); err != nil {
+		return time.Time{}, "", err
 	}
 	if cur.Deleted != deleted {
 		return time.Time{}, "", NewError(http.StatusBadRequest, "invalid_cursor",
@@ -104,13 +181,13 @@ func (s *Server) decodeKeysetView(cursor string, deleted bool) (time.Time, strin
 
 // encodeKeyset mints the next-page cursor from the last row's (created_at, id).
 // A marshal failure maps to a 500 envelope (matches the other list handlers).
-func (s *Server) encodeKeyset(createdAt time.Time, id string) (string, error) {
-	return s.encodeKeysetView(createdAt, id, false)
+func (s *Server) encodeKeyset(resource CursorResource, createdAt time.Time, id string) (string, error) {
+	return s.encodeKeysetView(resource, createdAt, id, false)
 }
 
 // encodeKeysetView is encodeKeyset carrying the trash-view flag.
-func (s *Server) encodeKeysetView(createdAt time.Time, id string, deleted bool) (string, error) {
-	c, err := EncodeCursor(s.deps.CursorSecret, keysetCursor{CreatedAt: createdAt, ID: id, Deleted: deleted})
+func (s *Server) encodeKeysetView(resource CursorResource, createdAt time.Time, id string, deleted bool) (string, error) {
+	c, err := EncodeCursor(s.deps.CursorSecret, resource, keysetCursor{CreatedAt: createdAt, ID: id, Deleted: deleted})
 	if err != nil {
 		return "", NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
 	}
@@ -139,17 +216,25 @@ const defaultPageLimit = 100
 // breaks the signature and DecodeCursor rejects it. The cursor remains
 // opaque to clients; the payload shape stays private to each resource.
 //
+// resource is the minting collection; it is embedded in the signed payload
+// so DecodeCursor can reject a cursor replayed on a different endpoint.
+//
 // Format:
 //
-//	base64url(json_payload) + "." + base64url(hmac_sha256(secret, base64url(json_payload)))
+//	envelope     = {"r": resource, "p": json_payload}
+//	base64url(envelope) + "." + base64url(hmac_sha256(secret, base64url(envelope)))
 //
 // The MAC is computed over the LITERAL emitted base64url(json) segment (not
 // a re-marshaled struct) so encode and verify are byte-canonical and cannot
 // drift. secret is the deployment HMAC secret (config.Signing.HMACSecret) —
 // the same deployment key used by approval tokens,
 // so there is no new key to manage.
-func EncodeCursor(secret string, payload any) (string, error) {
-	raw, err := json.Marshal(payload)
+func EncodeCursor(secret string, resource CursorResource, payload any) (string, error) {
+	inner, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(cursorEnvelope{Resource: string(resource), Payload: inner})
 	if err != nil {
 		return "", err
 	}
@@ -169,11 +254,18 @@ func EncodeCursor(secret string, payload any) (string, error) {
 // HMAC-secret rotation: a cursor signed under an old secret keeps verifying
 // until that secret is retired. Today callers pass a single-element slice.
 //
+// resource is the collection doing the decoding. A cursor whose signed
+// envelope names a different collection is rejected with
+// ErrCursorResourceMismatch — the fix for foreign cursors being silently
+// accepted as keyset anchors across account-level lists.
+//
 // Old unsigned cursors (plain base64url(json) with no "." signature segment,
 // as emitted before issue #144 M2) no longer verify and are hard-rejected
-// with ErrInvalidCursor. Cursors are ephemeral, so a client mid-pagination
-// simply restarts the query.
-func DecodeCursor(secrets []string, cursor string, dst any) error {
+// with ErrInvalidCursor. Pre-envelope signed cursors are likewise rejected:
+// they carry no resource, so there is nothing to bind them to. Cursors are
+// ephemeral, so a client mid-pagination simply restarts the query — the
+// same trade the M2 signing change already made.
+func DecodeCursor(secrets []string, resource CursorResource, cursor string, dst any) error {
 	if cursor == "" {
 		return nil
 	}
@@ -199,7 +291,18 @@ func DecodeCursor(secrets []string, cursor string, dst any) error {
 	if err != nil {
 		return ErrInvalidCursor
 	}
-	if err := json.Unmarshal(raw, dst); err != nil {
+	var env cursorEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return ErrInvalidCursor
+	}
+	if env.Resource == "" || len(env.Payload) == 0 {
+		// Pre-envelope cursor (or a hand-rolled payload). Unbindable.
+		return ErrInvalidCursor
+	}
+	if env.Resource != string(resource) {
+		return ErrCursorResourceMismatch
+	}
+	if err := json.Unmarshal(env.Payload, dst); err != nil {
 		return ErrInvalidCursor
 	}
 	return nil

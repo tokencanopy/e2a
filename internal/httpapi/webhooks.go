@@ -422,8 +422,8 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	}
 	var cur deliveriesCursor
 	if in.Cursor != "" {
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(cursorWebhookDeliveries, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.Status != in.Status {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -454,7 +454,7 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, deliveriesCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorWebhookDeliveries, deliveriesCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status,
 		})
 		if err != nil {
@@ -658,7 +658,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	if err != nil {
 		return nil, err
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(cursorWebhooks, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +679,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	var nextCursor string
 	if hasMore {
 		last := hooks[len(hooks)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(cursorWebhooks, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

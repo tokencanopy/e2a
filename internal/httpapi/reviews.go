@@ -160,7 +160,7 @@ func (s *Server) handleListReviews(ctx context.Context, in *listReviewsInput) (*
 	if s.deps.ListReviews == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "reviews are not available on this deployment")
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(cursorReviews, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (s *Server) handleListReviews(ctx context.Context, in *listReviewsInput) (*
 	var nextCursor string
 	if hasMore {
 		last := items[len(items)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(cursorReviews, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

@@ -113,8 +113,8 @@ func (s *Server) handleListStarterTemplates(ctx context.Context, in *listStarter
 	var afterAlias string
 	if in.Cursor != "" {
 		var cur starterTemplatesCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(cursorStarterTemplates, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		afterAlias = cur.Alias
 	}
@@ -136,7 +136,7 @@ func (s *Server) handleListStarterTemplates(ctx context.Context, in *listStarter
 	var nextCursor string
 	if hasMore {
 		var err error
-		if nextCursor, err = EncodeCursor(s.deps.CursorSecret, starterTemplatesCursor{Alias: lastAlias}); err != nil {
+		if nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorStarterTemplates, starterTemplatesCursor{Alias: lastAlias}); err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
 		}
 	}

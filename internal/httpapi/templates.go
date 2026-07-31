@@ -321,7 +321,7 @@ func (s *Server) handleListTemplates(ctx context.Context, in *listTemplatesInput
 	if s.deps.ListTemplates == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "templates unavailable")
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(cursorTemplates, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +342,7 @@ func (s *Server) handleListTemplates(ctx context.Context, in *listTemplatesInput
 	var nextCursor string
 	if hasMore {
 		last := tps[len(tps)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(cursorTemplates, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

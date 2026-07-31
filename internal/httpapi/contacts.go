@@ -318,7 +318,10 @@ func (s *Server) handleListContacts(ctx context.Context, in *listContactsInput) 
 	var afterID string
 	if in.Cursor != "" {
 		var cur contactsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil || cur.Filters != fingerprint {
+		if err := s.decodeCursor(cursorContacts, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if cur.Filters != fingerprint {
 			// A cursor that decodes but was minted under different filters is
 			// rejected too: honoring it would interleave two distinct queries.
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
@@ -338,7 +341,7 @@ func (s *Server) handleListContacts(ctx context.Context, in *listContactsInput) 
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, contactsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorContacts, contactsCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, Filters: fingerprint,
 		})
 		if err != nil {

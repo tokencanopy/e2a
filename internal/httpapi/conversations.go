@@ -132,8 +132,8 @@ func (s *Server) handleListConversations(ctx context.Context, in *ListConversati
 	var afterID string
 	if in.Cursor != "" {
 		var cur conversationsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(cursorConversations, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.AgentID != ag.ID || cur.Since != rfc3339OrEmpty(since) || cur.Until != rfc3339OrEmpty(until) {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -169,7 +169,7 @@ func (s *Server) handleListConversations(ctx context.Context, in *ListConversati
 	var nextCursor string
 	if hasMore {
 		last := convos[len(convos)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, conversationsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorConversations, conversationsCursor{
 			LastMessageAt:  last.LastMessageAt,
 			ConversationID: last.ID,
 			AgentID:        ag.ID,
