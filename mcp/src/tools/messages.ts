@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpClient, SendOpts } from "../client.js";
-import type { MessageView } from "@e2a/sdk/v1";
+import type { MessageSummaryView, MessageView } from "@e2a/sdk/v1";
 import { z } from "zod";
 import { runTool, strictInputSchema, paginationInput, emailSelector } from "./util.js";
 import { attachmentsArraySchema, type AttachmentInput } from "./attachments.js";
@@ -62,6 +62,39 @@ export function messageViewForTool(email: MessageView) {
       content_type: a.contentType,
       size_bytes: a.sizeBytes,
     })),
+  };
+}
+
+// MessageSummaryView → the frozen MCP list_messages shape. Keep this an
+// explicit projection rather than passing generated SDK models through: beta
+// REST/SDK fields such as threadId must not silently expand MCP output.
+export function messageSummaryViewForTool(message: MessageSummaryView) {
+  return {
+    id: message.id,
+    direction: message.direction,
+    header_from: message.headerFrom,
+    envelope_from: message.envelopeFrom,
+    verified_domain: message.verifiedDomain,
+    to: message.to,
+    cc: message.cc,
+    reply_to: message.replyTo,
+    delivered_to: message.deliveredTo,
+    subject: message.subject,
+    conversation_id: message.conversationId,
+    read_status: message.readStatus,
+    review_status: message.reviewStatus,
+    webhook_status: message.webhookStatus,
+    webhook_error: message.webhookError,
+    delivery_status: message.deliveryStatus,
+    delivery_detail: message.deliveryDetail,
+    sent_as: message.sentAs,
+    scheduled_at: message.scheduledAt,
+    flagged: message.flagged,
+    flag_reason: message.flagReason,
+    size_bytes: message.sizeBytes,
+    labels: message.labels,
+    created_at: message.createdAt,
+    deleted_at: message.deletedAt,
   };
 }
 
@@ -484,7 +517,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           ...(args.deleted !== undefined ? { deleted: args.deleted } : {}),
           ...(args.email !== undefined ? { explicitAddress: args.email } : {}),
         });
-        return { messages: page.items, ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}) };
+        return {
+          messages: page.items.map(messageSummaryViewForTool),
+          ...(page.next_cursor ? { next_cursor: page.next_cursor } : {}),
+        };
       }),
   );
 

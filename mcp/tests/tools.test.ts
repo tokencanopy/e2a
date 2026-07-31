@@ -189,6 +189,7 @@ function makeStubClient(
     getMessage: vi.fn(async (id: string, _addr?: string) => ({
       id,
       conversationId: "conv_x",
+      threadId: "thr_0123456789abcdef0123456789abcdef",
       headerFrom: "alice@example.com",
       envelopeFrom: "bounce@example.com",
       verifiedDomain: "example.com",
@@ -1090,12 +1091,12 @@ describe("e2a MCP server", () => {
 
   it("list_messages surfaces next_cursor when more pages remain", async () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      items: [{ messageId: "m1" }],
+      items: [{ id: "m1" }],
       next_cursor: "c_next",
     });
     const res = await client.callTool({ name: "list_messages", arguments: {} });
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
-    expect(payload.messages).toEqual([{ message_id: "m1" }]);
+    expect(payload.messages).toEqual([{ id: "m1" }]);
     expect(payload.next_cursor).toBe("c_next");
   });
 
@@ -1103,9 +1104,31 @@ describe("e2a MCP server", () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       items: [{
         id: "m1",
+        direction: "outbound",
         headerFrom: "alice@example.com",
         envelopeFrom: "bounce@example.net",
         verifiedDomain: "example.com",
+        to: ["recipient@example.net"],
+        cc: ["copy@example.net"],
+        replyTo: [],
+        deliveredTo: "bot@example.com",
+        subject: "Status",
+        conversationId: "conv_1",
+        readStatus: "",
+        reviewStatus: "sent",
+        webhookStatus: "delivered",
+        webhookError: "last retry",
+        deliveryStatus: "delivered",
+        deliveryDetail: "250 ok",
+        sentAs: "own_address",
+        scheduledAt: new Date("2026-07-30T12:00:00Z"),
+        flagged: true,
+        flagReason: "test flag",
+        sizeBytes: 123,
+        labels: ["important"],
+        createdAt: new Date("2026-07-30T12:01:00Z"),
+        deletedAt: new Date("2026-07-30T12:02:00Z"),
+        threadId: "thr_0123456789abcdef0123456789abcdef",
       }],
       next_cursor: undefined,
     });
@@ -1114,17 +1137,40 @@ describe("e2a MCP server", () => {
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
     expect(payload.messages).toEqual([{
       id: "m1",
+      direction: "outbound",
       header_from: "alice@example.com",
       envelope_from: "bounce@example.net",
       verified_domain: "example.com",
+      to: ["recipient@example.net"],
+      cc: ["copy@example.net"],
+      reply_to: [],
+      delivered_to: "bot@example.com",
+      subject: "Status",
+      conversation_id: "conv_1",
+      read_status: "",
+      review_status: "sent",
+      webhook_status: "delivered",
+      webhook_error: "last retry",
+      delivery_status: "delivered",
+      delivery_detail: "250 ok",
+      sent_as: "own_address",
+      scheduled_at: "2026-07-30T12:00:00.000Z",
+      flagged: true,
+      flag_reason: "test flag",
+      size_bytes: 123,
+      labels: ["important"],
+      created_at: "2026-07-30T12:01:00.000Z",
+      deleted_at: "2026-07-30T12:02:00.000Z",
     }]);
     expect(payload.messages[0]).not.toHaveProperty("headerFrom");
     expect(payload.messages[0]).not.toHaveProperty("verifiedDomain");
+    expect(payload.messages[0]).not.toHaveProperty("thread_id");
+    expect(payload.messages[0]).not.toHaveProperty("threadId");
   });
 
   it("list_messages omits next_cursor on the last page", async () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      items: [{ messageId: "m1" }],
+      items: [{ id: "m1" }],
       next_cursor: undefined,
     });
     const res = await client.callTool({ name: "list_messages", arguments: {} });
@@ -1151,6 +1197,8 @@ describe("e2a MCP server", () => {
     expect(parsed.authentication).toMatchObject({ dmarc: { status: "pass" } });
     expect(parsed).not.toHaveProperty("from_");
     expect(parsed).not.toHaveProperty("from");
+    expect(parsed).not.toHaveProperty("thread_id");
+    expect(parsed).not.toHaveProperty("threadId");
     expect(parsed.text).toBe("hello world");
     // Critical: attachments surfaced as metadata-only (no `data`)
     // — bytes blow the LLM's context if returned here. Same reason

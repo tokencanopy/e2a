@@ -432,6 +432,10 @@ declared stable.
   `read_status`, `sort`, `from`, `subject_contains`, `conversation_id`, `labels`,
   `since`, `until`) and cursor pagination. Held outbound drafts appear with
   `status=pending_review`.
+  The optional beta `thread_id` on each returned message is a server-owned,
+  mailbox-local email-topology identity. It is omitted for legacy messages
+  without an assignment. `conversation_id` remains caller-owned application
+  correlation and its existing filter does not filter by email thread.
 - `POST …/messages` — send a new email (a new thread). Returns `202 Accepted` for
   every non-terminal outcome — `pending_review` when the agent's protection policy
   holds it for review, `scheduled` **(beta)** when a future `send_at` is durably
@@ -469,9 +473,11 @@ declared stable.
   `delivery_status` value.
 - `GET …/messages/{id}` — fetch one message (inbound or outbound), including the
   raw message and structured inbound authentication evidence. Reading an unread
-  inbound message flips it to `read`. A soft-deleted message remains readable by
-  this direct GET and carries `deleted_at` until it is permanently purged (30 days
-  after deletion by default; the trash retention window is deployment-configurable).
+  inbound message flips it to `read`. The response may carry the same optional
+  beta, read-only `thread_id` as the list summary. A soft-deleted message remains
+  readable by this direct GET and carries `deleted_at` until it is permanently
+  purged (30 days after deletion by default; the trash retention window is
+  deployment-configurable).
   Ordinary message lists, conversations, reply targets, and forward targets hide
   trashed messages; use `GET …/messages?deleted=true` to enumerate the trash.
 - `POST …/messages/{id}/restore` — bring a trashed message back into the inbox.
@@ -484,6 +490,12 @@ declared stable.
 - `GET …/messages/{id}/attachments/{index}` — attachment metadata + a short-lived
   `download_url` (so binary bytes never stream through an agent's context);
   `?inline=true` returns base64 `data` for small attachments.
+
+`thread_id` is response-only on these existing message list/detail reads.
+There is no caller-writable request field, `/threads` resource,
+`thread_id` message filter, or complete-thread retrieval guarantee. The field
+is not added to send/reply/forward results, conversation responses, reviews,
+webhooks/events, WebSocket notifications, exports, or MCP output.
 
 ### Message lifecycle diagnostic contract (beta)
 
@@ -674,11 +686,15 @@ composed ceiling once its subject and bodies are included. A breach returns
 
 ### Conversations (`/v1/agents/{email}/conversations`)
 
-Threads derived from `messages.conversation_id`.
+Application conversations derived from caller-owned
+`messages.conversation_id`. These resources are workflow/correlation views,
+not RFC email threads: one application conversation can span several email
+threads, and one email thread can contain several conversation IDs.
 
-- `GET …/conversations` — list threads (`since`/`until`, cursor).
-- `GET …/conversations/{id}` — one thread with participants, labels, and member
-  messages.
+- `GET …/conversations` — list application conversations (`since`/`until`,
+  cursor).
+- `GET …/conversations/{id}` — one application conversation with participants,
+  labels, and member messages.
 
 ### Reviews (`/v1/reviews`) (beta)
 
@@ -834,7 +850,9 @@ carries — `{type, id, schema_version, created_at, data}` with the
 both channels, and the event `id` (identical across channels for the same
 event) lets a consumer dedup WS-vs-webhook. Tolerate unknown `type` values:
 future WS event kinds arrive in the same envelope. Metadata only; fetch full
-content via `GET /v1/agents/{email}/messages/{id}`:
+content via `GET /v1/agents/{email}/messages/{id}`. The event's optional
+`conversation_id` is application correlation; events and WebSocket
+notifications do not expose message-read-only `thread_id`:
 
 ```json
 {

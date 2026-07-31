@@ -1,6 +1,6 @@
 # Email Thread Identity
 
-Status: proposed
+Status: accepted; implementation pending merge
 Date: 2026-07-30
 Owners: e2a maintainers
 Surfaces: database, inbound SMTP, outbound delivery, existing HTTP message

@@ -147,6 +147,11 @@ string: a future version and an unknown `type` must still parse into the generic
 envelope. SDK stable-event guards narrow `data` only when both the type matches
 and `schema_version === "1"`.
 
+Event `conversation_id` values are caller-owned application correlation, not
+email-thread identity. The optional beta `thread_id` available on authenticated
+message list/detail reads is deliberately absent from stored events, webhook
+payloads, and WebSocket notifications.
+
 `data` is deliberately **open at the envelope level** (no discriminator,
 `oneOf`, or closed event enum). OpenAPI publishes the non-constraining
 `x-e2a-event-data-schemas` map on `EventEnvelope.data`; it maps each stable

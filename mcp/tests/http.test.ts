@@ -503,8 +503,8 @@ describe("HTTP MCP server", () => {
     const pgStub = makeStubClient();
     pgStub.listMessages = vi.fn(async (params: { cursor?: string }) =>
       params?.cursor === "c2"
-        ? { items: [{ messageId: "m3" }], next_cursor: undefined }
-        : { items: [{ messageId: "m1" }, { messageId: "m2" }], next_cursor: "c2" },
+        ? { items: [{ id: "m3" }], next_cursor: undefined }
+        : { items: [{ id: "m1" }, { id: "m2" }], next_cursor: "c2" },
     ) as McpClient["listMessages"];
     const { close: c, port } = await startHttpServer(0, {
       baseUrl: "http://e2a.local",
@@ -526,7 +526,7 @@ describe("HTTP MCP server", () => {
       ((await client.callTool({ name: "list_messages", arguments: { cursor: page1.next_cursor } }))
         .content as Array<{ text: string }>)[0].text,
     );
-    expect(page2.messages).toEqual([{ message_id: "m3" }]);
+    expect(page2.messages).toEqual([{ id: "m3" }]);
     expect(page2).not.toHaveProperty("next_cursor"); // last page
     await transport.close();
   });

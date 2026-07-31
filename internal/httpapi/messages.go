@@ -33,6 +33,7 @@ type MessageView struct {
 	Recipient      string                    `json:"delivered_to" doc:"The envelope Delivered-To address — this delivery's per-agent target (the mailbox that actually received this row), distinct from the To header (the to array)."`
 	Subject        string                    `json:"subject"`
 	ConversationID string                    `json:"conversation_id"`
+	ThreadID       string                    `json:"thread_id,omitempty" doc:"Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."`
 	// Direction (inbound|outbound) — mirrors MessageSummaryView so a client
 	// fetching a single message keeps the full trust-axis context (review F1).
 	// Deliberately a CLOSED enum despite being response-side: direction is a
@@ -267,6 +268,7 @@ type MessageSummaryView struct {
 	Recipient      string   `json:"delivered_to" doc:"The envelope Delivered-To address — this delivery's per-agent target (the mailbox that actually received this row), distinct from the To header (the to array)."`
 	Subject        string   `json:"subject"`
 	ConversationID string   `json:"conversation_id,omitempty"`
+	ThreadID       string   `json:"thread_id,omitempty" doc:"Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."`
 	// Status is the inbox read-state, exposed as `read_status` (MSG-1).
 	Status        string `json:"read_status"`
 	HITLStatus    string `json:"review_status,omitempty" doc:"Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."`
@@ -461,7 +463,9 @@ func (s *Server) registerMessages() {
 		if err != nil || msg == nil {
 			return nil, NewError(http.StatusNotFound, "not_found", "message not found")
 		}
-		return &messageOutput{Body: messageViewFromIdentity(msg)}, nil
+		view := messageViewFromIdentity(msg)
+		view.ThreadID = msg.ThreadID
+		return &messageOutput{Body: view}, nil
 	})
 
 	huma.Register(s.API, huma.Operation{
@@ -775,6 +779,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	items := make([]MessageSummaryView, len(msgs))
 	for i, m := range msgs {
 		items[i] = messageSummaryFromIdentity(m)
+		items[i].ThreadID = m.ThreadID
 	}
 
 	var nextCursor string

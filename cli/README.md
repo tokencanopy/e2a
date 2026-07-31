@@ -205,6 +205,10 @@ offset, at most 90 days ahead), `--idempotency-key`, `--agent`, `--json`
 `--conversation-id` (alias `--conversation`) — `reply` infers these from the
 message being replied to and rejects them as unknown flags.
 
+`--conversation-id` sets caller-owned application correlation; it does not
+place a fresh send into an existing RFC email thread. Use `reply` with the
+original message ID to preserve `In-Reply-To` / `References`.
+
 Scheduled sending via `--send-at` is **beta and may change before it is
 declared stable**.
 A future schedule exits `0` with `status=scheduled`; it is durably queued, so
@@ -234,6 +238,13 @@ instead of TSV). `get` flags: `--text` (print parsed body text only),
 a message's observed lifecycle transitions; flags: `--cursor` (continue from a
 prior page), `--limit` (page size, 1–100), `--agent`, `--json` (print the
 canonical lifecycle page as JSON).
+
+The conversation filter selects the existing caller-owned
+`conversation_id`, not email topology. On servers that expose it, SDK-shaped
+JSON from message list/get/listen may include optional beta `threadId`,
+a server-owned, read-only mailbox-local identity. Human-readable formats do
+not change, and there is no `threadId` request flag, filter, or thread
+endpoint.
 
 ### `e2a contacts`
 
@@ -290,7 +301,7 @@ e2a listen --agent bot@acme.com --forward http://localhost:3000/inbound --forwar
 # Emit the full message as JSON (one object per line) for piping:
 e2a listen --agent bot@acme.com --json
 
-# Only messages in one conversation:
+# Only messages with one caller-owned application conversation ID:
 e2a listen --agent bot@acme.com --conversation conv_123
 
 # Exit after the first (matching) message, or TIMEOUT (exit 6) if none arrives

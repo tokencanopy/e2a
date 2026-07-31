@@ -124,10 +124,16 @@ framework's session store. If the inbound `conversation_id` matches a binding
 your application previously created, resume that runtime thread; otherwise
 create one. Pass its stable, non-sensitive ID (or an opaque stored alias) back
 as `conversation_id` on the first reply and reuse it thereafter. This aligns
-e2a's grouping with the agent's memory. Continue replying by `message_id` as
-shown: `conversation_id` alone does not set the email headers used by
-Gmail/Outlook. Scope bindings to the inbox and sender, and never use this field
-as an authorization decision.
+the caller-owned application-conversation view with the agent's memory.
+Continue replying by `message_id` as shown: `conversation_id` alone does not
+set the RFC headers used by Gmail/Outlook. Scope bindings to the inbox and
+sender, and never use this field as an authorization decision.
+
+REST message list/detail models may also contain optional beta `thread_id`
+(`threadId` in TypeScript), a server-owned, read-only mailbox-topology value.
+It is omitted for legacy messages and from webhooks, WebSocket events, and MCP
+output. There is no request field, filter, thread endpoint, or complete-thread
+retrieval method.
 
 A full, runnable example (FastAPI + Google ADK agent, webhook → agent turn →
 reply) is at

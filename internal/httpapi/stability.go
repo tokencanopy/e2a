@@ -232,6 +232,12 @@ func (s *Server) applyEvolutionStance() {
 			markProperty(schemas, schema, property, extStabilityLevel, stabilityBeta)
 		}
 	}
+	// Server-owned email thread identity is a beta read projection embedded in
+	// the otherwise-stable shared message schemas. Only message list/detail
+	// handlers populate it; other operations that reuse these schemas omit it.
+	for _, schema := range []string{"MessageSummaryView", "MessageView"} {
+		markProperty(schemas, schema, "thread_id", extStabilityLevel, stabilityBeta)
+	}
 	for _, schema := range []string{"HoldReasonView", "ProtectionFindingView", "ThreatCategoryView"} {
 		markSchema(schemas, schema, extStabilityLevel, stabilityBeta)
 	}

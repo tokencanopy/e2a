@@ -20,6 +20,7 @@ function summaries(...items: Array<Record<string, unknown>>) {
 const M1 = {
   id: "msg_1",
   headerFrom: "you@example.com",
+  threadId: "thr_0123456789abcdef0123456789abcdef",
   createdAt: new Date("2026-07-01T10:00:00Z"),
   subject: "re: status",
 };
@@ -99,6 +100,7 @@ describe("messages commands", () => {
     const line = mockStdout.mock.calls[0][0] as string;
     const parsed = JSON.parse(line);
     expect(parsed.headerFrom).toBe("you@example.com");
+    expect(parsed.threadId).toBe("thr_0123456789abcdef0123456789abcdef");
     expect(parsed.id).toBe("msg_1");
     expect(parsed.createdAt).toBe("2026-07-01T10:00:00.000Z");
   });
@@ -171,12 +173,19 @@ describe("messages commands", () => {
   });
 
   it("get emits full JSON without --text", async () => {
-    const full = { id: "msg_1", subject: "s", conversationId: "conv-1" };
+    const full = {
+      id: "msg_1",
+      subject: "s",
+      conversationId: "conv-1",
+      threadId: "thr_0123456789abcdef0123456789abcdef",
+    };
     mockGet.mockResolvedValue(full);
     const { messagesGet } = await import("../commands/messages.js");
     await messagesGet("msg_1", {});
 
     expect(mockStdout).toHaveBeenCalledWith(JSON.stringify(full) + "\n");
+    expect(JSON.parse(mockStdout.mock.calls[0][0] as string).threadId)
+      .toBe("thr_0123456789abcdef0123456789abcdef");
   });
 
   it("get exits USAGE (2) without a message id", async () => {

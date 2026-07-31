@@ -44,7 +44,7 @@ What you get on top of bare SMTP:
 - **Outbound API** — agents send to other agents (SMTP relay) or humans (upstream SMTP, e.g. SES, Resend)
 - **Human in the loop** — opt-in approval gate that holds outbound mail until a reviewer approves via dashboard, magic-link email, the MCP tools, or the API
 - **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening)
-- **Conversation threading** — a stable `conversation_id` that survives the email ↔ structured-data boundary
+- **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
 - **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
 
 ## Quickstart
@@ -118,7 +118,7 @@ Inbound mail reaches you several complementary ways — **chosen per integration
 
 | Channel | How | Public URL needed? |
 |---------|-----|---------------------|
-| **Webhooks** | Account-level subscriptions (`POST /v1/webhooks`) — HTTPS POST per event, filterable by agent / conversation / event type | Yes |
+| **Webhooks** | Account-level subscriptions (`POST /v1/webhooks`) — HTTPS POST per event, filterable by agent / application conversation / event type | Yes |
 | **WebSocket** | Per-agent real-time notification stream (`/v1/agents/{email}/ws`) + REST fetch | No |
 | **REST polling** | Pull messages via `GET /v1/agents/{email}/messages` — the default path for MCP-based agents | No |
 | **MCP tools** | The e2a [MCP server](#mcp-server)'s inbox tools (`list_messages`, `get_message`, `get_attachment`, `list_conversations`, …) layered over the REST API | No |
@@ -178,16 +178,33 @@ if (event.type === "email.received") {
 
 Messages fetched over an authenticated channel — `client.messages.get(address, id)` or the `client.listen(...)` stream — are already trusted (the bearer token authenticated the call), so no verify step is needed there.
 
-### Conversation threading
+### Email threads and application conversations
 
-Both `send` and `reply` accept an optional opaque `conversation_id` (server-minted when omitted). e2a propagates it to the recipient on delivery via `payload.conversation_id`, surfaced in this priority order:
+Email clients build reply threads from the RFC `Message-ID`, `In-Reply-To`,
+and `References` graph. Use `reply` with the original e2a message ID so e2a can
+emit those headers; a fresh `send` or `forward` starts a new email thread.
 
-1. **`X-E2A-Conversation-Id` header** — authoritative for e2a-to-e2a traffic. Only honored when the SMTP envelope `MAIL FROM` originates from this relay, so external senders cannot forge it.
-2. **`In-Reply-To` / `References` lookup** — standard RFC 5322 threading, scoped to the recipient agent's own messages. Covers humans replying from Gmail/Outlook.
+`conversation_id` is separate, caller-owned application correlation. Both
+`send` and `reply` accept the optional opaque value, and e2a keeps its existing
+minting, inheritance, and delivery-correlation behavior when it is omitted.
+Applications can use it to associate mail with a workflow, ticket, or model
+session, but reusing it does not join fresh sends into one email thread, and
+changing it does not split replies out of their RFC thread.
 
-First contact from a human arrives with `conversation_id: null` — the inbound relay assigns no thread id by design. You don't have to mint one yourself: when the agent replies with `conversation_id` omitted, e2a auto-generates a stable `conv_…` anchor that later replies thread onto, and replies within an existing thread inherit the referenced message's id. An explicit `conversation_id` you pass always takes precedence; a `forward` starts a new thread.
+Existing message list and detail responses may also include `thread_id`
+(`threadId` in TypeScript and SDK-shaped CLI JSON). This optional beta field is
+server-owned, read-only, scoped to one agent mailbox, and derived from reply
+topology. It is omitted for legacy rows without an assignment. There is no
+`thread_id` request field, message filter, or thread list/detail endpoint, and
+the field is not added to webhook events, WebSocket notifications, exports, or
+MCP output.
 
-Agent frameworks should use that explicit override to bind email to model memory: create or resume the runtime's internal conversation when mail arrives, then pass its stable, non-sensitive thread/session ID (or an opaque stored alias) as `conversation_id` on the first reply and reuse it thereafter. Continue replying by the original message ID—the conversation ID aligns e2a's grouping with the runtime, while `In-Reply-To` / `References` preserve the Gmail/Outlook thread. Scope stored bindings to the inbox and sender, and never treat `conversation_id` as authorization.
+Agent frameworks should bind model memory with `conversation_id`: create or
+resume the runtime's internal conversation, pass its stable, non-sensitive
+session ID (or an opaque stored alias), and scope that binding to the inbox and
+sender. Continue replying by the original message ID—the correlation value
+aligns application state, while RFC reply headers preserve the Gmail/Outlook
+thread. Never treat either identifier as authorization.
 
 ### Content screening
 
@@ -352,7 +369,13 @@ Four things that aren't possible to bolt on without significant rework:
 
 1. **Inbound with no public URL.** Agents authenticate with their API key and consume inbound mail over a WebSocket to `/v1/agents/{email}/ws`, by polling the REST API, or through the MCP tools — no webhook URL, no ngrok, no port forward. Useful for agents on developer laptops, edge devices, or behind corporate firewalls. SendGrid/Resend are webhook-only by design.
 
-2. **Conversation threading on every reply.** Whether a human replies from Gmail or another e2a agent replies via the API, the inbound message arrives at the agent with a stable `conversation_id` already mapped to the original thread. For human senders, the relay does standard `In-Reply-To` / `References` lookup scoped to the recipient agent's own messages. For agent-to-agent where both sides are on e2a, it also trusts an `X-E2A-Conversation-Id` header it controls (envelope-from is its own domain), which survives clients that rewrite threading headers. SendGrid/Resend never see inbound mail — they aren't receivers — so neither path is available without you building both yourself.
+2. **Email threading on every reply.** e2a resolves the RFC
+   `Message-ID` / `In-Reply-To` / `References` graph within each agent mailbox,
+   emits correct reply headers, and keeps a server-owned topology identity for
+   message reads. `conversation_id` remains independent application
+   correlation. SendGrid/Resend never see inbound mail—they are not
+   receivers—so they cannot provide this bidirectional mailbox-local topology
+   without you building the receiving side yourself.
 
 3. **Slug provisioning on a shared domain.** Operators set `shared_domain: agents.e2a.dev` and users `POST {"email": "my-agent@agents.e2a.dev"}` to immediately register an agent on the shared domain with no DNS configuration. Possible because e2a *is* the SMTP relay claiming the domain — Resend / SendGrid are providers, not platforms, and can't multi-tenant a shared address space without you running the relay yourself.
 
@@ -380,7 +403,7 @@ Yes — and the extra steps are the point. Concretely:
 - Structured SPF/DKIM/DMARC evidence with explicit identifier alignment
 - WebSocket / REST / MCP transport for agents without public URLs
 - HITL approval flow with auto-expiration and stateless magic-link review
-- Conversation-Id threading that survives the email ↔ structured-data boundary
+- Mailbox-local reply topology plus caller-owned application correlation
 - Slug-based agent provisioning on a shared domain
 - Per-agent webhook routing, rate limits, and HITL config
 

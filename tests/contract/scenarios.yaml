@@ -215,6 +215,8 @@ scenarios:
           body_match:
             "items.length": 1
             "items[0].read_status": unread
+        capture:
+          read_thread_id: "items[0].thread_id"
 
       - id: get_detail
         action: request
@@ -234,6 +236,7 @@ scenarios:
             authentication.dmarc.domain: example.com
             authentication.dmarc.policy: reject
             "authentication.dmarc.aligned_by[0]": spf
+            thread_id: "{read_thread_id}"
 
       - id: list_unread_after
         action: request
@@ -452,6 +455,7 @@ scenarios:
           fields_absent:
             - data.body
             - data.raw_message
+            - data.thread_id
             - data.from
             - data.authenticated_from
             - data.auth
@@ -526,6 +530,8 @@ scenarios:
             - status
             - message_id
             - approval_expires_at
+          body_excludes:
+            - thread_id
           body_match:
             status: pending_review
 
@@ -574,6 +580,15 @@ scenarios:
             - message_id
         capture:
           held_id: message_id
+
+      - id: get_held_review
+        action: request
+        method: GET
+        path: /v1/reviews/{held_id}
+        expect:
+          status: 200
+          body_excludes:
+            - thread_id
 
       - id: reject
         # Reject is the account-scoped review-queue operation
@@ -843,6 +858,8 @@ scenarios:
           send_at: "{future_rfc3339}"
         expect:
           status: 202
+          body_excludes:
+            - thread_id
           body_match:
             status: scheduled
             scheduled_at: "{future_rfc3339}"
@@ -892,6 +909,8 @@ scenarios:
             id: "{scheduled_message_id}"
             delivery_status: accepted
             scheduled_at: "{future_rfc3339}"
+          body_excludes:
+            - thread_id
 
     cleanup:
       - id: delete_scheduled_agent_permanently

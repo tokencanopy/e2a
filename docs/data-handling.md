@@ -8,7 +8,7 @@ For vulnerability reporting and the security model, see [SECURITY.md](../SECURIT
 
 | Data | Where | Retention |
 |---|---|---|
-| Inbound + outbound message envelopes (sender, recipient, subject, conversation_id, timestamps) | Postgres `messages` | Indefinite while live. Soft-deleted rows are purged after 30 days by default. |
+| Inbound + outbound message envelopes (sender, recipient, subject, caller-owned `conversation_id`, optional server-owned `thread_id`, RFC topology identifiers, timestamps) | Postgres `messages` | Indefinite while live. Soft-deleted rows are purged after 30 days by default. |
 | Inbound message bodies (raw RFC822 in `raw_message`) | Postgres `messages` | Indefinite while live; same trash policy as the parent message |
 | Outbound message bodies | Postgres `messages.raw_message`, `body_text`, `body_html`, `attachments_json` | Indefinite while live, including after approve, reject, expiry, or delivery transitions |
 | Attachments | Postgres rows (`raw_message` / `attachments_json`) | Indefinite while live; same trash policy as the parent message — no S3/GCS |

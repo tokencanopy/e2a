@@ -2765,6 +2765,10 @@ components:
           type: integer
         subject:
           type: string
+        thread_id:
+          description: "Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."
+          type: string
+          x-stability-level: beta
         to:
           items:
             type: string
@@ -2900,6 +2904,10 @@ components:
           type: integer
         subject:
           type: string
+        thread_id:
+          description: "Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."
+          type: string
+          x-stability-level: beta
         to:
           items:
             type: string

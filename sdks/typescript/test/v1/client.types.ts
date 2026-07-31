@@ -7,6 +7,8 @@ import type {
   EventMessageLifecycleTransition,
   ListMessagesParams,
   MessageLifecycleTransition,
+  MessageSummaryView,
+  MessageView,
   PageMessageLifecycleTransition,
   SPFResult,
 } from "../../src/v1/index.js";
@@ -24,6 +26,11 @@ import type { InboundEmail } from "../../src/v1/inbound.js";
 
 const senderFilter: ListMessagesParams = { from_: "alice@example.com" };
 void senderFilter;
+
+const summaryThreadIDIsOptional: Pick<MessageSummaryView, "threadId"> = {};
+const detailThreadIDIsOptional: Pick<MessageView, "threadId"> = {};
+void summaryThreadIDIsOptional;
+void detailThreadIDIsOptional;
 
 // The pre-GA breaking rename intentionally removes the old public spelling.
 // @ts-expect-error `from` is the wire name; SDK callers use `from_`.

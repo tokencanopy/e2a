@@ -36,6 +36,7 @@ func reviewsServer(t *testing.T) *httptest.Server {
 					ID: "in1", AgentID: "support@acme.dev", Direction: "inbound",
 					Sender: "spam@evil.biz", Recipient: "support@acme.dev",
 					Subject: "held inbound", Status: "pending_review", ReviewReason: identity.ReviewReasonInboundScan,
+					ThreadID:   assignedThreadID,
 					RawMessage: []byte("From: spam@evil.biz\r\nSubject: held inbound\r\n\r\nbad link"),
 					CreatedAt:  time.Unix(1700000200, 0).UTC(),
 				}, nil
@@ -106,6 +107,9 @@ func TestReviews_InboundDetailReportsReviewStatus(t *testing.T) {
 	}
 	if body["review_status"] != "pending_review" {
 		t.Fatalf("inbound review detail must report review_status=pending_review, got %v", body["review_status"])
+	}
+	if _, present := body["thread_id"]; present {
+		t.Fatalf("review detail must omit thread_id, got %v", body["thread_id"])
 	}
 	reason, _ := body["hold_reason"].(map[string]any)
 	if reason["type"] != "scan" || reason["code"] != "inbound_scan" || reason["summary"] != "Content screening found a potential risk." {

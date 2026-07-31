@@ -7,7 +7,12 @@ import pytest
 
 from e2a.v1.errors import E2AValidationError
 from e2a.v1.client import AsyncE2AClient
-from e2a.v1.generated.models import AttachmentView, MessageView, SendResultView
+from e2a.v1.generated.models import (
+    AttachmentView,
+    MessageSummaryView,
+    MessageView,
+    SendResultView,
+)
 from e2a.v1.inbound import AsyncInboundResource
 from e2a.v1.webhook_signature import WebhookEvent
 
@@ -51,6 +56,38 @@ def operations(message: MessageView) -> Any:
 def test_async_client_exposes_inbound_resource() -> None:
     client = AsyncE2AClient(api_key="e2a_test", base_url="http://test.local")
     assert isinstance(client.inbound, AsyncInboundResource)
+
+
+def test_message_models_deserialize_optional_beta_thread_ids() -> None:
+    detail_wire = dict(load("minimal.json")["message"])
+    detail_wire["thread_id"] = "thr_0123456789abcdef0123456789abcdef"
+    detail = MessageView.from_dict(detail_wire)
+    summary = MessageSummaryView.from_dict(
+        {
+            "id": "msg_summary",
+            "direction": "inbound",
+            "header_from": "alice@example.com",
+            "envelope_from": "alice@example.com",
+            "verified_domain": "example.com",
+            "to": ["bot@example.com"],
+            "delivered_to": "bot@example.com",
+            "subject": "hello",
+            "read_status": "unread",
+            "labels": [],
+            "created_at": "2026-07-01T10:00:00Z",
+            "thread_id": "thr_fedcba9876543210fedcba9876543210",
+        }
+    )
+    legacy = MessageView.from_dict(load("minimal.json")["message"])
+
+    assert detail is not None
+    assert summary is not None
+    assert legacy is not None
+    assert detail.thread_id == "thr_0123456789abcdef0123456789abcdef"
+    assert summary.thread_id == "thr_fedcba9876543210fedcba9876543210"
+    assert legacy.thread_id is None
+    assert not MessageView.model_fields["thread_id"].is_required()
+    assert not MessageSummaryView.model_fields["thread_id"].is_required()
 
 
 @pytest.mark.anyio

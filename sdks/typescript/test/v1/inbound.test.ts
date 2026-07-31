@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import type { AttachmentView, MessageView, SendResultView } from "../../src/v1/generated/index.js";
+import type {
+  AttachmentView,
+  MessageSummaryView,
+  MessageView,
+  SendResultView,
+} from "../../src/v1/generated/index.js";
 import { ObjectSerializer } from "../../src/v1/generated/models/ObjectSerializer.js";
 import { E2AValidationError } from "../../src/v1/errors.js";
 import {
@@ -46,6 +51,20 @@ function operations(message: MessageView) {
 }
 
 describe("InboundEmail conformance", () => {
+  it("deserializes optional beta thread IDs on message detail and summary models", () => {
+    const detail = messageFromWire({ thread_id: "thr_0123456789abcdef0123456789abcdef" });
+    const summary = ObjectSerializer.deserialize(
+      { thread_id: "thr_fedcba9876543210fedcba9876543210" },
+      "MessageSummaryView",
+      "",
+    ) as MessageSummaryView;
+    const legacyDetail = messageFromWire({});
+
+    expect(detail.threadId).toBe("thr_0123456789abcdef0123456789abcdef");
+    expect(summary.threadId).toBe("thr_fedcba9876543210fedcba9876543210");
+    expect(legacyDetail.threadId).toBeUndefined();
+  });
+
   for (const name of ["full.json", "minimal.json", "adversarial.json"]) {
     it(`normalizes the shared ${name} vector`, async () => {
       const vector = load<Vector>(name);
