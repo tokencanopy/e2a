@@ -36,6 +36,10 @@ override:
   # Sending-ramp storage + River janitor — pre-provider abuse-control state.
   - threshold: 80
     path: ^internal/sendramp$
+  # Fire-time per-agent send rate limiter — the durable sliding-window store
+  # guarding provider-visible throughput.
+  - threshold: 80
+    path: ^internal/sendrate$
   # Inbound processing on River — the at-least-once worker + reconciler + retention.
   # (The relay-side ProcessIntake adapter is covered cross-package by relay tests.)
   - threshold: 65

@@ -14,10 +14,11 @@ import (
 
 // recordingMetrics captures every SLI emission for assertion.
 type recordingMetrics struct {
-	queueWaits []float64
-	terminals  []string
-	latencies  []float64
-	attempts   []attemptSample
+	queueWaits   []float64
+	terminals    []string
+	latencies    []float64
+	attempts     []attemptSample
+	rateDeferred int
 }
 
 type attemptSample struct {
@@ -36,6 +37,9 @@ func (r *recordingMetrics) OutboundTerminalLatency(seconds float64) {
 }
 func (r *recordingMetrics) OutboundAttempt(outcome string, seconds float64) {
 	r.attempts = append(r.attempts, attemptSample{outcome: outcome, seconds: seconds})
+}
+func (r *recordingMetrics) OutboundRateDeferred() {
+	r.rateDeferred++
 }
 
 func (r *recordingMetrics) attemptOutcomes() []string {

@@ -218,7 +218,9 @@ Key packages, grouped (name — a few words each):
 - Send guards & accounting: `idempotency` `Idempotency-Key` storage+replay;
   `unsubscribe` opaque per-recipient unsubscribe tokens/URLs
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
-  entitlements; `sendramp` per-domain recipient-volume ramping.
+  entitlements; `sendramp` per-domain recipient-volume ramping; `sendrate`
+  per-agent fire-time submission rate limiting (durable sliding window
+  enforced in the send worker immediately before provider submission).
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
@@ -297,7 +299,7 @@ manually on every API change even though the template won't remind you.
   `./internal/sendramp` and `./internal/outboundsend` with `-race`.
 - **Coverage ratchet**: `.testcoverage.yml` sets per-package floors (currently
   webhook, webhookpub, webhookdelivery, httpapi, contactdue, outboundsend,
-  sendramp, inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
+  sendramp, sendrate, inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
   Ratchet floors UP, never down. `make cover-check` runs the same gate CI
   runs (`vladopajic/go-test-coverage`).
 - **Contract tests**: TS and Python SDK contract tests run against

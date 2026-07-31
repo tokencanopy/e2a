@@ -41,6 +41,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/relay"
 	"github.com/tokencanopy/e2a/internal/senderidentity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
+	"github.com/tokencanopy/e2a/internal/sendrate"
 	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 	"github.com/tokencanopy/e2a/internal/usage"
@@ -285,7 +286,12 @@ func main() {
 		agent.NewOutboundDeliverer(sender),
 		pool,
 		outboundRamp,
-	).WithMetrics(metrics)
+	).WithMetrics(metrics).
+		// Fire-time per-agent rate limit (60 submissions/min/agent sliding
+		// window, durable in Postgres): the cross-replica counterpart of the
+		// acceptance-time in-memory limiter, enforced immediately before
+		// provider submission so scheduled-send bursts can't exceed it.
+		WithRateGate(sendrate.NewStore(pool, time.Minute, 60))
 	registrars = append(registrars, outboundJobs)
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job

@@ -24,6 +24,7 @@ func TestNoOpSatisfiesInterface(t *testing.T) {
 	m.NotifyMissed()
 	m.SetPublisherLag(0)
 	m.OutboundTerminalLatency(0)
+	m.OutboundRateDeferred()
 	m.WebhookFirstAttemptLatency(0)
 	m.WSHandshakeRejected("")
 }
@@ -46,6 +47,7 @@ func TestLogSatisfiesInterface(t *testing.T) {
 	m.NotifyMissed()
 	m.SetPublisherLag(2.5)
 	m.OutboundTerminalLatency(240)
+	m.OutboundRateDeferred()
 	m.WebhookFirstAttemptLatency(12.5)
 	m.WSHandshakeRejected("unauthorized")
 }

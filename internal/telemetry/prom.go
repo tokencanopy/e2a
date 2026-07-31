@@ -29,6 +29,7 @@ type Prom struct {
 	outTerminalLat     prometheus.Histogram
 	outAttempts        *prometheus.CounterVec
 	outAttemptDur      prometheus.Histogram
+	outRateDeferred    prometheus.Counter
 	whAttempts         *prometheus.CounterVec
 	whAttemptDur       prometheus.Histogram
 	whTerminal         *prometheus.CounterVec
@@ -232,6 +233,10 @@ func NewProm(build string) *Prom {
 			Help:    "Upstream submission attempt duration.",
 			Buckets: fastBuckets,
 		}),
+		outRateDeferred: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "e2a_outbound_rate_deferred_total",
+			Help: "Outbound submissions deferred by the per-agent fire-time rate limiter (snoozed, re-fired when the window frees capacity).",
+		}),
 		whAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_webhook_attempts_total",
 			Help: "Webhook delivery attempts, by outcome and endpoint response class.",
@@ -369,7 +374,7 @@ func NewProm(build string) *Prom {
 	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
@@ -435,6 +440,8 @@ func (p *Prom) OutboundAttempt(outcome string, seconds float64) {
 	p.outAttempts.WithLabelValues(enum(outAttemptSet, outcome)).Inc()
 	p.outAttemptDur.Observe(seconds)
 }
+
+func (p *Prom) OutboundRateDeferred() { p.outRateDeferred.Inc() }
 
 func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	p.whAttempts.WithLabelValues(enum(whSet, outcome), enum(classSet, statusClass)).Inc()
