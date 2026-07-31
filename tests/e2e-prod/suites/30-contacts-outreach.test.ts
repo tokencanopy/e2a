@@ -214,8 +214,14 @@ test("createContact: 201 + Location; a duplicate create → 409 conflict", async
   assert.equal(r.body?.address, address, "ContactView echoes the canonical address");
   assert.equal(r.body?.source, "manual", "a direct create has source=manual");
   assert.equal(r.body?.display_name, "Coverage Contact");
+  // RFC 3986 allows '@' unescaped in a path segment (pchar includes '@'), so
+  // the server may legally emit either "/v1/contacts/a@b.com" or the
+  // percent-encoded form. Compare the DECODED trailing segment instead of
+  // demanding one spelling (prod emits the raw '@' via Go's url.PathEscape).
+  const location = r.headers.location ?? "";
+  const locationAddress = decodeURIComponent(location.slice(location.lastIndexOf("/") + 1));
   assert.ok(
-    r.headers.location?.includes(`/v1/contacts/${encodeURIComponent(address)}`),
+    location.includes("/v1/contacts/") && locationAddress === address,
     `Location header names the new contact: ${r.headers.location}`,
   );
 

@@ -259,6 +259,17 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 // existing engagement when updated_at still equals expectedUpdatedAt. The
 // version check is in the UPDATE predicate, closing the race between an HTTP
 // If-Match comparison and the persistence write.
+//
+// The UPDATE and the read-back are two statements in one transaction, NOT a
+// data-modifying CTE with an outer SELECT over the table. In Postgres the
+// outer query of such a CTE runs on the statement snapshot, which predates the
+// CTE's own writes — so a `WITH updated AS (UPDATE …) SELECT … FROM
+// contact_engagements` returns the PRE-update row, and the derived ETag can
+// never match the row again (found live by the staging conformance suite). A
+// second statement in the same transaction sees the first statement's writes,
+// and the version predicate already lives in the UPDATE, so the follow-up
+// read by primary key is race-free. This also mirrors UpsertEngagement, which
+// re-reads via GetEngagement after its write.
 func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any, expectedUpdatedAt time.Time) (ContactEngagement, error) {
 	agentID = NormalizeEmail(agentID)
 	address = NormalizeMailboxAddress(address)
@@ -277,24 +288,26 @@ func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID
 		nextVal = *nextActionAt
 	}
 
-	row := s.pool.QueryRow(ctx,
-		`WITH updated AS (
-			UPDATE contact_engagements
-			   SET stage          = COALESCE($4, stage),
-			       next_action_at = CASE WHEN $5 THEN $6 ELSE next_action_at END,
-			       metadata       = COALESCE($7::jsonb, metadata),
-			       updated_at     = now()
-			 WHERE user_id = $1 AND agent_id = $2 AND address = $3
-			   AND updated_at = $8
-			 RETURNING id
-		)
-		SELECT `+engagementColumns+engagementFrom+`
-		 WHERE ce.id = (SELECT id FROM updated)`,
-		userID, agentID, address, stage, nextSet, nextVal, encoded, expectedUpdatedAt)
-	e, err := scanEngagement(row)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ContactEngagement{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var id string
+	err = tx.QueryRow(ctx,
+		`UPDATE contact_engagements
+		    SET stage          = COALESCE($4, stage),
+		        next_action_at = CASE WHEN $5 THEN $6 ELSE next_action_at END,
+		        metadata       = COALESCE($7::jsonb, metadata),
+		        updated_at     = now()
+		  WHERE user_id = $1 AND agent_id = $2 AND address = $3
+		    AND updated_at = $8
+		  RETURNING id`,
+		userID, agentID, address, stage, nextSet, nextVal, encoded, expectedUpdatedAt).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
-		if qerr := s.pool.QueryRow(ctx,
+		if qerr := tx.QueryRow(ctx,
 			`SELECT EXISTS (
 				SELECT 1 FROM contact_engagements
 				 WHERE user_id = $1 AND agent_id = $2 AND address = $3
@@ -306,7 +319,20 @@ func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID
 		}
 		return ContactEngagement{}, ErrEngagementNotFound
 	}
-	return e, err
+	if err != nil {
+		return ContactEngagement{}, err
+	}
+
+	e, err := scanEngagement(tx.QueryRow(ctx,
+		`SELECT `+engagementColumns+engagementFrom+`
+		  WHERE ce.id = $1`, id))
+	if err != nil {
+		return ContactEngagement{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ContactEngagement{}, err
+	}
+	return e, nil
 }
 
 // GetEngagement loads one engagement scoped to (account, agent, address).
