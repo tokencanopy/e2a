@@ -3,7 +3,10 @@
 > **GA resolution (2026-07-15):** queue-first external outbound delivery is
 > mandatory. `E2A_OUTBOUND_MODE` and the submit-inline fallback were removed.
 > Historical sync-mode branches below are retained only as design history;
-> self-send loopback remains a distinct local delivery path.
+> self-send loopback remains a distinct local delivery path. The agent-path
+> approve/reject endpoints were also removed in the pre-GA vocabulary freeze:
+> the human-approve path described below now lives at
+> `POST /v1/reviews/{id}/approve` (the `/v1/approve` magic link survives).
 
 Status: approved · Owner: backend · Related: `internal/hitlworker`, `internal/agent`, `internal/outboundsend`, `internal/identity`
 

@@ -155,7 +155,9 @@ npm run dev    # http://localhost:3000, proxies /api/* to :8080
 ```
 
 Google OAuth credentials are required for sign-in — set
-`E2A_GOOGLE_CLIENT_ID` and `E2A_GOOGLE_CLIENT_SECRET` in `config.yaml`.
+`oauth.google_client_id` and `oauth.google_client_secret` in `config.yaml`
+(or export the `E2A_GOOGLE_CLIENT_ID` / `E2A_GOOGLE_CLIENT_SECRET` env
+overrides).
 For API-only contributions you can skip the dashboard.
 
 ---

@@ -1,6 +1,9 @@
 # Webhook fan-out → River — Migration Design
 
-Status: **DRAFT for review** (2026-07-09). Author: design pass off the as-built worker.
+Status: **Shipped** (drafted 2026-07-09 as a design pass off the as-built worker).
+As built, the worker lives in `internal/webhookpub` (`FanOutArgs.Kind() =
+"webhook_fanout"`, no separate `internal/webhookfanout` package), behind the
+`E2A_WEBHOOK_FANOUT_MODE` flag in `internal/config`.
 Completes the webhook triad: **fan-out** (Layer 1 → Layer 2) is the last webhook stage
 still on a hand-rolled loop. Companion to `webhook-delivery-river-migration.md`
 (Layer 2 → Layer 3, shipped) and `inbound-message-pipeline-river.md` (the closest
@@ -101,12 +104,12 @@ the kind of hand-maintained concurrency reasoning that River's job leasing subsu
 
 ## 4. Design
 
-### 4.1 New job + worker (`internal/webhookfanout`)
+### 4.1 New job + worker (as built: `internal/webhookpub`)
 
 Mirror `internal/webhookdelivery`:
 
 ```
-FanOutArgs{ EventID string }   Kind() = "webhook_fan_out"; routed to QueueWebhook (§4.3)
+FanOutArgs{ EventID string }   Kind() = "webhook_fanout"; routed to QueueWebhook (§4.3)
 FanOutWorker.Work(ctx, job):
     ev := loadEvent(EventID)                       // pgx.ErrNoRows → return nil (event GC'd; done)
     if ev.Status != "pending" { return nil }       // already fanned out (idempotent re-run)
@@ -168,7 +171,8 @@ non-destructive) to `webhook_events`; partial index `(id) WHERE status='pending'
 fanout_job_id IS NULL` `CONCURRENTLY` (`-- e2a:no-transaction`) for the reconciler scan.
 No behavior change. *(Mirrors migrations 057/058 for notify.)*
 
-**Slice 1 — worker behind flag (not wired).** New `internal/webhookfanout`:
+**Slice 1 — worker behind flag (not wired).** New worker in `internal/webhookpub`
+(the draft's separate `internal/webhookfanout` package was not created):
 `FanOutArgs`/`FanOutWorker` (body lifted from `fanOutOne`), `Jobs` registrar
 (`RegisterJobs` adds the worker + `ReconcileWorker` periodic), `EnqueueFanOutTx`,
 `ReconcilePending`. Unit + integration tests against the real fan-out SQL. `E2A_WEBHOOK_FANOUT_MODE`
@@ -195,7 +199,7 @@ becomes unconditional, matching how delivery ended up). ~200 lines deleted.
 
 ## 6. Testing
 
-- **Unit** (`webhookfanout`): fake identity reader + fake delivery enqueuer — matched /
+- **Unit** (`webhookpub`): fake identity reader + fake delivery enqueuer — matched /
   no_match / multi-match; idempotent re-run (second Work is a no-op via status guard);
   `ErrNoRows` (GC'd event) → nil.
 - **Integration** (real PG): enqueue a fan-out job → N `wsd` rows + N delivery jobs;

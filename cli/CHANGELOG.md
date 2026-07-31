@@ -42,7 +42,7 @@ is bounded by a 5-second timeout.
 
 ## 2.0.0
 
-Current release. A major bump: the published 1.6.0 and this tree had diverged
+A major bump: the published 1.6.0 and this tree had diverged
 under one version number, and the intervening work removes login flags, renames
 output fields, and changes exit codes — every script driving the CLI should be
 re-read against the breaking notes below before upgrading.

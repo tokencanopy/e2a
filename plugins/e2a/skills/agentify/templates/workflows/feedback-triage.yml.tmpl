@@ -117,9 +117,9 @@ jobs:
           # bypassPermissions is the only mode that auto-runs Bash headlessly,
           # so the allowlist is the fence. It is deliberately NARROW:
           #   - the ticket-card helper (the only state Bash surface),
-          #   - `gh issue` ONLY — NOT `gh` (that would allow `gh auth token`
-          #     to print the App token, and `gh api` to reach the whole
-          #     installation),
+          #   - `gh issue` plus read-only `gh pr list`/`gh pr view` — never
+          #     bare `gh` (that would allow `gh auth token` to print the App
+          #     token) and never `gh api` (the whole installation),
           #   - NO `jq` (a raw `jq -rn env.X` reads E2A_API_KEY / the model
           #     token straight out of the run env),
           #   - Read + the e2a READ tools; NO e2a send tools.

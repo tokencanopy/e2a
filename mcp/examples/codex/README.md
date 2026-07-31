@@ -51,7 +51,7 @@ Then in the session:
 > Reply to the latest message politely.
 > Send an email to alice@example.com — subject "test", body "hello from Codex".
 
-If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, ask Codex to pass `agent_email` per tool call.
+If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, ask Codex to pass `email` per tool call.
 
 ## How it works
 

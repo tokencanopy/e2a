@@ -28,10 +28,10 @@
 > `mcp/src/tools/` were reshaped onto `/v1` (`send_message`/`reply_to_message`,
 > cursor pagination, structured error `code`s, `get_attachment` download URLs;
 > the SDK *transport* was repointed in the earlier round). The rejected-decision
-> event ships as **`email.approval_rejected`** (decision 9's rename **landed** —
-> `api/openapi.yaml` + the webhook-subscription and `/v1/events` enums all use it;
-> the `email.rejected` strings left in `internal/agent/api.go` are stale code
-> comments, not the wire value, which is `webhookpub.EventEmailRejected`).
+> event ships as **`email.review_rejected`** (the later reviews-queue rename
+> superseded decision 9's `approval_rejected` spelling — `api/openapi.yaml` +
+> the webhook-subscription and `/v1/events` enums all use it; the wire value is
+> `webhookpub.EventEmailReviewRejected`).
 >
 > **Second as-built update (later pre-GA drift — read this too).** A few of the
 > "shipped" claims above were accurate when written but have since been
@@ -2049,7 +2049,7 @@ routes left on that mux were residue. Decision per endpoint (consumer-verified �
 no in-repo caller hits any of these):
 
 - **Already covered by `/v1` → deleted the legacy route + handler:**
-  `/api/v1/agents/{email}/ws` (real WS is `/v1/agents/{address}/ws`),
+  `/api/v1/agents/{email}/ws` (real WS is `/v1/agents/{email}/ws`),
   `PATCH /api/v1/agents/{email}/messages/{id}` (label update → `/v1` `updateMessage`),
   `GET /api/v1/messages/{id}` (flat outbound detail → agent-scoped `/v1`),
   `GET /api/v1/pending` (clients build the cross-agent pending view client-side
@@ -2083,7 +2083,10 @@ Deleted dead legacy codegen: the TS `openapi-typescript` output
 (`src/v1/generated/types.ts`), the Python `datamodel-codegen` module, and the
 swag→TS npm scripts/devDeps. The `make swagger` target + `web/public/openapi.yaml`
 are kept (the dashboard's `scalar.html` API-reference page renders the file) but
-unwired from `make generate`/`generate-check`.
+unwired from `make generate`/`generate-check`. *(Superseded: the swag pipeline has
+since been fully retired — there is no `make swagger` target and no
+`web/public/openapi.yaml`; the dashboard renders `/v1/openapi.yaml` live from the
+Huma handlers.)*
 
 ### 13.3 Known deprecations & follow-ups (from the review passes)
 

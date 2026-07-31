@@ -24,7 +24,7 @@ adk web              # opens the ADK Web UI on http://localhost:8000
 adk run agent.py     # interactive CLI
 ```
 
-If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, pass `agent_email` per tool call.
+If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, pass `email` per tool call.
 
 Then in the chat:
 

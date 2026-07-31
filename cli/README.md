@@ -53,7 +53,9 @@ e2a config set agent_email bot@acme.com   # or export E2A_AGENT_EMAIL
 Without one, those commands exit `2` (usage) rather than picking an inbox for you.
 A default you set this way survives re-login.
 
-Need a least-privilege key bound to a single inbox? Mint one after logging in:
+Need a least-privilege key bound to a single inbox? Mint one after logging in
+(the agent must already exist — create it first with `e2a agents create`,
+below):
 
 ```bash
 e2a keys create --agent bot@acme.com
@@ -154,6 +156,13 @@ e2a agents get bot@acme.com
 ```
 
 `list`, `create`, and `get` all accept `--json` (print the raw JSON response).
+
+Creating an address on a custom domain (`bot@acme.com`) requires the domain to
+be registered and verified on your account first (web dashboard, MCP tools, or
+SDK — the CLI has no `domains` command). The deployment's shared domain needs
+no setup, and a bare name expands onto it (`e2a agents create mybot` →
+`mybot@<shared-domain>`). Throughout this README, `bot@acme.com` stands for
+any agent you've created.
 
 ### `e2a keys`
 

@@ -203,6 +203,13 @@ type InboundParseArgs struct {
 }
 func (InboundParseArgs) Kind() string { return "inbound_parse" }
 ```
+
+> **As built (supersedes the sketch above):** slice I2 shipped per
+> `inbound-message-pipeline-river.md`'s intake-row design — the raw MIME lands in
+> an `inbound_intake` row (migrations/056_inbound_intake.sql) at DATA time and the
+> River job carries only the id: `InboundProcessArgs{ IntakeID }`,
+> `Kind() = "inbound_process"` (`internal/inboundprocess/worker.go`). The
+> payload-in-job-args sketch above was not built.
 - **DATA handler shrinks to:** read body → `InsertTx` the parse job (dedupe on `(agent_id, body_hash)` via `InsertOpts.UniqueOpts` or an app pre-check) → 250. The LLM scan leaves the SMTP session entirely.
 - **Parse worker:** claim (River) → SPF/DKIM/DMARC from the stored connection metadata → parse/thread → screening incl. LLM scan → per-recipient-agent `messages` rows + events (`email.received`/`pending_review`/`blocked`/`flagged`) in one outbox tx → best-effort WS live-tail → return `nil`.
 - **Terminal dispositions.** River's states cover most of the draft's `parked`/`dropped` split: a **poison message** (parser-breaking MIME) → return an error until `MaxAttempts`, then River **discards** it — plus an alert (River's discarded-job count is the "parked, needs a code fix" signal). A **recipient deleted between the 250 and parse** → `river.JobCancel` (truly terminal, do-not-retry) + a terminal audit row. Discarded (poison, retry-after-fix) vs cancelled (gone, never retry) preserves the draft's distinction on River primitives.

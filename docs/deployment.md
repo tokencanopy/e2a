@@ -131,7 +131,7 @@ what its own externally visible API base is (it is the OAuth issuer) — keep
 that in mind if you run a server and point an SDK at a *different* deployment
 from the same environment.
 
-The TypeScript and Python SDKs follow the same pattern: pass `baseUrl` (or `base_url`) once and call `E2AApi.fetchInfo()` if you need the deployment's shared domain in your own code.
+The TypeScript and Python SDKs follow the same pattern: pass `baseUrl` (or `base_url`) once and call `client.info()` (TS `E2AClient`, Python `AsyncE2AClient`) if you need the deployment's shared domain in your own code.
 
 ## Web dashboard deployer
 
@@ -205,4 +205,4 @@ That leaves two real horizontal-scaling caveats:
 
 **User provisioning for an external control plane is opt-in and internal-only.** When `E2A_PROVISIONING_ENABLED=true`, the server exposes `POST /api/internal/users/provision` (not part of the public `/v1` API or the OpenAPI spec) so an operator's external control plane can create e2a users ahead of their first sign-in. The caller sends `{"external_ref", "email", "name"?}` and authenticates with a hex HMAC-SHA256 of the raw request body in `X-E2A-Internal-Signature`, keyed by `E2A_PROVISIONING_SECRET` (env-only, deliberately separate from the limits internal API secret so each can be rotated independently). `external_ref` is the idempotency key — it becomes the row's `google_subject` (`bootstrap:<ref>`), so a replay returns `200` with the same `user_id`; a fresh create returns `201`; a different `external_ref` carrying an email another account already holds returns `409 {"error":"email_conflict"}` and never attaches or merges. Provisioning creates only the user row — no session, API key, or limits row. Disabled (the self-host default), the endpoint 503s.
 
-**Otherwise infra-agnostic.** The Go binary runs on any container host (Docker, Podman, k8s, ECS, Fly, Cloud Run, …). Storage is plain Postgres 14+ — managed (RDS, Cloud SQL, Neon, Supabase) or self-managed. Email goes out via standard SMTP, not a vendor SDK. Attachments live in Postgres rows, so there's no S3/GCS dependency. No queue, no Redis, no separate worker process. Secrets are read from env vars, so any secret manager that injects env at start time works.
+**Otherwise infra-agnostic.** The Go binary runs on any container host (Docker, Podman, k8s, ECS, Fly, Cloud Run, …). Storage is plain Postgres (tested on Postgres 16 — the version exercised by docker-compose and CI) — managed (RDS, Cloud SQL, Neon, Supabase) or self-managed. Email goes out via standard SMTP, not a vendor SDK. Attachments live in Postgres rows, so there's no S3/GCS dependency. No queue, no Redis, no separate worker process. Secrets are read from env vars, so any secret manager that injects env at start time works.

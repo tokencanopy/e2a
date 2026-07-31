@@ -266,9 +266,11 @@ manually on every API change even though the template won't remind you.
 
 ## Client surfaces
 
-- **TS SDK** (`sdks/typescript/`): layered — generated types → `E2AApi` (raw
-  HTTP) → `E2AClient` (high-level `.parse()`, `.reply()`); WebSocket in
-  `v1/ws.ts`; webhook signature verification in `v1/webhook-signature.ts`.
+- **TS SDK** (`sdks/typescript/`): layered — generated types → generated
+  `Promise*Api` classes (raw HTTP) → `E2AClient` with namespaced resources
+  (`client.messages.send` / `.reply`, `client.inbound.fromEvent`); WebSocket
+  in `v1/ws.ts`; webhook verification via standalone `constructEvent` in
+  `v1/webhook-signature.ts`.
 - **Python SDK** (`sdks/python/`): src layout, async-native (httpx), sync +
   async high-level clients over the generated base; PEP 561 `py.typed`.
 - **CLI** (`cli/`): commands login, whoami, agents, keys, protection, send,

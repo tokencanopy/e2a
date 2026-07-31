@@ -156,14 +156,14 @@ beta event types must still parse. The stable mapping is:
 | Event type | `data` schema | Required fields | Optional fields |
 |---|---|---|---|
 | `email.received` | `EmailReceivedData` | `message_id`, `agent_email`, `direction` (`inbound`), `header_from` (nullable RFC 5322 From), `envelope_from` (nullable SMTP MAIL FROM), `verified_domain` (nullable; non-null only for DMARC pass), `authentication` (nullable for providerless delivery), `to[]`, `cc[]`, `reply_to[]`, `delivered_to` (scalar — the one per-agent copy; the fetch key), `subject`, `received_at` | `conversation_id`, `attachments[]` (metadata only: `filename`, `content_type`, `size_bytes` — the DECODED payload size, `index`) |
-| `email.sent` | `EmailSentData` | `message_id`, `agent_email`, `direction` (`outbound`), `provider_message_id`, `method`, `from`, `to[]`, `subject`, `message_type` | `conversation_id`, `cc[]`, `bcc[]` |
+| `email.sent` | `EmailSentData` | `message_id`, `agent_email`, `direction` (`outbound`), `method`, `from`, `to[]`, `subject`, `message_type` | `conversation_id`, `cc[]`, `bcc[]`, `provider_message_id` (omitted for providerless local-loopback sends) |
 | `email.failed` | `EmailFailedData` | `message_id`, `agent_email`, `direction`, `method`, `from`, `to[]`, `subject`, `message_type`, `reason` | `conversation_id`, `cc[]`, `bcc[]`, `reason_code`, `retryable` (present only when genuinely known) |
 | `email.delivered` | `EmailDeliveredData` | `message_id`, `agent_email`, `direction`, `delivered_to` (the one recipient this outcome is about) | `subject`, `smtp_detail` |
 | `email.bounced` | `EmailBouncedData` | `EmailDeliveredData` fields + `bounce_type` (`permanent` \| `transient` \| `undetermined`, from the SES bounce classification) | `subject`, `smtp_detail`, `bounce_sub_type` (raw SES sub-type, e.g. `General`) |
 | `email.complained` | `EmailComplainedData` | `message_id`, `agent_email`, `direction`, `delivered_to` | `subject`, `smtp_detail` |
 | `domain.sending_verified` | `DomainSendingVerifiedData` | `domain`, `sending_status` | — |
 | `domain.sending_failed` | `DomainSendingFailedData` | `domain`, `sending_status` | `reason` |
-| `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (`bounce` \| `complaint`) | `reason`, `message_id` |
+| `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (open set — known values `bounce`, `complaint`; tolerate unknown values) | `reason`, `message_id` |
 | `agent.suppression_added` (**beta**) | `AgentSuppressionAddedData` | `agent_email`, `address`, `source` (`unsubscribe` \| `manual`) | — |
 | `contact.due` (**beta**) | — (untyped, built in `internal/contactdue`) | `agent_email`, `address`, `stage`, `next_action_at`, `replied`, `outbound_count`, `contact` (`address`, `display_name`, `metadata`) | `last_outbound_at`, `last_conversation_id` |
 

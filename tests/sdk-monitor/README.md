@@ -286,7 +286,7 @@ and works end to end against production.
 ## Local checks
 
 ```bash
-python -m venv venv && ./venv/bin/pip install -r requirements.txt
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 E2A_MONITOR_WEBHOOK_SECRET=whsec_testsecret ./venv/bin/python test_monitor.py
 ```
 
