@@ -8,6 +8,7 @@ import type {
 import { ImportContactsRequestOnConflictEnum } from "@e2a/sdk/v1";
 import { createClient, requireAgentEmail } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
+import { parseRfc3339 } from "../time.js";
 import { sanitizeTsvField } from "./messages.js";
 
 export interface OutputOptions { json?: boolean }
@@ -43,9 +44,10 @@ function boolFilter(raw: string | undefined, flag: string): boolean | undefined 
 
 function dateValue(raw: string | undefined, flag: string): Date | undefined {
   if (raw === undefined) return undefined;
-  const value = new Date(raw);
-  if (Number.isNaN(value.getTime())) fail(EXIT.USAGE, `${flag} must be an ISO timestamp`);
-  return value;
+  // Strict shared parser (time.ts): an explicit UTC offset is required, so a
+  // date-only or offsetless value fails fast instead of being read in local
+  // time and silently shifting the filter.
+  return parseRfc3339(raw, flag);
 }
 
 export async function contactsList(opts: {

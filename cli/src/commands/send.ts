@@ -3,6 +3,7 @@ import { basename, extname } from "node:path";
 import type { SendResultView, Attachment } from "@e2a/sdk/v1";
 import { createClient, requireAgentEmail } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
+import { parseRfc3339 } from "../time.js";
 import { htmlToText } from "../html.js";
 
 export interface SendOptions {
@@ -78,23 +79,9 @@ const REPLY_USAGE =
  */
 export function parseSendAt(value: string | undefined, usage: string): Date | undefined {
   if (value === undefined) return undefined;
-  // Require an explicit UTC offset (Z or ±HH:MM), matching the MCP tool's strict
-  // RFC 3339 rule. Without it, `new Date()` reads a bare date-time as LOCAL time
-  // and a date-only value as UTC midnight — silently shifting the intended send
-  // instant across timezones.
-  const rfc3339WithOffset =
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
-  if (!rfc3339WithOffset.test(value)) {
-    return fail(
-      EXIT.USAGE,
-      `--send-at must be an RFC 3339 date-time WITH an explicit offset, e.g. 2026-08-01T09:00:00Z or 2026-08-01T09:00:00-07:00 (got "${value}")\n${usage}`,
-    );
-  }
-  const at = new Date(value);
-  if (Number.isNaN(at.getTime())) {
-    return fail(EXIT.USAGE, `--send-at is not a valid date-time: "${value}" (use RFC 3339, e.g. 2026-08-01T09:00:00Z)\n${usage}`);
-  }
-  return at;
+  // The strict shared parser requires the explicit offset — see time.ts for
+  // why a bare date-time can never be guessed at.
+  return parseRfc3339(value, "--send-at", usage);
 }
 
 function readFileOrUsage(path: string, flag: string): string {

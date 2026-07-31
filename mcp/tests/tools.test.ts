@@ -629,6 +629,76 @@ describe("e2a MCP server", () => {
     });
   });
 
+  it("contact tools accept any explicit RFC 3339 offset", async () => {
+    // Z, a negative offset, and a positive offset all denote an unambiguous
+    // instant and must validate on every contact timestamp field.
+    for (const stamp of ["2026-07-01T00:00:00Z", "2026-07-01T09:00:00-07:00", "2026-07-01T12:00:00+05:30"]) {
+      const res = await client.callTool({
+        name: "list_contacts",
+        arguments: { created_after: stamp },
+      });
+      expect(res.isError ?? false, `created_after ${stamp}`).toBe(false);
+      expect(stub.listContacts).toHaveBeenCalledWith({ createdAfter: new Date(stamp) });
+    }
+
+    const res = await client.callTool({
+      name: "list_outreach_contacts",
+      arguments: {
+        email: "raise@example.com",
+        next_action_before: "2026-07-28T09:00:00-07:00",
+        last_outbound_before: "2026-07-21T12:00:00+05:30",
+      },
+    });
+    expect(res.isError ?? false).toBe(false);
+    expect(stub.listOutreach).toHaveBeenCalledWith({
+      nextActionBefore: new Date("2026-07-28T09:00:00-07:00"),
+      lastOutboundBefore: new Date("2026-07-21T12:00:00+05:30"),
+    }, "raise@example.com");
+
+    const setRes = await client.callTool({
+      name: "set_outreach_contact",
+      arguments: {
+        email: "raise@example.com",
+        address: "partner@fund.vc",
+        next_action_at: "2026-08-01T09:00:00-07:00",
+      },
+    });
+    expect(setRes.isError ?? false).toBe(false);
+    expect(stub.setOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { nextActionAt: new Date("2026-08-01T09:00:00-07:00") },
+      "raise@example.com",
+      undefined,
+    );
+  });
+
+  it("contact tools reject date-only and offsetless timestamps", async () => {
+    // Without an explicit offset the instant is ambiguous: `new Date()` reads a
+    // bare date-time in LOCAL time and a date-only value as UTC midnight.
+    for (const stamp of ["2026-07-01", "2026-07-01T09:00:00"]) {
+      const res = await client.callTool({
+        name: "list_contacts",
+        arguments: { created_before: stamp },
+      });
+      expect(res.isError, `created_before ${stamp}`).toBe(true);
+
+      const outreachRes = await client.callTool({
+        name: "list_outreach_contacts",
+        arguments: { email: "raise@example.com", next_action_before: stamp },
+      });
+      expect(outreachRes.isError, `next_action_before ${stamp}`).toBe(true);
+
+      const setRes = await client.callTool({
+        name: "set_outreach_contact",
+        arguments: { email: "raise@example.com", address: "partner@fund.vc", next_action_at: stamp },
+      });
+      expect(setRes.isError, `next_action_at ${stamp}`).toBe(true);
+    }
+    expect(stub.listContacts).not.toHaveBeenCalled();
+    expect(stub.listOutreach).not.toHaveBeenCalled();
+    expect(stub.setOutreach).not.toHaveBeenCalled();
+  });
+
   it("create_contact forwards a retry key", async () => {
     await client.callTool({
       name: "create_contact",

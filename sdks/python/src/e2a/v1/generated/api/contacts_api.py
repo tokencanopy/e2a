@@ -931,7 +931,7 @@ class ContactsApi:
     ) -> DeleteImportBatchResult:
         """Reverse a contact import (beta)
 
-        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str
@@ -1002,7 +1002,7 @@ class ContactsApi:
     ) -> ApiResponse[DeleteImportBatchResult]:
         """Reverse a contact import (beta)
 
-        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str
@@ -1073,7 +1073,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Reverse a contact import (beta)
 
-        Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param batch_id: (required)
         :type batch_id: str

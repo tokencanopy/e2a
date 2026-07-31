@@ -11,6 +11,13 @@ const metadata = z.record(
 
 const contactAddress = z.string().email().describe("Contact email address.");
 
+// RFC 3339 date-time with an explicit UTC offset (Z or ±HH:MM both accepted).
+// Bare date-times and date-only values are rejected rather than guessed at:
+// `new Date()` would read them in LOCAL time and silently shift the filter
+// across timezones. Same rule as scheduled sending (messages.ts sendAtField).
+const contactTimestamp = z.string().datetime({ offset: true })
+  .describe("RFC 3339 date-time with an explicit UTC offset (Z or ±HH:MM), e.g. 2026-08-01T09:00:00Z or 2026-08-01T09:00:00-07:00. Date-only and offsetless values are rejected.");
+
 export function registerContactTools(server: McpServer, client: McpClient): void {
   server.registerTool(
     "list_contacts",
@@ -23,8 +30,8 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         ...paginationInput,
         source: z.enum(["import", "manual", "inbound"]).optional(),
         import_batch_id: z.string().optional(),
-        created_after: z.string().datetime().optional(),
-        created_before: z.string().datetime().optional(),
+        created_after: contactTimestamp.optional(),
+        created_before: contactTimestamp.optional(),
       }),
     },
     async (args) => runTool(async () => {
@@ -160,7 +167,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
       title: "Reverse a contact import (beta)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Remove untouched contacts and per-agent enrolments created by one import batch. Contacts with correspondence history, pre-existing outreach, and suppressions survive and the receipt reports each category. Account scope only.",
+        "Remove only verifiably untouched contacts and per-agent enrolments created by one import batch. Contacts or enrolments edited since the import, contacts with correspondence history or any surviving engagement, pre-existing outreach, and suppressions all survive, and the receipt reports each category. Account scope only.",
       inputSchema: strictInputSchema({ batch_id: z.string().min(1) }),
     },
     async (args) => runTool(() => client.deleteContactImport(args.batch_id)),
@@ -179,8 +186,8 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         stage: z.string().max(128).optional(),
         replied: z.boolean().optional(),
         suppressed: z.boolean().optional(),
-        next_action_before: z.string().datetime().optional(),
-        last_outbound_before: z.string().datetime().optional(),
+        next_action_before: contactTimestamp.optional(),
+        last_outbound_before: contactTimestamp.optional(),
       }),
     },
     async (args) => runTool(async () => {
@@ -222,7 +229,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         email: emailSelector,
         address: contactAddress,
         stage: z.string().max(128).optional(),
-        next_action_at: z.string().datetime().nullable().optional(),
+        next_action_at: contactTimestamp.nullable().optional(),
         metadata,
         if_match: z.string().optional(),
       }).refine(

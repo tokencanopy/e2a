@@ -37,7 +37,7 @@ type ContactImportRow struct {
 
 // ImportContactsRequest is one upload.
 type ImportContactsRequest struct {
-	Contacts   []ContactImportRow `json:"contacts" required:"true" minItems:"1" maxItems:"1000" doc:"The rows to import. At most 1000 per request; paginate client-side for larger lists."`
+	Contacts   []ContactImportRow `json:"contacts" required:"true" nullable:"false" minItems:"1" maxItems:"1000" doc:"The rows to import. At most 1000 per request; paginate client-side for larger lists."`
 	OnConflict string             `json:"on_conflict,omitempty" enum:"merge,skip" default:"merge" doc:"What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone."`
 	AgentEmail string             `json:"agent_email,omitempty" maxLength:"320" doc:"Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved."`
 	Stage      string             `json:"stage,omitempty" maxLength:"128" doc:"Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage."`
@@ -87,8 +87,8 @@ type DeleteImportBatchResult struct {
 	Deleted            bool   `json:"deleted"`
 	BatchID            string `json:"batch_id"`
 	ContactsDeleted    int    `json:"contacts_deleted" doc:"How many contacts this reversal removed."`
-	ContactsRetained   int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept because they have correspondence history."`
-	EngagementsDeleted int    `json:"engagements_deleted" doc:"How many per-agent outreach enrolments created by this import were removed."`
+	ContactsRetained   int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history."`
+	EngagementsDeleted int    `json:"engagements_deleted" doc:"How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here."`
 }
 
 type deleteImportBatchOutput struct {
@@ -108,7 +108,7 @@ func (s *Server) registerContactImport() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "deleteImportBatch", Method: http.MethodDelete, Path: "/v1/contacts/imports/{batch_id}",
 		Summary: "Reverse a contact import (beta)", Tags: []string{"contacts"},
-		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. " + contactImportBetaDescription,
+		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. " + contactImportBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleDeleteImportBatch)
@@ -131,6 +131,14 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 		if err != nil {
 			return nil, NewError(http.StatusBadRequest, "invalid_request", "agent_email must be a valid email address")
 		}
+	}
+	if len(in.Body.Contacts) == 0 {
+		// Defence in depth: the schema already rejects a missing, null, or
+		// empty array with 422 invalid_request, but a successful zero-row
+		// import reads as "it worked" while recording nothing — the worst
+		// possible answer to a bulk upload — so the bound is enforced here
+		// too, mirroring the row cap below.
+		return nil, NewError(http.StatusBadRequest, "invalid_request", "contacts must contain at least one row")
 	}
 	if len(in.Body.Contacts) > maxContactImportRows {
 		// Defence in depth: the schema already caps this, but the bound is what

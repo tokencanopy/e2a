@@ -259,4 +259,63 @@ describe("contacts commands", () => {
     await expect(outreachList({ nextActionBefore: "not-a-date" })).rejects.toThrow("process.exit");
     await expect(contactsList({ limit: "0" })).rejects.toThrow("process.exit");
   });
+
+  it("accepts explicit RFC 3339 offsets on every contact time argument", async () => {
+    mockList.mockReturnValue({ toArray: vi.fn(async () => []) });
+    mockOutreach.mockReturnValue({ toArray: vi.fn(async () => []) });
+    mockSetOutreach.mockResolvedValue({ address: "partner@fund.vc" });
+    const { contactsList, outreachList, outreachSet } = await import("../commands/contacts.js");
+
+    // Z, a negative offset, and a positive half-hour offset all name the same
+    // kind of unambiguous instant and must reach the SDK as that exact Date.
+    await contactsList({
+      createdAfter: "2026-07-01T09:00:00-07:00",
+      createdBefore: "2026-08-01T12:00:00+05:30",
+    });
+    expect(mockList).toHaveBeenCalledWith({
+      source: undefined,
+      importBatchId: undefined,
+      createdAfter: new Date("2026-07-01T09:00:00-07:00"),
+      createdBefore: new Date("2026-08-01T12:00:00+05:30"),
+    });
+
+    await outreachList({
+      nextActionBefore: "2026-08-01T09:00:00-07:00",
+      lastOutboundBefore: "2026-07-01T12:00:00+05:30",
+    });
+    expect(mockOutreach).toHaveBeenCalledWith("bot@agents.e2a.dev", {
+      stage: undefined,
+      replied: undefined,
+      suppressed: undefined,
+      nextActionBefore: new Date("2026-08-01T09:00:00-07:00"),
+      lastOutboundBefore: new Date("2026-07-01T12:00:00+05:30"),
+    });
+
+    await outreachSet("partner@fund.vc", { nextAction: "2026-08-01T09:00:00+05:30" });
+    expect(mockSetOutreach).toHaveBeenCalledWith(
+      "bot@agents.e2a.dev",
+      "partner@fund.vc",
+      { stage: undefined, metadata: undefined, nextActionAt: new Date("2026-08-01T09:00:00+05:30") },
+    );
+  });
+
+  it("rejects date-only and offsetless contact timestamps", async () => {
+    const { contactsList, outreachList, outreachSet } = await import("../commands/contacts.js");
+    // Without an explicit offset the instant is ambiguous: the JS Date
+    // constructor reads a bare date-time in LOCAL time and a date-only value
+    // as UTC midnight, so the filter would shift with the runner's timezone.
+    for (const stamp of ["2026-08-01", "2026-08-01T09:00:00", "2026-02-30T09:00:00Z"]) {
+      await expect(contactsList({ createdAfter: stamp })).rejects.toThrow("process.exit");
+      await expect(contactsList({ createdBefore: stamp })).rejects.toThrow("process.exit");
+      await expect(outreachList({ nextActionBefore: stamp })).rejects.toThrow("process.exit");
+      await expect(outreachList({ lastOutboundBefore: stamp })).rejects.toThrow("process.exit");
+      await expect(outreachSet("partner@fund.vc", { nextAction: stamp })).rejects.toThrow("process.exit");
+    }
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining("RFC 3339"),
+    );
+    expect(mockList).not.toHaveBeenCalled();
+    expect(mockOutreach).not.toHaveBeenCalled();
+    expect(mockSetOutreach).not.toHaveBeenCalled();
+  });
 });

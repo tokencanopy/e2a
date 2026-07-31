@@ -29,7 +29,7 @@ class ImportContactsRequest(BaseModel):
     ImportContactsRequest
     """ # noqa: E501
     agent_email: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved.")
-    contacts: Optional[Annotated[List[ContactImportRow], Field(min_length=1, max_length=1000)]] = Field(description="The rows to import. At most 1000 per request; paginate client-side for larger lists.")
+    contacts: Annotated[List[ContactImportRow], Field(min_length=1, max_length=1000)] = Field(description="The rows to import. At most 1000 per request; paginate client-side for larger lists.")
     on_conflict: Optional[StrictStr] = Field(default='merge', description="What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.")
     stage: Optional[Annotated[str, Field(strict=True, max_length=128)]] = Field(default=None, description="Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage.")
     additional_properties: Dict[str, Any] = {}
@@ -87,11 +87,6 @@ class ImportContactsRequest(BaseModel):
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
                 _dict[_key] = _value
-
-        # set to None if contacts (nullable) is None
-        # and model_fields_set contains the field
-        if self.contacts is None and "contacts" in self.model_fields_set:
-            _dict['contacts'] = None
 
         return _dict
 

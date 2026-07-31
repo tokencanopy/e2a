@@ -1082,13 +1082,17 @@ scenarios:
               display_name: First
             - address: not-an-email
             - address: FIRST@imp.vc
+            - address: "Second <Second@Imp.VC>"
+              display_name: Second
+        capture:
+          batch_id: batch_id
         expect:
           status: 200
           body_contains:
             - batch_id
             - results
           body_match:
-            created: 1
+            created: 2
             failed: 1
             skipped: 1
             "results[0].status": created
@@ -1096,6 +1100,8 @@ scenarios:
             "results[1].status": failed
             "results[2].status": skipped
             "results[2].code": duplicate_in_batch
+            "results[3].status": created
+            "results[3].address": second@imp.vc
 
       - id: imported_contact_is_readable
         action: request
@@ -1112,8 +1118,9 @@ scenarios:
         path: /v1/contacts?source=import
         expect:
           status: 200
-          body_match:
-            "items[0].address": first@imp.vc
+          body_array_contains:
+            items:
+              address: first@imp.vc
 
       - id: empty_batch_rejected
         action: request
@@ -1124,10 +1131,73 @@ scenarios:
         expect:
           status: 422
 
+      - id: null_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts: null
+        expect:
+          status: 422
+
+      - id: missing_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body: {}
+        expect:
+          status: 422
+
+      # A contact edited after the import no longer belongs solely to the
+      # batch: reversal must remove the untouched row and keep the edited one,
+      # and the receipt's deleted + retained must account for both.
+      - id: edit_protects_from_reversal
+        action: request
+        method: PATCH
+        path: /v1/contacts/second@imp.vc
+        body:
+          display_name: Second, Edited
+        expect:
+          status: 200
+
+      - id: reverse_batch
+        action: request
+        method: DELETE
+        path: /v1/contacts/imports/{batch_id}?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            contacts_deleted: 1
+            contacts_retained: 1
+
+      - id: untouched_contact_reversed
+        action: request
+        method: GET
+        path: /v1/contacts/first@imp.vc
+        expect:
+          status: 404
+
+      - id: edited_contact_survives
+        action: request
+        method: GET
+        path: /v1/contacts/second@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Second, Edited
+
     cleanup:
-      - action: request
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed first@imp.vc (404 here); after a mid-scenario failure this is
+      # what keeps the scenario self-cleaning for the next run.
+      - id: delete_first_contact_if_reversed
+        action: request
         method: DELETE
         path: /v1/contacts/first@imp.vc?confirm=DELETE
+      - action: request
+        method: DELETE
+        path: /v1/contacts/second@imp.vc?confirm=DELETE
         expect:
           status: 200
 
