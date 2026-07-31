@@ -81,10 +81,17 @@ Durable, human-readable notes for future syncs. Committed.
   `Dot`, `Eyebrow`, `ThemeToggle`, `InkConsole`); brand SVGs in `web/public`
   (`Logo` — one themeable component replacing the 4 static svgs); and other
   app components ported CSS-driven (`Field` ← `Field.tsx`, `Avatar` ←
-  `CounterpartyAvatar`, `Collapsible` ← `messages/Collapsible.tsx`); plus
-  net-new `Card`. Still NOT synced: `PageShell`/`Topbar` (responsive Tailwind
-  layout — want Tailwind in the package first) and `Sidebar` (Next.js routing +
-  auth context).
+  `CounterpartyAvatar`); plus net-new `Card`. Still NOT synced: `PageShell`/
+  `Topbar` (responsive Tailwind layout — want Tailwind in the package first)
+  and `Sidebar` (Next.js routing + auth context).
+  **`Collapsible` is now orphaned:** it was ported from
+  `web/src/app/components/messages/Collapsible.tsx`, but that source file was
+  deleted in commit `b25046c` ("refactor(hitl): consolidate dashboard review
+  flow") when the authenticated review flow was consolidated onto `/reviews`
+  and the old disclosure-row UI it backed was removed. The design-system copy
+  (`design-system/src/Collapsible/`) still ships and is not upstream-tracked
+  by anything in `web/src` — treat it as a package-owned component going
+  forward, or drop it from the synced set if nothing consumes it.
 - **`Logo` and `Avatar` are token-faithful, not file-faithful.** `Logo` is one
   React component drawn from Loft tokens (the `web/public/*.svg` files are flat
   recolorings of the same marks); `Avatar` needs the `--av-1..8` palette, which
