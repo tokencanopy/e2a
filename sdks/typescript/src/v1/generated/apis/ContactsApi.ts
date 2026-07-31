@@ -566,7 +566,9 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
 
         // Header Params
-        requestContext.setHeaderParam("If-Match", ObjectSerializer.serialize(ifMatch, "string", ""));
+        if (ifMatch !== undefined) {
+            requestContext.setHeaderParam("If-Match", ObjectSerializer.serialize(ifMatch, "string", ""));
+        }
 
 
         // Body Params
@@ -635,7 +637,9 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
 
         // Header Params
-        requestContext.setHeaderParam("If-Match", ObjectSerializer.serialize(ifMatch, "string", ""));
+        if (ifMatch !== undefined) {
+            requestContext.setHeaderParam("If-Match", ObjectSerializer.serialize(ifMatch, "string", ""));
+        }
 
 
         // Body Params
