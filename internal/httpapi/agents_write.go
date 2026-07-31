@@ -163,13 +163,16 @@ func (s *Server) handleUpdateAgent(ctx context.Context, in *updateAgentInput) (*
 	if s.deps.UpdateAgentName == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "update unavailable")
 	}
-	if err := s.deps.UpdateAgentName(ctx, ag.ID, ag.UserID, *in.Body.Name); err != nil {
+	// The store returns the authoritative post-update row, read INSIDE the
+	// write's own transaction. Re-reading here after the write committed was a
+	// torn read: a concurrent rename showed this caller the other writer's name
+	// as the result of their own PATCH, and a concurrent trash/delete answered
+	// 500 "failed to reload agent" on a rename that had committed.
+	updated, err := s.deps.UpdateAgentName(ctx, ag.ID, ag.UserID, *in.Body.Name)
+	if err != nil {
 		return nil, NewError(http.StatusBadRequest, "invalid_request", err.Error())
 	}
-
-	// Re-read for the authoritative post-update state (ag.ID is the email).
-	updated, err := s.deps.GetAgent(ctx, ag.ID)
-	if err != nil || updated == nil {
+	if updated == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload agent")
 	}
 	return &agentOutput{Body: agentViewFromIdentity(updated)}, nil
@@ -254,8 +257,13 @@ func (s *Server) handleRestoreAgent(ctx context.Context, in *AddressParam) (*age
 		return nil, err
 	}
 	// The trash-state decision belongs to the store (its UPDATE is the one
-	// atomic check); the handler only maps the sentinel.
-	if err := s.deps.RestoreAgent(ctx, ag.ID, ag.UserID); err != nil {
+	// atomic check); the handler only maps the sentinel. The store also returns
+	// the restored agent, read through the LIVE projection inside the restore's
+	// own transaction — same proof that the agent is visible again as the old
+	// post-commit re-read, minus its race (a concurrent rename or re-trash in
+	// the gap answered with the wrong name, or 500 on a committed restore).
+	restored, err := s.deps.RestoreAgent(ctx, ag.ID, ag.UserID)
+	if err != nil {
 		if errors.Is(err, identity.ErrNotInTrash) {
 			return nil, NewError(http.StatusConflict, "not_in_trash", "agent is not in the trash")
 		}
@@ -264,10 +272,7 @@ func (s *Server) handleRestoreAgent(ctx context.Context, in *AddressParam) (*age
 		}
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to restore agent")
 	}
-	// Re-read via the LIVE getter for the authoritative post-restore state
-	// (ag.ID is the email); it also proves the agent is visible again.
-	restored, err := s.deps.GetAgent(ctx, ag.ID)
-	if err != nil || restored == nil {
+	if restored == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload agent")
 	}
 	return &agentOutput{Body: agentViewFromIdentity(restored)}, nil

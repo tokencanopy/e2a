@@ -820,7 +820,7 @@ func TestClaimDueEngagementsSkipsTrashedAgents(t *testing.T) {
 
 	// Restoring makes the outreach pull-visible again, but acknowledges past
 	// schedules so a long-trashed inbox does not emit a wake-up thundering herd.
-	if err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
+	if _, err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	due, err = store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)

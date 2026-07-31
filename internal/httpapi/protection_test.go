@@ -10,9 +10,11 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
-// protectionServer builds a server whose UpdateAgentProtection mutates a captured
-// agent so the handler's re-read reflects the write — the full PUT → store →
-// re-read → view round-trip over the real chi+Huma stack.
+// protectionServer builds a server whose UpdateAgentProtection mutates a
+// captured agent and returns it — the full PUT → store → view round-trip over
+// the real chi+Huma stack. Returning the written row (rather than leaving the
+// handler to re-read) mirrors the store, whose read-back runs inside the
+// write's own transaction.
 func protectionServer(t *testing.T) (*httptest.Server, *identity.AgentIdentity) {
 	t.Helper()
 	ag := sampleAgent()
@@ -36,7 +38,7 @@ func protectionServer(t *testing.T) (*httptest.Server, *identity.AgentIdentity) 
 			}
 			return nil, errors.New("not found")
 		},
-		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) error {
+		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) (*identity.AgentIdentity, error) {
 			ag.InboundPolicy = cfg.InboundGatePolicy
 			ag.InboundAllowlist = cfg.InboundAllowlist
 			ag.InboundPolicyAction = cfg.InboundGateAction
@@ -47,7 +49,8 @@ func protectionServer(t *testing.T) (*httptest.Server, *identity.AgentIdentity) 
 			ag.HITLTTLSeconds = cfg.HITLTTLSeconds
 			ag.HITLExpirationAction = cfg.HITLExpirationAction
 			ag.SuppressNotifications = cfg.SuppressNotifications
-			return nil
+			a := ag
+			return &a, nil
 		},
 		Legacy: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) }),
 	}

@@ -232,11 +232,17 @@ func (s *Server) handlePutProtection(ctx context.Context, in *putProtectionInput
 		cfg.InboundScanSensitivity = identity.SensitivityOff
 		cfg.OutboundScanSensitivity = identity.SensitivityOff
 	}
-	if err := s.deps.UpdateAgentProtection(ctx, ag.ID, ag.UserID, cfg); err != nil {
+	// The store returns the posture it just wrote, read INSIDE the write's own
+	// transaction. Re-reading here after the write committed was a torn read,
+	// and the PUT is a full replace: a concurrent PUT landing in the gap handed
+	// this caller the OTHER writer's posture as the authoritative-looking
+	// result of their own request, and a concurrent trash answered 500 on a
+	// write that had committed.
+	updated, err := s.deps.UpdateAgentProtection(ctx, ag.ID, ag.UserID, cfg)
+	if err != nil {
 		return nil, NewError(http.StatusBadRequest, "invalid_request", err.Error())
 	}
-	updated, err := s.deps.GetAgent(ctx, ag.ID)
-	if err != nil || updated == nil {
+	if updated == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload agent")
 	}
 	return &protectionOutput{Body: protectionViewFromIdentity(updated)}, nil

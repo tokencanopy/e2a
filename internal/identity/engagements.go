@@ -232,6 +232,7 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 	}
 
 	var created bool
+	var engagementID string
 	err = tx.QueryRow(ctx,
 		`INSERT INTO contact_engagements
 		     (id, user_id, contact_id, agent_id, address, stage, next_action_at, metadata)
@@ -241,18 +242,34 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 		         next_action_at = CASE WHEN $9 THEN $7 ELSE contact_engagements.next_action_at END,
 		         metadata       = COALESCE($8::jsonb, contact_engagements.metadata),
 		         updated_at     = now()
-		  RETURNING (xmax = 0)`,
+		  RETURNING id, (xmax = 0)`,
 		NewEngagementID(), userID, contactID, agentID, address,
-		stageVal, nextVal, encoded, nextSet).Scan(&created)
+		stageVal, nextVal, encoded, nextSet).Scan(&engagementID, &created)
+	if err != nil {
+		return ContactEngagement{}, false, err
+	}
+
+	// Read the authoritative row INSIDE the write's transaction, by the primary
+	// key the upsert just returned. A read after the commit is a torn read: the
+	// engagement can be deleted (DeleteEngagement, a contact delete, an import
+	// reversal) in the gap, turning a committed write into a bogus
+	// ErrEngagementNotFound — which the HTTP layer reports as 412
+	// precondition_failed on a request that sent no If-Match. Activity hooks
+	// (RecordInbound/OutboundActivity fire on every message touching this
+	// contact) can likewise repaint the row before a 201-created response
+	// describes it. This is a plain SELECT taking no row locks, so it adds no
+	// lock-ordering edge over the contacts→engagements order the batch reversal
+	// relies on. Same shape as UpdateEngagementIfUnchanged.
+	e, err := scanEngagement(tx.QueryRow(ctx,
+		`SELECT `+engagementColumns+engagementFrom+`
+		  WHERE ce.id = $1`, engagementID))
 	if err != nil {
 		return ContactEngagement{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContactEngagement{}, false, err
 	}
-
-	e, err := s.GetEngagement(ctx, userID, agentID, address)
-	return e, created, err
+	return e, created, nil
 }
 
 // UpdateEngagementIfUnchanged updates only the agent-owned fields of an
@@ -268,8 +285,7 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 // never match the row again (found live by the staging conformance suite). A
 // second statement in the same transaction sees the first statement's writes,
 // and the version predicate already lives in the UPDATE, so the follow-up
-// read by primary key is race-free. This also mirrors UpsertEngagement, which
-// re-reads via GetEngagement after its write.
+// read by primary key is race-free. UpsertEngagement re-reads the same way.
 func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any, expectedUpdatedAt time.Time) (ContactEngagement, error) {
 	agentID = NormalizeEmail(agentID)
 	address = NormalizeMailboxAddress(address)
