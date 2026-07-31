@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io/fs"
@@ -9,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -280,29 +280,37 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 	}
 }
 
+// humaRegistrationPattern matches every huma entry point that ends in a
+// registered operation, in both call forms.
+//
+// The `[\[(]` alternation is the load-bearing part. Every one of these is a
+// GENERIC function, so explicit type instantiation is valid Go —
+// `huma.Post[In, Out](api, "/x", handler)` compiles, and the substring
+// `huma.Post(` does not appear anywhere in it. A literal-substring guard
+// therefore passes an operation that bypasses the NUL check entirely. (That
+// hole predates this change: the original guard looked for `huma.Register(`
+// and had it too.)
+var humaRegistrationPattern = regexp.MustCompile(`huma\.(Register|AutoRegister|Get|Post|Put|Patch|Delete)\s*[\[(]`)
+
 // TestEveryOperationGoesThroughRegisterOp is the guard that keeps the request
 // -content rule global. registerOp is the only place the guard runs, so an
 // operation wired past it would silently opt out — and the opt-out would be
 // invisible until someone found the 500 in production, which is exactly how the
 // five NUL vectors above were found.
 //
-// It checks every registration entry point huma exports, not just Register:
+// It covers every registration entry point huma exports, not just Register:
 // Get/Post/Put/Patch/Delete are convenience wrappers that call Register
 // internally, and AutoRegister reflects over a struct's methods to register
-// whatever it finds. A future `huma.Post(...)` would bypass the guard and, if
-// this test only looked for `huma.Register(`, would pass while doing it. The
-// walk is recursive so a future sub-package is covered too.
+// whatever it finds. The walk is recursive, so a future sub-package is covered.
+//
+// LIMITS — this is a substring/regex guard over source text, not a type-aware
+// analysis, so it is best-effort against deliberate obfuscation. It does NOT
+// catch an aliased import (`h.Register(`), a dot-import (a bare `Register(`),
+// or a sub-package that wraps huma itself and is called through that wrapper.
+// Those were considered and left uncovered on purpose: closing them needs
+// go/analysis, and the guard's job is to stop an ordinary mistake by someone
+// who does not know registerOp exists, not to defeat someone routing around it.
 func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
-	// Every huma entry point that ends in a registered operation.
-	forbidden := []string{
-		"huma.Register(",
-		"huma.AutoRegister(",
-		"huma.Get(",
-		"huma.Post(",
-		"huma.Put(",
-		"huma.Patch(",
-		"huma.Delete(",
-	}
 	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -322,10 +330,9 @@ func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		for _, pattern := range forbidden {
-			if bytes.Contains(source, []byte(pattern)) {
-				t.Errorf("%s calls %s directly; use registerOp so the operation inherits the shared request-content guards", path, strings.TrimSuffix(pattern, "("))
-			}
+		for _, hit := range humaRegistrationPattern.FindAll(source, -1) {
+			t.Errorf("%s calls %s directly; use registerOp so the operation inherits the shared request-content guards",
+				path, strings.TrimRight(string(hit), "[( \t"))
 		}
 		return nil
 	})
@@ -334,10 +341,50 @@ func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
 	}
 }
 
+// TestHumaRegistrationPatternCatchesBothCallForms pins the regex itself. The
+// bracket form is the one a literal-substring guard misses, so it is asserted
+// explicitly and cannot regress.
+func TestHumaRegistrationPatternCatchesBothCallForms(t *testing.T) {
+	caught := []string{
+		`huma.Register(s.API, huma.Operation{...}, s.handleX)`,
+		`huma.Register[listInput, listOutput](s.API, huma.Operation{...}, s.handleX)`,
+		`huma.Post(api, "/explicit-post", handler)`,
+		`huma.Post[In, Out](api, "/explicit-post", handler)`,
+		`huma.AutoRegister(api, server)`,
+		`huma.AutoRegister[*Server](api, server)`,
+		`huma.Get[In, Out](api, "/x", h)`,
+		`huma.Put(api, "/x", h)`,
+		`huma.Patch[In, Out](api, "/x", h)`,
+		`huma.Delete(api, "/x", h)`,
+		"huma.Register\t(api, op, h)", // gofmt would not write this, but a human might
+	}
+	for _, src := range caught {
+		if !humaRegistrationPattern.MatchString(src) {
+			t.Errorf("pattern missed a registration call: %s", src)
+		}
+	}
+
+	// Things that merely mention huma must not trip the guard, or the test
+	// becomes noise everyone learns to ignore.
+	ignored := []string{
+		`registerOp(s.API, huma.Operation{...}, s.handleX)`,
+		`var op huma.Operation`,
+		`func headerRef(name string) *huma.Param`,
+		`humanErrorMessage(err)`,
+		`s.API.OpenAPI()`,
+		`huma.NewError(status, msg)`,
+	}
+	for _, src := range ignored {
+		if humaRegistrationPattern.MatchString(src) {
+			t.Errorf("pattern false-positived on: %s", src)
+		}
+	}
+}
+
 // BenchmarkScanCleanImportBody measures the guard on the shape it must never
 // slow down: a clean 1000-row contact import, the largest body the API accepts
 // by row count. Every location string the walk could build is thrown away on a
-// clean request, which is why locPath defers rendering.
+// clean request, which is why nulScanner defers rendering.
 func BenchmarkScanCleanImportBody(b *testing.B) {
 	rows := make([]ContactImportRow, 1000)
 	for i := range rows {

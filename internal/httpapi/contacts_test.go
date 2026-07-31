@@ -931,6 +931,11 @@ func TestPatchContactRejectsEmptyIfMatch(t *testing.T) {
 //
 // The guard is not weakened by this: the compared body is the full validator,
 // which moves on every accepted write, so a stale tag never matches.
+//
+// NOTE ON WHAT THIS TEST IS: it is a FENCE, not a regression test. It passes
+// against unmodified main, because nothing about the matching behaviour
+// changed — its whole job is to fail loudly for whoever next reads §13.1.1 and
+// tightens the comparison. Do not cite it as evidence that a bug was fixed.
 func TestETagMatchesToleratesTheWeakPrefix(t *testing.T) {
 	const current = `"88eba810c0136ae642cf65a30025858b"`
 	cases := []struct {

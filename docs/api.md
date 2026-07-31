@@ -76,14 +76,18 @@ MCP tool surface), see:
   outside it and validate independently.)
 - **Conditional writes (`ETag` / `If-Match`).** Single-resource `GET`s return an
   `ETag`; pass it back as `If-Match` on the write to reject a lost update with
-  `412 precondition_failed`. Three rules follow RFC 9110 §13.1.1 and are worth
-  stating because they are easy to get wrong:
-  - Send the validator exactly as you received it. The `W/` weak prefix is
-    **tolerated** on input: `api.e2a.dev` is behind a CDN that can rewrite a
-    strong validator to its weak form in transit, and refusing it would mean a
-    permanent `412` that no retry clears. The comparison still covers the full
-    validator, which changes on every accepted write, so a stale tag never
-    matches.
+  `412 precondition_failed`. Three rules are worth stating because they are easy
+  to get wrong — two follow RFC 9110 §13.1.1, and the first **deliberately
+  deviates** from it, for the reason given there:
+  - Send the validator exactly as you received it. §13.1.1 specifies *strong*
+    comparison for `If-Match`, but the `W/` weak prefix is **tolerated** here on
+    purpose. `api.e2a.dev` is behind a Cloudflare edge that transforms responses
+    (it compresses; our origin does not), and Cloudflare downgrades a strong
+    `ETag` to its weak form whenever it transforms one — a downgrade we cannot
+    disable on our plan. Refusing the weak form would hand a client a permanent
+    `412` for echoing back exactly the validator it was given, and no retry
+    would ever clear it. The comparison still covers the full validator, which
+    changes on every accepted write, so a stale tag never matches.
   - `If-Match: *` means "if any current representation exists": it succeeds on
     an existing resource and is refused when there is none (it never creates).
   - Sending the header with an **empty value** is `400 invalid_request`, not an
