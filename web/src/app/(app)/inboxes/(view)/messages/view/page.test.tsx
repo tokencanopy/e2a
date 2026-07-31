@@ -36,7 +36,7 @@ describe("legacy message focus route", () => {
     });
   });
 
-  it("resolves ordinary message links to their exact canonical thread", async () => {
+  it("resolves ordinary message links to their canonical thread_id fragment", async () => {
     setSearchParams({
       email: "support@acme.io",
       id: "msg_inbound",
@@ -51,6 +51,7 @@ describe("legacy message focus route", () => {
           JSON.stringify({
             id: "msg_inbound",
             direction: "inbound",
+            thread_id: "客户 1%ready",
             conversation_id: "客户 1%ready",
           }),
         ),
@@ -60,7 +61,35 @@ describe("legacy message focus route", () => {
 
     await waitFor(() => {
       expect(mockRouterReplace).toHaveBeenCalledWith(
-        "/inboxes/messages?email=support%40acme.io#conv:%E5%AE%A2%E6%88%B7%201%25ready",
+        "/inboxes/messages?email=support%40acme.io#thr:%E5%AE%A2%E6%88%B7%201%25ready",
+      );
+    });
+  });
+
+  it("preserves legacy conversation navigation for an older server without thread_id", async () => {
+    setSearchParams({
+      email: "support@acme.io",
+      id: "msg_legacy",
+      direction: "inbound",
+    });
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            id: "msg_legacy",
+            direction: "inbound",
+            conversation_id: "legacy workflow",
+          }),
+        ),
+    });
+
+    render(<LegacyMessageFocusRedirect />);
+
+    await waitFor(() => {
+      expect(mockRouterReplace).toHaveBeenCalledWith(
+        "/inboxes/messages?email=support%40acme.io#conv:legacy%20workflow",
       );
     });
   });

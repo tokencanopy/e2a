@@ -54,6 +54,7 @@ export function ThreadList({
             thread={t}
             active={t.key === selectedKey}
             onSelect={onSelect}
+            historyIncomplete={hasMore}
           />
         ))}
         {hasMore && (

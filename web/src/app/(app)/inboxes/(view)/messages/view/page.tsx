@@ -45,9 +45,12 @@ function LegacyMessageFocusRedirectContent() {
     void getMessageDetailWire(email, id)
       .then((message) => {
         if (cancelled) return;
-        const key = message.conversation_id
-          ? `conv:${message.conversation_id}`
-          : `orphan:${message.id}`;
+        const key =
+          message.thread_id != null
+            ? `thr:${message.thread_id}`
+            : message.conversation_id
+              ? `conv:${message.conversation_id}`
+              : `orphan:${message.id}`;
         router.replace(`${inboxURL}#${encodeThreadFragment(key)}`);
       })
       .catch(() => {

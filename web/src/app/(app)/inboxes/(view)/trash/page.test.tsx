@@ -75,6 +75,19 @@ describe("AgentTrashPage", () => {
     expect(screen.getByText(/purges in 28d/)).toBeInTheDocument();
   });
 
+  it("keeps trash flat when deleted rows share a thread_id", async () => {
+    mockList([
+      { ...trashedMessage, id: "msg_1", thread_id: "thread_A" },
+      { ...trashedMessage, id: "msg_2", thread_id: "thread_A" },
+    ]);
+
+    render(<AgentTrashPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("trash-row")).toHaveLength(2);
+    });
+  });
+
   it("Restore POSTs to the message restore endpoint", async () => {
     let restored = false;
     mockFetch.mockImplementation((url: string, init?: RequestInit) => {

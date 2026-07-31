@@ -189,6 +189,7 @@ export async function sendAgentTestEmail(
 // MessageSummary type the UI reads.
 type MessageSummaryWire = {
   id: string;
+  thread_id?: string;
   direction: "inbound" | "outbound";
   header_from: string | null;
   envelope_from: string | null;
@@ -222,6 +223,7 @@ type PageMessageSummaryWire = {
 function projectSummary(w: MessageSummaryWire): import("../types").MessageSummary {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     direction: w.direction,
     from: w.header_from ?? "",
     verified_domain: w.verified_domain,
@@ -356,6 +358,7 @@ export async function getInboxUnread(
 // construction. See lib/swrKeys.ts.
 export type MessageViewWire = {
   id: string;
+  thread_id?: string;
   header_from: string | null;
   envelope_from: string | null;
   verified_domain: string | null;
@@ -402,6 +405,7 @@ export function projectPending(
 ): PendingMessageDetail {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     agent_email: email,
     direction: "outbound",
     subject: w.subject,
@@ -429,6 +433,7 @@ export function projectInbound(
 ): InboundMessageDetail {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     direction: "inbound",
     header_from: w.header_from,
     envelope_from: w.envelope_from,

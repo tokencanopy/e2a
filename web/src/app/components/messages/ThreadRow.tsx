@@ -15,10 +15,13 @@ export function ThreadRow({
   thread,
   active,
   onSelect,
+  historyIncomplete = false,
 }: {
   thread: Thread;
   active: boolean;
   onSelect: (key: string) => void;
+  /** More message pages remain, so this loaded group may gain older members. */
+  historyIncomplete?: boolean;
 }) {
   // Unread = any inbound message still marked unread. v1 carries inbound
   // read state in read_status (delivery_status is outbound-only). Drives
@@ -95,10 +98,18 @@ export function ThreadRow({
         }}
       >
         {thread.counterparty.name}
-        {thread.msgCount > 1 && (
-          <span style={{ color: "var(--fg-subtle)", fontWeight: 400 }}>
+        {(thread.msgCount > 1 || historyIncomplete) && (
+          <span
+            title={
+              historyIncomplete
+                ? "Older messages may be available"
+                : undefined
+            }
+            style={{ color: "var(--fg-subtle)", fontWeight: 400 }}
+          >
             {" "}
             {thread.msgCount}
+            {historyIncomplete ? "+" : ""}
           </span>
         )}
       </span>

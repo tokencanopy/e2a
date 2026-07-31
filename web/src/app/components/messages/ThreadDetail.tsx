@@ -26,6 +26,7 @@ export function ThreadDetail({
   agentEmail,
   onBack,
   onOpenMessage,
+  historyIncomplete = false,
 }: {
   thread: Thread | null;
   agentEmail: string;
@@ -35,6 +36,8 @@ export function ThreadDetail({
   // surface). Reading a message never leaves the conversation — bodies
   // render inline in the bubbles.
   onOpenMessage: (message: MessageSummary) => void;
+  /** More message pages remain, so the loaded count is a lower bound. */
+  historyIncomplete?: boolean;
 }) {
   if (!thread) {
     return (
@@ -122,7 +125,12 @@ export function ThreadDetail({
               color: "var(--fg-subtle)",
             }}
           >
-            {thread.msgCount} {thread.msgCount === 1 ? "message" : "messages"} ·
+            {thread.msgCount}
+            {historyIncomplete ? "+" : ""}{" "}
+            {thread.msgCount === 1 && !historyIncomplete
+              ? "message"
+              : "messages"}{" "}
+            ·
             started {formatRelativeAge(thread.startedAt)}
           </span>
         </div>

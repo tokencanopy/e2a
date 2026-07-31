@@ -38,6 +38,7 @@ const minutesAgo = (n: number) =>
 
 const PENDING_REPLY: MessageSummary = {
   id: "msg_pending",
+  thread_id: "thread_K3p9aQ",
   direction: "outbound",
   from: "support@acme.io",
   to: ["maya@stripe.com"],
@@ -52,6 +53,7 @@ const PENDING_REPLY: MessageSummary = {
 
 const PARENT_INBOUND: MessageSummary = {
   id: "msg_parent",
+  thread_id: "thread_K3p9aQ",
   direction: "inbound",
   from: "maya@stripe.com",
   to: ["support@acme.io"],
@@ -105,7 +107,7 @@ afterEach(() => {
 });
 
 describe("AgentInboxPage", () => {
-  it("renders thread rows grouped by conversation_id", async () => {
+  it("renders non-null thread_id rows as thr: groups and keeps legacy fallbacks", async () => {
     setSearchParams({ email: "support@acme.io" });
     mockMessages([PENDING_REPLY, PARENT_INBOUND, ORPHAN_INBOUND]);
 
@@ -116,7 +118,7 @@ describe("AgentInboxPage", () => {
     });
     // Pending thread sorts to the top.
     const rows = screen.getAllByTestId("thread-row");
-    expect(rows[0].dataset.threadKey).toBe("conv:conv_K3p9aQ");
+    expect(rows[0].dataset.threadKey).toBe("thr:thread_K3p9aQ");
     expect(rows[1].dataset.threadKey).toBe("orphan:msg_solo");
   });
 
@@ -266,12 +268,75 @@ describe("AgentInboxPage", () => {
     expect(screen.queryByRole("button", { name: /load older/i })).not.toBeInTheDocument();
   });
 
+  it("appends an older page member to its existing thread_id group", async () => {
+    const current = {
+      ...PARENT_INBOUND,
+      id: "msg_current",
+      subject: "Paged thread",
+      created_at: minutesAgo(10),
+    };
+    const older = {
+      ...PARENT_INBOUND,
+      id: "msg_older",
+      conversation_id: "different_workflow_metadata",
+      subject: "Paged thread",
+      created_at: minutesAgo(60),
+    };
+    setSearchParams({ email: "support@acme.io" });
+    mockFetch.mockImplementation((url: string) => {
+      const page = url.includes("cursor=older-cursor")
+        ? { items: [older], next_cursor: null }
+        : { items: [current], next_cursor: "older-cursor" };
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify(page)),
+      });
+    });
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+    render(<AgentInboxPage />);
+
+    const initialRow = await screen.findByTestId("thread-row");
+    expect(initialRow.dataset.threadKey).toBe("thr:thread_K3p9aQ");
+    expect(within(initialRow).getByText("1+")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /load older/i }));
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("thread-row")).toHaveLength(1);
+      expect(within(screen.getByTestId("thread-row")).getByText("2")).toBeInTheDocument();
+    });
+  });
+
+  it("marks a selected thread count as incomplete while older pages remain", async () => {
+    setSearchParams({ email: "support@acme.io" });
+    mockFetch.mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              items: [PARENT_INBOUND],
+              next_cursor: "older-cursor",
+            }),
+          ),
+      }),
+    );
+    window.history.replaceState(null, "", "#thr:thread_K3p9aQ");
+
+    render(<AgentInboxPage />);
+
+    expect(await screen.findByText(/1\+ messages/)).toBeInTheDocument();
+  });
+
   it("pending callout appears in the thread detail when a thread is pending", async () => {
     setSearchParams({ email: "support@acme.io" });
     mockMessages([PENDING_REPLY, PARENT_INBOUND]);
     // Gmail model: open the conversation (select its thread) to see the
     // detail + pending callout — the default view is the list.
-    window.history.replaceState(null, "", "#conv:conv_K3p9aQ");
+    window.history.replaceState(null, "", "#thr:thread_K3p9aQ");
 
     render(<AgentInboxPage />);
 
@@ -284,7 +349,7 @@ describe("AgentInboxPage", () => {
   it("clicking the pending callout opens that row on the consolidated Review page", async () => {
     setSearchParams({ email: "support@acme.io" });
     mockMessages([PENDING_REPLY, PARENT_INBOUND]);
-    window.history.replaceState(null, "", "#conv:conv_K3p9aQ");
+    window.history.replaceState(null, "", "#thr:thread_K3p9aQ");
     const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
 
     render(<AgentInboxPage />);
@@ -332,6 +397,7 @@ describe("AgentInboxPage", () => {
     const custom = {
       ...PARENT_INBOUND,
       id: "msg_custom",
+      thread_id: "客户 1%ready",
       conversation_id: "客户 1%ready",
       subject: "Encoded conversation",
     };
@@ -339,7 +405,7 @@ describe("AgentInboxPage", () => {
     window.history.replaceState(
       null,
       "",
-      "#conv:%E5%AE%A2%E6%88%B7%201%25ready",
+      "#thr:%E5%AE%A2%E6%88%B7%201%25ready",
     );
 
     render(<AgentInboxPage />);
@@ -352,6 +418,39 @@ describe("AgentInboxPage", () => {
         "Encoded conversation",
       ).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("falls back to the inbox list for a stale old conversation fragment", async () => {
+    setSearchParams({ email: "support@acme.io" });
+    mockMessages([PENDING_REPLY, PARENT_INBOUND]);
+    window.history.replaceState(null, "", "#conv:conv_K3p9aQ");
+
+    render(<AgentInboxPage />);
+
+    expect(await screen.findByTestId("thread-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("thread-detail")).not.toBeInTheDocument();
+  });
+
+  it("does not select a legacy conv group when the conversation spans new threads", async () => {
+    setSearchParams({ email: "support@acme.io" });
+    const legacy = {
+      ...PARENT_INBOUND,
+      id: "msg_legacy",
+      thread_id: undefined,
+    };
+    const split = {
+      ...PARENT_INBOUND,
+      id: "msg_split",
+      thread_id: "thread_other",
+    };
+    mockMessages([legacy, PARENT_INBOUND, split]);
+    window.history.replaceState(null, "", "#conv:conv_K3p9aQ");
+
+    render(<AgentInboxPage />);
+
+    expect(await screen.findByTestId("thread-list")).toBeInTheDocument();
+    expect(screen.getAllByTestId("thread-row")).toHaveLength(3);
+    expect(screen.queryByTestId("thread-detail")).not.toBeInTheDocument();
   });
 
   it("clicking a thread row opens its conversation (selects via hash)", async () => {
@@ -369,5 +468,17 @@ describe("AgentInboxPage", () => {
     await waitFor(() => {
       expect(screen.getByTestId("thread-detail")).toBeInTheDocument();
     });
+    expect(window.location.hash).toBe("#orphan:msg_solo");
+  });
+
+  it("clicking a threaded row writes a new thr: fragment", async () => {
+    setSearchParams({ email: "support@acme.io" });
+    mockMessages([PARENT_INBOUND]);
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+    render(<AgentInboxPage />);
+    await user.click(await screen.findByTestId("thread-row"));
+
+    expect(window.location.hash).toBe("#thr:thread_K3p9aQ");
   });
 });
