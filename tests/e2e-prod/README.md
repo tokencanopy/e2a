@@ -40,4 +40,20 @@ Do not commit credentials or print secret values in reports or logs.
 npm test              # run all suites (suites/*.test.ts)
 npm run smoke          # quick smoke check (smoke.ts)
 npm run coverage       # run all suites, then the coverage gate
+npm run test:unit      # harness unit tests (node --test harness/*.test.ts)
+npm run test:unit:gates  # gate unit tests (python3 -m unittest test_gates -v)
 ```
+
+`test:unit:gates` is deliberately NOT chained into `test:unit`: the harness
+tests are pure Node, while the gate tests drive the three Python coverage
+gates (`coverage_gate.py`, `event_coverage_gate.py`, `mcp_coverage_gate.py`)
+as subprocesses against synthetic shard directories, and need `python3` +
+PyYAML. Run both in environments that have them.
+
+The three gates fail closed on uncovered surface: every /v1 operationId
+(coverage_gate.py), every webhook event type (event_coverage_gate.py), and
+every advertised MCP tool (mcp_coverage_gate.py) must be exercised by a live
+run. Suite `30-contacts-outreach.test.ts` owns the contacts/outreach surface
+for all three: the 11 contacts operationIds (REST), the 11 contact MCP
+tools, and the `contact.due` event (dual-assertion emission, same bar as
+`21-webhook-events.test.ts`).
