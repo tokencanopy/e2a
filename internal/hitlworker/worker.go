@@ -631,6 +631,10 @@ func sendRequestFromStoredMessage(m *identity.Message) (outbound.SendRequest, er
 	if len(m.ReplyTo) > 0 {
 		replyTo = m.ReplyTo[0]
 	}
+	replyToMessageID := ""
+	if m.Type == "reply" {
+		replyToMessageID = m.EmailMessageID
+	}
 	return outbound.SendRequest{
 		To:               m.ToRecipients,
 		CC:               m.CC,
@@ -639,7 +643,7 @@ func sendRequestFromStoredMessage(m *identity.Message) (outbound.SendRequest, er
 		Body:             m.BodyText,
 		HTMLBody:         m.BodyHTML,
 		ReplyTo:          replyTo,
-		ReplyToMessageID: m.EmailMessageID,
+		ReplyToMessageID: replyToMessageID,
 		ConversationID:   m.ConversationID,
 		Attachments:      attachments,
 		Unsubscribe:      outbound.ManagedUnsubscribeIntent(m.ManagedUnsubscribe),

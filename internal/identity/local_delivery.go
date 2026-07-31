@@ -116,7 +116,7 @@ func (s *Store) ApproveAndDeliverLocal(
 	editedByReviewer := edits.Apply(m)
 
 	reviewerID := userID
-	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusSent, editedByReviewer, &reviewerID, screen)
+	inbound, err := s.finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusSent, editedByReviewer, &reviewerID, screen)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ func (s *Store) ExpireAndDeliverLocal(
 		return nil, err
 	}
 
-	inbound, err := finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusReviewExpiredApproved, false, nil, screen)
+	inbound, err := s.finalizeLocalDeliveryTx(txCtx, tx, m, result, MessageStatusReviewExpiredApproved, false, nil, screen)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func appendLocalDeliveryLifecycle(ctx context.Context, tx pgx.Tx, outbound, inbo
 	return []messagelifecycle.MessageLifecycleTransition{submitted}, []messagelifecycle.MessageLifecycleTransition{accepted}, nil
 }
 
-func finalizeLocalDeliveryTx(
+func (s *Store) finalizeLocalDeliveryTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	m *Message,
@@ -252,7 +252,13 @@ func finalizeLocalDeliveryTx(
 	reviewedByUserID *string,
 	screen LocalInboundScreen,
 ) (*Message, error) {
-	_, err := tx.Exec(ctx,
+	sourceThreadID, err := s.EnsureThreadTx(ctx, tx, m.AgentID, m.ID)
+	if err != nil {
+		return nil, err
+	}
+	m.ThreadID = sourceThreadID
+
+	_, err = tx.Exec(ctx,
 		`UPDATE messages
 		    SET status                = $2,
 		        delivery_status       = 'sent',
@@ -267,6 +273,10 @@ func finalizeLocalDeliveryTx(
 		        reviewed_at           = now(),
 		        reviewed_by_user_id   = $11,
 		        raw_message           = $12::bytea,
+		        rfc_message_id_key    = CASE
+		          WHEN rfc_message_id_key IS NULL AND $13 <> '' THEN $13
+		          ELSE rfc_message_id_key
+		        END,
 		        sent_as               = 'own_address'
 		  WHERE id = $1`,
 		m.ID,
@@ -281,6 +291,7 @@ func finalizeLocalDeliveryTx(
 		editedByReviewer || m.Edited,
 		reviewedByUserID,
 		result.Raw,
+		canonicalRFCMessageIDKey(result.ProviderMessageID),
 	)
 	if err != nil {
 		return nil, err
@@ -294,7 +305,11 @@ func finalizeLocalDeliveryTx(
 	// header_from to reviewers via the review queue, which expects an address,
 	// not an agent id.
 	inbound, err := createInboundMessage(
-		ctx, tx, screen.MessageID, m.AgentID, result.Sender, m.AgentID,
+		ctx, tx, messageThreadAssignment{
+			threadID:         sourceThreadID,
+			rfcMessageIDKey:  freshInboundMessageThread(result.ProviderMessageID).rfcMessageIDKey,
+			resolutionSource: "self_twin",
+		}, screen.MessageID, m.AgentID, result.Sender, m.AgentID,
 		result.ProviderMessageID, m.Subject, m.ConversationID, "unread",
 		result.Raw, nil, nil, screen.Flagged, screen.FlagReason, result.To, result.CC, m.ReplyTo,
 		screen.Screening, &InboundAuth{HeaderFrom: firstOr(result.To, m.AgentID)},
@@ -302,6 +317,7 @@ func finalizeLocalDeliveryTx(
 	if err != nil {
 		return nil, fmt.Errorf("local delivery inbound row: %w", err)
 	}
+	s.recordThreadResolution("self_twin", 1)
 	if _, err := tx.Exec(ctx, `UPDATE messages SET method='loopback' WHERE id=$1`, inbound.ID); err != nil {
 		return nil, fmt.Errorf("local delivery inbound method: %w", err)
 	}

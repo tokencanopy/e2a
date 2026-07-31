@@ -132,6 +132,33 @@ empties.
 | `e2a_queue_depth` | gauge | `queue`, `state` | Job counts per queue (`outbound`, `inbound`, `webhook`, `maintenance`, `notify`, `default`) and state (`available`, `running`, `retryable`, `scheduled`). |
 | `e2a_queue_oldest_age_seconds` | gauge | `queue` | Age of the oldest runnable (`available`) job. Growth means workers aren't keeping up. |
 
+### Thread identity
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_thread_resolution_total` | counter | `source` | Mailbox-local topology decisions and diagnostics. Final decision sources are `api_reply`, `fresh_send`, `forward`, `rfc_in_reply_to`, `rfc_references`, `self_twin`, `authenticated_delivery_twin`, and `no_anchor`. Diagnostic sources are `lazy_legacy_anchor`, `anchor_found_without_thread`, `legacy_anchor_unmatched`, `ambiguous_anchor`, and `cycle_detected`; a diagnostic can accompany a final source for the same write. |
+| `e2a_thread_null_messages` | gauge | `age_bucket` | Threadless messages in the current bounded sample, split into `lt_1h`, `1h_6h`, and `6h_24h`. Rows older than 24 hours are intentionally excluded because historical threadless rows are supported migration state. |
+| `e2a_thread_invariant_violations` | gauge | `kind` | Invalid parent edges in the current bounded sample: `dangling_parent`, `cross_agent_parent`, `thread_mismatch`, `cycle`, or `cycle_depth_limit`. |
+| `e2a_thread_relationship_percent` | gauge | `kind` | Sampled mailbox-local topology ratios: `threads_multi_conversation` and `conversations_multi_thread`. These are expected measurements, not error signals. |
+
+The hourly janitor walks at most 1,000 messages in primary-key order and
+rotates a cursor through the table; parent traversal is capped at 64 edges.
+This is a bounded sample, not a full-table aggregate. It clears a sampled
+child's invalid `thread_parent_id` (including a cycle edge) with a guarded
+update, but never changes `thread_id` or `rfc_message_id_key`. A chain that
+merely reaches the traversal cap is measured as `cycle_depth_limit` and left
+unchanged.
+
+Lazy adoption volume over the last hour is:
+
+```promql
+sum(increase(e2a_thread_resolution_total{source="lazy_legacy_anchor"}[1h]))
+```
+
+Ambiguous anchors also emit a structured, process-wide rate-limited log (at
+most one line per minute). It contains only candidate/thread counts: no
+addresses, subjects, message content, or RFC Message-IDs.
+
 ### Maintenance
 
 | Metric | Type | Labels | Meaning |

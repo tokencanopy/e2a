@@ -1,0 +1,182 @@
+package rfcmessageid
+
+import (
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestParseCanonicalizesDomainOnly(t *testing.T) {
+	got, err := Parse("<CaseSensitive.Left@MAIL.Example.COM>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"<CaseSensitive.Left@mail.example.com>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %v, want %v", got, want)
+	}
+}
+
+func TestParseAcceptsCFWSAroundTokens(t *testing.T) {
+	value := " (first <ignored> (nested\\) comment))\r\n\t<one@EXAMPLE.COM> (between)\t<two@[IPv6:ABCD::1]> "
+
+	got, err := Parse(value)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"<one@example.com>", "<two@[ipv6:abcd::1]>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %v, want %v", got, want)
+	}
+}
+
+func TestParseKeepsLastDuplicateInWireOrder(t *testing.T) {
+	got, err := Parse("<first@EXAMPLE.COM> <second@example.com> <first@example.com> <third@example.com> <second@EXAMPLE.COM>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"<first@example.com>", "<third@example.com>", "<second@example.com>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %v, want %v", got, want)
+	}
+}
+
+func TestParseTokensReturnsLastOriginalAndCanonicalForms(t *testing.T) {
+	got, err := ParseTokens("<First@EXAMPLE.COM> <second@EXAMPLE.COM> <First@example.com>")
+	if err != nil {
+		t.Fatalf("ParseTokens: %v", err)
+	}
+	want := []Token{
+		{Original: "<second@EXAMPLE.COM>", Canonical: "<second@example.com>"},
+		{Original: "<First@example.com>", Canonical: "<First@example.com>"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseTokens = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseTreatsIdentifierLeftAsCaseSensitive(t *testing.T) {
+	got, err := Parse("<Left@example.com> <left@EXAMPLE.COM>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"<Left@example.com>", "<left@example.com>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %v, want %v", got, want)
+	}
+}
+
+func TestParseEmptyOrCFWSOnlyReturnsNoTokens(t *testing.T) {
+	for _, value := range []string{"", " \t", "(nothing here)", "\r\n\t(comment)"} {
+		got, err := Parse(value)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", value, err)
+		}
+		if got != nil {
+			t.Fatalf("Parse(%q) = %#v, want nil", value, got)
+		}
+	}
+}
+
+func TestParseRejectsMalformedValues(t *testing.T) {
+	tests := []string{
+		"bare@example.com",
+		"<missing-at.example.com>",
+		"<@example.com>",
+		"<left@>",
+		"<left..dot@example.com>",
+		"<.left@example.com>",
+		"<left.@example.com>",
+		"<left@example..com>",
+		"<left@.example.com>",
+		"<left@example.com.>",
+		"<left@@example.com>",
+		"<left @example.com>",
+		"<left@(comment)example.com>",
+		"<left@example.com",
+		"left@example.com>",
+		"<<left@example.com>>",
+		"<left@[IPv6:ABCD::1>",
+		"<left@[bad]literal>",
+		"<left@[bad\\literal]>",
+		"<left@éxample.com>",
+		"(unterminated <left@example.com>",
+		"(bad\\)",
+	}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			if got, err := Parse(value); !errors.Is(err, ErrInvalidSyntax) {
+				t.Fatalf("Parse(%q) = %v, %v; want ErrInvalidSyntax", value, got, err)
+			}
+		})
+	}
+}
+
+func TestParseRejectsControlCharactersAndInvalidFolding(t *testing.T) {
+	tests := []string{
+		"<left@\x00example.com>",
+		"<left@example.com>\x7f",
+		"<left@example.com>\n <next@example.com>",
+		"<left@example.com>\r <next@example.com>",
+		"<left@example.com>\r\n<next@example.com>",
+		"(comment\x01)<left@example.com>",
+	}
+
+	for _, value := range tests {
+		if got, err := Parse(value); !errors.Is(err, ErrInvalidSyntax) {
+			t.Fatalf("Parse(%q) = %v, %v; want ErrInvalidSyntax", value, got, err)
+		}
+	}
+}
+
+func TestParseRejectsOversizedInput(t *testing.T) {
+	value := strings.Repeat(" ", MaxInputBytes+1)
+
+	if got, err := Parse(value); !errors.Is(err, ErrInputTooLarge) {
+		t.Fatalf("Parse(oversized) = %v, %v; want ErrInputTooLarge", got, err)
+	}
+}
+
+func TestParseRejectsOversizedIdentifier(t *testing.T) {
+	value := "<" + strings.Repeat("a", MaxIdentifierBytes-len("<@example.com>")+1) + "@example.com>"
+
+	if got, err := Parse(value); !errors.Is(err, ErrInputTooLarge) {
+		t.Fatalf("Parse(oversized identifier) = %v, %v; want ErrInputTooLarge", got, err)
+	}
+}
+
+func TestParseAcceptsIdentifierAtSizeLimit(t *testing.T) {
+	left := strings.Repeat("a", MaxIdentifierBytes-len("<@example.com>"))
+	value := "<" + left + "@example.com>"
+
+	got, err := Parse(value)
+	if err != nil {
+		t.Fatalf("Parse(identifier at limit): %v", err)
+	}
+	if len(got) != 1 || got[0] != value {
+		t.Fatalf("Parse(identifier at limit) returned %d unexpected tokens", len(got))
+	}
+}
+
+func TestCanonicalizeRequiresExactlyOneToken(t *testing.T) {
+	got, err := Canonicalize(" (provider) <Wire.Left@MAIL.EXAMPLE.COM> ")
+	if err != nil {
+		t.Fatalf("Canonicalize: %v", err)
+	}
+	if want := "<Wire.Left@mail.example.com>"; got != want {
+		t.Fatalf("Canonicalize = %q, want %q", got, want)
+	}
+
+	for _, value := range []string{
+		"",
+		"(comment only)",
+		"<one@example.com> <two@example.com>",
+		"<same@example.com> <same@EXAMPLE.COM>",
+	} {
+		if got, err := Canonicalize(value); !errors.Is(err, ErrInvalidSyntax) {
+			t.Fatalf("Canonicalize(%q) = %q, %v; want ErrInvalidSyntax", value, got, err)
+		}
+	}
+}

@@ -22,6 +22,7 @@ func scrape(t *testing.T, p *Prom) string {
 		}
 	}
 	body = strings.ReplaceAll(body, `{build="unknown",`, "{")
+	body = strings.ReplaceAll(body, `,build="unknown"}`, "}")
 	body = strings.ReplaceAll(body, `{build="unknown"}`, "")
 	return body
 }
@@ -250,6 +251,10 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.InboundProcess(secret, 0)
 	p.SetQueueDepth("attacker_queue", "exploded", 1)
 	p.HTTPRequest("PROPFIND", "/v1/agents/{email}", "7xx", 0.1) // unknown method + class
+	p.ThreadResolution(secret, 1)
+	p.SetThreadNullMessages(addr, 2)
+	p.SetThreadInvariantViolations(secret, 3)
+	p.SetThreadRelationshipPercent(addr, 50)
 
 	out := scrape(t, p)
 	if strings.Contains(out, secret) || strings.Contains(out, addr) {
@@ -265,9 +270,38 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_inbound_process_total{outcome="other"} 1`,
 		`e2a_queue_depth{queue="other",state="other"} 1`,
 		`e2a_http_requests_total{method="other",route="/v1/agents/{email}",status_class="other"} 1`,
+		`e2a_thread_resolution_total{source="other"} 1`,
+		`e2a_thread_null_messages{age_bucket="other"} 2`,
+		`e2a_thread_invariant_violations{kind="other"} 3`,
+		`e2a_thread_relationship_percent{kind="other"} 50`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing normalized series %q in exposition", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
+func TestPromEmitsThreadIdentitySeries(t *testing.T) {
+	p := NewProm("")
+	p.ThreadResolution("rfc_in_reply_to", 2)
+	p.ThreadResolution("lazy_legacy_anchor", 1)
+	p.SetThreadNullMessages("lt_1h", 3)
+	p.SetThreadInvariantViolations("dangling_parent", 4)
+	p.SetThreadRelationshipPercent("threads_multi_conversation", 25)
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_thread_resolution_total{source="rfc_in_reply_to"} 2`,
+		`e2a_thread_resolution_total{source="lazy_legacy_anchor"} 1`,
+		`e2a_thread_null_messages{age_bucket="lt_1h"} 3`,
+		`e2a_thread_invariant_violations{kind="dangling_parent"} 4`,
+		`e2a_thread_relationship_percent{kind="threads_multi_conversation"} 25`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing thread identity series %q in exposition", want)
 		}
 	}
 	if t.Failed() {

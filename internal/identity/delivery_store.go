@@ -797,9 +797,14 @@ func (s *Store) PreserveOutboundTerminalFailure(ctx context.Context, messageID s
 // remain eligible because trash may commit after the durable send claim.
 func (s *Store) MarkOutboundSentTx(ctx context.Context, tx pgx.Tx, messageID, providerMessageID string) (*OutboundSentInfo, error) {
 	m := &Message{ID: messageID, Direction: "outbound", DeliveryStatus: "sent", ProviderMessageID: providerMessageID}
+	rfcMessageIDKey := canonicalRFCMessageIDKey(providerMessageID)
 	err := tx.QueryRow(ctx,
 		`UPDATE messages m
 		    SET delivery_status = 'sent', provider_message_id = $2, send_claimed_at = NULL,
+		        rfc_message_id_key = CASE
+		          WHEN rfc_message_id_key IS NULL AND $3 <> '' THEN $3
+		          ELSE rfc_message_id_key
+		        END,
 		        delivery_failure_source=NULL,delivery_failure_reason_code=NULL,delivery_detail=NULL,
 		        delivery_failure_occurred_at=NULL,delivery_failure_attempt=NULL,delivery_failure_blocked_recipients=NULL
 		   FROM agent_identities a
@@ -807,7 +812,7 @@ func (s *Store) MarkOutboundSentTx(ctx context.Context, tx pgx.Tx, messageID, pr
 		    AND m.agent_id = a.id
 		    AND m.delivery_status = 'sending'
 		 RETURNING m.agent_id, m.subject, m.message_type, m.method, m.conversation_id, m.sender, m.to_recipients, m.cc, m.bcc`,
-		messageID, providerMessageID,
+		messageID, providerMessageID, rfcMessageIDKey,
 	).Scan(&m.AgentID, &m.Subject, &m.Type, &m.Method, &m.ConversationID, &m.Sender, &m.ToRecipients, &m.CC, &m.BCC)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

@@ -8,6 +8,7 @@ import (
 
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/janitor"
 	"github.com/tokencanopy/e2a/internal/oauth"
 )
@@ -25,6 +26,8 @@ type fakePruner struct {
 	webhookEventCalled int
 	oauthCalled        int
 	idempotencyCalled  int
+	threadAuditCursors []string
+	threadAuditResults []identity.ThreadIdentityAuditResult
 
 	// per-method error injection
 	messagesErr     error
@@ -35,6 +38,7 @@ type fakePruner struct {
 	webhookEventErr error
 	oauthErr        error
 	idempotencyErr  error
+	threadAuditErr  error
 }
 
 func (f *fakePruner) DeleteExpiredMessages(context.Context) (int64, error) {
@@ -77,6 +81,18 @@ func (f *fakePruner) CleanupExpired(context.Context, time.Time) (oauth.Retention
 	return oauth.RetentionResult{AuthCodesDeleted: 1}, f.oauthErr
 }
 
+func (f *fakePruner) AuditThreadIdentity(_ context.Context, afterID string) (identity.ThreadIdentityAuditResult, error) {
+	f.threadAuditCursors = append(f.threadAuditCursors, afterID)
+	if f.threadAuditErr != nil {
+		return identity.ThreadIdentityAuditResult{}, f.threadAuditErr
+	}
+	index := len(f.threadAuditCursors) - 1
+	if index < len(f.threadAuditResults) {
+		return f.threadAuditResults[index], nil
+	}
+	return identity.ThreadIdentityAuditResult{}, nil
+}
+
 // metricCall captures one JanitorRowsDeleted emission (table + count).
 type metricCall struct {
 	table string
@@ -90,12 +106,26 @@ type fakeMetrics struct {
 	calls          []metricCall
 	expiredPending []int
 	terminals      []terminalMetricCall
+	resolutions    []threadCountMetricCall
+	nullThreads    []threadCountMetricCall
+	violations     []threadCountMetricCall
+	relationships  []threadPercentMetricCall
 }
 
 type terminalMetricCall struct {
 	outcome string
 	scope   string
 	count   int
+}
+
+type threadCountMetricCall struct {
+	kind  string
+	count int
+}
+
+type threadPercentMetricCall struct {
+	kind    string
+	percent float64
 }
 
 func (m *fakeMetrics) JanitorRowsDeleted(table string, count int) {
@@ -108,6 +138,22 @@ func (m *fakeMetrics) WebhookExpiredPending(count int) {
 
 func (m *fakeMetrics) WebhookTerminal(outcome, scope string, count int) {
 	m.terminals = append(m.terminals, terminalMetricCall{outcome, scope, count})
+}
+
+func (m *fakeMetrics) ThreadResolution(source string, count int) {
+	m.resolutions = append(m.resolutions, threadCountMetricCall{source, count})
+}
+
+func (m *fakeMetrics) SetThreadNullMessages(ageBucket string, count int) {
+	m.nullThreads = append(m.nullThreads, threadCountMetricCall{ageBucket, count})
+}
+
+func (m *fakeMetrics) SetThreadInvariantViolations(kind string, count int) {
+	m.violations = append(m.violations, threadCountMetricCall{kind, count})
+}
+
+func (m *fakeMetrics) SetThreadRelationshipPercent(kind string, percent float64) {
+	m.relationships = append(m.relationships, threadPercentMetricCall{kind, percent})
 }
 
 func newJanitor(f *fakePruner, oauth janitor.OAuthPruner) *janitor.Janitor {
@@ -211,6 +257,107 @@ func TestSweep_ContinuesPastErrors(t *testing.T) {
 		f.webhookEventCalled != 1 || f.oauthCalled != 1 || f.idempotencyCalled != 1 {
 		t.Errorf("a prune was skipped after an earlier error: %+v", f)
 	}
+}
+
+func TestSweep_AuditsThreadIdentityAndAdvancesCursor(t *testing.T) {
+	f := &fakePruner{threadAuditResults: []identity.ThreadIdentityAuditResult{
+		{
+			Scanned:    8,
+			NextCursor: "msg_next",
+			Violations: identity.ThreadInvariantViolations{
+				DanglingParent:   1,
+				CrossAgentParent: 2,
+				ThreadMismatch:   3,
+				Cycle:            4,
+				CycleDepthLimit:  5,
+			},
+			RepairedParentPointers: 10,
+			NullThreadsByAge: identity.ThreadNullAgeBuckets{
+				LessThanOneHour:      6,
+				OneToSixHours:        7,
+				SixToTwentyFourHours: 8,
+			},
+			ThreadsSampled:           4,
+			MultiConversationThreads: 1,
+			ConversationsSampled:     5,
+			MultiThreadConversations: 2,
+		},
+		{},
+	}}
+	j, m := newJanitorM(f, nil)
+
+	if err := j.Sweep(context.Background()); err != nil {
+		t.Fatalf("first Sweep: %v", err)
+	}
+	if err := j.Sweep(context.Background()); err != nil {
+		t.Fatalf("second Sweep: %v", err)
+	}
+	if got, want := f.threadAuditCursors, []string{"", "msg_next"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("audit cursors = %v, want %v", got, want)
+	}
+
+	wantNull := []threadCountMetricCall{{"lt_1h", 6}, {"1h_6h", 7}, {"6h_24h", 8}}
+	wantViolations := []threadCountMetricCall{
+		{"dangling_parent", 1},
+		{"cross_agent_parent", 2},
+		{"thread_mismatch", 3},
+		{"cycle", 4},
+		{"cycle_depth_limit", 5},
+	}
+	wantRelationships := []threadPercentMetricCall{
+		{"threads_multi_conversation", 25},
+		{"conversations_multi_thread", 40},
+	}
+	if len(m.nullThreads) < len(wantNull) || !equalThreadCounts(m.nullThreads[:min(len(m.nullThreads), len(wantNull))], wantNull) {
+		t.Errorf("null-thread metrics = %v, want prefix %v", m.nullThreads, wantNull)
+	}
+	if len(m.violations) < len(wantViolations) || !equalThreadCounts(m.violations[:min(len(m.violations), len(wantViolations))], wantViolations) {
+		t.Errorf("violation metrics = %v, want prefix %v", m.violations, wantViolations)
+	}
+	if len(m.relationships) < len(wantRelationships) || !equalThreadPercents(m.relationships[:min(len(m.relationships), len(wantRelationships))], wantRelationships) {
+		t.Errorf("relationship metrics = %v, want prefix %v", m.relationships, wantRelationships)
+	}
+	if got, want := m.resolutions, []threadCountMetricCall{{"cycle_detected", 4}}; !equalThreadCounts(got, want) {
+		t.Errorf("resolution metrics = %v, want %v", got, want)
+	}
+}
+
+func TestSweep_ContinuesAfterThreadAuditError(t *testing.T) {
+	auditErr := errors.New("thread audit boom")
+	f := &fakePruner{threadAuditErr: auditErr}
+	j := newJanitor(f, nil)
+
+	err := j.Sweep(context.Background())
+	if !errors.Is(err, auditErr) {
+		t.Fatalf("Sweep error = %v, want joined thread audit error", err)
+	}
+	if f.idempotencyCalled != 1 {
+		t.Fatalf("idempotency prune called %d times after audit error, want 1", f.idempotencyCalled)
+	}
+}
+
+func equalThreadCounts(got, want []threadCountMetricCall) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalThreadPercents(got, want []threadPercentMetricCall) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestSweep_NilOAuthSkipped: a nil OAuth dependency (OAuth provider disabled) is

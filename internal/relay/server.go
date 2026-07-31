@@ -21,6 +21,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -30,6 +31,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/piguard"
+	"github.com/tokencanopy/e2a/internal/rfcmessageid"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 	"github.com/tokencanopy/e2a/internal/ws"
@@ -554,13 +556,18 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	var inboundMsg *identity.Message
 	err = srv.store.WithTx(ctx, func(tx pgx.Tx) error {
 		var txErr error
-		inboundMsg, txErr = srv.store.CreateInboundMessageAuthenticatedInTx(
+		inboundMsg, txErr = srv.store.CreateInboundMessageAuthenticatedThreadedInTx(
 			ctx, tx, messageID, agent.ID, identity.InboundAuth{HeaderFrom: headerFrom, EnvelopeFrom: envelopeFrom, Authentication: authentication}, rcpt,
 			threadInfo.MessageID, threadInfo.Subject, conversationID,
 			deliveryStatus, body,
 			policyDecision.Flagged, policyDecision.Reason,
 			threadInfo.To, threadInfo.CC, threadInfo.ReplyTo,
 			screenRes.Denorm,
+			identity.InboundThreadEvidence{
+				InReplyTo:            threadInfo.ThreadInReplyTo,
+				References:           threadInfo.ThreadReferences,
+				DeliveryTwinSourceID: threadInfo.E2AMessageID,
+			},
 		)
 		if txErr != nil {
 			return txErr
@@ -895,15 +902,18 @@ func extractEmail(addr string) string {
 }
 
 type threadInfo struct {
-	MessageID      string
-	Subject        string
-	InReplyTo      string
-	References     []string
-	From           string   // From header (human-readable sender, not SMTP envelope)
-	ReplyTo        []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
-	To             []string // To: header addresses (one row per fan-out target sees the same list)
-	CC             []string // Cc: header addresses
-	ConversationID string   // X-E2A-Conversation-ID header, if present
+	MessageID        string
+	Subject          string
+	InReplyTo        string
+	References       []string
+	From             string   // From header (human-readable sender, not SMTP envelope)
+	ReplyTo          []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
+	To               []string // To: header addresses (one row per fan-out target sees the same list)
+	CC               []string // Cc: header addresses
+	ConversationID   string   // X-E2A-Conversation-ID header, if present
+	E2AMessageID     string   // unsigned delivery correlation candidate; store revalidates
+	ThreadInReplyTo  []identity.RFCMessageIDCandidate
+	ThreadReferences []identity.RFCMessageIDCandidate
 }
 
 // extractThreadInfo parses threading headers from a raw RFC 2822 message.
@@ -922,6 +932,8 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 			refs = append(refs, ref)
 		}
 	}
+	threadInReplyTo := parseThreadCandidates(msg.Header.Get("In-Reply-To"))
+	threadReferences := parseThreadCandidates(msg.Header.Get("References"))
 	// Use the same single-author parser as DMARC. Ambiguous From fields are not
 	// projected as a sender identity.
 	fromHeader := author.Address
@@ -934,11 +946,29 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 		// RFC 5322 § 3.6.2 allows multiple addresses in Reply-To. Mirror
 		// the same parser used for To/Cc so display names get stripped
 		// the same way and the field shape is uniform across consumers.
-		ReplyTo:        extractAddressList(msg.Header.Get("Reply-To")),
-		To:             extractAddressList(msg.Header.Get("To")),
-		CC:             extractAddressList(msg.Header.Get("Cc")),
-		ConversationID: msg.Header.Get("X-E2A-Conversation-Id"),
+		ReplyTo:          extractAddressList(msg.Header.Get("Reply-To")),
+		To:               extractAddressList(msg.Header.Get("To")),
+		CC:               extractAddressList(msg.Header.Get("Cc")),
+		ConversationID:   msg.Header.Get("X-E2A-Conversation-Id"),
+		E2AMessageID:     strings.TrimSpace(msg.Header.Get(delivery.MessageIDHeader)),
+		ThreadInReplyTo:  threadInReplyTo,
+		ThreadReferences: threadReferences,
 	}
+}
+
+func parseThreadCandidates(value string) []identity.RFCMessageIDCandidate {
+	tokens, err := rfcmessageid.ParseTokens(value)
+	if err != nil {
+		return nil
+	}
+	out := make([]identity.RFCMessageIDCandidate, 0, len(tokens))
+	for _, token := range tokens {
+		out = append(out, identity.RFCMessageIDCandidate{
+			Original:  token.Original,
+			Canonical: token.Canonical,
+		})
+	}
+	return out
 }
 
 // decodeMIMEHeader decodes any RFC 2047 encoded-word runs in a header value

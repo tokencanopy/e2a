@@ -1067,6 +1067,10 @@ var errHoldAttachments = errors.New("failed to serialize attachments")
 // legacy handler and the v1 httpapi layer call it so there is exactly one
 // hold-and-notify path (api-v1-redesign — outbound extraction).
 func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string) (*identity.Message, error) {
+	return a.HoldForApprovalCoreThreaded(ctx, agent, req, msgType, replyToEmailMessageID, "", nil)
+}
+
+func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID, parentMessageID string, idemCompleteTx AcceptIdemCompleter) (*identity.Message, error) {
 	var attachmentsJSON []byte
 	if len(req.Attachments) > 0 {
 		b, err := json.Marshal(req.Attachments)
@@ -1086,8 +1090,8 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 		// accept-tx. A same-tx enqueue failure fails the whole hold (500) — the same
 		// DB fault would have failed the message insert anyway.
 		if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
-			m, err := a.store.CreatePendingOutboundMessageManagedTx(
-				ctx, tx, agent.ID,
+			m, err := a.store.CreatePendingOutboundMessageManagedThreadedTx(
+				ctx, tx, parentMessageID, agent.ID,
 				req.To, req.CC, req.BCC,
 				req.Subject, req.Body, req.HTMLBody,
 				attachmentsJSON,
@@ -1104,6 +1108,15 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 			if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
 				return err
 			}
+			if idemCompleteTx != nil {
+				if err := idemCompleteTx(ctx, tx, &OutboundResult{
+					Held:              true,
+					PendingMessageID:  m.ID,
+					ApprovalExpiresAt: m.ApprovalExpiresAt,
+				}); err != nil {
+					return err
+				}
+			}
 			msg = m
 			return nil
 		}); txErr != nil {
@@ -1111,20 +1124,35 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 			return nil, txErr
 		}
 	} else {
-		// No notifier configured: plain hold, no notification (behavior unchanged).
-		m, err := a.store.CreatePendingOutboundMessageManaged(
-			ctx, agent.ID,
-			req.To, req.CC, req.BCC,
-			req.Subject, req.Body, req.HTMLBody,
-			attachmentsJSON,
-			msgType, req.ConversationID, replyToEmailMessageID, req.ReplyTo,
-			agent.HITLTTLSeconds, req.Unsubscribe != nil,
-		)
-		if err != nil {
-			log.Printf("[api] hitl: create pending message: agent=%s err=%v", agent.ID, err)
-			return nil, err
+		// No notifier configured: the row and optional keyed replay response still
+		// share one transaction, so a crash cannot create a second held thread.
+		if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
+			m, err := a.store.CreatePendingOutboundMessageManagedThreadedTx(
+				ctx, tx, parentMessageID, agent.ID,
+				req.To, req.CC, req.BCC,
+				req.Subject, req.Body, req.HTMLBody,
+				attachmentsJSON,
+				msgType, req.ConversationID, replyToEmailMessageID, req.ReplyTo,
+				agent.HITLTTLSeconds, req.Unsubscribe != nil,
+			)
+			if err != nil {
+				return err
+			}
+			if idemCompleteTx != nil {
+				if err := idemCompleteTx(ctx, tx, &OutboundResult{
+					Held:              true,
+					PendingMessageID:  m.ID,
+					ApprovalExpiresAt: m.ApprovalExpiresAt,
+				}); err != nil {
+					return err
+				}
+			}
+			msg = m
+			return nil
+		}); txErr != nil {
+			log.Printf("[api] hitl: create pending message: agent=%s err=%v", agent.ID, txErr)
+			return nil, txErr
 		}
-		msg = m
 	}
 
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
@@ -1256,6 +1284,10 @@ func resolveOutboundConversationID(explicit, msgType string, referenced *identit
 }
 
 func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx AcceptIdemCompleter) (*OutboundResult, *OutboundError) {
+	parentMessageID := ""
+	if msgType == "reply" && referenced != nil {
+		parentMessageID = referenced.ID
+	}
 	// Validate the canonical envelope before screening can durably hold the
 	// draft, but deliberately do not mint while it is pending human review.
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, false); uerr != nil {
@@ -1293,7 +1325,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// fully own the hold decision — hitl_enabled/hitl_mode were retired in
 	// Slice 5b (their behavior is mapped forward by migration 042).
 	if verdict.Review() {
-		msg, err := a.HoldForApprovalCore(ctx, agent, req, msgType, replyToEmailMessageID)
+		msg, err := a.HoldForApprovalCoreThreaded(ctx, agent, req, msgType, replyToEmailMessageID, parentMessageID, idemCompleteTx)
 		if err != nil {
 			if errors.Is(err, errHoldAttachments) {
 				return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to serialize attachments"}
@@ -1321,7 +1353,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if req.ScheduledAt != nil {
 			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
 		}
-		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, idemCompleteTx)
+		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, parentMessageID, idemCompleteTx)
 		if err != nil {
 			log.Printf("[api] self-send failed: agent=%s error=%v", agent.EmailAddress(), err)
 			return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "self-send failed"}
@@ -1378,7 +1410,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	//     202/message id. Without a key, that ambiguous retry is a new request and
 	//     may enqueue a duplicate (the public guarantee is at-least-once).
 	if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
-		msg, err := a.store.CreateOutboundMessageTx(ctx, tx, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
+		msg, err := a.store.CreateOutboundMessageThreadedTx(ctx, tx, parentMessageID, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
 		if err != nil {
 			return err
 		}

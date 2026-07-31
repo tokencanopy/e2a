@@ -340,6 +340,14 @@ type Message struct {
 	// is non-null; nil on outbound rows (which never have a verdict).
 	Auth           *emailauth.AuthVerdict `json:"-"`
 	ConversationID string                 `json:"conversation_id,omitempty"`
+	// ThreadID is e2a's mailbox-local materialized email reply topology.
+	// ThreadParentID is the optional directly resolved reply parent and
+	// RFCMessageIDKey is the canonical exact wire anchor. These are internal
+	// storage fields: public projections opt in explicitly, and account export
+	// must not acquire them through Message's JSON representation.
+	ThreadID        string `json:"-"`
+	ThreadParentID  string `json:"-"`
+	RFCMessageIDKey string `json:"-"`
 	// DeliveryStatus is overloaded by direction. On inbound rows it carries
 	// the inbox read/unread status (messages.inbox_status) under this legacy
 	// JSON key. On outbound rows it carries the outbound delivery rollup
@@ -542,6 +550,10 @@ type Store struct {
 	// failure (or settles authoritative provider-accept evidence as sent) and
 	// publishes the matching terminal webhook in the caller's transaction.
 	scheduledSendFinalizer ScheduledSendFinalizer
+	// threadIdentityMetrics is the narrow, low-cardinality observability
+	// surface for topology resolution and lazy legacy adoption. Optional so
+	// stores in tests and embedded deployments remain inert by default.
+	threadIdentityMetrics ThreadIdentityMetrics
 }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs
@@ -580,6 +592,12 @@ func (s *Store) SetOutboundJobCanceller(c OutboundJobCanceller) {
 // used when a scheduled message is restored after its cutoff.
 func (s *Store) SetScheduledSendFinalizer(f ScheduledSendFinalizer) {
 	s.scheduledSendFinalizer = f
+}
+
+// SetThreadMetrics installs the thread-resolution counter sink.
+// Production wires the same telemetry backend used by the janitor gauges.
+func (s *Store) SetThreadMetrics(metrics ThreadIdentityMetrics) {
+	s.threadIdentityMetrics = metrics
 }
 
 func (s *Store) cancelOutboundJobIDsTx(ctx context.Context, tx pgx.Tx, jobIDs []int64) error {
@@ -2090,6 +2108,28 @@ func NewConversationID() string {
 	return "conv_" + generateID()
 }
 
+// NewThreadID returns an opaque mailbox-local email thread identifier. The
+// random suffix matches message and conversation IDs: 128 bits rendered as
+// lowercase hexadecimal.
+func NewThreadID() string {
+	return "thr_" + generateID()
+}
+
+// IsValidThreadID reports whether id has the only persisted thread-ID shape
+// emitted by e2a. Thread IDs are server-owned and are never accepted from API
+// callers.
+func IsValidThreadID(id string) bool {
+	if len(id) != len("thr_")+32 || !strings.HasPrefix(id, "thr_") {
+		return false
+	}
+	for _, c := range id[len("thr_"):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // CreateInboundMessage stores an inbound message. If id is empty a new
 // one is generated; otherwise the caller's pre-generated ID is used so
 // the upstream signer can bind auth headers to the same ID that gets
@@ -2099,14 +2139,26 @@ func NewConversationID() string {
 // header list when the agent was Bcc'd). replyTo is the parsed Reply-To:
 // header (empty when absent — never silently falls back to sender).
 func (s *Store) CreateInboundMessage(ctx context.Context, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, s.pool, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, s.pool, assignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 // CreateInboundMessageAuthenticated stores the canonical identity and
 // authentication model. The legacy CreateInboundMessage remains temporarily
 // available while older tests and relay call sites migrate.
 func (s *Store) CreateInboundMessageAuthenticated(ctx context.Context, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, s.pool, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, s.pool, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 // WithTx opens a transaction, runs fn inside it, and commits if fn
@@ -2139,11 +2191,54 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 // body, executed against either *pgxpool.Pool or pgx.Tx via the
 // messageExecutor interface below.
 func (s *Store) CreateInboundMessageInTx(ctx context.Context, tx pgx.Tx, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, tx, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 func (s *Store) CreateInboundMessageAuthenticatedInTx(ctx context.Context, tx pgx.Tx, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, tx, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
+}
+
+func (s *Store) CreateInboundMessageAuthenticatedThreadedInTx(ctx context.Context, tx pgx.Tx, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, evidence InboundThreadEvidence) (*Message, error) {
+	assignment, err := s.resolveInboundThreadTx(ctx, tx, agentID, recipient, emailMessageID, auth, evidence)
+	if err != nil {
+		return nil, err
+	}
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
+}
+
+// CreateInboundMessageAuthenticatedTwinInTx creates the Inbox representation
+// of a providerless physical delivery that the platform itself already
+// authenticated (self-send/local loopback). It copies the source outbound
+// thread without making either twin the reply parent of the other.
+func (s *Store) CreateInboundMessageAuthenticatedTwinInTx(ctx context.Context, tx pgx.Tx, sourceMessageID, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
+	threadID, err := s.EnsureThreadTx(ctx, tx, agentID, sourceMessageID)
+	if err != nil {
+		return nil, err
+	}
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.threadID = threadID
+	assignment.resolutionSource = "self_twin"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 func storedInboundSender(auth InboundAuth) string {
@@ -2160,9 +2255,12 @@ type messageExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
-func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, canonical *InboundAuth) (*Message, error) {
+func createInboundMessage(ctx context.Context, exec messageExecutor, assignment messageThreadAssignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, canonical *InboundAuth) (*Message, error) {
 	if id == "" {
 		id = NewMessageID()
+	}
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
 	}
 	now := time.Now()
 
@@ -2204,6 +2302,9 @@ func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID
 		RawMessage:        rawMessage,
 		AuthHeaders:       authHeaders,
 		ConversationID:    conversationID,
+		ThreadID:          assignment.threadID,
+		ThreadParentID:    assignment.threadParentID,
+		RFCMessageIDKey:   assignment.rfcMessageIDKey,
 		DeliveryStatus:    deliveryStatus,
 		Flagged:           flagged,
 		FlagReason:        flagReason,
@@ -2226,9 +2327,9 @@ func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID
 		inboxStatus = &m.DeliveryStatus
 	}
 	_, err := exec.Exec(ctx,
-		`INSERT INTO messages (id, agent_id, direction, sender, header_from, envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, raw_message, auth_headers, auth_verdict, flagged, flag_reason, conversation_id, inbox_status, created_at, expires_at, review_reason, scan_score, scan_action, status, approval_expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
-		m.ID, m.AgentID, m.Direction, m.Sender, nullIfEmptyString(m.HeaderFrom), nullIfEmptyString(m.EnvelopeFrom), nullIfEmptyBytes(authenticationJSON), m.Recipient, m.ToRecipients, m.CC, m.ReplyTo, m.Subject, m.EmailMessageID, m.RawMessage, authHeadersJSON, nullIfEmptyBytes(authVerdict), m.Flagged, nullIfEmptyString(m.FlagReason), m.ConversationID, inboxStatus, m.CreatedAt, m.ExpiresAt, nullIfEmptyString(m.ReviewReason), m.ScanScore, nullIfEmptyString(m.ScanAction), m.Status, m.ApprovalExpiresAt,
+		`INSERT INTO messages (id, agent_id, direction, sender, header_from, envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, raw_message, auth_headers, auth_verdict, flagged, flag_reason, conversation_id, thread_id, thread_parent_id, rfc_message_id_key, inbox_status, created_at, expires_at, review_reason, scan_score, scan_action, status, approval_expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
+		m.ID, m.AgentID, m.Direction, m.Sender, nullIfEmptyString(m.HeaderFrom), nullIfEmptyString(m.EnvelopeFrom), nullIfEmptyBytes(authenticationJSON), m.Recipient, m.ToRecipients, m.CC, m.ReplyTo, m.Subject, m.EmailMessageID, m.RawMessage, authHeadersJSON, nullIfEmptyBytes(authVerdict), m.Flagged, nullIfEmptyString(m.FlagReason), m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), nullIfEmptyString(m.RFCMessageIDKey), inboxStatus, m.CreatedAt, m.ExpiresAt, nullIfEmptyString(m.ReviewReason), m.ScanScore, nullIfEmptyString(m.ScanAction), m.Status, m.ApprovalExpiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -2503,6 +2604,17 @@ func (s *Store) CreateOutboundMessage(ctx context.Context, agentID string, toRec
 // can submit the persisted bytes without re-composing. provider_message_id is
 // empty until the worker records the SES id in MarkOutboundSentTx.
 func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID string, toRecipients, cc, bcc []string, subject, msgType, method, providerMessageID, conversationID string, rawMessage []byte, deliveryStatus, envelopeFrom, sentAs string) (*Message, error) {
+	return s.CreateOutboundMessageThreadedTx(
+		ctx, tx, "", agentID, toRecipients, cc, bcc, subject, msgType, method,
+		providerMessageID, conversationID, rawMessage, deliveryStatus,
+		envelopeFrom, sentAs,
+	)
+}
+
+func (s *Store) createOutboundMessageAssignedTx(ctx context.Context, tx pgx.Tx, assignment messageThreadAssignment, agentID string, toRecipients, cc, bcc []string, subject, msgType, method, providerMessageID, conversationID string, rawMessage []byte, deliveryStatus, envelopeFrom, sentAs string) (*Message, error) {
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
+	}
 	id := "msg_" + generateID()
 	now := time.Now()
 
@@ -2521,6 +2633,9 @@ func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID 
 		Method:            method,
 		ProviderMessageID: providerMessageID,
 		ConversationID:    conversationID,
+		ThreadID:          assignment.threadID,
+		ThreadParentID:    assignment.threadParentID,
+		RFCMessageIDKey:   assignment.rfcMessageIDKey,
 		CreatedAt:         now,
 		ExpiresAt:         nil,
 		ToRecipients:      toRecipients,
@@ -2532,9 +2647,9 @@ func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID 
 		SentAs:            sentAs,
 	}
 	_, err := tx.Exec(ctx,
-		`INSERT INTO messages (id, agent_id, direction, recipient, subject, message_type, method, provider_message_id, conversation_id, created_at, expires_at, to_recipients, cc, bcc, status, sender, raw_message, delivery_status, sent_as, envelope_from)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.Type, m.Method, m.ProviderMessageID, m.ConversationID, m.CreatedAt, m.ExpiresAt, m.ToRecipients, m.CC, m.BCC, MessageStatusSent, m.Sender, nullIfEmptyBytes(m.RawMessage), nullIfEmpty(deliveryStatus), nullIfEmpty(sentAs), nullIfEmpty(envelopeFrom),
+		`INSERT INTO messages (id, agent_id, direction, recipient, subject, message_type, method, provider_message_id, conversation_id, thread_id, thread_parent_id, rfc_message_id_key, created_at, expires_at, to_recipients, cc, bcc, status, sender, raw_message, delivery_status, sent_as, envelope_from)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.Type, m.Method, m.ProviderMessageID, m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), nullIfEmptyString(m.RFCMessageIDKey), m.CreatedAt, m.ExpiresAt, m.ToRecipients, m.CC, m.BCC, MessageStatusSent, m.Sender, nullIfEmptyBytes(m.RawMessage), nullIfEmpty(deliveryStatus), nullIfEmpty(sentAs), nullIfEmpty(envelopeFrom),
 	)
 	if err != nil {
 		return nil, err
@@ -2618,7 +2733,15 @@ func (s *Store) CreatePendingOutboundMessageTx(ctx context.Context, tx pgx.Tx, a
 }
 
 func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pgx.Tx, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
-	m, err := createPendingOutboundMessage(ctx, tx, agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
+	return s.CreatePendingOutboundMessageManagedThreadedTx(ctx, tx, "", agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
+}
+
+func (s *Store) CreatePendingOutboundMessageManagedThreadedTx(ctx context.Context, tx pgx.Tx, parentMessageID, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
+	assignment, err := s.outboundThreadAssignmentTx(ctx, tx, agentID, msgType, parentMessageID, "")
+	if err != nil {
+		return nil, err
+	}
+	m, err := createPendingOutboundMessage(ctx, tx, assignment, agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
 	if err != nil {
 		return nil, err
 	}
@@ -2637,6 +2760,7 @@ func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pg
 		return nil, err
 	}
 	m.LifecycleTransitions = []messagelifecycle.MessageLifecycleTransition{hold}
+	s.recordThreadAssignment(assignment)
 	return m, nil
 }
 
@@ -2644,9 +2768,12 @@ func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pg
 // creators; exec is satisfied by both *pgxpool.Pool and pgx.Tx (messageExecutor).
 // replyTo, when non-empty, is a caller-supplied Reply-To override persisted on
 // the reply_to column (single element) so it survives the recompose at approval.
-func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
+func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, assignment messageThreadAssignment, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
 	if ttlSeconds <= 0 || ttlSeconds > HITLMaxTTLSeconds {
 		return nil, fmt.Errorf("ttl_seconds must be between 1 and %d", HITLMaxTTLSeconds)
+	}
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
 	}
 
 	id := "msg_" + generateID()
@@ -2679,6 +2806,8 @@ func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, age
 		EmailMessageID:     replyToEmailMessageID,
 		Type:               msgType,
 		ConversationID:     conversationID,
+		ThreadID:           assignment.threadID,
+		ThreadParentID:     assignment.threadParentID,
 		CreatedAt:          now,
 		ExpiresAt:          nil,
 		ToRecipients:       toRecipients,
@@ -2698,17 +2827,17 @@ func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, age
 	_, err := exec.Exec(ctx,
 		`INSERT INTO messages (
 		    id, agent_id, direction, recipient, subject, email_message_id, message_type,
-		    conversation_id, created_at, expires_at,
+		    conversation_id, thread_id, thread_parent_id, created_at, expires_at,
 		    to_recipients, cc, bcc, reply_to,
 		    status, approval_expires_at,
 		    body_text, body_html, attachments_json, sender, managed_unsubscribe)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7,
-		         $8, $9, $10,
-		         $11, $12, $13, $14,
-		         $15, $16,
-		         $17, $18, $19, $20, $21)`,
+		         $8, $9, $10, $11, $12,
+		         $13, $14, $15, $16,
+		         $17, $18,
+		         $19, $20, $21, $22, $23)`,
 		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.EmailMessageID, m.Type,
-		m.ConversationID, m.CreatedAt, m.ExpiresAt,
+		m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), m.CreatedAt, m.ExpiresAt,
 		m.ToRecipients, m.CC, m.BCC, replyToArg,
 		m.Status, m.ApprovalExpiresAt,
 		nullIfEmptyString(m.BodyText), nullIfEmptyString(m.BodyHTML), attachmentsArg, m.Sender, m.ManagedUnsubscribe,
@@ -3210,7 +3339,11 @@ func (s *Store) ApproveAndSend(
 		        edited            = $10,
 		        reviewed_at       = now(),
 		        reviewed_by_user_id = $11,
-		        raw_message       = $12::bytea
+		        raw_message       = $12::bytea,
+		        rfc_message_id_key = CASE
+		          WHEN rfc_message_id_key IS NULL AND $13 <> '' THEN $13
+		          ELSE rfc_message_id_key
+		        END
 		  WHERE id = $1`,
 		messageID,
 		MessageStatusSent,
@@ -3227,6 +3360,7 @@ func (s *Store) ApproveAndSend(
 		// accepted draft columns. Empty on the rare already-sent replay path
 		// (send_attempts doesn't cache bytes) -> NULL, best-effort.
 		nullIfEmptyBytes(result.Raw),
+		canonicalRFCMessageIDKey(result.ProviderMessageID),
 	)
 	if err != nil {
 		return nil, err
@@ -3476,7 +3610,11 @@ func (s *Store) ExpireApproveAndSend(
 		        bcc               = $7,
 		        recipient         = $8,
 		        reviewed_at       = now(),
-		        raw_message       = $9::bytea
+		        raw_message       = $9::bytea,
+		        rfc_message_id_key = CASE
+		          WHEN rfc_message_id_key IS NULL AND $10 <> '' THEN $10
+		          ELSE rfc_message_id_key
+		        END
 		  WHERE id = $1`,
 		messageID,
 		MessageStatusReviewExpiredApproved,
@@ -3487,6 +3625,7 @@ func (s *Store) ExpireApproveAndSend(
 		result.BCC,
 		firstOr(result.To, ""),
 		nullIfEmptyBytes(result.Raw),
+		canonicalRFCMessageIDKey(result.ProviderMessageID),
 	)
 	if err != nil {
 		return nil, err
@@ -3940,7 +4079,7 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 	var query string
 	var args []interface{}
 
-	baseSelect := `SELECT m.id, m.agent_id, m.direction, m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, COALESCE(m.method, ''), m.conversation_id, COALESCE(m.inbox_status, ''), COALESCE(m.status, ''), COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), COALESCE(octet_length(m.raw_message), 0), m.created_at, m.deleted_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), m.auth_headers, m.scheduled_at
+	baseSelect := `SELECT m.id, m.agent_id, m.direction, m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, COALESCE(m.method, ''), m.conversation_id, COALESCE(m.thread_id, ''), COALESCE(m.inbox_status, ''), COALESCE(m.status, ''), COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), COALESCE(octet_length(m.raw_message), 0), m.created_at, m.deleted_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), m.auth_headers, m.scheduled_at
 		 FROM messages m
 		 LEFT JOIN webhook_deliveries wd ON wd.message_id = m.id
 		 WHERE m.agent_id = $1`
@@ -4067,7 +4206,7 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 		var authHeadersJSON []byte
 		if err := rows.Scan(
 			&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo,
-			&m.Subject, &m.EmailMessageID, &m.Method, &m.ConversationID,
+			&m.Subject, &m.EmailMessageID, &m.Method, &m.ConversationID, &m.ThreadID,
 			&m.InboxStatus, &m.Status, &m.WebhookStatus, &m.WebhookError, &m.SizeBytes,
 			&m.CreatedAt, &m.DeletedAt, &m.Labels,
 			&outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &authVerdict, &m.Flagged, &m.FlagReason,
@@ -4122,12 +4261,12 @@ func (s *Store) GetMessageWithContent(ctx context.Context, messageID, agentID st
 		   UPDATE messages SET inbox_status = CASE WHEN inbox_status = 'unread' THEN 'read' ELSE inbox_status END
 		   WHERE id = $1 AND agent_id = $2
 		     AND NOT (direction = 'inbound' AND status IN (`+heldInboundStatuses+`))
-		   RETURNING id, agent_id, direction, sender, COALESCE(header_from, '') AS header_from, COALESCE(envelope_from, '') AS envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, conversation_id, COALESCE(inbox_status, '') AS inbox_status, raw_message, auth_headers, auth_verdict, COALESCE(flagged, false) AS flagged, COALESCE(flag_reason, '') AS flag_reason, created_at, expires_at, deleted_at, labels, COALESCE(delivery_status, '') AS delivery_status, COALESCE(delivery_detail, '') AS delivery_detail, COALESCE(sent_as, '') AS sent_as, COALESCE(body_text, '') AS body_text, COALESCE(body_html, '') AS body_html, COALESCE(status, '') AS status, COALESCE(method, '') AS method, scheduled_at
+		   RETURNING id, agent_id, direction, sender, COALESCE(header_from, '') AS header_from, COALESCE(envelope_from, '') AS envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, conversation_id, COALESCE(thread_id, '') AS thread_id, COALESCE(thread_parent_id, '') AS thread_parent_id, COALESCE(rfc_message_id_key, '') AS rfc_message_id_key, COALESCE(inbox_status, '') AS inbox_status, raw_message, auth_headers, auth_verdict, COALESCE(flagged, false) AS flagged, COALESCE(flag_reason, '') AS flag_reason, created_at, expires_at, deleted_at, labels, COALESCE(delivery_status, '') AS delivery_status, COALESCE(delivery_detail, '') AS delivery_detail, COALESCE(sent_as, '') AS sent_as, COALESCE(body_text, '') AS body_text, COALESCE(body_html, '') AS body_html, COALESCE(status, '') AS status, COALESCE(method, '') AS method, scheduled_at
 		 )
-		 SELECT upd.id, upd.agent_id, upd.direction, upd.sender, upd.header_from, upd.envelope_from, upd.authentication, upd.recipient, upd.to_recipients, upd.cc, upd.reply_to, upd.subject, upd.email_message_id, upd.conversation_id, upd.inbox_status, upd.raw_message, upd.auth_headers, upd.auth_verdict, upd.flagged, upd.flag_reason, upd.created_at, upd.expires_at, upd.deleted_at, upd.labels, upd.delivery_status, upd.delivery_detail, upd.sent_as, upd.body_text, upd.body_html, upd.status, upd.method, upd.scheduled_at, COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
+		 SELECT upd.id, upd.agent_id, upd.direction, upd.sender, upd.header_from, upd.envelope_from, upd.authentication, upd.recipient, upd.to_recipients, upd.cc, upd.reply_to, upd.subject, upd.email_message_id, upd.conversation_id, upd.thread_id, upd.thread_parent_id, upd.rfc_message_id_key, upd.inbox_status, upd.raw_message, upd.auth_headers, upd.auth_verdict, upd.flagged, upd.flag_reason, upd.created_at, upd.expires_at, upd.deleted_at, upd.labels, upd.delivery_status, upd.delivery_detail, upd.sent_as, upd.body_text, upd.body_html, upd.status, upd.method, upd.scheduled_at, COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
 		 FROM upd LEFT JOIN webhook_deliveries wd ON wd.message_id = upd.id`,
 		messageID, agentID,
-	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.CreatedAt, &m.ExpiresAt, &m.DeletedAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.Method, &m.ScheduledAt, &m.WebhookStatus, &m.WebhookError)
+	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.ThreadID, &m.ThreadParentID, &m.RFCMessageIDKey, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.CreatedAt, &m.ExpiresAt, &m.DeletedAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.Method, &m.ScheduledAt, &m.WebhookStatus, &m.WebhookError)
 	if err != nil {
 		return nil, err
 	}
@@ -4304,6 +4443,18 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 			if len(messageIDs) == 0 {
 				return nil
 			}
+			// A hard-deleted parent cannot remain as a dangling internal pointer
+			// on a surviving child. Children that are part of this same purge
+			// batch need no update because they are deleted immediately below.
+			if _, err := tx.Exec(ctx,
+				`UPDATE messages
+				    SET thread_parent_id = NULL
+				  WHERE thread_parent_id = ANY($1)
+				    AND NOT (id = ANY($1))`,
+				messageIDs,
+			); err != nil {
+				return err
+			}
 			tag, err := tx.Exec(ctx, `DELETE FROM messages WHERE id = ANY($1)`, messageIDs)
 			if err != nil {
 				return err
@@ -4424,6 +4575,15 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 			if err := s.cancelOutboundJobIDsTx(ctx, tx, []int64{*sendJobID}); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE messages
+			    SET thread_parent_id = NULL
+			  WHERE agent_id = $2
+			    AND thread_parent_id = $1`,
+			messageID, agentID,
+		); err != nil {
+			return err
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM messages WHERE id = $1`, messageID)
 		return err

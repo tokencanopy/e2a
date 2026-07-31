@@ -61,6 +61,7 @@ func (a *API) performSelfSend(
 	agent *identity.AgentIdentity,
 	req outbound.SendRequest,
 	msgType string,
+	parentMessageID string,
 	idemCompleteTx AcceptIdemCompleter,
 ) (*identity.Message, error) {
 	email := agent.EmailAddress()
@@ -97,8 +98,8 @@ func (a *API) performSelfSend(
 	var receivedEvent webhookpub.Event
 	err = a.store.WithTx(ctx, func(tx pgx.Tx) error {
 		var txErr error
-		outboundMsg, txErr = a.store.CreateOutboundMessageTx(
-			ctx, tx, agent.ID, []string{email}, nil, nil, req.Subject, msgType,
+		outboundMsg, txErr = a.store.CreateOutboundMessageThreadedTx(
+			ctx, tx, parentMessageID, agent.ID, []string{email}, nil, nil, req.Subject, msgType,
 			"loopback", providerID, req.ConversationID, rawMessage,
 			"sent", "", "own_address",
 		)
@@ -106,8 +107,8 @@ func (a *API) performSelfSend(
 			return fmt.Errorf("self-send outbound row: %w", txErr)
 		}
 
-		inboundMsg, txErr := a.store.CreateInboundMessageAuthenticatedInTx(
-			ctx, tx, inboundID, agent.ID, identity.InboundAuth{HeaderFrom: email, StoredSender: loopbackDisplayFrom(req, email)}, email, providerID, req.Subject,
+		inboundMsg, txErr := a.store.CreateInboundMessageAuthenticatedTwinInTx(
+			ctx, tx, outboundMsg.ID, inboundID, agent.ID, identity.InboundAuth{HeaderFrom: email, StoredSender: loopbackDisplayFrom(req, email)}, email, providerID, req.Subject,
 			req.ConversationID, "unread", rawMessage, gate.Flagged, gate.Reason,
 			[]string{email}, nil, replyToList(req.ReplyTo), screenRes.Denorm,
 		)
