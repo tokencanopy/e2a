@@ -43,6 +43,12 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$ROOT:/work" "$IMG" 
 find "$OUT" -name '*.ts' -print0 | xargs -0 perl -i -ne \
   'print unless /^\s*import\s+["'"'"']whatwg-fetch["'"'"'];\s*$/'
 
+# The generator emits setHeaderParam(...) unconditionally for OPTIONAL header
+# params (e.g. If-Match); an omitted param then reaches the wire as the literal
+# string "undefined". Wrap those emissions in `if (param !== undefined)` guards
+# (Idempotency-Key stays unguarded — retry.ts depends on the stub; see script).
+python3 "$ROOT/scripts/guard-optional-header-params.py" "$OUT/apis"
+
 # OpenAPI Generator imports every schema into its API wrapper variants and
 # imports HttpFile into standalone models even when those symbols are unused.
 # Normalize selected generator-known unused imports so static analysis and the

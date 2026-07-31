@@ -112,6 +112,8 @@ generate-check: spec-check generate-sdk-check
 generate-sdk-check: generate-sdk
 	@echo "==> Testing generated import normalization"
 	python3 -m unittest scripts/test_strip_unused_generated_imports.py
+	@echo "==> Testing optional-header-param guard normalization"
+	python3 -m unittest scripts/test_guard_optional_header_params.py
 	@echo "==> Checking generated code is up to date"
 	git diff --exit-code sdks/typescript/src/v1/generated/ sdks/python/src/e2a/v1/generated/
 
