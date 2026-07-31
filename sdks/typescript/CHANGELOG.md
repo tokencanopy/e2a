@@ -29,6 +29,23 @@ Additive only. Every 5.3.0 call site keeps compiling and behaving identically.
   `pending` | `verified` | `failed`, with detail in `sendingError`). Both are
   open string sets — tolerate unknown values.
 
+- **`client.contacts`** — manage the people an account corresponds with:
+  `list`/`get`/`getWithETag`/`create`/`update`/`delete` (account-scoped,
+  optimistic concurrency via `ifMatch`), plus `import`/`deleteImport` for
+  structured-row bulk imports. `client.contacts.outreach(email, params)` and
+  its `getOutreach`/`getOutreachWithETag`/`setOutreach`/`deleteOutreach`
+  counterparts track one agent's per-contact engagement (stage, next action,
+  reply/suppression state) and may be driven by an agent-scoped credential.
+- **`sendAt` on `messages.send` / `.reply` / `.forward`** — schedule a future
+  send by passing a `Date`, no more than 90 days ahead. Beta and may change
+  before it is declared stable. The durable `scheduled` result is success, not
+  a reason to retry; even with `wait: "sent"` it returns immediately rather
+  than holding the HTTP request until the future time.
+- **`message.threadId`** — an optional beta, server-owned, read-only identity
+  for the mailbox-local reply graph, exposed on message list/detail models.
+  Legacy messages can omit it. There is no `threadId` request field, list
+  filter, thread endpoint, or complete-thread retrieval method.
+
 ### Fixed
 - **HTTP 410 now maps to `E2ANotFoundError`** in the status fallback, matching
   the family the `gone` error code already took in the code table. Previously a

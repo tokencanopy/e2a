@@ -29,6 +29,25 @@ parameters are keyword-only with defaults that preserve 5.3.0 behavior.
   address (``none`` | ``pending`` | ``verified`` | ``failed``, with detail in
   ``sending_error``). Both are open string sets — tolerate unknown values.
 
+- **`client.contacts`** — manage the people an account corresponds with:
+  `list`/`get`/`get_with_etag`/`create`/`update`/`delete` (account-scoped,
+  optimistic concurrency via `if_match`), plus `import_`/`delete_import` for
+  structured-row bulk imports. `client.contacts.outreach(email, ...)` and its
+  `get_outreach`/`get_outreach_with_etag`/`set_outreach`/`delete_outreach`
+  counterparts track one agent's per-contact engagement (stage, next action,
+  reply/suppression state) and may be driven by an agent-scoped credential.
+  Available on both `AsyncE2AClient` and the synchronous `E2AClient`.
+- **``send_at`` on ``messages.send`` / ``.reply`` / ``.forward``** — schedule a
+  future send with a timezone-aware ``datetime``, no more than 90 days ahead.
+  Beta and may change before it is declared stable. The durable ``scheduled``
+  result is success, not a reason to retry; even with ``wait="sent"`` it
+  returns immediately rather than holding the HTTP request until the future
+  time.
+- **``message.thread_id``** — an optional beta, server-owned, read-only
+  identity for the mailbox-local reply graph, exposed on message list/detail
+  models. Legacy messages can omit it. There is no ``thread_id`` request
+  field, list filter, thread endpoint, or complete-thread retrieval method.
+
 ### Fixed
 - **``unsubscribe=`` no longer mutates the caller's request model.** When the
   body was already a ``SendEmailRequest`` / ``ReplyRequest`` / ``ForwardRequest``
