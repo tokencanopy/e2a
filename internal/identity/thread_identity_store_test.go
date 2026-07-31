@@ -64,7 +64,7 @@ func TestThreadIdentityMigrationsDoNotBackfillExistingMessages(t *testing.T) {
 		"088_messages_thread_parent_idx.sql",
 		"089_messages_agent_inbound_message_id_idx.sql",
 		"090_messages_thread_parent_id_idx.sql",
-		"091_drop_messages_thread_parent_idx.sql",
+		"092_messages_outbound_provider_agent_idx.sql",
 	} {
 		sql, err := migrations.FS.ReadFile(name)
 		if err != nil {
@@ -88,11 +88,12 @@ func TestThreadIdentityMigrationsDoNotBackfillExistingMessages(t *testing.T) {
 	}
 }
 
-func TestLegacyInboundAnchorLookupUsesPartialIndexWithGenericPlan(t *testing.T) {
+func TestThreadAnchorBatchLookupUsesExactIndexesWithGenericPlan(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
 	agentID := convoTestSetup(t, store, "legacy-inbound-index")
+	otherAgentID := convoTestSetup(t, store, "legacy-outbound-index-other")
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO messages (id, agent_id, direction, email_message_id)
 		 SELECT 'msg_legacy_plan_' || g,
@@ -103,6 +104,17 @@ func TestLegacyInboundAnchorLookupUsesPartialIndexWithGenericPlan(t *testing.T) 
 		agentID,
 	); err != nil {
 		t.Fatalf("seed planner distribution: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO messages (id, agent_id, direction, provider_message_id)
+		 SELECT 'msg_provider_plan_' || g,
+		        CASE WHEN g = 5000 THEN $1 ELSE $2 END,
+		        'outbound',
+		        '<legacy-plan-2500@EXAMPLE.TEST>'
+		   FROM generate_series(1, 5000) AS g`,
+		agentID, otherAgentID,
+	); err != nil {
+		t.Fatalf("seed outbound planner distribution: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE messages`); err != nil {
 		t.Fatalf("analyze messages: %v", err)
@@ -125,26 +137,21 @@ func TestLegacyInboundAnchorLookupUsesPartialIndexWithGenericPlan(t *testing.T) 
 		_, _ = conn.Exec(context.Background(), `RESET enable_seqscan`)
 	}()
 
-	const statement = "thread_legacy_inbound_probe"
+	const statement = "thread_anchor_batch_probe"
 	if _, err := conn.Exec(ctx, `DEALLOCATE ALL`); err != nil {
 		t.Fatalf("deallocate existing prepared statements: %v", err)
 	}
-	if _, err := conn.Exec(ctx, `PREPARE `+statement+` (text, text[]) AS
-		SELECT id, COALESCE(thread_id, '')
-		  FROM messages
-		 WHERE agent_id = $1
-		   AND direction = 'inbound'
-		   AND email_message_id <> ''
-		   AND email_message_id = ANY($2)
-		 ORDER BY created_at, id`); err != nil {
-		t.Fatalf("prepare legacy lookup: %v", err)
+	if _, err := conn.Exec(ctx, `PREPARE `+statement+` (text, integer[], text[], text[], integer) AS `+
+		identity.ThreadAnchorBatchQueryForTest()); err != nil {
+		t.Fatalf("prepare production thread anchor batch lookup: %v", err)
 	}
 
 	rows, err := conn.Query(ctx,
 		`EXPLAIN (FORMAT TEXT) EXECUTE `+statement+` ('`+
-			strings.ReplaceAll(agentID, `'`, `''`)+`', ARRAY['<legacy-plan-2500@example.test>'])`)
+			strings.ReplaceAll(agentID, `'`, `''`)+
+			`', ARRAY[0], ARRAY['<legacy-plan-2500@EXAMPLE.TEST>'], ARRAY['<legacy-plan-2500@example.test>'], 17)`)
 	if err != nil {
-		t.Fatalf("explain generic legacy lookup: %v", err)
+		t.Fatalf("explain generic production lookup: %v", err)
 	}
 	defer rows.Close()
 	var plan strings.Builder
@@ -159,9 +166,34 @@ func TestLegacyInboundAnchorLookupUsesPartialIndexWithGenericPlan(t *testing.T) 
 	if err := rows.Err(); err != nil {
 		t.Fatalf("explain rows: %v", err)
 	}
-	if !strings.Contains(plan.String(), "messages_agent_inbound_message_id_idx") {
-		t.Fatalf("generic legacy lookup did not use partial index:\n%s", plan.String())
+	assertIndexCond := func(index string, required ...string) {
+		t.Helper()
+		planText := plan.String()
+		indexAt := strings.Index(planText, index)
+		if indexAt < 0 {
+			t.Fatalf("generic production lookup did not use %s:\n%s", index, planText)
+		}
+		afterIndex := planText[indexAt+len(index):]
+		condAt := strings.Index(afterIndex, "Index Cond:")
+		if condAt < 0 {
+			t.Fatalf("generic production lookup used %s without an Index Cond:\n%s", index, planText)
+		}
+		condLine := afterIndex[condAt:]
+		if newline := strings.IndexByte(condLine, '\n'); newline >= 0 {
+			condLine = condLine[:newline]
+		}
+		for _, fragment := range required {
+			if !strings.Contains(condLine, fragment) {
+				t.Fatalf("%s condition %q does not contain %q:\n%s", index, condLine, fragment, planText)
+			}
+		}
 	}
+	assertIndexCond("messages_agent_rfc_message_id_idx",
+		"agent_id = $1", "rfc_message_id_key = input.canonical")
+	assertIndexCond("messages_agent_inbound_message_id_idx",
+		"agent_id = $1", "email_message_id = input.original")
+	assertIndexCond("messages_outbound_provider_agent_idx",
+		"provider_message_id = input.original", "agent_id = $1")
 }
 
 func TestCreateOutboundMessageTxAssignsDistinctFreshThreads(t *testing.T) {

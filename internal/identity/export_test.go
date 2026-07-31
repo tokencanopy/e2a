@@ -18,3 +18,9 @@ func SetThreadChildDetachBatchForTest(n int64) (restore func()) {
 	threadChildDetachBatch = n
 	return func() { threadChildDetachBatch = prev }
 }
+
+// ThreadAnchorBatchQueryForTest exposes the exact production lookup so generic
+// planner tests cannot silently drift to a simplified, index-friendly shape.
+func ThreadAnchorBatchQueryForTest() string {
+	return threadAnchorBatchQuery
+}

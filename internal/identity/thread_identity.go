@@ -279,15 +279,19 @@ func (s *Store) resolveInboundThreadTx(ctx context.Context, tx pgx.Tx, agentID, 
 	if err != nil {
 		return messageThreadAssignment{}, err
 	}
-	if err := lockInitiallyThreadlessAnchorsTx(ctx, tx, agentID, initialMatches); err != nil {
-		return messageThreadAssignment{}, err
-	}
-	// Re-read after the deterministic lock. A concurrent EnsureThreadTx that
-	// started first may have changed a null row while we waited; consensus must
-	// use that committed value rather than the initial snapshot.
-	matches, err := s.findThreadAnchorsBatchTx(ctx, tx, agentID, candidates)
+	lockedThreadless, err := lockInitiallyThreadlessAnchorsTx(ctx, tx, agentID, initialMatches)
 	if err != nil {
 		return messageThreadAssignment{}, err
+	}
+	matches := initialMatches
+	if lockedThreadless {
+		// Re-read after the deterministic lock. A concurrent EnsureThreadTx that
+		// started first may have changed a null row while we waited; consensus
+		// must use that committed value rather than the initial snapshot.
+		matches, err = s.findThreadAnchorsBatchTx(ctx, tx, agentID, candidates)
+		if err != nil {
+			return messageThreadAssignment{}, err
+		}
 	}
 
 	for i, candidate := range candidates {
@@ -511,6 +515,64 @@ func containsNormalizedAddress(addresses []string, target string) bool {
 // index probes is capped at N+1, then their union is deduplicated and capped at
 // N+1 again. Returning N+1 rows marks that candidate ambiguous without ever
 // materializing an attacker-controlled duplicate set.
+const threadAnchorBatchQuery = `WITH requested AS (
+   SELECT *
+     FROM unnest($2::integer[], $3::text[], $4::text[])
+          AS input(ordinal, original, canonical)
+ )
+ SELECT requested.ordinal, matched.id, matched.thread_id
+   FROM requested
+   CROSS JOIN LATERAL (
+     SELECT candidate.id, candidate.thread_id
+       FROM (
+         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+            FROM messages m
+           WHERE m.agent_id = $1
+             AND m.rfc_message_id_key = requested.canonical
+           LIMIT $5)
+         UNION ALL
+         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+            FROM messages m
+           WHERE m.agent_id = $1
+             AND m.direction = 'inbound'
+             AND m.email_message_id <> ''
+             AND m.email_message_id = requested.original
+           LIMIT $5)
+         UNION ALL
+         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+            FROM messages m
+           WHERE m.agent_id = $1
+             AND m.direction = 'inbound'
+             AND m.email_message_id <> ''
+             AND requested.canonical <> requested.original
+             AND m.email_message_id = requested.canonical
+           LIMIT $5)
+         UNION ALL
+         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+            FROM messages m
+           WHERE m.agent_id = $1
+             AND m.direction = 'outbound'
+             AND m.provider_message_id <> ''
+             AND m.provider_message_id = requested.original
+           ORDER BY m.provider_message_id, m.agent_id, m.id
+           LIMIT $5)
+         UNION ALL
+         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
+            FROM messages m
+           WHERE m.agent_id = $1
+             AND m.direction = 'outbound'
+             AND m.provider_message_id <> ''
+             AND requested.canonical <> requested.original
+             AND m.provider_message_id = requested.canonical
+           ORDER BY m.provider_message_id, m.agent_id, m.id
+           LIMIT $5)
+       ) AS candidate
+      GROUP BY candidate.id, candidate.thread_id
+      ORDER BY candidate.id
+      LIMIT $5
+   ) AS matched
+  ORDER BY requested.ordinal, matched.id`
+
 func (s *Store) findThreadAnchorsBatchTx(ctx context.Context, tx pgx.Tx, agentID string, candidates []sourcedThreadCandidate) ([][]threadAnchorRow, error) {
 	matches := make([][]threadAnchorRow, len(candidates))
 	if len(candidates) == 0 {
@@ -524,46 +586,7 @@ func (s *Store) findThreadAnchorsBatchTx(ctx context.Context, tx pgx.Tx, agentID
 		originals[i] = candidate.Original
 		canonicals[i] = candidate.Canonical
 	}
-	rows, err := tx.Query(ctx,
-		`WITH requested AS (
-		   SELECT *
-		     FROM unnest($2::integer[], $3::text[], $4::text[])
-		          AS input(ordinal, original, canonical)
-		 )
-		 SELECT requested.ordinal, matched.id, matched.thread_id
-		   FROM requested
-		   CROSS JOIN LATERAL (
-		     SELECT candidate.id, candidate.thread_id
-		       FROM (
-		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
-		            FROM messages m
-		           WHERE m.agent_id = $1
-		             AND m.rfc_message_id_key = requested.canonical
-		           LIMIT $5)
-		         UNION ALL
-		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
-		            FROM messages m
-		           WHERE m.agent_id = $1
-		             AND m.direction = 'inbound'
-		             AND m.email_message_id <> ''
-		             AND (m.email_message_id = requested.original
-		                  OR m.email_message_id = requested.canonical)
-		           LIMIT $5)
-		         UNION ALL
-		         (SELECT m.id, COALESCE(m.thread_id, '') AS thread_id
-		            FROM messages m
-		           WHERE m.agent_id = $1
-		             AND m.direction = 'outbound'
-		             AND m.provider_message_id <> ''
-		             AND (m.provider_message_id = requested.original
-		                  OR m.provider_message_id = requested.canonical)
-		           LIMIT $5)
-		       ) AS candidate
-		      GROUP BY candidate.id, candidate.thread_id
-		      ORDER BY candidate.id
-		      LIMIT $5
-		   ) AS matched
-		  ORDER BY requested.ordinal, matched.id`,
+	rows, err := tx.Query(ctx, threadAnchorBatchQuery,
 		agentID, ordinals, originals, canonicals, MaxThreadAnchorMatches+1,
 	)
 	if err != nil {
@@ -584,7 +607,7 @@ func (s *Store) findThreadAnchorsBatchTx(ctx context.Context, tx pgx.Tx, agentID
 	return matches, rows.Err()
 }
 
-func lockInitiallyThreadlessAnchorsTx(ctx context.Context, tx pgx.Tx, agentID string, matches [][]threadAnchorRow) error {
+func lockInitiallyThreadlessAnchorsTx(ctx context.Context, tx pgx.Tx, agentID string, matches [][]threadAnchorRow) (bool, error) {
 	unique := make(map[string]struct{})
 	for _, candidateRows := range matches {
 		if len(candidateRows) > MaxThreadAnchorMatches {
@@ -597,7 +620,7 @@ func lockInitiallyThreadlessAnchorsTx(ctx context.Context, tx pgx.Tx, agentID st
 		}
 	}
 	if len(unique) == 0 {
-		return nil
+		return false, nil
 	}
 	ids := make([]string, 0, len(unique))
 	for id := range unique {
@@ -615,14 +638,14 @@ func lockInitiallyThreadlessAnchorsTx(ctx context.Context, tx pgx.Tx, agentID st
 		agentID, ids,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return rows.Err()
+	return true, rows.Err()
 }

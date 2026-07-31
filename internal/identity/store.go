@@ -4455,7 +4455,6 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 				   FROM messages m
 				  WHERE m.deleted_at IS NOT NULL
 				    AND m.deleted_at <= now() - make_interval(secs => $2)
-				  ORDER BY m.id
 				  LIMIT $1
 				  FOR UPDATE SKIP LOCKED`,
 				expiredDeleteBatch, TrashRetention.Seconds())

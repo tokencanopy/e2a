@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -84,6 +85,11 @@ const e2aMigrationLockID int64 = 0x65325F4D49475200
 // into two numbered files: one transactional (the setup), one with
 // this directive (the CONCURRENTLY statement).
 const noTransactionDirective = "e2a:no-transaction"
+
+var (
+	createConcurrentIndexMarker = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b`)
+	createConcurrentIndexTarget = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*)(?:\.(?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*))?)`)
+)
 
 // acquireConnTimeout caps how long the runner will wait for a pooled
 // connection to be available before bailing out. Hit during rolling
@@ -333,6 +339,41 @@ func stripSQLCommentsAndStrings(body string) string {
 	return b.String()
 }
 
+// validateConcurrentIndexPostcondition closes the non-atomic retry gap of
+// CREATE INDEX CONCURRENTLY. PostgreSQL can leave an INVALID same-name index
+// after an interrupted build; a retry with IF NOT EXISTS then returns success.
+// Never record that migration as applied unless its exact target exists and is
+// both ready and valid.
+func validateConcurrentIndexPostcondition(ctx context.Context, conn *pgxpool.Conn, body string) error {
+	stripped := stripSQLCommentsAndStrings(body)
+	if !createConcurrentIndexMarker.MatchString(stripped) {
+		return nil
+	}
+	match := createConcurrentIndexTarget.FindStringSubmatch(stripped)
+	if len(match) != 2 {
+		return fmt.Errorf("could not identify CREATE INDEX CONCURRENTLY target")
+	}
+	target := match[1]
+	var exists, valid, ready bool
+	if err := conn.QueryRow(ctx,
+		`SELECT target.oid IS NOT NULL,
+		        COALESCE(idx.indisvalid, false),
+		        COALESCE(idx.indisready, false)
+		   FROM (SELECT to_regclass($1) AS oid) AS target
+		   LEFT JOIN pg_index AS idx ON idx.indexrelid = target.oid`,
+		target,
+	).Scan(&exists, &valid, &ready); err != nil {
+		return fmt.Errorf("verify concurrent index %s: %w", target, err)
+	}
+	if !exists || !valid || !ready {
+		return fmt.Errorf(
+			"concurrent index %s is missing or invalid (exists=%t indisvalid=%t indisready=%t); DROP INDEX CONCURRENTLY IF EXISTS %s and retry",
+			target, exists, valid, ready, target,
+		)
+	}
+	return nil
+}
+
 // applyOne reads a migration file and applies it.
 //
 // For migrations without the no-transaction directive: SQL + tracker
@@ -365,6 +406,9 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 		}
 		if _, err := conn.Exec(ctx, string(body)); err != nil {
 			return fmt.Errorf("exec migration (no-transaction): %w", err)
+		}
+		if err := validateConcurrentIndexPostcondition(ctx, conn, string(body)); err != nil {
+			return fmt.Errorf("verify migration %s: %w", name, err)
 		}
 		if _, err := conn.Exec(ctx,
 			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",

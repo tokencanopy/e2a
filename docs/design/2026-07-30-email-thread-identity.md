@@ -281,22 +281,35 @@ create index concurrently if not exists messages_thread_parent_id_idx
 create index concurrently if not exists messages_agent_inbound_message_id_idx
     on messages (agent_id, email_message_id)
     where direction = 'inbound' and email_message_id <> '';
+
+create index concurrently if not exists messages_outbound_provider_agent_idx
+    on messages (provider_message_id, agent_id, id)
+    include (thread_id)
+    where direction = 'outbound' and provider_message_id <> '';
 ```
 
 `messages_agent_thread_created_idx` supports the bounded invariant-audit and
 observability queries defined below. It does not imply or pre-build a public
 thread-enumeration API. The trailing `id` in `messages_thread_parent_id_idx`
 supports ordered, 5,000-row child-detach batches so a high-fanout parent does
-not require an unbounded scan, sort, or lock set.
+not require an unbounded scan, sort, or lock set. The first rollout retains the
+older single-column `messages_thread_parent_idx` as a valid fallback; remove it
+only in a later release after the composite replacement is verified valid.
+Every `CREATE INDEX CONCURRENTLY` migration is post-checked through
+`pg_index.indisvalid`/`indisready` before its filename is recorded. An
+interrupted same-name build therefore fails closed and leaves any prior valid
+fallback in place until an operator drops only the invalid index and retries.
 
 Do not add a unique constraint on `rfc_message_id_key`. Duplicate wire IDs,
 delivery twins, imported mail, and historical data make uniqueness invalid.
 
-The existing provider-ID index supports the outbound side of exact legacy
-anchor lookup. No migration updates existing message rows or performs a
+The existing provider-only index continues to support delivery-feedback
+correlation; the new mailbox-local provider index bounds and covers the
+outbound side of exact legacy anchor lookup, including the per-branch ordered
+`N+1` limit. No migration updates existing message rows or performs a
 historical sweep. The implementation must confirm with `EXPLAIN` under the
-driver's prepared/generic-plan behavior that the legacy inbound query uses
-`messages_agent_inbound_message_id_idx`.
+driver's prepared/generic-plan behavior that the exact production batch query
+uses all three mailbox-local anchor indexes.
 
 ### ID generation and validation
 
@@ -331,7 +344,7 @@ The operational bounds are part of the parser contract:
 - inspect at most 64 KiB per header field;
 - accept at most 998 bytes in one bracketed identifier;
 - after canonical keep-last deduplication, retain only the nearest (rightmost)
-  256 distinct identifiers from each header.
+  32 distinct identifiers from each header.
 
 Obsolete compatibility is deliberately narrow. The parser tolerates bounded
 printable `obs-in-reply-to` / `obs-references` phrase text, including quoted
@@ -517,7 +530,7 @@ For a normal inbound message:
    `rfc_message_id_key`;
 2. examine valid `In-Reply-To` candidates from right to left;
 3. if none resolves, examine valid `References` candidates from right to left;
-4. retain at most 256 nearest candidates from each field, for at most 512
+4. retain at most 32 nearest candidates from each field, for at most 64
    candidates total; all retained `In-Reply-To` candidates keep precedence,
    but a saturated or entirely unmatched `In-Reply-To` field does not consume
    or erase the independent `References` fallback budget;
@@ -526,11 +539,13 @@ For a normal inbound message:
    rows; the batch combines canonical `rfc_message_id_key` matches with the
    exact direction-aware inbound and outbound legacy fallbacks described
    above, with no SQL query per candidate;
-6. for each candidate key, inspect at most 16 distinct matching rows; each
-   canonical or legacy index branch and their distinct union fetches at most
-   17 rows (`N+1`) so overflow is detected without materializing an
-   attacker-controlled duplicate set; an overflow is ambiguity and resolution
-   continues to the next candidate;
+6. for each candidate key, inspect at most 16 distinct matching rows;
+   canonical, exact-original legacy, and exact-canonical legacy branches are
+   separate so forced generic plans retain scalar equality index conditions.
+   Each branch and their distinct union fetches at most 17 rows (`N+1`) so
+   overflow is detected without materializing an attacker-controlled duplicate
+   set; an overflow is ambiguity and resolution continues to the next
+   candidate;
 7. deterministically lock every initially threadless match from non-overflow
    candidates in ascending internal `messages.id` order, then re-read all
    candidate matches in one second batched lookup before computing consensus;
@@ -548,13 +563,14 @@ For a normal inbound message:
 12. set `thread_parent_id` only when one exact parent row was selected;
 13. if no candidate resolves, mint a new thread.
 
-The synchronous resolution path therefore uses up to three fixed SQL calls
-independent of candidate count: one batched match lookup, one optional
-deterministic lock query, and one batched revalidation lookup. It never issues
-SQL per candidate. At most 512 candidates and 16 non-overflow rows per
-candidate can contribute initially threadless lock targets (8,192 before
-row-ID deduplication). Any key that reaches the seventeenth distinct row fails
-closed as ambiguous even if the first 16 rows appear to agree.
+The synchronous resolution path therefore uses one batched match lookup when
+no threadless anchor exists, or up to three fixed SQL calls when adoption needs
+locking: the initial lookup, one deterministic lock query, and one post-lock
+revalidation lookup. It never issues a separate SQL statement per candidate.
+At most 64 candidates and 16 non-overflow rows per candidate can contribute
+initially threadless lock targets (1,024 before row-ID deduplication). Any key
+that reaches the seventeenth distinct row fails closed as ambiguous even if
+the first 16 rows appear to agree.
 
 The immediate `In-Reply-To` relationship has precedence over older
 `References`. Within a header, the rightmost usable identifier is the nearest
@@ -629,7 +645,7 @@ then any selected anchor, then the new-message insert. The second batched
 lookup occurs after those deterministic locks, so a concurrent lazy adoption
 that committed while this transaction waited contributes its established
 thread to final consensus. Indexed exact lookups, the
-256-candidates-per-field (512 total) budget, and the 16-row-per-key limit keep
+32-candidates-per-field (64 total) budget, and the 16-row-per-key limit keep
 the extra work finite on the synchronous pre-`250` path.
 
 ## Conversation identity remains separate
@@ -670,10 +686,10 @@ own provider evidence, compatibility analysis, and wire-level review.
 
 That statement governs outbound `References` construction. Inbound topology
 resolution remains bounded by the parser contract above: parsing retains at
-most 256 identifiers from each received field, and resolution examines at most
-512 candidates total. Every retained `In-Reply-To` candidate precedes every
+most 32 identifiers from each received field, and resolution examines at most
+64 candidates total. Every retained `In-Reply-To` candidate precedes every
 retained `References` candidate, without one field consuming the other's
-256-candidate budget.
+32-candidate budget.
 
 ### Outbound messages without a wire anchor
 
@@ -1056,7 +1072,7 @@ addresses from routine logs.
 ### Unit tests
 
 - RFC token parsing, comments, folding, malformed input, bounds, case rules,
-  obsolete-form compatibility limits, nearest-256-per-field retention, and
+  obsolete-form compatibility limits, nearest-32-per-field retention, and
   duplicate removal.
 - Right-to-left candidate precedence.
 - Fixed-count batched lookup with no per-candidate SQL, N+1 overflow at 17

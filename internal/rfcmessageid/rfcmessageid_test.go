@@ -46,6 +46,26 @@ func TestParseAcceptsObsoleteReplyPhrasesAroundTokens(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsObsoletePhraseFoldingWhitespace(t *testing.T) {
+	for _, value := range []string{
+		"reply-to\t<one@EXAMPLE.COM>",
+		"reply-to\r\n\t<one@EXAMPLE.COM>",
+		"reply-to\r\n <one@EXAMPLE.COM>",
+	} {
+		got, err := ParseTokens(value)
+		if err != nil {
+			t.Fatalf("ParseTokens(%q): %v", value, err)
+		}
+		want := []Token{{
+			Original:  "<one@EXAMPLE.COM>",
+			Canonical: "<one@example.com>",
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ParseTokens(%q) = %#v, want %#v", value, got, want)
+		}
+	}
+}
+
 func TestParseAcceptsObsoleteQuotedIdentifierLeft(t *testing.T) {
 	got, err := Parse(`<"Case Sensitive"@MAIL.EXAMPLE.COM>`)
 	if err != nil {

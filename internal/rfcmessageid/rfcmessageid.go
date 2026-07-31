@@ -27,7 +27,7 @@ const (
 	// from one field. The byte bound protects parsing; this independent count
 	// bound protects downstream exact-anchor resolution from turning one long
 	// References field into thousands of database probes.
-	MaxTokens = 256
+	MaxTokens = 32
 )
 
 var (
@@ -300,6 +300,8 @@ func skipObsoletePhrase(value string, offset int) (int, error) {
 		switch value[offset] {
 		case '>':
 			return 0, invalidAt(offset)
+		case ' ', '\t':
+			offset++
 		case '"':
 			next, err := consumeQuotedString(value, offset)
 			if err != nil {
