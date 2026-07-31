@@ -369,6 +369,29 @@ Decisions and why:
   genuinely useful columns (fund, check size, warm-intro path) that e2a should
   never model.
 
+**Reversal (DELETE `/v1/contacts/imports/{batch_id}`) is defensive, not
+tag-driven.** `import_batch_id` on both tables is origin provenance: it records
+which batch created the row and never moves (a merge re-import leaves it
+pointing at the original batch). Because the tag alone cannot distinguish
+"still just an import artifact" from "the account has since built on this",
+the reversal removes a tagged row only when it is verifiably untouched:
+
+- `updated_at = created_at` — no PATCH, upsert, activity record, or due
+  notification has ever landed (every mutation path sets `updated_at`), so
+  even stale provenance cannot cause data loss;
+- an engagement must additionally carry no derived wire activity and no
+  message history for that agent/address;
+- a contact must additionally have no message history and **no surviving
+  engagement** — batch-created untouched enrolments are deleted first, so any
+  engagement still present (one created independently of the import, or one
+  edited since) retains the contact. The guard decides; the
+  contacts→engagements `ON DELETE CASCADE` is never relied upon, because
+  reaching it with a live engagement would silently destroy that state.
+
+Anything failing a check is retained and counted, so
+`contacts_deleted + contacts_retained` always reconciles against what the
+batch created.
+
 ### 3.4 Authorization and scope
 
 | Surface | Guard | Rationale |

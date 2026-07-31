@@ -160,7 +160,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
       title: "Reverse a contact import (beta)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Remove untouched contacts and per-agent enrolments created by one import batch. Contacts with correspondence history, pre-existing outreach, and suppressions survive and the receipt reports each category. Account scope only.",
+        "Remove only verifiably untouched contacts and per-agent enrolments created by one import batch. Contacts or enrolments edited since the import, contacts with correspondence history or any surviving engagement, pre-existing outreach, and suppressions all survive, and the receipt reports each category. Account scope only.",
       inputSchema: strictInputSchema({ batch_id: z.string().min(1) }),
     },
     async (args) => runTool(() => client.deleteContactImport(args.batch_id)),

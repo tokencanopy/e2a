@@ -560,10 +560,30 @@ func (s *Store) ImportContactsWithOptions(ctx context.Context, userID, batchID s
 // DeleteImportBatch reverses an import, returning how many contacts it removed
 // and how many it deliberately kept.
 //
-// It removes only contacts that batch CREATED (import_batch_id still points at
-// it). A contact whose provenance moved, or that a later merge re-pointed, is
-// retained — reversing an upload must not delete a record the user has since
-// built history on.
+// PROVENANCE SEMANTICS. import_batch_id is origin provenance: it records which
+// batch CREATED the row and never moves afterwards (a later merge re-import
+// leaves it pointing at the original batch — see ImportContactsWithOptions).
+// Because the tag alone cannot distinguish "still just an import artifact"
+// from "the account has since built on this", reversal is defensive and
+// removes a tagged row only when it is verifiably UNTOUCHED:
+//
+//   - updated_at still equals created_at — no PATCH, upsert, activity record,
+//     or due-notification has ever landed on the row. Every mutation path sets
+//     updated_at = now(), and an import writes both defaults in one statement,
+//     so equality is an exact "never mutated" witness. This makes even stale
+//     provenance (a tag re-pointed by any past or future write path) unable to
+//     cause data loss.
+//   - an engagement additionally must carry no derived wire activity
+//     (first/last outbound, last inbound, last conversation, due notice).
+//   - a contact additionally must have no message history and NO surviving
+//     engagement — including one created independently of the import. The
+//     engagements this batch created are deleted first, so any engagement
+//     still present at this point is state the reversal must not destroy.
+//     This guard, not the contacts→engagements ON DELETE CASCADE, decides:
+//     reaching the cascade with a live engagement would silently delete it.
+//
+// A row failing any check is retained and counted, so created ==
+// deleted + retained always reconciles against the batch.
 func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (deleted int, retained int, engagementsDeleted int, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -582,9 +602,29 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 		return 0, 0, 0, err
 	}
 
+	// Engagements first: only enrolments this batch created AND that nobody
+	// has touched since. A later stage/next-action edit, any recorded wire
+	// activity, a delivered due notification, or message history involving
+	// this agent and address makes the row live outreach state rather than
+	// an import artifact, and it survives.
 	tag, err := tx.Exec(ctx,
-		`DELETE FROM contact_engagements
-		  WHERE user_id = $1 AND import_batch_id = $2`,
+		`DELETE FROM contact_engagements ce
+		  WHERE ce.user_id = $1 AND ce.import_batch_id = $2
+		    AND ce.updated_at = ce.created_at
+		    AND ce.first_outbound_at IS NULL
+		    AND ce.last_outbound_at IS NULL
+		    AND ce.last_inbound_at IS NULL
+		    AND ce.last_conversation_id = ''
+		    AND ce.notified_next_action_at IS NULL
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM messages m
+		         WHERE m.agent_id = ce.agent_id
+		           AND (lower(m.sender) = ce.address
+		            OR EXISTS (
+		                 SELECT 1 FROM unnest(m.to_recipients) AS r
+		                  WHERE lower(r) = ce.address))
+		    )`,
 		userID, batchID)
 	if err != nil {
 		return 0, 0, 0, err
@@ -594,14 +634,15 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 	var total int
 	err = tx.QueryRow(ctx,
 		`WITH target AS MATERIALIZED (
-		     SELECT c.id, c.user_id, c.address
+		     SELECT c.id, c.user_id, c.address, c.created_at, c.updated_at
 		       FROM contacts c
 		      WHERE c.user_id = $1 AND c.import_batch_id = $2
 		 ),
 		 doomed AS MATERIALIZED (
 		     SELECT c.id
 		       FROM target c
-		      WHERE NOT EXISTS (
+		      WHERE c.updated_at = c.created_at
+		        AND NOT EXISTS (
 		            SELECT 1
 		              FROM messages m
 		              JOIN agent_identities a
@@ -610,6 +651,12 @@ func (s *Store) DeleteImportBatch(ctx context.Context, userID, batchID string) (
 		                OR EXISTS (
 		                     SELECT 1 FROM unnest(m.to_recipients) AS r
 		                      WHERE lower(r) = c.address)
+		      )
+		        AND NOT EXISTS (
+		            SELECT 1
+		              FROM contact_engagements ce
+		             WHERE ce.user_id = c.user_id
+		               AND ce.contact_id = c.id
 		      )
 		 ),
 		 removed AS (

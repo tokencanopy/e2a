@@ -87,8 +87,8 @@ type DeleteImportBatchResult struct {
 	Deleted            bool   `json:"deleted"`
 	BatchID            string `json:"batch_id"`
 	ContactsDeleted    int    `json:"contacts_deleted" doc:"How many contacts this reversal removed."`
-	ContactsRetained   int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept because they have correspondence history."`
-	EngagementsDeleted int    `json:"engagements_deleted" doc:"How many per-agent outreach enrolments created by this import were removed."`
+	ContactsRetained   int    `json:"contacts_retained" doc:"How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history."`
+	EngagementsDeleted int    `json:"engagements_deleted" doc:"How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here."`
 }
 
 type deleteImportBatchOutput struct {
@@ -108,7 +108,7 @@ func (s *Server) registerContactImport() {
 	huma.Register(s.API, huma.Operation{
 		OperationID: "deleteImportBatch", Method: http.MethodDelete, Path: "/v1/contacts/imports/{batch_id}",
 		Summary: "Reverse a contact import (beta)", Tags: []string{"contacts"},
-		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes untouched contacts created by the batch and per-agent enrolments the batch created, including enrolments on pre-existing contacts. Contacts with correspondence history are retained; pre-existing outreach and suppressions are never affected. The response reports each category. Account-scoped credentials only. " + contactImportBetaDescription,
+		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category, and contacts_deleted + contacts_retained reconciles against what the batch created. Account-scoped credentials only. " + contactImportBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleDeleteImportBatch)
