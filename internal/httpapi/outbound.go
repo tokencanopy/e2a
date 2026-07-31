@@ -438,6 +438,7 @@ type ReplyRequest struct {
 	ReplyTo        ReplyToField          `json:"reply_to,omitempty"`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
+	QuoteHistory   bool                  `json:"quote_history,omitempty" doc:"Experimental: when true, the server appends the referenced message as mail-client-style quoted history beneath the reply body — an 'On <date>, <sender> wrote:' attribution line followed by the original text ('>'-prefixed) and, when an html body is supplied, the original HTML in a blockquote. Composition happens at accept time, so a held reply shows the reviewer the final quoted content. Only the body parts the caller supplies are quoted (a text-only reply stays text-only). Defaults to false (the body is sent exactly as provided). This field may change or be removed before it is declared stable."`
 	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent's own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the reply would otherwise be held for review. Scheduling survives a review hold: if held, send_at is preserved on the pending_review message (surfaced as scheduled_at) and re-armed on approval — submitted at send_at if still future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
 }
 
@@ -583,6 +584,16 @@ func (s *Server) handleReply(ctx context.Context, in *replyInput) (*sendOutput, 
 		// referenced message — so the reply inherits its thread there (#328).
 		ConversationID: b.ConversationID, ReplyTo: normReplyTo, Attachments: b.Attachments,
 		Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
+	}
+	// EXPERIMENTAL quote_history: rewrite the caller's body parts with the
+	// parent quoted beneath, BEFORE deliver — so review holds, idempotency
+	// replay, and the stored outbound row all see the final composed content.
+	if b.QuoteHistory {
+		qctx := outbound.ExtractForwardContext(msg.RawMessage)
+		req.Body = outbound.BuildReplyQuoteBody(req.Body, qctx)
+		if req.HTMLBody != "" {
+			req.HTMLBody = outbound.BuildReplyQuoteHTMLBody(req.HTMLBody, qctx)
+		}
 	}
 	req.CC = agent.StripAgentSelfAliases(req.CC, ag.EmailAddress())
 	req.BCC = agent.StripAgentSelfAliases(req.BCC, ag.EmailAddress())
