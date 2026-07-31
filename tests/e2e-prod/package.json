@@ -9,6 +9,7 @@
     "pretest:prod": "rm -rf reports/coverage reports/mcp-coverage reports/event-coverage reports/target",
     "test:prod": "node --test --test-concurrency=1 --test-reporter=spec suites/*.test.ts suites/prod/*.test.ts",
     "test:unit": "node --test harness/*.test.ts",
+    "test:unit:gates": "python3 -m unittest test_gates -v",
     "coverage:gate": "python3 coverage_gate.py",
     "coverage:gate:mcp": "python3 mcp_coverage_gate.py",
     "coverage:gate:events": "python3 event_coverage_gate.py",

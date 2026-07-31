@@ -5,10 +5,11 @@ and the full scope/design writeup).
 ``tests/test_e2e.py`` already exercises 7 methods (``info``, ``agents.create``,
 ``agents.delete``, ``messages.send``, ``messages.list``, ``messages.get``,
 ``messages.reply``) as part of its self-loopback round trip and now calls
-``mark_covered`` for each. This module fills in the rest of the 64 methods
-runtime introspection finds on ``AsyncE2AClient``
-(``tests/resource_coverage_lib/discovery.py``), minus the two destructive/
-no-happy-path entries allowlisted in the gate (``account.delete``,
+``mark_covered`` for each. This module fills in the rest of the methods
+runtime introspection finds on ``AsyncE2AClient`` (the live count is owned by
+``tests/resource_coverage_lib/discovery.py`` — 77 at time of writing — so it
+is deliberately not restated here), minus the two destructive/no-happy-path
+entries allowlisted in the gate (``account.delete``,
 ``account.suppressions.delete``) and ``listen`` (allowlisted — see the gate
 for why).
 
@@ -35,7 +36,7 @@ import time
 
 import pytest
 
-from e2a import AsyncE2AClient
+from e2a import AsyncE2AClient, E2ANotFoundError
 
 from .resource_coverage_lib.tracker import mark_covered
 
@@ -509,4 +510,166 @@ async def test_webhooks_and_events_full_surface():
             deleted_hook = await client.webhooks.delete(hook.id)
             assert deleted_hook.deleted is True
             mark_covered("webhooks.delete")
+            await client.agents.delete(email)
+
+
+# ── contacts: account-level CRUD, list, and bulk import ─────────────
+
+
+async def test_contacts_account_level_crud_list_and_import():
+    async with _client() as client:
+        slug = _slug("ct")
+        addr_a = f"{slug}-a@example.com"
+        addr_b = f"{slug}-b@example.com"
+        addr_c = f"{slug}-c@example.com"
+        addr_d = f"{slug}-d@example.com"
+        import_a = f"{slug}-imp-a@example.com"
+        import_b = f"{slug}-imp-b@example.com"
+        batch_id = ""  # set once the import lands so finally can reverse it on failure
+        try:
+            # create canonicalizes the address: a display-name form with an
+            # uppercased domain resolves to the lowercase canonical key.
+            created = await client.contacts.create(
+                {"address": f"Py Cov A <{slug}-a@EXAMPLE.COM>", "display_name": "Py Cov A"}
+            )
+            assert created.address == addr_a
+            assert created.display_name == "Py Cov A"
+            assert created.source == "manual"
+            mark_covered("contacts.create")
+
+            got = await client.contacts.get(addr_a)
+            assert got.address == addr_a
+            assert got.display_name == "Py Cov A"
+            mark_covered("contacts.get")
+
+            item, etag = await client.contacts.get_with_etag(addr_a)
+            assert item.address == addr_a
+            assert isinstance(etag, str) and etag
+            mark_covered("contacts.get_with_etag")
+
+            updated = await client.contacts.update(addr_a, {"display_name": "Py Cov A renamed"}, if_match=etag)
+            assert updated.address == addr_a
+            assert updated.display_name == "Py Cov A renamed"
+            mark_covered("contacts.update")
+
+            await client.contacts.create({"address": addr_b})
+            await client.contacts.create({"address": addr_c})
+
+            # Page size 1 on purpose: with three of our own contacts newest-first,
+            # finding all three proves the AutoPager really walked next_cursor
+            # instead of stopping after the first page.
+            listed = await client.contacts.list(limit=1).to_list(limit=200)
+            assert {addr_a, addr_b, addr_c} <= {c.address for c in listed}
+            manual = await client.contacts.list(source="manual", limit=100).to_list(limit=200)
+            assert {addr_a, addr_b, addr_c} <= {c.address for c in manual}
+            assert all(c.source == "manual" for c in manual)
+            mark_covered("contacts.list")
+
+            # Three fresh rows where the third duplicates the first in-batch:
+            # the upload itself still succeeds, with one outcome per row.
+            imported = await client.contacts.import_(
+                {"contacts": [{"address": import_a}, {"address": import_b}, {"address": import_a}]}
+            )
+            assert imported.batch_id
+            assert imported.created == 2
+            assert imported.skipped == 1
+            assert imported.failed == 0
+            assert [r.status for r in imported.results] == ["created", "created", "skipped"]
+            assert imported.results[2].code == "duplicate_in_batch"
+            batch_id = imported.batch_id
+            mark_covered("contacts.import_")
+
+            # Freshly imported contacts have no correspondence history, so the
+            # reversal removes both of them (nothing retained).
+            reversed_batch = await client.contacts.delete_import(batch_id)
+            assert reversed_batch.deleted is True
+            assert reversed_batch.batch_id == batch_id
+            assert reversed_batch.contacts_deleted == 2
+            batch_id = ""  # reversed — nothing left for finally to undo
+            mark_covered("contacts.delete_import")
+            with pytest.raises(E2ANotFoundError):
+                await client.contacts.get(import_a)
+
+            created_d = await client.contacts.create({"address": addr_d})
+            assert created_d.address == addr_d
+            deleted = await client.contacts.delete(addr_d)
+            assert deleted.deleted is True
+            assert deleted.address == addr_d
+            mark_covered("contacts.delete")
+            with pytest.raises(E2ANotFoundError):
+                await client.contacts.get(addr_d)
+        finally:
+            for address in (addr_a, addr_b, addr_c, addr_d, import_a, import_b):
+                try:
+                    await client.contacts.delete(address)
+                except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
+                    pass
+            if batch_id:
+                try:
+                    await client.contacts.delete_import(batch_id)
+                except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
+                    pass
+
+
+# ── contacts: per-agent outreach (engagements) ───────────────────────
+
+
+async def test_contacts_outreach_full_surface():
+    async with _client() as client:
+        email = _bot("outreach")
+        address = f"{_slug('out')}@example.com"
+        await client.agents.create({"email": email, "name": "cov outreach"})
+        try:
+            await client.contacts.create({"address": address, "display_name": "Py Cov Outreach"})
+            try:
+                # The first set_outreach on an (agent, contact) pair CREATES the
+                # engagement; stage and next_action_at are caller-owned fields.
+                enrolled = await client.contacts.set_outreach(
+                    email, address, {"stage": "touch1", "next_action_at": "2099-01-01T00:00:00Z"}
+                )
+                assert enrolled.agent_email == email
+                assert enrolled.address == address
+                assert enrolled.stage == "touch1"
+                assert enrolled.next_action_at is not None
+                mark_covered("contacts.set_outreach")
+
+                got = await client.contacts.get_outreach(email, address)
+                assert got.agent_email == email
+                assert got.address == address
+                assert got.stage == "touch1"
+                mark_covered("contacts.get_outreach")
+
+                item, etag = await client.contacts.get_outreach_with_etag(email, address)
+                assert item.stage == "touch1"
+                assert isinstance(etag, str) and etag
+                mark_covered("contacts.get_outreach_with_etag")
+
+                # The update half of the upsert: guarded by the ETag above.
+                advanced = await client.contacts.set_outreach(email, address, {"stage": "touch2"}, if_match=etag)
+                assert advanced.stage == "touch2"
+
+                # Fresh agent ⇒ its outreach list holds exactly this engagement;
+                # the stage filter must return it, a mismatched stage must not.
+                working = await client.contacts.outreach(email, stage="touch2").to_list(limit=20)
+                assert any(e.address == address for e in working)
+                assert all(e.stage == "touch2" for e in working)
+                other = await client.contacts.outreach(email, stage="no-such-stage").to_list(limit=20)
+                assert not any(e.address == address for e in other)
+                mark_covered("contacts.outreach")
+
+                removed = await client.contacts.delete_outreach(email, address)
+                assert removed.deleted is True
+                assert removed.address == address
+                mark_covered("contacts.delete_outreach")
+                with pytest.raises(E2ANotFoundError):
+                    await client.contacts.get_outreach(email, address)
+            finally:
+                try:
+                    await client.contacts.delete(address)
+                except E2ANotFoundError:
+                    # Best-effort cleanup: the happy path already deleted it.
+                    pass
+        finally:
             await client.agents.delete(email)
