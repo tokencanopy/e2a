@@ -331,7 +331,7 @@ See [docs/deployment.md](docs/deployment.md) for the full env-var reference, sha
 
 - **Identity** — agent registration requires DNS TXT verification of domain ownership (custom domains)
 - **Domain auth** — SPF and DKIM checked on every inbound message
-- **Header signatures** — HMAC-SHA256 over canonical auth-header string; reject if timestamp older than 5 minutes
+- **Header signatures** — HMAC-SHA256 over the `<t>.<body>` signing string delivered in the `X-E2A-Signature` header; receivers reject timestamps older than 5 minutes
 - **SSRF protection** — webhook URLs must be HTTPS (in production), resolve to public IPs, use domain names (no raw IPs, no private/loopback ranges)
 - **OAuth CSRF** — single-use, time-limited nonce in the `state` parameter
 - **Production mode** (`env: production` in `config.yaml`) enforces the above where development mode is more permissive
@@ -455,7 +455,7 @@ Save the key — it's only shown once. Register an agent and confirm it works:
 KEY=e2a_...
 curl -X POST http://localhost:8080/v1/agents \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"email":"my-bot@agents.e2a.dev"}'   # an email on the deployment shared domain (or a domain you've verified)
+  -d '{"email":"my-bot@agents.localhost"}'   # the local compose shared domain (or a domain you've verified)
 
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/agents
 ```
