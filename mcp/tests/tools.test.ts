@@ -6,12 +6,13 @@ import {
   E2AConnectionError,
   E2AError,
   EventView,
+  MessageSummaryView,
   ValidateTemplateResponse,
 } from "@e2a/sdk/v1";
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
-import { registerMessageTools } from "../src/tools/messages.js";
+import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
 import { registerReviewTools } from "../src/tools/review.js";
@@ -1189,6 +1190,20 @@ describe("e2a MCP server", () => {
     expect(payload.messages[0]).not.toHaveProperty("verifiedDomain");
     expect(payload.messages[0]).not.toHaveProperty("thread_id");
     expect(payload.messages[0]).not.toHaveProperty("threadId");
+  });
+
+  it("keeps the MCP message-summary projection in sync with stable SDK fields", () => {
+    const sdkFields = MessageSummaryView.attributeTypeMap
+      .map(({ name }) => name)
+      .filter((name) => name !== "threadId");
+    const projectedFields = Object.keys(
+      messageSummaryViewForTool({} as MessageSummaryView),
+    ).map((name) => {
+      const camel = name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+      return camel;
+    });
+
+    expect(projectedFields.sort()).toEqual(sdkFields.sort());
   });
 
   it("list_messages omits next_cursor on the last page", async () => {

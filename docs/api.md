@@ -487,6 +487,13 @@ declared stable.
 - `POST …/messages/{id}/reply`, `POST …/messages/{id}/forward` — reply to /
   forward a message; `202` covers `accepted`, `scheduled`, and
   `pending_review`, all distinguished by the response `status`.
+
+Replies preserve the RFC reply headers needed to join the source email thread.
+Forwards deliberately do not copy those headers, including when a held forward
+is later approved; a forward is a new email thread. This is a wire-level
+threading correction, not a request/response schema change. A held outbound
+message's idempotency completion is recorded in the hold transaction, so a
+post-commit retry cannot create a duplicate held draft.
 - `GET …/messages/{id}/attachments/{index}` — attachment metadata + a short-lived
   `download_url` (so binary bytes never stream through an agent's context);
   `?inline=true` returns base64 `data` for small attachments.

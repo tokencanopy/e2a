@@ -96,6 +96,10 @@ type Metrics interface {
 	// processing time (0 for RCPT-stage rejections).
 	SMTPInbound(outcome string, seconds float64)
 
+	// ThreadHeaderParseFailure counts an inbound RFC threading header that
+	// failed strict parsing. header is one of {in_reply_to, references}.
+	ThreadHeaderParseFailure(header string)
+
 	// OutboundQueueWait records due→pickup latency for one outbound
 	// send attempt (River attempted_at − scheduled_at; created_at would
 	// count each retry's full backoff as queue wait).
@@ -232,6 +236,7 @@ func (NoOp) SetPublisherLag(float64)        {}
 
 func (NoOp) HTTPRequest(string, string, string, float64)  {}
 func (NoOp) SMTPInbound(string, float64)                  {}
+func (NoOp) ThreadHeaderParseFailure(string)              {}
 func (NoOp) OutboundQueueWait(float64)                    {}
 func (NoOp) OutboundTerminal(string)                      {}
 func (NoOp) OutboundTerminalLatency(float64)              {}
@@ -439,6 +444,11 @@ func (l *Log) ThreadResolution(source string, count int) {
 		log.Printf("[metrics] event=thread.resolution source=%s count=%d",
 			enum(threadResolutionSet, source), count)
 	}
+}
+
+func (l *Log) ThreadHeaderParseFailure(header string) {
+	log.Printf("[metrics] event=thread.header_parse_failure header=%s",
+		enum(threadHeaderSet, header))
 }
 
 // Periodic gauges are Prom-only, matching the other sampled gauge families.

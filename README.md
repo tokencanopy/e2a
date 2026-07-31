@@ -491,6 +491,12 @@ To receive real inbound mail, point a domain's MX record at your relay host:
 Then register and verify the domain through the API (see [Domains](docs/api.md)). Without DNS, the API still works for testing — but external email won't reach your relay.
 
 > **Upgrades and migrations.** The e2a binary embeds `migrations/*.sql` and **auto-applies any pending ones at startup** (tracked in a `schema_migrations` table). When you upgrade e2a, restarting the container applies new schema migrations automatically — no manual step. `E2A_MIGRATION_MODE` controls this: `auto` (default, applies pending), `verify` (refuse startup and report pending), or `skip` (emergency surgery). Migrations are idempotent and non-destructive, so re-applying is safe.
+
+> Thread-identity upgrades include several `CREATE INDEX CONCURRENTLY` migrations. The
+> direction-aware legacy-anchor indexes inspect existing message rows and can keep the
+> first upgraded process in migration startup until each build completes; schedule the
+> rollout with normal migration headroom and monitor startup logs. They take the
+> migration advisory lock but do not block ordinary reads or writes.
 >
 > (The compose file also mounts `migrations/` into Postgres' init directory, but that path only runs on first start with an empty data volume — the binary's startup auto-apply is what keeps an upgraded deployment current.)
 

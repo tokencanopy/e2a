@@ -137,6 +137,7 @@ empties.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `e2a_thread_resolution_total` | counter | `source` | Committed mailbox-local topology decisions and diagnostics. Final decision sources are `api_reply`, `fresh_send`, `forward`, `rfc_in_reply_to`, `rfc_references`, `self_twin`, `authenticated_delivery_twin`, and `no_anchor`. Diagnostic sources are `lazy_legacy_anchor`, `anchor_found_without_thread`, `legacy_anchor_unmatched`, `ambiguous_anchor`, and `cycle_detected`; a diagnostic can accompany a final source for the same committed write. |
+| `e2a_thread_header_parse_failures_total` | counter | `header` | Inbound `In-Reply-To` or `References` headers rejected by the strict RFC Message-ID parser. The header label is bounded to `in_reply_to` or `references`; rejected fields fail closed and are treated as having no candidates. |
 | `e2a_thread_null_messages` | gauge | `age_bucket` | Threadless messages in the current bounded sample, split into `lt_1h`, `1h_6h`, and `6h_24h`. Rows older than 24 hours are intentionally excluded because historical threadless rows are supported migration state. |
 | `e2a_thread_invariant_violations` | gauge | `kind` | Invalid parent edges in the current bounded sample: `dangling_parent`, `cross_agent_parent`, `thread_mismatch`, `cycle`, or `cycle_depth_limit`. |
 | `e2a_thread_relationship_percent` | gauge | `kind` | Sampled mailbox-local topology ratios: `threads_multi_conversation` and `conversations_multi_thread`. These are expected measurements, not error signals. |

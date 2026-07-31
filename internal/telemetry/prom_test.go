@@ -252,6 +252,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.SetQueueDepth("attacker_queue", "exploded", 1)
 	p.HTTPRequest("PROPFIND", "/v1/agents/{email}", "7xx", 0.1) // unknown method + class
 	p.ThreadResolution(secret, 1)
+	p.ThreadHeaderParseFailure("not-a-header")
 	p.SetThreadNullMessages(addr, 2)
 	p.SetThreadInvariantViolations(secret, 3)
 	p.SetThreadRelationshipPercent(addr, 50)
@@ -271,6 +272,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_queue_depth{queue="other",state="other"} 1`,
 		`e2a_http_requests_total{method="other",route="/v1/agents/{email}",status_class="other"} 1`,
 		`e2a_thread_resolution_total{source="other"} 1`,
+		`e2a_thread_header_parse_failures_total{header="other"} 1`,
 		`e2a_thread_null_messages{age_bucket="other"} 2`,
 		`e2a_thread_invariant_violations{kind="other"} 3`,
 		`e2a_thread_relationship_percent{kind="other"} 50`,
@@ -287,6 +289,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 func TestPromEmitsThreadIdentitySeries(t *testing.T) {
 	p := NewProm("")
 	p.ThreadResolution("rfc_in_reply_to", 2)
+	p.ThreadHeaderParseFailure("references")
 	p.ThreadResolution("lazy_legacy_anchor", 1)
 	p.SetThreadNullMessages("lt_1h", 3)
 	p.SetThreadInvariantViolations("dangling_parent", 4)
@@ -296,6 +299,7 @@ func TestPromEmitsThreadIdentitySeries(t *testing.T) {
 	for _, want := range []string{
 		`e2a_thread_resolution_total{source="rfc_in_reply_to"} 2`,
 		`e2a_thread_resolution_total{source="lazy_legacy_anchor"} 1`,
+		`e2a_thread_header_parse_failures_total{header="references"} 1`,
 		`e2a_thread_null_messages{age_bucket="lt_1h"} 3`,
 		`e2a_thread_invariant_violations{kind="dangling_parent"} 4`,
 		`e2a_thread_relationship_percent{kind="threads_multi_conversation"} 25`,

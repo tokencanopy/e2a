@@ -84,6 +84,12 @@ type Metrics interface {
 	SMTPInbound(outcome string, seconds float64)
 }
 
+// threadHeaderParseMetrics is optional so existing relay metric adapters keep
+// compiling while richer telemetry backends can observe strict-parser rejects.
+type threadHeaderParseMetrics interface {
+	ThreadHeaderParseFailure(header string)
+}
+
 // AuthenticationChecker evaluates the connection and message identities used
 // by the inbound trust gate. It is injectable so end-to-end tests can exercise
 // deterministic DMARC-pass paths without depending on public DNS.
@@ -132,6 +138,12 @@ func (s *Server) SetMetrics(m Metrics) { s.metrics = m }
 func (s *Server) recordSMTPInbound(outcome string, seconds float64) {
 	if s.metrics != nil {
 		s.metrics.SMTPInbound(outcome, seconds)
+	}
+}
+
+func (s *Server) recordThreadHeaderParseFailure(header string) {
+	if m, ok := s.metrics.(threadHeaderParseMetrics); ok {
+		m.ThreadHeaderParseFailure(header)
 	}
 }
 
@@ -401,6 +413,9 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// we are in the live session or replaying a persisted intake row.
 	author := emailauth.ParseAuthorIdentity(in.Body)
 	threadInfo := extractThreadInfoWithAuthor(in.Body, author)
+	for _, header := range threadInfo.MalformedThreadHeaders {
+		srv.recordThreadHeaderParseFailure(header)
+	}
 	envelopeFrom := extractEmail(in.EnvelopeFrom)
 	headerFrom := threadInfo.From
 	// SPF/DKIM/DMARC against the TRUE envelope MAIL FROM (RFC 7208), not the From
@@ -902,18 +917,19 @@ func extractEmail(addr string) string {
 }
 
 type threadInfo struct {
-	MessageID        string
-	Subject          string
-	InReplyTo        string
-	References       []string
-	From             string   // From header (human-readable sender, not SMTP envelope)
-	ReplyTo          []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
-	To               []string // To: header addresses (one row per fan-out target sees the same list)
-	CC               []string // Cc: header addresses
-	ConversationID   string   // X-E2A-Conversation-ID header, if present
-	E2AMessageID     string   // unsigned delivery correlation candidate; store revalidates
-	ThreadInReplyTo  []identity.RFCMessageIDCandidate
-	ThreadReferences []identity.RFCMessageIDCandidate
+	MessageID              string
+	Subject                string
+	InReplyTo              string
+	References             []string
+	From                   string   // From header (human-readable sender, not SMTP envelope)
+	ReplyTo                []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
+	To                     []string // To: header addresses (one row per fan-out target sees the same list)
+	CC                     []string // Cc: header addresses
+	ConversationID         string   // X-E2A-Conversation-ID header, if present
+	E2AMessageID           string   // unsigned delivery correlation candidate; store revalidates
+	ThreadInReplyTo        []identity.RFCMessageIDCandidate
+	ThreadReferences       []identity.RFCMessageIDCandidate
+	MalformedThreadHeaders []string
 }
 
 // extractThreadInfo parses threading headers from a raw RFC 2822 message.
@@ -932,8 +948,15 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 			refs = append(refs, ref)
 		}
 	}
-	threadInReplyTo := parseThreadCandidates(msg.Header.Get("In-Reply-To"))
-	threadReferences := parseThreadCandidates(msg.Header.Get("References"))
+	threadInReplyTo, inReplyToMalformed := parseThreadCandidates(msg.Header.Get("In-Reply-To"))
+	threadReferences, referencesMalformed := parseThreadCandidates(msg.Header.Get("References"))
+	var malformed []string
+	if inReplyToMalformed {
+		malformed = append(malformed, "in_reply_to")
+	}
+	if referencesMalformed {
+		malformed = append(malformed, "references")
+	}
 	// Use the same single-author parser as DMARC. Ambiguous From fields are not
 	// projected as a sender identity.
 	fromHeader := author.Address
@@ -946,20 +969,24 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 		// RFC 5322 § 3.6.2 allows multiple addresses in Reply-To. Mirror
 		// the same parser used for To/Cc so display names get stripped
 		// the same way and the field shape is uniform across consumers.
-		ReplyTo:          extractAddressList(msg.Header.Get("Reply-To")),
-		To:               extractAddressList(msg.Header.Get("To")),
-		CC:               extractAddressList(msg.Header.Get("Cc")),
-		ConversationID:   msg.Header.Get("X-E2A-Conversation-Id"),
-		E2AMessageID:     strings.TrimSpace(msg.Header.Get(delivery.MessageIDHeader)),
-		ThreadInReplyTo:  threadInReplyTo,
-		ThreadReferences: threadReferences,
+		ReplyTo:                extractAddressList(msg.Header.Get("Reply-To")),
+		To:                     extractAddressList(msg.Header.Get("To")),
+		CC:                     extractAddressList(msg.Header.Get("Cc")),
+		ConversationID:         msg.Header.Get("X-E2A-Conversation-Id"),
+		E2AMessageID:           strings.TrimSpace(msg.Header.Get(delivery.MessageIDHeader)),
+		ThreadInReplyTo:        threadInReplyTo,
+		ThreadReferences:       threadReferences,
+		MalformedThreadHeaders: malformed,
 	}
 }
 
-func parseThreadCandidates(value string) []identity.RFCMessageIDCandidate {
+func parseThreadCandidates(value string) ([]identity.RFCMessageIDCandidate, bool) {
+	if strings.TrimSpace(value) == "" {
+		return nil, false
+	}
 	tokens, err := rfcmessageid.ParseTokens(value)
 	if err != nil {
-		return nil
+		return nil, true
 	}
 	out := make([]identity.RFCMessageIDCandidate, 0, len(tokens))
 	for _, token := range tokens {
@@ -968,7 +995,7 @@ func parseThreadCandidates(value string) []identity.RFCMessageIDCandidate {
 			Canonical: token.Canonical,
 		})
 	}
-	return out
+	return out, false
 }
 
 // decodeMIMEHeader decodes any RFC 2047 encoded-word runs in a header value

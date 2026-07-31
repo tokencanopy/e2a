@@ -47,6 +47,7 @@ type Prom struct {
 	queueDepth         *prometheus.GaugeVec
 	queueOldestAge     *prometheus.GaugeVec
 	threadResolution   *prometheus.CounterVec
+	threadHeaderParse  *prometheus.CounterVec
 	threadNull         *prometheus.GaugeVec
 	threadViolations   *prometheus.GaugeVec
 	threadRelationship *prometheus.GaugeVec
@@ -110,6 +111,7 @@ var (
 		"legacy_anchor_unmatched", "ambiguous_anchor", "no_anchor",
 		"cycle_detected",
 	)
+	threadHeaderSet    = set("in_reply_to", "references")
 	threadNullAgeSet   = set("lt_1h", "1h_6h", "6h_24h")
 	threadViolationSet = set(
 		"dangling_parent", "cross_agent_parent", "thread_mismatch",
@@ -305,6 +307,10 @@ func NewProm(build string) *Prom {
 			Name: "e2a_thread_resolution_total",
 			Help: "Mailbox-local thread identity decisions, by bounded resolution source.",
 		}, []string{"source"}),
+		threadHeaderParse: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_thread_header_parse_failures_total",
+			Help: "Inbound RFC threading headers rejected by the strict parser.",
+		}, []string{"header"}),
 		threadNull: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "e2a_thread_null_messages",
 			Help: "Recent sampled messages without a materialized thread ID, by age bucket.",
@@ -368,7 +374,7 @@ func NewProm(build string) *Prom {
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
-		p.threadResolution, p.threadNull, p.threadViolations, p.threadRelationship,
+		p.threadResolution, p.threadHeaderParse, p.threadNull, p.threadViolations, p.threadRelationship,
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
 		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
@@ -503,6 +509,10 @@ func (p *Prom) ThreadResolution(source string, count int) {
 	if count > 0 {
 		p.threadResolution.WithLabelValues(enum(threadResolutionSet, source)).Add(float64(count))
 	}
+}
+
+func (p *Prom) ThreadHeaderParseFailure(header string) {
+	p.threadHeaderParse.WithLabelValues(enum(threadHeaderSet, header)).Inc()
 }
 
 func (p *Prom) SetThreadNullMessages(ageBucket string, count int) {
