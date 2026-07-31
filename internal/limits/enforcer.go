@@ -46,9 +46,32 @@ type DBEnforcer struct {
 	cache map[string]cachedLimits
 }
 
+// cachedLimits is one user's cache slot. It doubles as an invalidation
+// tombstone: Invalidate does not delete the slot, it bumps gen and
+// zeroes expires (a zero expires is always in the past, so cacheGet
+// treats it as a miss). Retaining the slot is what lets a fill that was
+// already in flight discover that it raced an invalidation.
+//
+// gen is the per-user invalidation generation. Get samples it BEFORE
+// the DB read and hands it back to cachePut, which stores the fill only
+// if gen still matches. Without that check this interleaving silently
+// defeats an explicit invalidation:
+//
+//	T1 Get        -> cache miss, reads the OLD account_limits row
+//	T2 sidecar    -> commits NEW limits, POSTs /api/internal/limits/invalidate
+//	T2 Invalidate -> evicts the entry
+//	T1 cachePut   -> stores the PRE-write limits with a FRESH TTL
+//
+// A user who had just upgraded would then keep hitting 402
+// limit_exceeded for up to cacheTTL (60s in prod) even though billing
+// did everything right — defeating the one mechanism billing has to
+// make an upgrade take effect immediately. A counter rather than a
+// timestamp because two events inside one clock tick must still
+// compare as different.
 type cachedLimits struct {
 	limits  Limits
 	expires time.Time
+	gen     uint64
 }
 
 // NewEnforcer constructs the production enforcer. cacheTTL of 0 disables
@@ -77,9 +100,13 @@ func newEnforcerWithReader(reader limitsReader, counter Counter, defaults Defaul
 }
 
 func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
-	if cached, ok := e.cacheGet(userID); ok {
+	cached, gen, ok := e.cacheGet(userID)
+	if ok {
 		return cached, nil
 	}
+	// gen was sampled together with the miss, i.e. strictly BEFORE the
+	// DB read below. cachePut re-checks it so a fill that raced an
+	// Invalidate is dropped instead of re-caching pre-write limits.
 	row, found, err := e.store.Get(ctx, userID)
 	if err != nil {
 		return Limits{}, err
@@ -96,14 +123,24 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 			MaxStorageBytes:  e.defaults.MaxStorageBytes,
 		}
 	}
-	e.cachePut(userID, resolved)
+	e.cachePut(userID, resolved, gen)
 	return resolved, nil
 }
 
+// Invalidate evicts the user's cached Limits and bumps their
+// invalidation generation, so any fill already in flight (one that read
+// account_limits before the caller's write committed) is discarded by
+// cachePut rather than stored with a fresh TTL.
 func (e *DBEnforcer) Invalidate(userID string) {
+	if e.cacheTTL <= 0 {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.cache, userID)
+	// Leave a tombstone rather than deleting: the bumped generation has
+	// to survive so a racing cachePut can see that it lost. expires is
+	// left zero, which cacheGet reads as already-expired (a miss).
+	e.cache[userID] = cachedLimits{gen: e.cache[userID].gen + 1}
 }
 
 func (e *DBEnforcer) CheckAgentCreate(ctx context.Context, userID string) error {
@@ -201,26 +238,39 @@ func safeInt64ToInt(v int64) int {
 	return int(v)
 }
 
-func (e *DBEnforcer) cacheGet(userID string) (Limits, bool) {
+// cacheGet returns the cached limits when they are present and unexpired.
+// It always returns the user's current invalidation generation alongside
+// the result — sampled under the same lock acquisition as the lookup —
+// so a caller that observes a miss can pass that generation to cachePut
+// and have the store rejected if an Invalidate landed in between.
+func (e *DBEnforcer) cacheGet(userID string) (Limits, uint64, bool) {
 	if e.cacheTTL <= 0 {
-		return Limits{}, false
+		return Limits{}, 0, false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	c, ok := e.cache[userID]
 	if !ok || time.Now().After(c.expires) {
-		return Limits{}, false
+		return Limits{}, c.gen, false
 	}
-	return c.limits, true
+	return c.limits, c.gen, true
 }
 
-func (e *DBEnforcer) cachePut(userID string, l Limits) {
+// cachePut stores a fill only if the user's invalidation generation is
+// still the one the caller sampled before its DB read. A stale fill is
+// dropped outright rather than stored with a shorter TTL: the next
+// Get simply re-reads account_limits, which is the correct post-write
+// value and costs one query.
+func (e *DBEnforcer) cachePut(userID string, l Limits, gen uint64) {
 	if e.cacheTTL <= 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.cache[userID] = cachedLimits{limits: l, expires: time.Now().Add(e.cacheTTL)}
+	if e.cache[userID].gen != gen {
+		return
+	}
+	e.cache[userID] = cachedLimits{limits: l, expires: time.Now().Add(e.cacheTTL), gen: gen}
 }
 
 // Compile-time check: DBEnforcer satisfies the Enforcer interface and

@@ -60,6 +60,16 @@ type invalidateLimitsRequest struct {
 // it's an internal seam between the OSS server and its operator's
 // provisioner. Self-hosters who don't run a provisioner simply leave
 // InternalAPISecret empty and the endpoint 503s.
+//
+// Scope caveat: the cache this busts is PER PROCESS. One POST clears it
+// in exactly the server process that handled the request. An operator
+// running several server replicas behind a load balancer must fan the
+// call out to every replica (or accept that non-targeted replicas keep
+// serving the old caps until limits.cache_ttl_seconds expires); a
+// single POST through the load balancer only reaches one of them. The
+// enforcer's generation guard makes each individual invalidation
+// reliable — it cannot make one invalidation reach processes it was
+// never sent to.
 func (a *API) handleInvalidateLimits(w http.ResponseWriter, r *http.Request) {
 	if a.internalAPISecret == "" {
 		http.Error(w, "internal api not configured", http.StatusServiceUnavailable)
