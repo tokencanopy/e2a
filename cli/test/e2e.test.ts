@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
+import { writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseHelpCommands, recordAdvertised, recordCovered, flushCliCoverage } from "./harness/cli-coverage.js";
 
@@ -133,6 +134,7 @@ describe.skipIf(!live)("cli live parity", () => {
     expect(commands).toEqual([
       "agents",
       "config",
+      "contacts",
       "doctor",
       "keys",
       "listen",
@@ -286,6 +288,106 @@ describe.skipIf(!live)("cli live parity", () => {
     expect(setOff.code, setOff.stderr).toBe(0);
     recordCovered("protection");
   });
+
+  it("contacts: create/get/list/update/delete + import/imports delete + outreach tree", () => {
+    const slug = Date.now().toString(36);
+    const addr = `cli-live-contacts-${slug}@example.com`;
+    const importAddr1 = `cli-live-contacts-import-a-${slug}@example.com`;
+    const importAddr2 = `cli-live-contacts-import-b-${slug}@example.com`;
+    const csvPath = `/tmp/e2a-cli-e2e-contacts-${slug}.csv`;
+    writeFileSync(
+      csvPath,
+      `email,name,company\n${importAddr1},Import One,Acme\n${importAddr2},Import Two,Acme\n`,
+    );
+
+    try {
+      // Identity CRUD.
+      const created = run([
+        "contacts", "create", addr,
+        "--name", "CLI Live", "--metadata", '{"origin":"cli-e2e"}', "--json",
+      ]);
+      expect(created.code, created.stderr).toBe(0);
+      expect(JSON.parse(created.stdout).address).toBe(addr);
+
+      const got = run(["contacts", "get", addr]);
+      expect(got.code, got.stderr).toBe(0);
+      const etag = got.stdout.match(/^etag:\s+(\S+)$/m)?.[1];
+      expect(etag, `contacts get must print an etag line:\n${got.stdout}`).toBeTruthy();
+
+      const list = run(["contacts", "list", "--json"]);
+      expect(list.code, list.stderr).toBe(0);
+      expect(list.stdout).toContain(addr);
+
+      const updated = run([
+        "contacts", "update", addr, "--name", "CLI Live Updated", "--if-match", etag!, "--json",
+      ]);
+      expect(updated.code, updated.stderr).toBe(0);
+      expect(JSON.parse(updated.stdout).displayName).toBe("CLI Live Updated");
+
+      // CSV import: --dry-run previews without writing, the real run writes,
+      // imports delete reverses the batch.
+      const dryRun = run(["contacts", "import", csvPath, "--dry-run", "--json"]);
+      expect(dryRun.code, dryRun.stderr).toBe(0);
+      expect(JSON.parse(dryRun.stdout).rows).toBe(2);
+      // Preview must not have created anything.
+      expect(run(["contacts", "get", importAddr1]).code).not.toBe(0);
+
+      const imported = run(["contacts", "import", csvPath, "--json"]);
+      expect(imported.code, imported.stderr).toBe(0);
+      const importResult = JSON.parse(imported.stdout);
+      expect(importResult.batchId).toBeTruthy();
+      expect(importResult.created).toBe(2);
+
+      const reversed = run(["contacts", "imports", "delete", importResult.batchId, "--json"]);
+      expect(reversed.code, reversed.stderr).toBe(0);
+      expect(JSON.parse(reversed.stdout).deleted).toBe(true);
+      expect(run(["contacts", "get", importAddr1]).code).not.toBe(0);
+
+      // Outreach tree against a fresh (throwaway) agent.
+      const bot = `cli-live-outreach-${slug}@${DOMAIN}`;
+      const createdAgent = run(["agents", "create", bot, "--name", "cli live contacts e2e", "--json"]);
+      expect(createdAgent.code, createdAgent.stderr).toBe(0);
+      createdAgents.push(bot);
+
+      const nextAction = new Date(Date.now() + 86_400_000).toISOString();
+      const enrolled = run([
+        "contacts", "outreach", "set", addr,
+        "--agent", bot, "--stage", "prospect", "--next-action", nextAction, "--json",
+      ]);
+      expect(enrolled.code, enrolled.stderr).toBe(0);
+      expect(JSON.parse(enrolled.stdout).stage).toBe("prospect");
+
+      const outreach = run(["contacts", "outreach", "get", addr, "--agent", bot]);
+      expect(outreach.code, outreach.stderr).toBe(0);
+      // TSV: address \t stage \t nextActionAt \t etag
+      const fields = outreach.stdout.trim().split("\t");
+      expect(fields[0]).toBe(addr);
+      expect(fields[1]).toBe("prospect");
+      expect(fields[3], `outreach get must end with an etag field:\n${outreach.stdout}`).toBeTruthy();
+
+      const outreachList = run([
+        "contacts", "outreach", "list", "--agent", bot, "--stage", "prospect", "--json",
+      ]);
+      expect(outreachList.code, outreachList.stderr).toBe(0);
+      expect(outreachList.stdout).toContain(addr);
+
+      const unenrolled = run(["contacts", "outreach", "delete", addr, "--agent", bot, "--json"]);
+      expect(unenrolled.code, unenrolled.stderr).toBe(0);
+      expect(run(["contacts", "outreach", "get", addr, "--agent", bot]).code).not.toBe(0);
+
+      // Deleting the identity removes the contact (suppression survives server-side).
+      const deleted = run(["contacts", "delete", addr, "--json"]);
+      expect(deleted.code, deleted.stderr).toBe(0);
+      expect(JSON.parse(deleted.stdout).address).toBe(addr);
+      expect(run(["contacts", "get", addr]).code).not.toBe(0);
+
+      recordCovered("contacts");
+    } finally {
+      // Tolerate non-zero: the happy path already deleted these.
+      for (const a of [addr, importAddr1, importAddr2]) run(["contacts", "delete", a]);
+      rmSync(csvPath, { force: true });
+    }
+  }, 60_000);
 
   it("doctor: healthy (0), warnings-only (8), and config failure (9) exit codes", () => {
     // The account-scoped conformance credential is deliberately shared with
