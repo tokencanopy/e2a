@@ -2,7 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts"],
+    // test/harness holds the offline unit tests for the e2e coverage harness
+    // itself (e.g. the --help parser); the live binary-spawn suites under
+    // test/*.test.ts stay on vitest.e2e.config.ts.
+    include: ["src/**/*.test.ts", "test/harness/*.test.ts"],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],

@@ -771,12 +771,22 @@ test("emit: contact.due — a past-due engagement emits the event and attempts a
     info(SUITE, "contact.due", `emitted evt=${ev!.id} fanned to ${fanout!.matched_webhooks} webhook(s); our webhook whd=${del!.id} attempts=${del!.attempts} last_status=${del!.last_status_code}`);
     verifiedEventTypes.add("contact.due");
   } finally {
-    trackedHooks.delete(hook.id);
-    await client.delete(`/v1/webhooks/${encodeURIComponent(hook.id)}?confirm=DELETE`);
-    untrackEngagement(agent, address);
-    await client.delete(`/v1/agents/${encodeURIComponent(agent)}/contacts/${encodeURIComponent(address)}?confirm=DELETE`);
-    trackedContacts.delete(address);
-    await client.delete(`/v1/contacts/${encodeURIComponent(address)}?confirm=DELETE`);
+    // Each delete is individually guarded and the resource is untracked only
+    // AFTER its delete succeeds: a throw here must neither skip the remaining
+    // deletes nor strand the resource for the `after` fallback (whose
+    // 404-tolerance makes a double-delete harmless).
+    try {
+      await client.delete(`/v1/webhooks/${encodeURIComponent(hook.id)}?confirm=DELETE`);
+      trackedHooks.delete(hook.id);
+    } catch { /* after() retries via trackedHooks */ }
+    try {
+      await client.delete(`/v1/agents/${encodeURIComponent(agent)}/contacts/${encodeURIComponent(address)}?confirm=DELETE`);
+      untrackEngagement(agent, address);
+    } catch { /* after() retries via trackedEngagements */ }
+    try {
+      await client.delete(`/v1/contacts/${encodeURIComponent(address)}?confirm=DELETE`);
+      trackedContacts.delete(address);
+    } catch { /* after() retries via trackedContacts */ }
   }
 });
 
