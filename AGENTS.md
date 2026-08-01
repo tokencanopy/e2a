@@ -43,9 +43,10 @@ through an HTTP API (SMTP relay agent-to-agent, upstream SMTP such as SES
 agent-to-human), with an optional human-in-the-loop (HITL) approval gate and
 opt-in prompt-injection content screening (piguard).
 
-Polyglot monorepo, Apache-2.0, GitHub: `tokencanopy/e2a`. The `/v1` API and
-SDKs are release candidates; stable compatibility guarantees start at the
-announced GA tag.
+Polyglot monorepo, Apache-2.0, GitHub: `tokencanopy/e2a`. The core `/v1` API
+and SDKs are stable (GA — no breaking changes within `/v1`); the beta surface
+is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
+(machine-readable: `x-stability-level` in `api/openapi.yaml`).
 
 | Surface | Path | Stack | Package |
 |---|---|---|---|

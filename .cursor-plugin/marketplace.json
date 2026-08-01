@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "e2a — authenticated email gateway for AI agents (MCP server + operate-well skill).",
-    "version": "0.5.0"
+    "version": "0.6.0"
   },
   "plugins": [
     {
