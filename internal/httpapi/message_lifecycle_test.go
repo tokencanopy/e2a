@@ -164,11 +164,11 @@ func TestMessageLifecycleCursorBindingAndTamper(t *testing.T) {
 	_, first := lifecycleGET(t, srv, "agent@example.com", "msg_one", "?limit=1")
 	cursor := first["next_cursor"].(string)
 	var decoded messageLifecycleCursor
-	if err := DecodeCursor([]string{lifecycleTestSecret}, cursor, &decoded); err != nil {
+	if err := DecodeCursor([]string{lifecycleTestSecret}, "u_1", cursorMessageLifecycle, cursor, &decoded); err != nil {
 		t.Fatal(err)
 	}
 	var decodedWire map[string]any
-	if err := DecodeCursor([]string{lifecycleTestSecret}, cursor, &decodedWire); err != nil {
+	if err := DecodeCursor([]string{lifecycleTestSecret}, "u_1", cursorMessageLifecycle, cursor, &decodedWire); err != nil {
 		t.Fatal(err)
 	}
 	if decodedWire["s"] != "asc" {
@@ -200,7 +200,7 @@ func TestMessageLifecycleCursorRejectsMissingOrWrongSortBinding(t *testing.T) {
 		"v": 1, "g": "agent@example.com", "m": "msg_one",
 		"t": time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC), "i": "mlt_000",
 	}
-	missing, err := EncodeCursor(lifecycleTestSecret, base)
+	missing, err := EncodeCursor(lifecycleTestSecret, "u_1", cursorMessageLifecycle, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestMessageLifecycleCursorRejectsMissingOrWrongSortBinding(t *testing.T) {
 		wrongPayload[key] = value
 	}
 	wrongPayload["s"] = "desc"
-	wrong, err := EncodeCursor(lifecycleTestSecret, wrongPayload)
+	wrong, err := EncodeCursor(lifecycleTestSecret, "u_1", cursorMessageLifecycle, wrongPayload)
 	if err != nil {
 		t.Fatal(err)
 	}

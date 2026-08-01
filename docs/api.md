@@ -39,7 +39,14 @@ MCP tool surface), see:
   plus-tagged addresses (`a+tag@x.com`). The official SDKs encode this for you;
   hand-rolled clients must do it themselves.
 - **Pagination.** List endpoints return `{ items, next_cursor }`; pass
-  `next_cursor` back as `?cursor=…` to page forward. The SDKs auto-page.
+  `next_cursor` back as `?cursor=…` to page forward. The SDKs auto-page. A
+  cursor is bound to the exact request that issued it: the account that minted
+  it, the collection, its path parameters (the agent, webhook, or message it
+  was listed under), and the filters it was minted with. Replaying one on a
+  different list, a different parent, with different filters, or under a
+  different account's credentials is a `400 invalid_cursor` rather than a
+  silently wrong page. Cursors are opaque; treat them as ephemeral — on
+  `invalid_cursor`, drop the cursor and restart the query from the first page.
 - **Idempotency.** Nine mutating operations honor an opt-in `Idempotency-Key`
   header: `sendMessage`, `replyToMessage`, `forwardMessage`, `approveReview`,
   `createWebhook`, `rotateWebhookSecret`, and `createApiKey`, plus the beta

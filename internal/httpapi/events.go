@@ -277,8 +277,8 @@ func (s *Server) handleListEvents(ctx context.Context, in *ListEventsInput) (*li
 	}
 	var cur eventsCursor
 	if in.Cursor != "" {
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(user.ID, cursorEvents, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.Ty != in.Type || cur.Ag != in.AgentID || cur.Co != in.ConversationID ||
 			cur.Ms != in.MessageID || cur.Si != rfc3339PtrOrEmpty(since) || cur.Un != rfc3339PtrOrEmpty(until) {
@@ -303,7 +303,7 @@ func (s *Server) handleListEvents(ctx context.Context, in *ListEventsInput) (*li
 	var nextCursor string
 	if hasMore {
 		last := events[len(events)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, eventsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorEvents, eventsCursor{
 			C: last.CreatedAt, I: last.ID,
 			Ty: in.Type, Ag: in.AgentID, Co: in.ConversationID, Ms: in.MessageID,
 			Si: rfc3339PtrOrEmpty(since), Un: rfc3339PtrOrEmpty(until),

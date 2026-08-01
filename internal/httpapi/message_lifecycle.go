@@ -62,8 +62,10 @@ func (s *Server) handleMessageLifecycle(ctx context.Context, in *messageLifecycl
 	var afterID string
 	if in.Cursor != "" {
 		var cursor messageLifecycleCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cursor); err != nil ||
-			cursor.Version != messageLifecycleCursorVersion || cursor.AgentID != agent.ID || cursor.MessageID != in.ID ||
+		if err := s.decodeCursor(agent.UserID, cursorMessageLifecycle, in.Cursor, &cursor); err != nil {
+			return nil, err
+		}
+		if cursor.Version != messageLifecycleCursorVersion || cursor.AgentID != agent.ID || cursor.MessageID != in.ID ||
 			cursor.OccurredAt.IsZero() || cursor.ID == "" || cursor.Sort != messageLifecycleSortAscending {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
 		}
@@ -107,7 +109,7 @@ func (s *Server) handleMessageLifecycle(ctx context.Context, in *messageLifecycl
 	var nextCursor string
 	if hasMore {
 		last := items[len(items)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, messageLifecycleCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, agent.UserID, cursorMessageLifecycle, messageLifecycleCursor{
 			Version: messageLifecycleCursorVersion, AgentID: agent.ID, MessageID: in.ID,
 			OccurredAt: last.OccurredAt.UTC(), ID: last.ID, Sort: messageLifecycleSortAscending,
 		})

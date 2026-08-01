@@ -124,7 +124,7 @@ func (s *Server) handleListAPIKeys(ctx context.Context, in *listAPIKeysInput) (*
 	if s.deps.ListAPIKeys == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "API keys are not available on this deployment")
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(user.ID, cursorAPIKeys, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func (s *Server) handleListAPIKeys(ctx context.Context, in *listAPIKeysInput) (*
 	var nextCursor string
 	if hasMore {
 		last := keys[len(keys)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorAPIKeys, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

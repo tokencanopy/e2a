@@ -396,13 +396,26 @@ type ListDeliveriesInput struct {
 }
 
 // deliveriesCursor is the opaque keyset position for the delivery log: the last
-// row's (created_at, id) plus the status filter it was minted under, so a
-// continuation that changes status is rejected rather than silently returning a
-// wrong page (mirrors the messages/events filter-binding).
+// row's (created_at, id) plus the PARENT WEBHOOK and the status filter it was
+// minted under, so a continuation that changes either is rejected rather than
+// silently returning a wrong page (mirrors the messages/events filter-binding).
+//
+// WebhookID is what makes this list's binding complete. The resource
+// discriminator only proves a cursor came from *some* deliveries list, and this
+// endpoint is parameterized by {id}: without the parent, a cursor minted on
+// webhook A was accepted on webhook B and A's keyset anchor was handed to B's
+// query — an arbitrarily truncated, commonly empty page. Both webhooks are
+// caller-owned (the handler checks GetWebhook before it touches the cursor), so
+// this was never cross-tenant leakage, but it is the same silent-wrong-answer
+// failure the resource binding exists to eliminate. Every other parameterized
+// list already pins its parent: messages/conversations pin AgentID,
+// engagements/agent suppressions pin AgentEmail, message_lifecycle pins
+// AgentID + MessageID.
 type deliveriesCursor struct {
 	CreatedAt time.Time `json:"c"`
 	ID        string    `json:"i"`
 	Status    string    `json:"s,omitempty"`
+	WebhookID string    `json:"w,omitempty"`
 }
 type listDeliveriesOutput struct {
 	Body Page[WebhookDeliveryView]
@@ -422,8 +435,12 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	}
 	var cur deliveriesCursor
 	if in.Cursor != "" {
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(user.ID, cursorWebhookDeliveries, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if cur.WebhookID != in.ID {
+			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
+				"cursor was created for a different webhook — start a new query without a cursor")
 		}
 		if cur.Status != in.Status {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -454,8 +471,8 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, deliveriesCursor{
-			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status,
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorWebhookDeliveries, deliveriesCursor{
+			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status, WebhookID: in.ID,
 		})
 		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
@@ -658,7 +675,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	if err != nil {
 		return nil, err
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(user.ID, cursorWebhooks, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +696,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	var nextCursor string
 	if hasMore {
 		last := hooks[len(hooks)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorWebhooks, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

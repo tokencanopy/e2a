@@ -608,7 +608,7 @@ func TestDeleteMessagePermanentIsAccountOnly(t *testing.T) {
 // must not continue a trash (?deleted=true) listing, and vice versa.
 func TestListAgentsCursorBoundToView(t *testing.T) {
 	srv := testServer(t)
-	liveCursor, err := EncodeCursor("", keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com"})
+	liveCursor, err := EncodeCursor("", "u_1", cursorAgents, keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com"})
 	if err != nil {
 		t.Fatalf("EncodeCursor: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestListAgentsCursorBoundToView(t *testing.T) {
 	if code != 400 || errCode(body) != "invalid_cursor" {
 		t.Fatalf("live cursor on trash view: want 400 invalid_cursor, got %d %v", code, body)
 	}
-	trashCursor, err := EncodeCursor("", keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com", Deleted: true})
+	trashCursor, err := EncodeCursor("", "u_1", cursorAgents, keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com", Deleted: true})
 	if err != nil {
 		t.Fatalf("EncodeCursor: %v", err)
 	}

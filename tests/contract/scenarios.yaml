@@ -1656,3 +1656,89 @@ scenarios:
         path: /v1/contacts/investor@fund.vc?confirm=DELETE
         expect:
           status: 200
+
+  - name: cursor_binding_foreign_cursor_rejected
+    description: >
+      Pagination cursors are bound to the exact query that minted them — the
+      collection, its parent path parameters, its filters, and the minting
+      account. Replaying a genuinely minted cursor anywhere else must surface
+      400 invalid_cursor, never a silently mispositioned (typically empty)
+      200 page. The runners share a single test account, so the cross-account
+      replay cannot be staged in this DSL; that axis binds via the MAC key
+      and is deliberately indistinguishable from the forged-cursor case
+      asserted last here — its two-account matrix lives in
+      internal/httpapi/cursor_binding_test.go.
+    steps:
+      # Two contacts so a limit=1 first page yields a real continuation cursor.
+      - id: seed_first
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-a@bind.vc
+        expect:
+          status: 201
+
+      - id: seed_second
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-b@bind.vc
+        expect:
+          status: 201
+
+      - id: mint
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+        capture:
+          contacts_cursor: next_cursor
+
+      - id: foreign_endpoint_rejected
+        # A real /v1/contacts cursor presented to /v1/agents: pre-binding this
+        # verified (same HMAC secret, same keyset shape) and anchored the
+        # agents query at a meaningless position; now it is a 400.
+        action: request
+        method: GET
+        path: /v1/agents?cursor={contacts_cursor}
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+      - id: own_continuation_still_walks
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1&cursor={contacts_cursor}
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+
+      - id: forged_cursor_rejected
+        # The same surface a foreign ACCOUNT's cursor produces: a plain MAC
+        # failure, indistinguishable from tampering.
+        action: request
+        method: GET
+        path: /v1/contacts?cursor=not-a-real-cursor
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-a@bind.vc?confirm=DELETE
+        expect:
+          status: 200
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-b@bind.vc?confirm=DELETE
+        expect:
+          status: 200

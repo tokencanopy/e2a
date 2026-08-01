@@ -269,8 +269,10 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var afterID string
 	if in.Cursor != "" {
 		var cur engagementsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil ||
-			cur.AgentEmail != ag.ID || cur.Filters != fingerprint {
+		if err := s.decodeCursor(p.User.ID, cursorEngagements, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if cur.AgentEmail != ag.ID || cur.Filters != fingerprint {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
 		}
 		afterCreatedAt, afterID = cur.CreatedAt, cur.ID
@@ -288,7 +290,7 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var next string
 	if hasMore {
 		last := rows[len(rows)-1]
-		next, err = EncodeCursor(s.deps.CursorSecret, engagementsCursor{
+		next, err = EncodeCursor(s.deps.CursorSecret, p.User.ID, cursorEngagements, engagementsCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, AgentEmail: ag.ID, Filters: fingerprint,
 		})
 		if err != nil {
