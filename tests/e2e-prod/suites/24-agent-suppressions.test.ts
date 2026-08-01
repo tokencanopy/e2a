@@ -178,6 +178,115 @@ test("delete: unknown address on an owned agent returns 404 not_found", async ()
 });
 
 // ---------------------------------------------------------------------------
+// Isolation: this is the DEFINING semantic of an agent-scoped block — it binds
+// to one exact sending agent, not to the account. Without this, the surface is
+// indistinguishable from the account-wide list it deliberately is not.
+// ---------------------------------------------------------------------------
+test("isolation: a block on one agent does not leak to another agent", async () => {
+  const [agentA, agentB] = [await freshAgent("supisoa"), await freshAgent("supisob")];
+  const address = `shared-${uniqueSlug("rcpt")}@example.com`;
+
+  await client.post(suppressionsPath(agentA), { body: { address }, expect: 200 });
+
+  const listB = await client.get<PageAgentSuppressionView>(suppressionsPath(agentB), { expect: 200 });
+  assert.ok(
+    !listB.body!.items.some((s) => s.address === address),
+    "agent B's list must not contain a block created on agent A",
+  );
+
+  // The same address is independently blockable on B, and the two entries are
+  // distinct rows: removing B's must leave A's standing.
+  await client.post(suppressionsPath(agentB), { body: { address }, expect: 200 });
+  await client.delete(`${suppressionsPath(agentB, address)}?confirm=DELETE`, { expect: 200 });
+
+  const listA = await client.get<PageAgentSuppressionView>(suppressionsPath(agentA), { expect: 200 });
+  assert.ok(
+    listA.body!.items.some((s) => s.address === address),
+    "deleting agent B's block must not remove agent A's block on the same address",
+  );
+
+  // And the delete on B is not silently satisfied by A's row: it is gone now.
+  const del = await client.delete<ErrorEnvelope>(`${suppressionsPath(agentB, address)}?confirm=DELETE`);
+  assert.equal(del.status, 404, `re-deleting agent B's block → 404, got ${del.status}: ${del.raw.slice(0, 200)}`);
+});
+
+// ---------------------------------------------------------------------------
+// Pagination: the list auto-grows with every unsubscribe, so the cursor is
+// load-bearing for every client (dashboard, CLI, MCP all page through it). The
+// envelope shape is asserted in the lifecycle test; this walks a REAL cursor
+// and pins the server's agent-pinning guard — a cursor minted for one agent
+// must not be replayable against another.
+// ---------------------------------------------------------------------------
+test("pagination: cursor walks the list and is pinned to its agent", async () => {
+  const agent = await freshAgent("suppg");
+  const addresses = [
+    `page-a-${uniqueSlug("rcpt")}@example.com`,
+    `page-b-${uniqueSlug("rcpt")}@example.com`,
+    `page-c-${uniqueSlug("rcpt")}@example.com`,
+  ];
+  for (const address of addresses) {
+    await client.post(suppressionsPath(agent), { body: { address }, expect: 200 });
+  }
+
+  // Walk one row at a time; every page must advance and never repeat a row.
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < addresses.length + 1; page += 1) {
+    const query: Record<string, string | number> = { limit: 1 };
+    if (cursor) query.cursor = cursor;
+    const r = await client.get<PageAgentSuppressionView>(suppressionsPath(agent), { query, expect: 200 });
+    assert.ok(r.body!.items.length <= 1, `limit=1 returns at most one row, got ${r.body!.items.length}`);
+    for (const item of r.body!.items) seen.push(item.address);
+    const next = r.body!.next_cursor;
+    if (!next) break;
+    assert.notEqual(next, cursor, "next_cursor must advance, or a client paging this list would loop forever");
+    cursor = next;
+  }
+  assert.deepEqual(
+    [...seen].sort(),
+    [...addresses].sort(),
+    "walking the cursor yields every row exactly once",
+  );
+
+  // A cursor is scoped to the agent that minted it (the handler compares the
+  // cursor's agent against the route's). Replaying it on another owned agent
+  // must be rejected rather than silently paging the wrong list.
+  const other = await freshAgent("suppgo");
+  const first = await client.get<PageAgentSuppressionView>(suppressionsPath(agent), {
+    query: { limit: 1 },
+    expect: 200,
+  });
+  const borrowed = first.body!.next_cursor;
+  assert.ok(borrowed, "precondition: the seeded list is longer than one page");
+  const replay = await client.get<ErrorEnvelope>(suppressionsPath(other), { query: { limit: 1, cursor: borrowed! } });
+  assert.equal(replay.status, 400, `replayed cursor → 400, got ${replay.status}: ${replay.raw.slice(0, 200)}`);
+  assert.equal(replay.body?.error?.code, "invalid_cursor", "error envelope code=invalid_cursor");
+});
+
+// ---------------------------------------------------------------------------
+// Destructive-confirm guard: like every delete op, un-suppressing requires
+// ?confirm=DELETE. Huma enforces it declaratively (required + enum), so the
+// omission is a 422 BEFORE the handler runs — and the entry must survive.
+// ---------------------------------------------------------------------------
+test("delete: omitting ?confirm=DELETE is rejected and leaves the block intact", async () => {
+  const agent = await freshAgent("supcf");
+  const address = `confirm-${uniqueSlug("rcpt")}@example.com`;
+  await client.post(suppressionsPath(agent), { body: { address }, expect: 200 });
+
+  const noConfirm = await client.delete<ErrorEnvelope>(suppressionsPath(agent, address));
+  assert.equal(noConfirm.status, 422, `delete without confirm → 422, got ${noConfirm.status}: ${noConfirm.raw.slice(0, 200)}`);
+
+  const wrongConfirm = await client.delete<ErrorEnvelope>(`${suppressionsPath(agent, address)}?confirm=yes`);
+  assert.equal(wrongConfirm.status, 422, `delete with a wrong confirm token → 422, got ${wrongConfirm.status}`);
+
+  const list = await client.get<PageAgentSuppressionView>(suppressionsPath(agent), { expect: 200 });
+  assert.ok(
+    list.body!.items.some((s) => s.address === address),
+    "a rejected delete must not remove the block",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Scope: the surface is account-administration — an agent-scoped credential
 // must be rejected with 403 forbidden. Mirrors 19-account's key hygiene: the
 // probe key is minted fresh and only THAT key is ever deleted.
