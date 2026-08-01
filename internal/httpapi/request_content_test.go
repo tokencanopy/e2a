@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -191,6 +192,32 @@ func TestNULInNonBodyParamsIsRejected(t *testing.T) {
 	clean := createContactInput{IdempotencyKey: "idem-1"}
 	if bad := scanInputForNUL(reflect.ValueOf(&clean)); bad != nil {
 		t.Fatalf("clean header flagged at %s", bad.Location)
+	}
+}
+
+// TestLongMapKeyInErrorLocationIsTruncated pins that the error envelope stays
+// bounded when the offending location runs through a caller-controlled map
+// key. The location is echoed into BOTH error.message and
+// details.fields[0].location, and Huma binds the body before requirePrincipal
+// runs — so without truncation a multi-megabyte metadata key comes back ~2x in
+// the response, unauthenticated. Keys are capped at render time the same way
+// truncateForError bounds them in validateContactMetadata messages.
+func TestLongMapKeyInErrorLocationIsTruncated(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	longKey := strings.Repeat("k", 64<<10)
+	code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/contacts", "account", map[string]any{
+		"address":  "long-key@example.com",
+		"metadata": map[string]any{longKey: "a\x00b"},
+	})
+	assertNULRejected(t, code, body, "body.metadata."+strings.Repeat("k", 32)+"…")
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > 1024 {
+		t.Errorf("error response is %d bytes for a %d-byte key; the location must not reflect the key",
+			len(raw), len(longKey))
 	}
 }
 

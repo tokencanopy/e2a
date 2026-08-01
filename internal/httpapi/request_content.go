@@ -87,6 +87,13 @@ type locSegment struct {
 	name    string
 	index   int
 	indexed bool
+	// untrusted marks a caller-controlled map key. Field names come from our
+	// own structs, but a map key is arbitrary caller input of arbitrary size —
+	// the location is echoed into both error.message and details.fields, so an
+	// unbounded key would reflect megabytes of caller bytes back in the
+	// response (Huma binds the body before auth runs, so unauthenticated).
+	// Truncated at render time, on the failure path only.
+	untrusted bool
 }
 
 // location materializes the current path, e.g. body.contacts[417].display_name.
@@ -103,7 +110,11 @@ func (s *nulScanner) location() string {
 		if i > 0 {
 			b.WriteByte('.')
 		}
-		b.WriteString(seg.name)
+		name := seg.name
+		if seg.untrusted {
+			name = truncateForError(name)
+		}
+		b.WriteString(name)
 	}
 	return b.String()
 }
@@ -210,7 +221,7 @@ func (s *nulScanner) scanValue(v reflect.Value) *nulViolation {
 					// response the way FieldError deliberately avoids.
 					return s.violation(nulKeyMessage)
 				}
-				s.path = append(s.path, locSegment{name: key.String()})
+				s.path = append(s.path, locSegment{name: key.String(), untrusted: true})
 				pushed = true
 			}
 			if bad := s.scanValue(iter.Value()); bad != nil {
