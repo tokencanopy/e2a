@@ -2826,7 +2826,11 @@ scenarios:
       "body", so the composed attribution is fully deterministic. The detail
       view surfaces the quote-stripped parsed.text, so the assertions match
       that projection exactly; the raw wire composition is pinned by unit
-      tests server-side.
+      tests server-side. Both replies use a future send_at (composition
+      happens at accept, before scheduling) so the scenario never submits to
+      a provider — no real mail in seed mode, and trash-cancel in cleanup
+      cannot race a submission lease (the same pattern as the scheduled_*
+      scenarios).
     setup:
       - register_agent:
           email: quote-history-{scenario_token}@agents.e2a.dev
@@ -2842,10 +2846,11 @@ scenarios:
         body:
           text: quoted reply conformance
           quote_history: true
+          send_at: "{future_rfc3339}"
         expect:
           status: 202
           body_match:
-            status: accepted
+            status: scheduled
         capture:
           quoted_message_id: message_id
 
@@ -2873,10 +2878,11 @@ scenarios:
         path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply
         body:
           text: verbatim reply conformance
+          send_at: "{future_rfc3339}"
         expect:
           status: 202
           body_match:
-            status: accepted
+            status: scheduled
         capture:
           verbatim_message_id: message_id
 

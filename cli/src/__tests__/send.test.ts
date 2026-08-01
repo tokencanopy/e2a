@@ -255,7 +255,9 @@ describe("send/reply commands", () => {
     await reply("msg_orig", { body: "answer", quoteHistory: true });
 
     expect(mockReply.mock.calls[0][2].quoteHistory).toBe(true);
-    expect(process.exitCode).toBe(0);
+    // A sent reply never sets a failure code; exitCode may be untouched
+    // (undefined) when this test runs in isolation.
+    expect(process.exitCode ?? 0).toBe(0);
   });
 
   it("omits quoteHistory from the reply body when the flag is not set", async () => {

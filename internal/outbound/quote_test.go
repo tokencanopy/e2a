@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -67,5 +68,30 @@ func TestBuildReplyQuoteAttributionDegrades(t *testing.T) {
 	}
 	if got := BuildReplyQuoteAttribution(ForwardContext{From: "b@example.com"}); got != "b@example.com wrote:" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestExtractBodyPartsDepthBounded(t *testing.T) {
+	// A pathologically nested multipart must terminate at the depth bound
+	// rather than recursing per level. Build 200 genuinely nested layers
+	// (distinct boundaries), innermost a text part.
+	nest := func(depth int) string {
+		body := "Content-Type: text/plain\r\n\r\ndeep\r\n"
+		for i := depth - 1; i >= 0; i-- {
+			b := fmt.Sprintf("b%d", i)
+			body = "Content-Type: multipart/mixed; boundary=" + b + "\r\n\r\n" +
+				"--" + b + "\r\n" + body + "--" + b + "--\r\n"
+		}
+		return body
+	}
+	deep := []byte("From: a@x.com\r\n" + nest(200))
+	ctx := ExtractForwardContext(deep)
+	if ctx.Text != "" {
+		t.Fatalf("expected depth bound to cut extraction, got Text=%q", ctx.Text)
+	}
+	// Sanity: the same shape within the bound still extracts.
+	shallow := []byte("From: a@x.com\r\n" + nest(3))
+	if got := ExtractForwardContext(shallow).Text; !strings.Contains(got, "deep") {
+		t.Fatalf("shallow nesting should extract, got %q", got)
 	}
 }
