@@ -273,7 +273,7 @@ func TestSendTestCore_ScreeningReviewHolds(t *testing.T) {
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "testreview")
 
-	if err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, identity.ProtectionConfig{
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, identity.ProtectionConfig{
 		InboundGatePolicy:       "open",
 		InboundGateAction:       "review",
 		InboundScanSensitivity:  identity.SensitivityOff,

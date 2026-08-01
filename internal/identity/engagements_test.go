@@ -178,6 +178,65 @@ func TestUpdateEngagementIfUnchangedIsAtomic(t *testing.T) {
 	}
 }
 
+// TestUpdateEngagementIfUnchangedReturnsPostUpdateRow pins the other half of
+// the If-Match contract: an accepted conditional update must return the row AS
+// UPDATED, with an advanced updated_at, so the response ETag matches the stored
+// state and a guarded read-modify-write chain can continue.
+//
+// Regression: the original implementation ran the read-back as the outer
+// SELECT of a data-modifying CTE. In Postgres that outer query runs on the
+// statement snapshot, which predates the CTE's UPDATE — the call committed the
+// new stage but returned the old one with the old updated_at, so the derived
+// ETag was permanently stale (caught live by the staging conformance suite,
+// suite 30, on the prospect→nurture transition).
+func TestUpdateEngagementIfUnchangedReturnsPostUpdateRow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "engfresh")
+
+	original := enroll(t, store, user.ID, "raise@e.com", "partner@fresh.vc", "prospect")
+
+	next := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+	nextP := &next
+	stage := "nurture"
+	got, err := store.UpdateEngagementIfUnchanged(ctx, user.ID, "raise@e.com",
+		"partner@fresh.vc", &stage, &nextP, nil, original.UpdatedAt)
+	if err != nil {
+		t.Fatalf("conditional update: %v", err)
+	}
+	if got.Stage != "nurture" {
+		t.Errorf("stage = %q, want post-update %q — the conditional update returned the pre-update row", got.Stage, "nurture")
+	}
+	if got.NextActionAt == nil || !got.NextActionAt.Equal(next) {
+		t.Errorf("next_action_at = %v, want post-update %v", got.NextActionAt, next)
+	}
+	if !got.UpdatedAt.After(original.UpdatedAt) {
+		t.Errorf("updated_at = %v, want later than expected %v — a stale updated_at means the derived ETag never moves", got.UpdatedAt, original.UpdatedAt)
+	}
+
+	// The returned row must agree with a subsequent read, exactly where the
+	// ETag is concerned: same stage, same updated_at.
+	reread, err := store.GetEngagement(ctx, user.ID, "raise@e.com", "partner@fresh.vc")
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if reread.Stage != got.Stage {
+		t.Errorf("stored stage = %q, returned %q", reread.Stage, got.Stage)
+	}
+	if !reread.UpdatedAt.Equal(got.UpdatedAt) {
+		t.Errorf("stored updated_at = %v, returned %v — the response validator would not match the row", reread.UpdatedAt, got.UpdatedAt)
+	}
+
+	// And the returned updated_at is the real new validator: conditioning the
+	// next update on it must succeed.
+	stage2 := "engaged"
+	if _, err := store.UpdateEngagementIfUnchanged(ctx, user.ID, "raise@e.com",
+		"partner@fresh.vc", &stage2, nil, nil, got.UpdatedAt); err != nil {
+		t.Errorf("chained conditional update with returned updated_at: %v", err)
+	}
+}
+
 // TestUpsertEngagementCannotBypassContactCap pins that enrollment and manual
 // contact creation share one account limit. An engagement may create a missing
 // contact for convenience, but it is not a back door around the safety cap.
@@ -761,7 +820,7 @@ func TestClaimDueEngagementsSkipsTrashedAgents(t *testing.T) {
 
 	// Restoring makes the outreach pull-visible again, but acknowledges past
 	// schedules so a long-trashed inbox does not emit a wake-up thundering herd.
-	if err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
+	if _, err := store.RestoreAgent(ctx, agent, user.ID); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	due, err = store.ClaimDueEngagements(ctx, time.Now().UTC(), 50)

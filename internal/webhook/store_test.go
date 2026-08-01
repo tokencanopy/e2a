@@ -249,7 +249,7 @@ func TestGetPendingDeliveriesSkipsTrash(t *testing.T) {
 	}
 
 	// Restore → claimable again (the skip left the row unleased).
-	if err := identityStore.RestoreMessage(ctx, msg.ID, agent.ID); err != nil {
+	if _, err := identityStore.RestoreMessage(ctx, msg.ID, agent.ID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	pending, err = deliveryStore.GetPendingDeliveries(ctx, 10)

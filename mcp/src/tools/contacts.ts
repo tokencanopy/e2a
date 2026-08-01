@@ -11,6 +11,14 @@ const metadata = z.record(
 
 const contactAddress = z.string().email().describe("Contact email address.");
 
+// An empty string is not a validator. Accepting one would send `If-Match:` with
+// no value — which the API now rejects, and which before it did degraded a write
+// the model believed was guarded into an unconditional one. Omitting the field
+// is how you ask for an unconditional write; "" is a mistake, so the schema
+// refuses it at the tool boundary rather than round-tripping it.
+const ifMatchValidator = z.string().min(1).optional()
+  .describe("ETag from a prior read, used to reject a stale write. Omit the field entirely for an unconditional write; an empty string is rejected.");
+
 // RFC 3339 date-time with an explicit UTC offset (Z or ±HH:MM both accepted).
 // Bare date-times and date-only values are rejected rather than guessed at:
 // `new Date()` would read them in LOCAL time and silently shift the filter
@@ -93,7 +101,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         address: contactAddress,
         display_name: z.string().max(320).optional(),
         metadata,
-        if_match: z.string().optional(),
+        if_match: ifMatchValidator,
       }).refine(
         (value) => value.display_name !== undefined || value.metadata !== undefined,
         { message: "display_name or metadata is required" },
@@ -231,7 +239,7 @@ export function registerContactTools(server: McpServer, client: McpClient): void
         stage: z.string().max(128).optional(),
         next_action_at: contactTimestamp.nullable().optional(),
         metadata,
-        if_match: z.string().optional(),
+        if_match: ifMatchValidator,
       }).refine(
         (value) => value.stage !== undefined || value.next_action_at !== undefined || value.metadata !== undefined,
         { message: "stage, next_action_at, or metadata is required" },

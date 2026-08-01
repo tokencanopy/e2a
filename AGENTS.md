@@ -6,6 +6,33 @@ knowledge of the project. For deeper prose, see `README.md` (product),
 `CONTRIBUTING.md` (contributor workflow), `docs/` (API reference,
 deployment, design docs), and `SECURITY.md`.
 
+## Public repository data boundary (non-negotiable)
+
+This repository and all of its GitHub surfaces are public. **Never put real
+customer data or non-public production-derived data in source files, tests,
+fixtures, generated artifacts, commit messages, branch names,
+PR/issue/discussion titles or bodies, review comments, screenshots, log
+excerpts, or benchmark output.** This includes email and agent addresses,
+customer domains or names, user/account/agent/message/contact IDs, message
+content or subjects, customer-specific URLs or IP addresses, timestamps tied to
+customer activity, and delivery, bounce, or incident details that can be
+correlated to a customer. An address on `agents.e2a.dev` is a customer
+identifier, not a safe example value. Public service metadata deliberately
+documented for users, such as `https://api.e2a.dev`, is not customer data.
+
+Before any GitHub-facing write, replace production-derived values with synthetic
+ones such as `example.com`, `.test`, `.invalid`, `agents.localhost`, or clearly
+fictional resource IDs. Describe production evidence only in anonymized,
+non-correlatable terms (for example, "a production customer saw repeated SMTP
+rejections"). Keep exact evidence only in an approved private incident or
+operations system. Relevance to a fix is not an exception to this boundary.
+
+If customer data is found before push, stop and rewrite the affected files and
+commits. If it reaches GitHub, treat it as a data exposure: stop propagation,
+notify Josh/security, sanitize the PR or issue, rewrite reachable Git history,
+check related refs/forks/caches, and contact GitHub Support when cached views or
+references need purging. Deleting the visible text alone is not sufficient.
+
 ## Project overview
 
 e2a is an **authenticated email gateway for AI agents**: it gives an agent a
@@ -315,6 +342,29 @@ manually on every API change even though the template won't remind you.
   feature, extend all three interpreters in parity, add runner-level regressions
   in every language, and prefer dynamic placeholders over fixtures that age or
   collide under concurrent runs.
+- **New SDK surface needs live coverage in per-PR CI, not only staging.** The
+  post-merge staging conformance gate must never be the FIRST live exercise
+  of a method — that is how `If-Match: undefined` shipped (#774). The
+  ts-contract job enforces a denominator: every ergonomic client method must
+  be exercised by `sdks/typescript/test/v1/contract-client.test.ts` or carry
+  an explicit allowlist entry in `contract-coverage.test.ts` (a ratchet —
+  shrink it; grow it only with a reason the contract server can't run the
+  path).
+- **Generated clients are pipeline artifacts — never hand-edit them.** Any
+  behavior fix belongs in the generation pipeline (`make generate-sdk`, e.g.
+  the TS post-processing step `scripts/guard-optional-header-params.py`), so
+  regeneration cannot undo it. Static audits pin the load-bearing emission
+  shapes per PR — optional header params must stay guarded in both generated
+  clients (TS: `test/v1/optional-header-params.test.ts`; Python:
+  `tests/test_generated_header_guards.py`) — because the freshness gate alone
+  re-blesses whatever a new generator version emits.
+- **Data-modifying CTEs must not re-select from the table they modified.** In
+  Postgres the outer query runs on the statement snapshot, which predates the
+  CTE's own writes — `WITH x AS (UPDATE t … RETURNING …) SELECT … FROM t`
+  returns the pre-update row (this broke `UpdateEngagementIfUnchanged`'s ETag
+  chain, #775). Read FROM the CTE's RETURNING output, or split write and read
+  into two statements in one transaction. Guarded repo-wide by
+  `internal/sqlguard` (waiver: `// cte-snapshot-safe: <reason>`).
 - **Schema-change rule**: when changing a table shape, add/update DB-backed
   tests in every package that writes direct SQL against that table — the
   idempotent migration runner will not catch drifted runtime SQL.

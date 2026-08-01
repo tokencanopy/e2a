@@ -55,6 +55,65 @@ func setupAPIWithLimits(t *testing.T, internalSecret string) (*httptest.Server, 
 	return server, store, pool, enf
 }
 
+// validUserID is the shape identity.generateID emits: 16 random bytes hex
+// encoded => 32 lowercase hex chars. NOT a UUID — validating the endpoint's
+// user_id as a UUID would reject every real user.
+const validUserID = "0123456789abcdef0123456789abcdef"
+
+// recordingEnforcer captures Invalidate calls so a test can assert the
+// handler never forwards a malformed user_id (and therefore never mints a
+// permanent cache entry for it).
+type recordingEnforcer struct {
+	limits.Enforcer
+	calls []string
+}
+
+func (r *recordingEnforcer) Invalidate(userID string) { r.calls = append(r.calls, userID) }
+
+// setupAPIWithRecorder is setupAPIWithLimits with the enforcer swapped for a
+// recorder, so tests can observe exactly what reaches Invalidate.
+func setupAPIWithRecorder(t *testing.T, internalSecret string) (*httptest.Server, *recordingEnforcer) {
+	t.Helper()
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	smtpRelay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{})
+	sender := outbound.NewSender(smtpRelay, "test.e2a.dev")
+	userAuth := auth.NewUserAuth(&config.OAuthConfig{}, store, false)
+	usageStore := usage.NewStore(pool)
+	rec := &recordingEnforcer{Enforcer: limits.NewEnforcer(
+		limits.NewStore(pool), usageStore,
+		limits.Defaults{PlanCode: "default", MaxAgents: 100, MaxDomains: 10, MaxMessagesMonth: 1_000_000, MaxStorageBytes: 1 << 40},
+		0,
+	)}
+
+	api := agent.NewAPI(store, sender, smtpRelay, userAuth, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	api.SetEnforcer(rec)
+	api.SetUsageStore(usageStore)
+	api.SetInternalAPISecret(internalSecret)
+
+	router := mux.NewRouter()
+	api.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	return server, rec
+}
+
+// postInvalidate signs and posts an invalidate request.
+func postInvalidate(t *testing.T, server *httptest.Server, secret, userID string) int {
+	t.Helper()
+	body := []byte(`{"user_id":"` + userID + `"}`)
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write(body)
+	req, _ := http.NewRequest("POST", server.URL+"/api/internal/limits/invalidate", bytes.NewReader(body))
+	req.Header.Set("X-E2A-Internal-Signature", hex.EncodeToString(h.Sum(nil)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
 func TestInvalidateLimits_RejectsMissingSignature(t *testing.T) {
 	server, _, _, _ := setupAPIWithLimits(t, "test-secret-1")
 
@@ -84,7 +143,7 @@ func TestInvalidateLimits_AcceptsCorrectSignature(t *testing.T) {
 	secret := "test-secret-3"
 	server, _, _, _ := setupAPIWithLimits(t, secret)
 
-	body := []byte(`{"user_id":"u_xyz"}`)
+	body := []byte(`{"user_id":"0123456789abcdef0123456789abcdef"}`)
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write(body)
 	sig := hex.EncodeToString(h.Sum(nil))
@@ -109,5 +168,50 @@ func TestInvalidateLimits_503WhenSecretUnset(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("no-secret config: status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// TestInvalidateLimits_RejectsMalformedUserID pins the edge shape check.
+// Since the process-wide invalidation epoch, this is defense-in-depth rather
+// than the memory bound (Invalidate only ever deletes map entries — see
+// limits.DBEnforcer.Invalidate); it keeps the endpoint's contract tight and
+// makes a caller sending the wrong field fail loudly.
+func TestInvalidateLimits_RejectsMalformedUserID(t *testing.T) {
+	const secret = "test-secret-malformed"
+	server, rec := setupAPIWithRecorder(t, secret)
+
+	for _, bad := range []string{
+		"u_xyz",                             // legacy-looking, wrong shape
+		"0123456789ABCDEF0123456789ABCDEF",  // uppercase hex
+		"0123456789abcdef0123456789abcde",   // 31 chars
+		"0123456789abcdef0123456789abcdef0", // 33 chars
+		"0123456789abcdef0123456789abcdeg",  // non-hex char
+		"../../etc/passwd",                  // traversal-ish junk
+	} {
+		if code := postInvalidate(t, server, secret, bad); code != http.StatusBadRequest {
+			t.Errorf("user_id %q: status = %d, want 400", bad, code)
+		}
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("malformed user_ids reached Invalidate (would mint cache entries): %v", rec.calls)
+	}
+}
+
+// TestInvalidateLimits_AcceptsWellFormedUncachedUserID is the counterweight to
+// the test above and pins the trap in the fix: the invalidate must still reach
+// the enforcer for a user who has NO cached entry, because that is exactly the
+// racing case (miss -> DB read -> invalidate -> cachePut) — the epoch has to
+// advance so the in-flight fill is dropped. An edge check that rejected
+// unknown-but-well-formed ids would silently reintroduce the original
+// stale-limits bug.
+func TestInvalidateLimits_AcceptsWellFormedUncachedUserID(t *testing.T) {
+	const secret = "test-secret-uncached"
+	server, rec := setupAPIWithRecorder(t, secret)
+
+	if code := postInvalidate(t, server, secret, validUserID); code != http.StatusNoContent {
+		t.Fatalf("well-formed uncached user_id: status = %d, want 204", code)
+	}
+	if len(rec.calls) != 1 || rec.calls[0] != validUserID {
+		t.Fatalf("Invalidate calls = %v, want exactly [%s]", rec.calls, validUserID)
 	}
 }
