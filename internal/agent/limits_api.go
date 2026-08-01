@@ -106,14 +106,14 @@ func (a *API) handleInvalidateLimits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
-	// Bound what can enter the enforcer's cache map. Invalidate now records a
-	// generation tombstone for whatever key it is handed — it MUST, because a
-	// user with no cached entry is exactly the case the invalidate/fill race
-	// guard exists to cover: the generation has to advance so an in-flight
-	// fill can see it lost. That makes an unvalidated user_id an unbounded
-	// map-growth vector (the map has no TTL sweep), so the bound belongs here,
-	// at the edge, rather than in Invalidate where it would silently
-	// reintroduce the race.
+	// Shape-check the user_id before it reaches the enforcer. This is
+	// defense-in-depth, not the memory bound: the enforcer's process-wide
+	// invalidation epoch means Invalidate only ever DELETES map entries
+	// (see limits.DBEnforcer.Invalidate), so even an unvalidated user_id
+	// could not grow the cache. Rejecting garbage here still keeps the
+	// endpoint's contract tight and makes a misbehaving caller (a sidecar
+	// bug sending the wrong field) fail loudly instead of silently
+	// no-oping.
 	if !isUserID(req.UserID) {
 		http.Error(w, "user_id is malformed", http.StatusBadRequest)
 		return
@@ -132,7 +132,7 @@ const userIDLen = 32
 // userIDLen lowercase hex characters. A shape check, not an existence check —
 // confirming existence would mean a DB round trip on a path whose whole purpose
 // is to avoid one, and a well-formed id for a deleted user is harmless (it
-// tombstones a key nothing will ever read).
+// deletes a cache key nothing will ever read).
 func isUserID(s string) bool {
 	if len(s) != userIDLen {
 		return false

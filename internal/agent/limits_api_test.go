@@ -171,11 +171,11 @@ func TestInvalidateLimits_503WhenSecretUnset(t *testing.T) {
 	}
 }
 
-// TestInvalidateLimits_RejectsMalformedUserID guards the growth vector the
-// generation change introduced. Invalidate now WRITES a tombstone for whatever
-// key it is given (it must — see the comment on limits.DBEnforcer.Invalidate),
-// and the cache map has no TTL sweep, so an unvalidated user_id would let a
-// caller mint permanent entries. The bound lives at the edge.
+// TestInvalidateLimits_RejectsMalformedUserID pins the edge shape check.
+// Since the process-wide invalidation epoch, this is defense-in-depth rather
+// than the memory bound (Invalidate only ever deletes map entries — see
+// limits.DBEnforcer.Invalidate); it keeps the endpoint's contract tight and
+// makes a caller sending the wrong field fail loudly.
 func TestInvalidateLimits_RejectsMalformedUserID(t *testing.T) {
 	const secret = "test-secret-malformed"
 	server, rec := setupAPIWithRecorder(t, secret)
@@ -198,11 +198,12 @@ func TestInvalidateLimits_RejectsMalformedUserID(t *testing.T) {
 }
 
 // TestInvalidateLimits_AcceptsWellFormedUncachedUserID is the counterweight to
-// the test above and pins the trap in the fix: the guard must still fire for a
-// user who has NO cached entry, because that is exactly the racing case
-// (miss -> DB read -> invalidate -> cachePut). A "only tombstone if an entry
-// already exists" bound would pass the malformed test and silently reintroduce
-// the original stale-limits bug.
+// the test above and pins the trap in the fix: the invalidate must still reach
+// the enforcer for a user who has NO cached entry, because that is exactly the
+// racing case (miss -> DB read -> invalidate -> cachePut) — the epoch has to
+// advance so the in-flight fill is dropped. An edge check that rejected
+// unknown-but-well-formed ids would silently reintroduce the original
+// stale-limits bug.
 func TestInvalidateLimits_AcceptsWellFormedUncachedUserID(t *testing.T) {
 	const secret = "test-secret-uncached"
 	server, rec := setupAPIWithRecorder(t, secret)

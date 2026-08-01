@@ -3,6 +3,7 @@ package limits
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -332,27 +333,40 @@ func TestEnforcer_CacheStillWorksAfterInvalidate(t *testing.T) {
 	}
 }
 
-// TestEnforcer_InvalidateIsPerUser: bumping one user's generation must
-// not drop another user's concurrent fill. A single process-wide
-// counter would fail this.
-func TestEnforcer_InvalidateIsPerUser(t *testing.T) {
+// TestEnforcer_InvalidateEvictsOnlyTheNamedUsersCachedEntry: Invalidate
+// deletes only the named user's CACHED entry — an unrelated user's
+// already-cached limits must keep serving from memory.
+//
+// Note what this test deliberately does NOT claim: that an unrelated
+// user's invalidate cannot drop another user's *in-flight fill*. Under
+// the process-wide invalidation epoch it can — intentionally so (the
+// epoch is what bounds the cache map; see Invalidate). A false drop
+// only costs one extra DB read on a path that already missed the cache.
+// What must never happen is a cached entry becoming collateral damage,
+// which is what this test pins.
+func TestEnforcer_InvalidateEvictsOnlyTheNamedUsersCachedEntry(t *testing.T) {
 	store := &fakeStore{row: raceOldRow, found: true}
 	e := newEnforcerWithReader(store, &fakeCounter{}, defaultsForTest(), time.Minute)
 
-	store.onGet = func(callNo int) {
-		if callNo == 1 {
-			e.Invalidate("other-user")
+	// Fill and cache user1, with no invalidation in flight.
+	if _, err := e.Get(context.Background(), "user1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// Invalidate a different user entirely.
+	e.Invalidate("other-user")
+
+	// user1's cached entry must survive and keep serving from memory.
+	for i := 0; i < 3; i++ {
+		got, err := e.Get(context.Background(), "user1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got != raceOldRow {
+			t.Errorf("Get #%d = %+v, want cached %+v", i+2, got, raceOldRow)
 		}
 	}
-
-	if _, err := e.Get(context.Background(), "user1"); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if _, err := e.Get(context.Background(), "user1"); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
 	if n := store.callCount(); n != 1 {
-		t.Errorf("store hit %d times, want 1 (an unrelated user's invalidate must not drop this fill)", n)
+		t.Errorf("store hit %d times, want 1 (an unrelated user's invalidate must not evict this user's cached entry)", n)
 	}
 }
 
@@ -485,13 +499,14 @@ func (w *wrappedErr) Error() string { return "wrapped: " + w.inner.Error() }
 func (w *wrappedErr) Unwrap() error { return w.inner }
 
 // TestEnforcer_InvalidateAdvancesGenerationForUncachedUser pins the trap in
-// the growth-bounding fix. It is tempting to bound the cache map by only
-// tombstoning when an entry already exists — that would be WRONG. A user with
-// no cached entry is exactly the racing case: the fill is in flight at gen 0,
-// and if Invalidate no-ops the fill comes back, matches gen 0, and caches the
-// pre-write limits with a fresh TTL — the original bug, restored. The
-// generation must advance for unknown users; the growth bound belongs at the
-// HTTP edge (handleInvalidateLimits validates the user-id shape).
+// the growth-bounding fix. It is tempting to bound the cache map by no-oping
+// Invalidate when the user has no entry — that would be WRONG. A user with no
+// cached entry is exactly the racing case: the fill is in flight at the
+// sampled epoch, and if Invalidate no-ops the fill comes back, matches, and
+// caches the pre-write limits with a fresh TTL — the original bug, restored.
+// The epoch must advance for unknown users too; the process-wide epoch makes
+// that free (no per-user state to retain), which is precisely why the map
+// stays bounded.
 func TestEnforcer_InvalidateAdvancesGenerationForUncachedUser(t *testing.T) {
 	store := &fakeStore{row: raceOldRow, found: true}
 	e := newEnforcerWithReader(store, &fakeCounter{}, defaultsForTest(), time.Minute)
@@ -519,19 +534,78 @@ func TestEnforcer_InvalidateAdvancesGenerationForUncachedUser(t *testing.T) {
 }
 
 // TestEnforcer_ZeroValueInvalidateDoesNotPanic pins the nil-map invariant.
-// Invalidate became a map WRITE in the generation change (it only deleted
-// before, which is safe on a nil map), so a DBEnforcer built as a zero value
-// would panic without either the cacheTTL<=0 early return or lazy init.
+// Invalidate itself is nil-map-safe again (delete on a nil map is a no-op),
+// but cachePut still writes, so a zero-value DBEnforcer must survive the
+// whole invalidate-then-fill sequence via lazy init.
 func TestEnforcer_ZeroValueInvalidateDoesNotPanic(t *testing.T) {
 	// cacheTTL <= 0: the early return covers it (this is the shape the
 	// apiserver tests construct).
 	(&DBEnforcer{}).Invalidate("user1")
 
-	// cacheTTL > 0 with a nil map: only lazy init saves this.
+	// cacheTTL > 0 with a nil map: Invalidate must not panic, and a fill
+	// afterwards must lazily allocate the map. The epoch is sampled via
+	// the normal path (cacheGet), exactly as Get does.
 	e := &DBEnforcer{cacheTTL: time.Minute}
 	e.Invalidate("user1")
-	e.cachePut("user2", raceNewRow, 0)
+	_, gen, ok := e.cacheGet("user2")
+	if ok {
+		t.Fatalf("cacheGet on empty enforcer reported a hit")
+	}
+	e.cachePut("user2", raceNewRow, gen)
 	if got, _, ok := e.cacheGet("user2"); !ok || got != raceNewRow {
 		t.Fatalf("cachePut on a lazily-initialized map: got %+v ok=%v", got, ok)
+	}
+}
+
+// TestEnforcer_InvalidateNeverCachedUsersRetainsNothing pins the memory bound
+// that motivated the process-wide epoch. The per-user tombstone design
+// retained one map entry per distinct userID ever passed to Invalidate, for
+// the process lifetime — an unbounded-growth vector reachable through the
+// HMAC-authenticated /api/internal/limits/invalidate endpoint. Under the
+// epoch design Invalidate's only map effect is delete, so a flood of
+// invalidates for never-cached users must leave the map empty — and must not
+// have degraded the invalidate/fill race guard.
+func TestEnforcer_InvalidateNeverCachedUsersRetainsNothing(t *testing.T) {
+	store := &fakeStore{row: raceOldRow, found: true}
+	e := newEnforcerWithReader(store, &fakeCounter{}, defaultsForTest(), time.Minute)
+
+	const n = 10_000
+	for i := 0; i < n; i++ {
+		// Syntactically valid user-id shapes (32 lowercase hex chars),
+		// as would pass the handleInvalidateLimits shape check.
+		e.Invalidate(fmt.Sprintf("%032x", i))
+	}
+	e.mu.Lock()
+	retained := len(e.cache)
+	e.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("cache retained %d entries after %d invalidates of never-cached users, want 0", retained, n)
+	}
+
+	// The race guard must still hold after the flood: an invalidate landing
+	// inside the fill window drops the fill.
+	store.onGet = func(callNo int) {
+		if callNo != 1 {
+			return
+		}
+		store.setRow(raceNewRow)
+		e.Invalidate("user1")
+	}
+	if _, err := e.Get(context.Background(), "user1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, err := e.Get(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("second Get: %v", err)
+	}
+	if got != raceNewRow {
+		t.Errorf("second Get = %+v, want %+v (stale fill was cached after invalidate flood)", got, raceNewRow)
+	}
+	// Only the one genuinely-filled user occupies the map.
+	e.mu.Lock()
+	retained = len(e.cache)
+	e.mu.Unlock()
+	if retained != 1 {
+		t.Errorf("cache holds %d entries, want 1 (only users cached by real fills)", retained)
 	}
 }
