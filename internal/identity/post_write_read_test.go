@@ -37,34 +37,54 @@ import (
 // Each test also asserts the racer really did land afterwards, so a run where
 // the interleaving failed to happen cannot pass silently.
 
-// lockWaiters counts backends currently blocked on a lock in the test database.
-func lockWaiters(t *testing.T, pool *pgxpool.Pool) int {
+// beginHolder opens the holder transaction and returns it with its backend pid,
+// so the waits below can be scoped to "blocked BY THIS transaction" rather than
+// to a global waiter count. The pid is the write path's equivalent of the
+// racer's marker comment: the write path runs store SQL that cannot be tagged,
+// but everything it blocks on here is a lock this transaction holds.
+//
+// Scoping matters in practice — several agent worktrees share one local
+// Postgres. A global count can be satisfied by an unrelated waiter, which lets
+// the racer queue AHEAD of the write path and trips the "interleaving did not
+// happen" assertion as a flake. (It fails safe: never a false pass.)
+func beginHolder(t *testing.T, pool *pgxpool.Pool) (pgx.Tx, int) {
 	t.Helper()
-	var n int
-	if err := pool.QueryRow(context.Background(),
-		`SELECT count(*)
-		   FROM pg_locks l
-		   JOIN pg_stat_activity a ON a.pid = l.pid
-		  WHERE NOT l.granted
-		    AND a.datname = current_database()`).Scan(&n); err != nil {
-		t.Fatalf("poll locks: %v", err)
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
 	}
-	return n
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	var pid int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatalf("holder backend pid: %v", err)
+	}
+	return tx, pid
 }
 
-// waitForExtraLockWaiter waits until one MORE backend is blocked than at
-// baseline. Counting relative to a baseline rather than absolutely keeps the
-// interleaving honest if anything else is using the same database.
-func waitForExtraLockWaiter(t *testing.T, pool *pgxpool.Pool, baseline int) {
+// waitForBlockedBy waits until want backends are blocked specifically by the
+// holder transaction. pg_blocking_pids covers every lock type the harness uses,
+// advisory locks included.
+func waitForBlockedBy(t *testing.T, pool *pgxpool.Pool, holderPID, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	var n int
 	for time.Now().Before(deadline) {
-		if lockWaiters(t, pool) > baseline {
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*)
+			   FROM pg_stat_activity a
+			  WHERE a.datname = current_database()
+			    AND a.pid <> $1
+			    AND $1 = ANY (pg_blocking_pids(a.pid))`, holderPID).Scan(&n); err != nil {
+			t.Fatalf("poll blocked backends: %v", err)
+		}
+		if n >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the write path never blocked on the holder's lock")
+	t.Fatalf("%d backend(s) blocked by the holder, want %d — the write path never "+
+		"reached the lock it must contend for", n, want)
 }
 
 // waitForBlockedRacer waits until the racer carrying this marker is itself
@@ -119,6 +139,86 @@ func startRacer(t *testing.T, pool *pgxpool.Pool, sql string) (string, <-chan er
 	return marker, done
 }
 
+// TestUpsertEngagementAdvancesUpdatedAtMonotonically pins the companion
+// property to the read-back fix: updated_at must never move BACKWARDS.
+//
+// `now()` is transaction START time, so a transaction that begins earlier but
+// commits later stamps an EARLIER updated_at than one that already committed.
+// Reading the row inside the write's transaction (the fix above) makes that
+// transaction live longer, which widens the window — so the two changes belong
+// together. Every writer of contact_engagements.updated_at now uses
+// monotonicUpdatedAt.
+//
+// The interleaving is exact and needs no timing luck: the upsert's transaction
+// is pinned open on the contact-capacity advisory lock, so its now() is already
+// fixed; a later writer then commits a strictly greater updated_at while the
+// upsert waits. When the upsert finally runs, `now()` would take the column
+// backwards past that value.
+func TestUpsertEngagementAdvancesUpdatedAtMonotonically(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := newEngagementOwner(t, store, "engmono")
+	const agent, address = "raise@e.com", "partner@engmono.vc"
+	enroll(t, store, user.ID, agent, address, "prospect")
+
+	holder, holderPID := beginHolder(t, pool)
+	if _, err := holder.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"contact-cap:"+user.ID); err != nil {
+		t.Fatalf("hold contact-cap lock: %v", err)
+	}
+
+	type upsertResult struct {
+		e   identity.ContactEngagement
+		err error
+	}
+	upserted := make(chan upsertResult, 1)
+	go func() {
+		stage := "nurture"
+		e, _, err := store.UpsertEngagement(ctx, user.ID, agent, address, &stage, nil, nil)
+		upserted <- upsertResult{e, err}
+	}()
+	// The upsert's transaction has now begun (its now() is pinned) and is
+	// parked on the advisory lock, having touched no rows yet.
+	waitForBlockedBy(t, pool, holderPID, 1)
+
+	// A later writer commits ahead of it. It needs no lock from the upsert, so
+	// this is ordinary sequential SQL, not a race.
+	var ahead time.Time
+	if err := pool.QueryRow(ctx,
+		`UPDATE contact_engagements
+		    SET updated_at = clock_timestamp()
+		  WHERE user_id = $1 AND agent_id = $2 AND address = $3
+		  RETURNING updated_at`,
+		user.ID, agent, address).Scan(&ahead); err != nil {
+		t.Fatalf("advance updated_at ahead of the parked upsert: %v", err)
+	}
+
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release contact-cap lock: %v", err)
+	}
+	got := <-upserted
+	if got.err != nil {
+		t.Fatalf("UpsertEngagement: %v", got.err)
+	}
+
+	if !got.e.UpdatedAt.After(ahead) {
+		t.Errorf("updated_at = %v, want strictly after the %v a writer had already "+
+			"committed — now() is transaction START time, so this upsert walked the "+
+			"column BACKWARDS and anyone ordering or filtering on updated_at sees the "+
+			"newer write vanish", got.e.UpdatedAt, ahead)
+	}
+	// And the returned validator is the stored one, as ever.
+	reread, err := store.GetEngagement(ctx, user.ID, agent, address)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if !reread.UpdatedAt.Equal(got.e.UpdatedAt) {
+		t.Errorf("stored updated_at %v, returned %v", reread.UpdatedAt, got.e.UpdatedAt)
+	}
+}
+
 // TestUpsertEngagementReturnsTheRowItCommitted is the site-1 regression.
 //
 // UpsertEngagement committed its transaction and then called GetEngagement on
@@ -138,11 +238,7 @@ func TestUpsertEngagementReturnsTheRowItCommitted(t *testing.T) {
 
 	// Hold the contact-capacity advisory lock the upsert takes before any of
 	// its writes — the one deterministic pause point inside that transaction.
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
-	}
-	defer holder.Rollback(ctx) //nolint:errcheck
+	holder, holderPID := beginHolder(t, pool)
 	if _, err := holder.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
 		"contact-cap:"+user.ID); err != nil {
@@ -153,14 +249,13 @@ func TestUpsertEngagementReturnsTheRowItCommitted(t *testing.T) {
 		e   identity.ContactEngagement
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	upserted := make(chan upsertResult, 1)
 	go func() {
 		stage := "nurture"
 		e, _, err := store.UpsertEngagement(ctx, user.ID, agent, address, &stage, nil, nil)
 		upserted <- upsertResult{e, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	// Queue the un-enrolment behind the upsert. It takes the same advisory
 	// lock, so it cannot start until the upsert's transaction commits — which
@@ -216,11 +311,7 @@ func TestUpdateWebhookReturnsTheRowItWrote(t *testing.T) {
 		t.Fatalf("CreateWebhook: %v", err)
 	}
 
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
-	}
-	defer holder.Rollback(ctx) //nolint:errcheck
+	holder, holderPID := beginHolder(t, pool)
 	if _, err := holder.Exec(ctx, `SELECT id FROM webhooks WHERE id = $1 FOR UPDATE`, w.ID); err != nil {
 		t.Fatalf("hold webhook row: %v", err)
 	}
@@ -229,14 +320,13 @@ func TestUpdateWebhookReturnsTheRowItWrote(t *testing.T) {
 		w   *identity.Webhook
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	updated := make(chan updateResult, 1)
 	go func() {
 		mine := "mine"
 		got, err := store.UpdateWebhook(ctx, w.ID, userID, identity.WebhookUpdate{Description: &mine})
 		updated <- updateResult{got, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	marker, racer := startRacer(t, pool,
 		"UPDATE webhooks SET description = 'racer-won' WHERE id = "+sqlLit(w.ID))
@@ -282,11 +372,7 @@ func TestUpdateTemplateReturnsTheRowItWrote(t *testing.T) {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
-	}
-	defer holder.Rollback(ctx) //nolint:errcheck
+	holder, holderPID := beginHolder(t, pool)
 	if _, err := holder.Exec(ctx, `SELECT id FROM templates WHERE id = $1 FOR UPDATE`, tpl.ID); err != nil {
 		t.Fatalf("hold template row: %v", err)
 	}
@@ -295,14 +381,13 @@ func TestUpdateTemplateReturnsTheRowItWrote(t *testing.T) {
 		t   *identity.Template
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	updated := make(chan updateResult, 1)
 	go func() {
 		mine := "mine"
 		got, err := store.UpdateTemplate(ctx, tpl.ID, userID, identity.TemplateUpdate{Name: &mine})
 		updated <- updateResult{got, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	marker, racer := startRacer(t, pool,
 		"UPDATE templates SET name = 'racer-won' WHERE id = "+sqlLit(tpl.ID))
@@ -344,18 +429,17 @@ func TestUpdateAgentNameReturnsTheRowItWrote(t *testing.T) {
 	ctx := context.Background()
 	userID, agentID := trashTestSetup(t, store, "agentname-torn")
 
-	holder := lockAgentRow(t, pool, agentID)
+	holder, holderPID := lockAgentRow(t, pool, agentID)
 	type nameResult struct {
 		a   *identity.AgentIdentity
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	renamed := make(chan nameResult, 1)
 	go func() {
 		a, err := store.UpdateAgentName(ctx, agentID, userID, "mine")
 		renamed <- nameResult{a, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	marker, racer := startRacer(t, pool,
 		"UPDATE agent_identities SET name = 'racer-won' WHERE id = "+sqlLit(agentID))
@@ -396,18 +480,17 @@ func TestUpdateAgentProtectionReturnsTheRowItWrote(t *testing.T) {
 		HITLTTLSeconds:          3600, HITLExpirationAction: identity.HITLExpirationReject,
 	}
 
-	holder := lockAgentRow(t, pool, agentID)
+	holder, holderPID := lockAgentRow(t, pool, agentID)
 	type protResult struct {
 		a   *identity.AgentIdentity
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	written := make(chan protResult, 1)
 	go func() {
 		a, err := store.UpdateAgentProtection(ctx, agentID, userID, cfg)
 		written <- protResult{a, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	// A concurrent full-replace PUT landing right behind this one.
 	marker, racer := startRacer(t, pool,
@@ -454,18 +537,17 @@ func TestRestoreAgentReturnsTheRestoredAgent(t *testing.T) {
 		t.Fatalf("SoftDeleteAgent: %v", err)
 	}
 
-	holder := lockAgentRow(t, pool, agentID)
+	holder, holderPID := lockAgentRow(t, pool, agentID)
 	type restoreResult struct {
 		a   *identity.AgentIdentity
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	restored := make(chan restoreResult, 1)
 	go func() {
 		a, err := store.RestoreAgent(ctx, agentID, userID)
 		restored <- restoreResult{a, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	marker, racer := startRacer(t, pool,
 		"UPDATE agent_identities SET deleted_at = now() WHERE id = "+sqlLit(agentID))
@@ -509,11 +591,7 @@ func TestRestoreMessageReturnsTheRestoredMessage(t *testing.T) {
 		t.Fatalf("SoftDeleteMessage: %v", err)
 	}
 
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
-	}
-	defer holder.Rollback(ctx) //nolint:errcheck
+	holder, holderPID := beginHolder(t, pool)
 	if _, err := holder.Exec(ctx, `SELECT id FROM messages WHERE id = $1 FOR UPDATE`, msg.ID); err != nil {
 		t.Fatalf("hold message row: %v", err)
 	}
@@ -522,13 +600,12 @@ func TestRestoreMessageReturnsTheRestoredMessage(t *testing.T) {
 		m   *identity.Message
 		err error
 	}
-	baseline := lockWaiters(t, pool)
 	restored := make(chan restoreResult, 1)
 	go func() {
 		m, err := store.RestoreMessage(ctx, msg.ID, agentID)
 		restored <- restoreResult{m, err}
 	}()
-	waitForExtraLockWaiter(t, pool, baseline)
+	waitForBlockedBy(t, pool, holderPID, 1)
 
 	marker, racer := startRacer(t, pool,
 		"UPDATE messages SET deleted_at = now() WHERE id = "+sqlLit(msg.ID))
@@ -559,18 +636,14 @@ func TestRestoreMessageReturnsTheRestoredMessage(t *testing.T) {
 	}
 }
 
-func lockAgentRow(t *testing.T, pool *pgxpool.Pool, agentID string) pgx.Tx {
+func lockAgentRow(t *testing.T, pool *pgxpool.Pool, agentID string) (pgx.Tx, int) {
 	t.Helper()
-	ctx := context.Background()
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
-	}
-	t.Cleanup(func() { _ = holder.Rollback(ctx) })
-	if _, err := holder.Exec(ctx, `SELECT id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentID); err != nil {
+	holder, pid := beginHolder(t, pool)
+	if _, err := holder.Exec(context.Background(),
+		`SELECT id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentID); err != nil {
 		t.Fatalf("hold agent row: %v", err)
 	}
-	return holder
+	return holder, pid
 }
 
 func assertAgentName(t *testing.T, pool *pgxpool.Pool, agentID, want string) {

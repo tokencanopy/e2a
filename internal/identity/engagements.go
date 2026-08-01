@@ -162,6 +162,35 @@ func scanEngagement(row pgx.Row) (ContactEngagement, error) {
 	return e, nil
 }
 
+// monotonicUpdatedAt renders the updated_at bump that EVERY writer of
+// contact_engagements.updated_at uses. qualifier is the table name or alias the
+// statement addresses the row by ("" when the column is unambiguous).
+//
+// `now()` is TRANSACTION START time, not statement time. A transaction that
+// begins earlier but commits later therefore writes an EARLIER updated_at than
+// one that already committed, and the column walks backwards. That is
+// self-consistent for ETag purposes (the validator hashes whatever value it
+// returns) but it corrupts anyone ordering or filtering by updated_at, and the
+// exposure grows with transaction lifetime — UpsertEngagement's transaction now
+// spans its write AND the authoritative read-back.
+//
+// GREATEST(clock_timestamp(), old + 1µs) is evaluated per statement and is
+// strictly greater than the value it replaces, so the column is monotonic per
+// row no matter how the transactions interleave. It also strengthens the
+// If-Match contract: a conditional update's new validator can never collide
+// with the one the caller just used. Mirrors UpdateTemplate, which was the only
+// writer in the codebase already doing this.
+//
+// It has to be applied by every writer or it guarantees nothing: one straggler
+// on now() can still drag the column backwards past a monotonic write.
+func monotonicUpdatedAt(qualifier string) string {
+	col := "updated_at"
+	if qualifier != "" {
+		col = qualifier + ".updated_at"
+	}
+	return "GREATEST(clock_timestamp(), " + col + " + interval '1 microsecond')"
+}
+
 // UpsertEngagement enrolls a contact with an agent, or updates the agent-owned
 // fields of an existing enrollment.
 //
@@ -241,7 +270,7 @@ func (s *Store) UpsertEngagement(ctx context.Context, userID, agentID, address s
 		     SET stage          = COALESCE($6, contact_engagements.stage),
 		         next_action_at = CASE WHEN $9 THEN $7 ELSE contact_engagements.next_action_at END,
 		         metadata       = COALESCE($8::jsonb, contact_engagements.metadata),
-		         updated_at     = now()
+		         updated_at     = `+monotonicUpdatedAt("contact_engagements")+`
 		  RETURNING id, (xmax = 0)`,
 		NewEngagementID(), userID, contactID, agentID, address,
 		stageVal, nextVal, encoded, nextSet).Scan(&engagementID, &created)
@@ -316,7 +345,7 @@ func (s *Store) UpdateEngagementIfUnchanged(ctx context.Context, userID, agentID
 		    SET stage          = COALESCE($4, stage),
 		        next_action_at = CASE WHEN $5 THEN $6 ELSE next_action_at END,
 		        metadata       = COALESCE($7::jsonb, metadata),
-		        updated_at     = now()
+		        updated_at     = `+monotonicUpdatedAt("")+`
 		  WHERE user_id = $1 AND agent_id = $2 AND address = $3
 		    AND updated_at = $8
 		  RETURNING id`,
@@ -461,7 +490,7 @@ func recordOutboundActivity(ctx context.Context, exec contactExecutor, userID, a
 		    SET first_outbound_at    = LEAST(COALESCE(first_outbound_at, $4), $4),
 		        last_outbound_at     = GREATEST(COALESCE(last_outbound_at, $4), $4),
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
-		        updated_at           = now()
+		        updated_at           = `+monotonicUpdatedAt("")+`
 		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
 		userID, NormalizeEmail(agentID), NormalizeMailboxAddress(address), at.UTC(), conversationID)
 	if err != nil {
@@ -493,7 +522,7 @@ func recordInboundActivity(ctx context.Context, exec contactExecutor, userID, ag
 		`UPDATE contact_engagements
 		    SET last_inbound_at      = GREATEST(COALESCE(last_inbound_at, $4), $4),
 		        last_conversation_id = COALESCE(NULLIF($5, ''), last_conversation_id),
-		        updated_at           = now()
+		        updated_at           = `+monotonicUpdatedAt("")+`
 		  WHERE user_id = $1 AND agent_id = $2 AND address = $3`,
 		userID, NormalizeEmail(agentID), NormalizeMailboxAddress(address), at.UTC(), conversationID)
 	if err != nil {
@@ -556,7 +585,7 @@ func (s *Store) ClaimDueEngagementsTx(ctx context.Context, tx pgx.Tx, now time.T
 	rows, err := tx.Query(ctx,
 		`UPDATE contact_engagements ce
 		    SET notified_next_action_at = ce.next_action_at,
-		        updated_at = now()
+		        updated_at = `+monotonicUpdatedAt("ce")+`
 		  WHERE ce.id IN (
 		        SELECT c.id
 		          FROM contact_engagements c

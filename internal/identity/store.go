@@ -2003,7 +2003,7 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*Agen
 		if _, err := tx.Exec(ctx,
 			`UPDATE contact_engagements
 			    SET notified_next_action_at = next_action_at,
-			        updated_at = now()
+			        updated_at = `+monotonicUpdatedAt("")+`
 			  WHERE user_id = $1
 			    AND agent_id = $2
 			    AND next_action_at IS NOT NULL
