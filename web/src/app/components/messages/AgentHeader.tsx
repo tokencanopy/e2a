@@ -174,8 +174,11 @@ export function AgentHeader({
       </div>
 
       {/* Tab strip — five tabs; horizontal scroll on narrow screens rather
-          than wrapping into the header. */}
-      <div className="flex items-center gap-1 mt-1 overflow-x-auto whitespace-nowrap">
+          than wrapping into the header. overflow-y must be pinned: setting
+          only overflow-x makes the other axis compute to `auto`, and the
+          active tab's -1px bottom margin then overflows vertically by 1px,
+          which Chrome renders as a stray vertical scrollbar. */}
+      <div className="flex items-center gap-1 mt-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
         {TABS.map((t) => {
           const active = t.key === tab;
           const baseStyle = {
