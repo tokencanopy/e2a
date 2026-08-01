@@ -110,7 +110,7 @@ async function createAgent(label: string): Promise<string> {
 // test. (Agent deletion cascades too; this just keeps the account tidy even
 // if cleanup of the agent itself fails.)
 async function deleteBlock(email: string, address: string): Promise<void> {
-  await callTool(mcp, "delete_agent_suppression", { email, address }).catch(() => {});
+  await callTool(mcp, "delete_agent_suppression", { email, address, confirm: true }).catch(() => {});
 }
 
 before(async () => {
@@ -178,10 +178,13 @@ test("mcp-suppressions: agent-scoped block lifecycle via MCP", async () => {
     assert.equal(inList!.agent_email, email, "list items are self-describing (agent_email)");
     assert.equal(inList!.source, "manual", "listed entry keeps source=manual");
 
-    // delete_agent_suppression — no confirm arg on the MCP tool; the wrapper
-    // supplies the REST ?confirm=DELETE itself.
+    // delete_agent_suppression must fail closed without the explicit MCP guard,
+    // even though the SDK wrapper supplies REST's ?confirm=DELETE internally.
+    const unconfirmed = await callTool(mcp, "delete_agent_suppression", { email, address });
+    assert.equal(unconfirmed.isError, true, "delete_agent_suppression requires confirm:true");
+
     const deleted = await parseOk<DeleteSuppressionResult>(
-      await callTool(mcp, "delete_agent_suppression", { email, address }),
+      await callTool(mcp, "delete_agent_suppression", { email, address, confirm: true }),
       "delete_agent_suppression",
     );
     assert.equal(deleted.deleted, true, "delete_agent_suppression returns deleted:true");
@@ -199,7 +202,7 @@ test("mcp-suppressions: agent-scoped block lifecycle via MCP", async () => {
 
     // Re-deleting the now-gone block must surface as a tool error (REST 404
     // not_found) — proves the delete was real, not silently satisfied.
-    const reDelete = await callTool(mcp, "delete_agent_suppression", { email, address });
+    const reDelete = await callTool(mcp, "delete_agent_suppression", { email, address, confirm: true });
     if (!reDelete.isError) {
       fail(SUITE, "re-delete-not-error", `delete_agent_suppression on an already-removed block did not surface as error`);
     }

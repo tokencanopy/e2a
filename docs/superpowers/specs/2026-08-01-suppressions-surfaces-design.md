@@ -141,10 +141,10 @@ matching contacts.ts conventions — zod `strictInputSchema`, `runTool`,
 `readOnlyHint`/`destructiveHint` annotations):
 
 - `list_suppressions` (account; paginated; readOnly)
-- `delete_suppression` (account; destructive+idempotent)
+- `delete_suppression` (account; destructive+idempotent; requires `confirm:true`)
 - `list_agent_suppressions` (readOnly)
 - `create_agent_suppression` (idempotent)
-- `delete_agent_suppression` (destructive+idempotent)
+- `delete_agent_suppression` (destructive+idempotent; requires `confirm:true`)
 
 All five go in **ADMIN_TOOLS** in `tiers.ts`: the server enforces account
 scope on every one of them (agent list/create/delete are account-scope-only
@@ -188,7 +188,8 @@ Register in `server.ts`; the existing tier-completeness test picks them up.
   (chip / "(beta)" in tool titles) exactly like contacts; account scope is
   GA and unmarked.
 - **Destructive default fails closed**: every remove goes through an explicit
-  confirm (web `confirm()`, API `?confirm=DELETE` supplied by SDK).
+  confirm (web `confirm()`, MCP `confirm:true`, API `?confirm=DELETE` supplied
+  by SDK).
 
 ## Scalability and extensibility notes
 
