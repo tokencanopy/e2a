@@ -79,8 +79,9 @@ type Server struct {
 type Metrics interface {
 	// SMTPInbound records the terminal outcome of one SMTP intake decision.
 	// outcome ∈ {accepted, accepted_dedup, tempfail, rejected_unknown_recipient,
-	// rejected_unverified_domain, rejected_quota}; seconds is DATA processing
-	// time (0 for RCPT-stage rejections, which have no DATA phase).
+	// rejected_unverified_domain, rejected_quota, rejected_line_too_long};
+	// seconds is DATA processing time (0 for RCPT-stage rejections, which
+	// have no DATA phase).
 	SMTPInbound(outcome string, seconds float64)
 }
 
@@ -133,8 +134,9 @@ func (s *Server) SetMetrics(m Metrics) { s.metrics = m }
 
 // recordSMTPInbound is the nil-safe recording seam every intake outcome goes
 // through. Units: exactly one accepted/accepted_dedup/tempfail call per DATA
-// transaction (never per recipient); rejected_* calls are per rejected RCPT
-// command — one transaction can emit several rejections and still accept.
+// transaction (never per recipient); rejected_line_too_long is one per DATA
+// transaction aborted mid-read; the other rejected_* calls are per rejected
+// RCPT command — one transaction can emit several rejections and still accept.
 func (s *Server) recordSMTPInbound(outcome string, seconds float64) {
 	if s.metrics != nil {
 		s.metrics.SMTPInbound(outcome, seconds)
@@ -167,14 +169,19 @@ func NewServer(cfg *config.Config, store *identity.Store, usage usage.UsageTrack
 	smtpSrv.WriteTimeout = 30 * time.Second
 	smtpSrv.MaxMessageBytes = 10 * 1024 * 1024 // 10MB
 	smtpSrv.MaxRecipients = 50
-	// go-smtp defaults MaxLineLength to 2000 bytes. Agent-generated mail
-	// (single-line JSON, unfolded HTML, unwrapped base64) routinely
-	// exceeds that — a customer's two agents bounced 30 messages to each
-	// other over three days on "too long a line in input stream" before
-	// reformatting (prod, 2026-07-18..20). The whole message is already
-	// capped by MaxMessageBytes above, so a 1MiB line cap bounds per-line
-	// memory without rejecting realistic agent payloads.
-	smtpSrv.MaxLineLength = 1 << 20
+	// go-smtp defaults MaxLineLength to 2000 bytes, which bounced real
+	// agent mail carrying single-line JSON / unfolded HTML at DATA with
+	// "too long a line in input stream" (prod, 2026-07-18..20: 30 bounces
+	// over three days). 128KiB covers those payloads with wide margin but
+	// is kept deliberately modest rather than raised toward
+	// MaxMessageBytes: the limit bounds ALL lines, including pre-auth SMTP
+	// command lines, so it is per-connection memory an unauthenticated
+	// peer can force. It must also stay at or below the 1MiB header-scan
+	// buffer in internal/emailauth/checker.go, or the DKIM l= guard there
+	// fails open. Since #745 the composer quoted-printable-encodes any
+	// outbound body with a >998-octet line, so this cap guards inbound
+	// mail from third-party MTAs.
+	smtpSrv.MaxLineLength = 1 << 17 // 128KiB
 	smtpSrv.AllowInsecureAuth = !cfg.IsProduction()
 
 	if cfg.SMTP.TLSCert != "" && cfg.SMTP.TLSKey != "" {
@@ -330,6 +337,15 @@ func (s *session) Data(r io.Reader) error {
 	start := time.Now()
 	body, err := io.ReadAll(r)
 	if err != nil {
+		// A line over MaxLineLength surfaces here as go-smtp's ErrTooLongLine
+		// and bounces the transaction with a 554. Record it — the incident
+		// behind the MaxLineLength comment in NewServer was invisible in
+		// metrics precisely because this path returned early. Other read
+		// errors (client drop → io.ErrUnexpectedEOF, MaxMessageBytes →
+		// smtp.ErrDataTooLarge) are deliberately left unrecorded, as before.
+		if errors.Is(err, smtp.ErrTooLongLine) {
+			s.relay.recordSMTPInbound("rejected_line_too_long", time.Since(start).Seconds())
+		}
 		return err
 	}
 

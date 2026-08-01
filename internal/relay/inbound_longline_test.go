@@ -15,12 +15,12 @@ import (
 )
 
 // Regression test for the go-smtp MaxLineLength default (2000 bytes).
-// Agent-generated mail — single-line JSON, unfolded HTML, unwrapped
-// base64 — routinely exceeds that, and the relay used to reject it at
-// DATA with "554 ... too long a line in input stream". This bit a real
-// customer whose two agents messaged each other (prod, 2026-07-18..20,
-// 30 bounces). The relay now allows lines up to 1MiB; the whole message
-// stays capped by MaxMessageBytes.
+// Agent-generated mail — single-line JSON, unfolded HTML — routinely
+// exceeds that, and the relay used to reject it at DATA with "554 ...
+// too long a line in input stream". This bit a real customer whose two
+// agents messaged each other (prod, 2026-07-18..20, 30 bounces). The
+// relay now allows lines up to 128KiB; the whole message stays capped
+// by MaxMessageBytes.
 //
 // Same integration shape as inbound_limit_test.go: needs a real DB and
 // an actual SMTP socket bind, so skipped under -short.
@@ -62,7 +62,7 @@ func TestRelay_Data_AcceptsLongLines(t *testing.T) {
 
 	// A single ~64KiB body line — the shape real agent payloads take
 	// (one JSON object, one unfolded HTML document). Well past the old
-	// 2000-byte default, well under the new 1MiB cap.
+	// 2000-byte default, well under the new 128KiB cap.
 	longLine := strings.Repeat("x", 64*1024)
 	body := "From: sender@elsewhere.test\r\nTo: " + agentEmail + "\r\n" +
 		"Subject: long line\r\nContent-Type: application/json\r\n\r\n" + longLine
