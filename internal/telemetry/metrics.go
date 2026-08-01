@@ -89,11 +89,13 @@ type Metrics interface {
 
 	// SMTPInbound records one SMTP intake decision. outcome ∈
 	// {accepted, accepted_dedup, tempfail, rejected_unknown_recipient,
-	// rejected_unverified_domain, rejected_quota}. Units differ by
-	// stage: accepted/accepted_dedup/tempfail are per DATA transaction;
-	// rejected_* are per rejected RCPT command (one transaction can
-	// emit several rejections and still accept). seconds is DATA
-	// processing time (0 for RCPT-stage rejections).
+	// rejected_unverified_domain, rejected_quota, rejected_line_too_long}.
+	// Units differ by stage: accepted/accepted_dedup/tempfail are per DATA
+	// transaction; rejected_line_too_long is per DATA transaction aborted
+	// mid-read (line over MaxLineLength); the other rejected_* are per
+	// rejected RCPT command (one transaction can emit several rejections
+	// and still accept). seconds is DATA processing time (0 for RCPT-stage
+	// rejections).
 	SMTPInbound(outcome string, seconds float64)
 
 	// ThreadHeaderParseFailure counts an inbound RFC threading header that

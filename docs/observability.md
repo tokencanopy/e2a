@@ -74,7 +74,7 @@ SES outage must not knock every instance out of rotation).
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients. A DATA phase aborted mid-read (client dropped, size limit) records no outcome. |
+| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients; `rejected_line_too_long` (554 — a line over the relay's `MaxLineLength`) is one per DATA transaction aborted mid-read. Other mid-read DATA aborts (client dropped, size limit) record no outcome. |
 | `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). Includes an exact `2` second SLO bucket. |
 
 Policy rejections (550/552) are *correct* behavior, not failures — the
