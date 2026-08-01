@@ -174,7 +174,7 @@ addresses, subjects, message content, or RFC Message-IDs.
 | `e2a_janitor_rows_deleted_total` | counter | `table` | TTL sweep deletions. |
 | `e2a_notify_missed_total` | counter | — | Fallback-poll wakeups LISTEN/NOTIFY missed (reconnect churn indicator). |
 | `e2a_redeliver_requests_total` | counter | `scope` | Customer-driven webhook replays. |
-| `e2a_contact_due_events_total` | counter | `outcome` | `contact.due` outreach wake-ups from the `internal/contactdue` sweep, by `outcome` (`published`/`failed`). A sustained zero while engagements are enrolled and scheduled means the sweep isn't running; non-zero `failed` means an agent was not woken for a schedule that already fired and won't retry — worth alerting on. |
+| `e2a_contact_due_events_total` | counter | `outcome` | `contact.due` sweep outcomes. `published` counts wake-ups committed to the durable outbox. `failed` counts a failed atomic claim/publish attempt (or the affected batch size when known); the transaction rolls back and River retries the job. A sustained zero `published` despite known overdue, armed engagements can indicate a stalled sweep. Alert on sustained `failed` growth or exhausted River jobs rather than treating one increment as a permanent miss. |
 
 ## Prober metrics (external black-box, `cmd/e2a-prober`)
 
