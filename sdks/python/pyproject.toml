@@ -34,6 +34,12 @@ dependencies = [
     "typing-extensions>=4.7",
 ]
 
+[tool.hatch.build.targets.sdist]
+# Defensive: local pytest-cov data files must never ship in the sdist (they
+# embed absolute local paths). They are also gitignored; this guards a build
+# from a tree where one exists anyway.
+exclude = [".coverage*"]
+
 [tool.hatch.build.targets.wheel]
 # src layout: ship the e2a package (incl. PEP 561 py.typed markers at every
 # hand-written level, not just the generated sub-package).

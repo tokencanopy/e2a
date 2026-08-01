@@ -51,6 +51,9 @@ cli/coverage/
 sdks/typescript/coverage/
 mcp/coverage/
 
+# pytest-cov data files (python -m pytest --cov)
+sdks/python/.coverage*
+
 # TS SDK ergonomic-surface coverage-gate shards (npm run test:live --workspace @e2a/sdk)
 sdks/typescript/test/coverage/reports/
 
