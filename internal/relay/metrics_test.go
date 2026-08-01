@@ -412,6 +412,76 @@ func TestSMTPInboundMetric_AsyncAcceptedAndDedup(t *testing.T) {
 	}
 }
 
+// TestSMTPInboundMetric_RejectedLineTooLong drives a DATA payload with a single
+// line over the relay's 128KiB MaxLineLength and asserts the 554 abort records
+// exactly one "rejected_line_too_long" observation — the original long-line
+// incident surfaced as a customer complaint precisely because this path
+// recorded nothing.
+func TestSMTPInboundMetric_RejectedLineTooLong(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+
+	const domain = "metrics-longline.example.com"
+	const agentEmail = "bot@" + domain
+	user, err := store.CreateOrGetUser(ctx, "owner@"+domain, "O", "g-metrics-longline")
+	if err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("domain: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE domains SET verified=true WHERE domain=$1`, domain); err != nil {
+		t.Fatalf("verify domain: %v", err)
+	}
+	if _, err := store.CreateAgent(ctx, agentEmail, domain, "", "", "", user.ID); err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
+	}
+	cfg := &config.Config{SMTP: config.SMTPConfig{ListenAddr: "127.0.0.1:" + port, Domain: domain}, Env: "development"}
+	server := relay.NewServer(cfg, store, usage.NewNoopUsageTracker(), ws.NewHub())
+	metrics := &fakeSMTPMetrics{}
+	server.SetMetrics(metrics)
+	addr := startMetricsRelay(t, cfg, server)
+
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("smtp.Dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Mail("sender@ext.test"); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := c.Rcpt(agentEmail); err != nil {
+		t.Fatalf("RCPT TO: %v", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	// A single 160KiB line — over the 128KiB cap, small enough that the
+	// unread remainder after the server aborts fits in loopback socket
+	// buffers (the server reads ~128KiB before erroring).
+	body := "From: sender@ext.test\r\nTo: " + agentEmail + "\r\nSubject: too long\r\n\r\n" +
+		strings.Repeat("y", 160*1024)
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	cerr := w.Close()
+	if cerr == nil {
+		t.Fatal("DATA with a 160KiB line succeeded; want 554 too-long-line rejection")
+	}
+	if !strings.Contains(cerr.Error(), "554") || !strings.Contains(cerr.Error(), "too long a line") {
+		t.Fatalf("DATA close error = %v, want 554 too-long-line", cerr)
+	}
+
+	assertSingleOutcome(t, metrics, "rejected_line_too_long", false)
+}
+
 // TestSMTPInboundMetric_NilMetricsSafe proves the default (no SetMetrics call)
 // stays nil-safe on both the RCPT rejection path and the DATA accept path.
 func TestSMTPInboundMetric_NilMetricsSafe(t *testing.T) {

@@ -86,7 +86,8 @@ var (
 	methodSet = set("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 	classSet  = set("1xx", "2xx", "3xx", "4xx", "5xx", "none")
 	smtpSet   = set("accepted", "accepted_dedup", "tempfail",
-		"rejected_unknown_recipient", "rejected_unverified_domain", "rejected_quota")
+		"rejected_unknown_recipient", "rejected_unverified_domain", "rejected_quota",
+		"rejected_line_too_long")
 	outTermSet = set("sent", "failed_suppressed", "failed_provider",
 		"failed_local_retries", "failed_cancelled")
 	outAttemptSet = set("success", "temporary_failure", "permanent_failure")
@@ -422,7 +423,10 @@ func (p *Prom) HTTPRequest(method, route, statusClass string, seconds float64) {
 func (p *Prom) SMTPInbound(outcome string, seconds float64) {
 	o := enum(smtpSet, outcome)
 	p.smtpInbound.WithLabelValues(o).Inc()
-	// RCPT-stage rejections carry no DATA duration; only observe real ones.
+	// Only fully-processed DATA transactions feed the duration histogram
+	// (it backs the 2s latency SLO): RCPT-stage rejections have no DATA
+	// phase, and rejected_line_too_long aborts mid-read, so its elapsed
+	// time is not a processing latency.
 	if o == "accepted" || o == "accepted_dedup" || o == "tempfail" {
 		p.smtpDuration.Observe(seconds)
 	}
