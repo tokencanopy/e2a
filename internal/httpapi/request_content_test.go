@@ -317,7 +317,7 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 // therefore passes an operation that bypasses the NUL check entirely. (That
 // hole predates this change: the original guard looked for `huma.Register(`
 // and had it too.)
-var humaRegistrationPattern = regexp.MustCompile(`huma\.(Register|AutoRegister|Get|Post|Put|Patch|Delete)\s*[\[(]`)
+var humaRegistrationPattern = regexp.MustCompile(`huma\.(Register|AutoRegister|Get|Head|Post|Put|Patch|Delete)\s*[\[(]`)
 
 // TestEveryOperationGoesThroughRegisterOp is the guard that keeps the request
 // -content rule global. registerOp is the only place the guard runs, so an
@@ -326,7 +326,7 @@ var humaRegistrationPattern = regexp.MustCompile(`huma\.(Register|AutoRegister|G
 // five NUL vectors above were found.
 //
 // It covers every registration entry point huma exports, not just Register:
-// Get/Post/Put/Patch/Delete are convenience wrappers that call Register
+// Get/Head/Post/Put/Patch/Delete are convenience wrappers that call Register
 // internally, and AutoRegister reflects over a struct's methods to register
 // whatever it finds. The walk is recursive, so a future sub-package is covered.
 //
@@ -337,6 +337,11 @@ var humaRegistrationPattern = regexp.MustCompile(`huma\.(Register|AutoRegister|G
 // Those were considered and left uncovered on purpose: closing them needs
 // go/analysis, and the guard's job is to stop an ordinary mistake by someone
 // who does not know registerOp exists, not to defeat someone routing around it.
+// One more known limit: the walk starts at ".", the package directory under
+// `go test`, so only internal/httpapi and its sub-packages are covered — a
+// registration in a different package tree would be invisible. No such
+// registration exists today (repo-wide grep confirms), and every handler lives
+// here by construction.
 func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
 	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -349,15 +354,24 @@ func TestEveryOperationGoesThroughRegisterOp(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		if path == "request_content.go" {
-			// The wrapper itself is the one legitimate caller.
-			return nil
-		}
 		source, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return readErr
 		}
-		for _, hit := range humaRegistrationPattern.FindAll(source, -1) {
+		hits := humaRegistrationPattern.FindAll(source, -1)
+		if path == "request_content.go" {
+			// The wrapper itself is the one legitimate caller: exactly the
+			// single huma.Register call inside registerOp. Anything beyond
+			// that one call — a second registration, or a convenience wrapper
+			// like huma.Post — is a bypass even in this file, so the file is
+			// checked rather than skipped wholesale.
+			if len(hits) == 1 && strings.HasPrefix(string(hits[0]), "huma.Register") {
+				return nil
+			}
+			t.Errorf("request_content.go must contain exactly the one huma.Register call inside registerOp; found %d registration calls", len(hits))
+			return nil
+		}
+		for _, hit := range hits {
 			t.Errorf("%s calls %s directly; use registerOp so the operation inherits the shared request-content guards",
 				path, strings.TrimRight(string(hit), "[( \t"))
 		}
@@ -380,6 +394,8 @@ func TestHumaRegistrationPatternCatchesBothCallForms(t *testing.T) {
 		`huma.AutoRegister(api, server)`,
 		`huma.AutoRegister[*Server](api, server)`,
 		`huma.Get[In, Out](api, "/x", h)`,
+		`huma.Head(api, "/x", h)`,
+		`huma.Head[In, Out](api, "/x", h)`,
 		`huma.Put(api, "/x", h)`,
 		`huma.Patch[In, Out](api, "/x", h)`,
 		`huma.Delete(api, "/x", h)`,
