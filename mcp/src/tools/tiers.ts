@@ -125,6 +125,15 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   "delete_contact",
   "import_contacts",
   "delete_contact_import",
+  // Suppression administration is account-only on the server for BOTH scopes:
+  // the agent-scoped endpoints deliberately reject agent credentials (an agent
+  // must not edit its own blocklist), so exposing these at runtime tier would
+  // only surface guaranteed-403 tools.
+  "list_suppressions",
+  "delete_suppression",
+  "list_agent_suppressions",
+  "create_agent_suppression",
+  "delete_agent_suppression",
 ]);
 
 export type Scope = "account" | "agent";

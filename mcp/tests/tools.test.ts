@@ -22,6 +22,7 @@ import { registerTemplateTools } from "../src/tools/templates.js";
 import { registerApiKeyTools } from "../src/tools/apikeys.js";
 import { registerLegacyTools } from "../src/tools/legacy.js";
 import { registerContactTools } from "../src/tools/contacts.js";
+import { registerSuppressionTools } from "../src/tools/suppressions.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -119,6 +120,34 @@ function makeStubClient(
     getOutreachWithETag: vi.fn(async (address: string) => ({ data: { address, stage: "prospect" }, etag: '"outreach-v1"' })),
     setOutreach: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
     deleteOutreach: vi.fn(async (address: string) => ({ deleted: true, address })),
+    listSuppressions: vi.fn(async () => ({
+      items: [{
+        address: "gone@example.net",
+        source: "bounce",
+        reason: "smtp; 550 5.1.1 recipient not found",
+        sourceMessageId: "msg_bounce1",
+        createdAt: new Date("2026-07-17T21:12:26.000Z"),
+      }],
+      next_cursor: undefined,
+    })),
+    deleteSuppression: vi.fn(async (address: string) => ({ deleted: true, address })),
+    listAgentSuppressions: vi.fn(async () => ({
+      items: [{
+        agentEmail: "bot@example.com",
+        address: "optout@example.net",
+        source: "unsubscribe",
+        createdAt: new Date("2026-07-20T09:00:00.000Z"),
+      }],
+      next_cursor: undefined,
+    })),
+    createAgentSuppression: vi.fn(async (email: string, body: { address: string; reason?: string }) => ({
+      agentEmail: email,
+      address: body.address,
+      ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      source: "manual",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    })),
+    deleteAgentSuppression: vi.fn(async (_email: string, address: string) => ({ deleted: true, address })),
     listAllAgents: vi.fn(async () => [{ email: "bot@example.com" }]),
     // whoami → client.whoami() returns an AccountView (the authenticated
     // account identity), NOT an agent record. No default-agent resolution.
@@ -498,7 +527,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(71);
+    expect(frozenToolNames).toHaveLength(76);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -527,9 +556,10 @@ describe("e2a MCP server", () => {
     registerTemplateTools(recorder, stub);
     registerApiKeyTools(recorder, stub);
     registerContactTools(recorder, stub);
+    registerSuppressionTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(71);
+    expect(names).toHaveLength(76);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -539,14 +569,14 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
     expect(RUNTIME_TOOLS.size).toBe(20);
-    expect(ADMIN_TOOLS.size).toBe(51);
-    expect(toolNamesForScope("account").size).toBe(71);
+    expect(ADMIN_TOOLS.size).toBe(56);
+    expect(toolNamesForScope("account").size).toBe(76);
   });
 
-  it("account scope exposes all 71 canonical and compatibility tools", async () => {
+  it("account scope exposes all 76 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(71);
+    expect(tools).toHaveLength(76);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -697,6 +727,93 @@ describe("e2a MCP server", () => {
     expect(stub.listContacts).not.toHaveBeenCalled();
     expect(stub.listOutreach).not.toHaveBeenCalled();
     expect(stub.setOutreach).not.toHaveBeenCalled();
+  });
+
+  // ── Suppressions: account-level list/remove + agent-level list/add/remove ──
+
+  it("list_suppressions returns the account block list in the frozen envelope", async () => {
+    const res = await client.callTool({
+      name: "list_suppressions",
+      arguments: { cursor: "cur_1", limit: 50 },
+    });
+    expect(stub.listSuppressions).toHaveBeenCalledWith({ cursor: "cur_1", limit: 50 });
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload.suppressions).toEqual([{
+      address: "gone@example.net",
+      source: "bounce",
+      reason: "smtp; 550 5.1.1 recipient not found",
+      source_message_id: "msg_bounce1",
+      created_at: "2026-07-17T21:12:26.000Z",
+    }]);
+    // Exhausted list → next_cursor OMITTED (frozen MCP envelope contract).
+    expect(payload).not.toHaveProperty("next_cursor");
+  });
+
+  it("delete_suppression removes one account-level block", async () => {
+    const res = await client.callTool({
+      name: "delete_suppression",
+      arguments: { address: "gone@example.net" },
+    });
+    expect(stub.deleteSuppression).toHaveBeenCalledWith("gone@example.net");
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toEqual({ deleted: true, address: "gone@example.net" });
+  });
+
+  it("list_agent_suppressions requires email and forwards pagination", async () => {
+    const missing = await client.callTool({
+      name: "list_agent_suppressions",
+      arguments: {},
+    });
+    expect(missing.isError).toBe(true);
+    expect(stub.listAgentSuppressions).not.toHaveBeenCalled();
+
+    const res = await client.callTool({
+      name: "list_agent_suppressions",
+      arguments: { email: "bot@example.com", cursor: "cur_a", limit: 10 },
+    });
+    expect(stub.listAgentSuppressions).toHaveBeenCalledWith("bot@example.com", { cursor: "cur_a", limit: 10 });
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload.suppressions).toEqual([{
+      agent_email: "bot@example.com",
+      address: "optout@example.net",
+      source: "unsubscribe",
+      created_at: "2026-07-20T09:00:00.000Z",
+    }]);
+    expect(payload).not.toHaveProperty("next_cursor");
+  });
+
+  it("create_agent_suppression adds a manual per-agent block", async () => {
+    const res = await client.callTool({
+      name: "create_agent_suppression",
+      arguments: { email: "bot@example.com", address: "optout@example.net", reason: "asked us to stop" },
+    });
+    expect(stub.createAgentSuppression).toHaveBeenCalledWith(
+      "bot@example.com",
+      { address: "optout@example.net", reason: "asked us to stop" },
+    );
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toMatchObject({
+      agent_email: "bot@example.com",
+      address: "optout@example.net",
+      source: "manual",
+    });
+
+    // Address validity is enforced at the tool boundary, before the client.
+    const bad = await client.callTool({
+      name: "create_agent_suppression",
+      arguments: { email: "bot@example.com", address: "not-an-email" },
+    });
+    expect(bad.isError).toBe(true);
+  });
+
+  it("delete_agent_suppression removes only the exact agent-recipient block", async () => {
+    const res = await client.callTool({
+      name: "delete_agent_suppression",
+      arguments: { email: "bot@example.com", address: "optout@example.net" },
+    });
+    expect(stub.deleteAgentSuppression).toHaveBeenCalledWith("bot@example.com", "optout@example.net");
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toEqual({ deleted: true, address: "optout@example.net" });
   });
 
   it("create_contact forwards a retry key", async () => {
