@@ -40,6 +40,11 @@ it("loads contacts and exposes create/import actions", async () => {
   expect(screen.getAllByText("partner@fund.vc").length).toBeGreaterThan(0);
   expect(screen.getByRole("button", { name: "Import CSV" })).toBeInTheDocument();
 
+  // View switcher to the account-wide suppression list.
+  const suppressionsLink = screen.getByRole("link", { name: "Suppressions" });
+  expect(suppressionsLink).toHaveAttribute("href", "/contacts/suppressions");
+  expect(screen.getByRole("link", { name: "Contacts" })).toHaveAttribute("aria-current", "page");
+
   await userEvent.click(screen.getByRole("button", { name: "New contact" }));
   expect(screen.getByRole("textbox", { name: "Email address" })).toBeInTheDocument();
 });

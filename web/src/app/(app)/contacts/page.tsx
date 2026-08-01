@@ -7,6 +7,7 @@ import { Chip } from "../../components/loft/Chip";
 import { PageShell } from "../../components/loft/PageShell";
 import { useAgents } from "../../components/hooks/useAgents";
 import { mapCsvRows, parseCsv, type ImportPreviewRow } from "./_lib/csv";
+import { ViewTabs } from "./_lib/ViewTabs";
 
 type Contact = {
   address: string;
@@ -159,6 +160,7 @@ export default function ContactsPage() {
         </>
       }
     >
+      <ViewTabs active="contacts" />
       <div className="space-y-6">
         <AgentPromptCard
           blurb="Your coding agent can import contacts, enroll them with an inbox, and manage outreach over MCP."
