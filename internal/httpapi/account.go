@@ -63,7 +63,7 @@ type accountOutput struct{ Body AccountView }
 const limitsUnavailableRetrySeconds = 5
 
 func (s *Server) registerAccount() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAccount", Method: http.MethodGet, Path: "/v1/account",
 		Summary: "Get account: identity + plan limits + usage (whoami)", Tags: []string{"account"},
 		Description: "The authenticated principal's identity (user + scope; agent_email for agent-scoped credentials), plan caps, and current usage. Works for both account- and agent-scoped credentials. (Deployment discovery — shared domain, slug registration — is the separate public GET /v1/info.)",
@@ -75,7 +75,7 @@ func (s *Server) registerAccount() {
 		},
 	}, s.handleGetMyLimits)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "exportAccount", Method: http.MethodGet, Path: "/v1/account/export",
 		Summary: "Export your data (GDPR right-of-access)", Tags: []string{"account"},
 		Description: "A JSON dump of every record the authenticated account owns. " +
@@ -87,7 +87,7 @@ func (s *Server) registerAccount() {
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleExportUserData)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
 		Summary: "Delete your account + all data (irreversible)", Tags: []string{"account"},
 		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
@@ -99,14 +99,14 @@ func (s *Server) registerAccount() {
 		},
 	}, s.handleDeleteAccount)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listSuppressions", Method: http.MethodGet, Path: "/v1/account/suppressions",
 		Summary: "List suppressed recipient addresses", Tags: []string{"account"},
 		Description: "Addresses e2a will refuse to send to (auto-added on a hard bounce or complaint, or added manually). Sends to a suppressed address fail with recipient_suppressed.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListSuppressions)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteSuppression", Method: http.MethodDelete, Path: "/v1/account/suppressions/{address}",
 		Summary: "Remove an address from the suppression list", Tags: []string{"account"},
 		Description: "Un-suppress a recipient. A previously-blocked send to it then succeeds (idempotency keys are released, so no fresh key is needed). Requires ?confirm=DELETE. Returns 200 with a deletion object ({deleted:true, address}).",

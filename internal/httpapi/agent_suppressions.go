@@ -73,7 +73,7 @@ type deleteAgentSuppressionOutput struct {
 const agentSuppressionBetaDescription = "Beta: agent-scoped suppression management may change before it is declared stable."
 
 func (s *Server) registerAgentSuppressions() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listAgentSuppressions", Method: http.MethodGet, Path: "/v1/agents/{email}/suppressions",
 		Summary: "List an agent's suppressed recipients (beta)", Tags: []string{"agents"},
 		Description: "Lists recipient addresses blocked only for this exact sending agent. Account-scoped credentials only. " + agentSuppressionBetaDescription,
@@ -81,7 +81,7 @@ func (s *Server) registerAgentSuppressions() {
 		Extensions:  beta(),
 	}, s.handleListAgentSuppressions)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "createAgentSuppression", Method: http.MethodPost, Path: "/v1/agents/{email}/suppressions",
 		Summary: "Suppress a recipient for an agent (beta)", Tags: []string{"agents"},
 		Description: "Idempotently creates a manual recipient block for this exact sending agent. Account-scoped credentials only. " + agentSuppressionBetaDescription,
@@ -89,7 +89,7 @@ func (s *Server) registerAgentSuppressions() {
 		Extensions:  beta(),
 	}, s.handleCreateAgentSuppression)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAgentSuppression", Method: http.MethodDelete, Path: "/v1/agents/{email}/suppressions/{address}",
 		Summary: "Remove an agent recipient suppression (beta)", Tags: []string{"agents"},
 		Description: "Removes only the exact agent-scoped block. Requires ?confirm=DELETE. Account-scoped credentials only. " + agentSuppressionBetaDescription,

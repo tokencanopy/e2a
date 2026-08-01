@@ -1478,6 +1478,98 @@ scenarios:
         expect:
           status: 200
 
+  - name: contacts_import_row_length_isolation
+    description: >
+      Per-row isolation for content-LENGTH violations. The 320-code-point
+      bounds on address and display_name used to be item-level maxLength in
+      the request schema, where one over-long spreadsheet cell rejected the
+      whole upload with 422 and nothing imported. They are now per-row
+      handler checks like every other content rule: the batch answers 200,
+      the offending row alone reports failed with invalid_request, and its
+      valid neighbours import. The over-long display_name row sits BETWEEN
+      two valid rows — exactly the shape the schema bound used to reject
+      wholesale. The reversal then removes what the batch created.
+    steps:
+      - id: import_with_overlong_row
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts:
+            - address: iso-one@imp.vc
+              display_name: Iso One
+            - address: iso-long@imp.vc
+              # 336 code points — over the 320 bound this row alone must fail on.
+              display_name: "Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-"
+            - address: iso-two@imp.vc
+              display_name: Iso Two
+        capture:
+          batch_id: batch_id
+        expect:
+          status: 200
+          body_contains:
+            - batch_id
+            - results
+          body_match:
+            created: 2
+            failed: 1
+            skipped: 0
+            "results[0].status": created
+            "results[0].address": iso-one@imp.vc
+            "results[1].status": failed
+            "results[1].code": invalid_request
+            "results[1].address": iso-long@imp.vc
+            "results[2].status": created
+            "results[2].address": iso-two@imp.vc
+
+      - id: first_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-one@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso One
+            source: import
+
+      - id: failed_row_left_no_contact
+        action: request
+        method: GET
+        path: /v1/contacts/iso-long@imp.vc
+        expect:
+          status: 404
+
+      - id: second_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-two@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso Two
+
+      - id: reverse_batch
+        action: request
+        method: DELETE
+        path: /v1/contacts/imports/{batch_id}?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            contacts_deleted: 2
+            contacts_retained: 0
+
+    cleanup:
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed both rows (404 here); after a mid-scenario failure these are
+      # what keep the scenario self-cleaning for the next run.
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-one@imp.vc?confirm=DELETE
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-two@imp.vc?confirm=DELETE
+
   - name: contact_outreach
     description: >
       Per-agent outreach state. Enrolment creates the contact if absent, a

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
@@ -146,7 +147,7 @@ type UpdateContactRequest struct {
 
 type updateContactInput struct {
 	Address string `path:"address"`
-	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412."`
+	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."`
 	Body    UpdateContactRequest
 }
 
@@ -171,7 +172,7 @@ type deleteContactOutput struct {
 }
 
 func (s *Server) registerContacts() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listContacts", Method: http.MethodGet, Path: "/v1/contacts",
 		Summary: "List contacts (beta)", Tags: []string{"contacts"},
 		Description: "Lists the people this account corresponds with, newest first. Account-scoped credentials only. " + contactBetaDescription,
@@ -179,7 +180,7 @@ func (s *Server) registerContacts() {
 		Extensions:  beta(),
 	}, s.handleListContacts)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "createContact", Method: http.MethodPost, Path: "/v1/contacts",
 		Summary: "Create a contact (beta)", Tags: []string{"contacts"},
 		Description:   "Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. " + contactBetaDescription,
@@ -188,7 +189,7 @@ func (s *Server) registerContacts() {
 		Extensions:    beta(),
 	}, s.handleCreateContact)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getContact", Method: http.MethodGet, Path: "/v1/contacts/{address}",
 		Summary: "Get a contact (beta)", Tags: []string{"contacts"},
 		Description: "Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. " + contactBetaDescription,
@@ -196,7 +197,7 @@ func (s *Server) registerContacts() {
 		Extensions:  beta(),
 	}, s.handleGetContact)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateContact", Method: http.MethodPatch, Path: "/v1/contacts/{address}",
 		Summary: "Update a contact (beta)", Tags: []string{"contacts"},
 		Description: "Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. " + contactBetaDescription,
@@ -204,7 +205,7 @@ func (s *Server) registerContacts() {
 		Extensions:  beta(),
 	}, s.handleUpdateContact)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteContact", Method: http.MethodDelete, Path: "/v1/contacts/{address}",
 		Summary: "Delete a contact (beta)", Tags: []string{"contacts"},
 		Description: "Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. " + contactBetaDescription,
@@ -445,6 +446,9 @@ func (s *Server) handleUpdateContact(ctx context.Context, in *updateContactInput
 	if s.deps.UpdateContact == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "contacts are not available on this deployment")
 	}
+	if env := emptyIfMatchError(ctx, in.IfMatch); env != nil {
+		return nil, env
+	}
 	if err := validateContactMetadata(in.Body.Metadata); err != nil {
 		return nil, err
 	}
@@ -486,15 +490,86 @@ func (s *Server) handleUpdateContact(ctx context.Context, in *updateContactInput
 	return &updateContactOutput{ETag: contactETag(updated), Body: contactView(updated)}, nil
 }
 
+// emptyIfMatchError rejects an If-Match header that was sent with no value.
+//
+// RFC 9110 §13.1.1 defines the field value as `"*" / #entity-tag` with at least
+// one member, so an empty field value is a malformed request rather than a
+// precondition that failed — which is why this is 400 and not 412. It matters
+// because the alternative reading is the worst one available: a header present
+// but empty would otherwise silently degrade a write the caller believed was
+// guarded into an unconditional one. A client that builds the header by
+// interpolating a possibly-empty variable then overwrites a concurrent edit and
+// receives a 200 telling it the guard held. (The quoted-empty form `""` is a
+// syntactically valid validator and keeps its existing 412 behaviour.)
+//
+// Detecting this needs the raw request: Go collapses a present-but-empty header
+// to the same "" an absent header produces, so presence is checked directly.
+// When the raw request is unavailable the check does not fire — it can only ever
+// add a rejection, never remove one.
+func emptyIfMatchError(ctx context.Context, ifMatch string) *ErrorEnvelope {
+	if ifMatch != "" {
+		return nil
+	}
+	r := RequestFromContext(ctx)
+	if r == nil {
+		return nil
+	}
+	if _, present := r.Header[textproto.CanonicalMIMEHeaderKey("If-Match")]; !present {
+		return nil
+	}
+	return NewError(http.StatusBadRequest, "invalid_request",
+		"If-Match was sent with no value; supply the ETag from a prior read, or omit the header for an unconditional write").
+		WithDetails(ValidationErrorDetails{Fields: []FieldError{{
+			Location: "header.If-Match",
+			Message:  "must not be empty",
+		}}})
+}
+
 // etagMatches implements the subset of RFC 9110 §13.1.1 this surface needs:
-// the wildcard, and a comma-separated list of candidate validators. Weak
-// prefixes are tolerated on input because intermediaries add them.
+// the wildcard, and a comma-separated list of candidate validators.
+//
+// THE W/ PREFIX IS TOLERATED ON INPUT ON PURPOSE. DO NOT "FIX" THIS TO A
+// STRICT STRONG COMPARISON. §13.1.1 does specify strong comparison for
+// If-Match, and reading only the RFC makes this look like a bug — it is not,
+// and the deviation is load-bearing in production:
+//
+//   - api.e2a.dev sits behind a Cloudflare proxy, and that edge actively
+//     transforms responses (br compression is confirmed live; our origin sets
+//     no `encode` directive in either Caddyfile, so the compression is the
+//     edge's own).
+//   - Cloudflare downgrades a strong ETag to a weak one whenever it transforms
+//     a response. "Respect Strong ETags" is an Enterprise-only setting and
+//     e2a.dev is on the Free plan, so we cannot turn that off.
+//   - So a client can legitimately GET `ETag: W/"abc"` for a row whose origin
+//     validator is `"abc"`, echo exactly what it was given as If-Match, and —
+//     under a strict comparison — receive a PERMANENT 412 that no retry ever
+//     clears. Every conditional write on this surface would break, in prod
+//     only: the staging host is DNS-only (unproxied), so the conformance gate
+//     structurally cannot observe it and a green gate proves nothing here.
+//
+// Tolerating the prefix is what makes optimistic concurrency work through a
+// transforming intermediary. The guard still holds: the compared body is the
+// full strong validator, which changes on every accepted write, so a stale
+// validator cannot match whether or not it arrived wearing a W/.
+//
+// The wildcard is deliberate and correct: `If-Match: *` means "if any current
+// representation exists". Both call sites load the resource before consulting
+// this function and answer 404/412 when it is absent, so `*` can only reach
+// here for a resource that does exist — it never creates one.
 func etagMatches(ifMatch, current string) bool {
 	ifMatch = strings.TrimSpace(ifMatch)
+	// RFC 9110 grammar is `"*" / 1#entity-tag` — the wildcard stands alone and
+	// is not a list member, so it is matched here rather than inside the loop.
 	if ifMatch == "*" {
 		return true
 	}
 	for _, candidate := range strings.Split(ifMatch, ",") {
+		// The strip happens per candidate, inside the loop, so a single tag and
+		// a comma list behave identically — an intermediary that weakens
+		// validators weakens them the same way however many the client sent.
+		// TrimPrefix is case-sensitive by design: RFC 9110 defines the weak
+		// prefix as exactly "W/", so a lowercase "w/" is not a weak validator
+		// and correctly fails to match.
 		candidate = strings.TrimSpace(candidate)
 		candidate = strings.TrimPrefix(candidate, "W/")
 		if candidate == current {

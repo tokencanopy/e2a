@@ -413,7 +413,7 @@ type messagesCursor struct {
 }
 
 func (s *Server) registerMessages() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listMessages",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages",
@@ -423,7 +423,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListMessages)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteMessage",
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -433,7 +433,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "restoreMessage",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/messages/{id}/restore",
@@ -443,7 +443,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleRestoreMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getMessage",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -468,7 +468,7 @@ func (s *Server) registerMessages() {
 		return &messageOutput{Body: view}, nil
 	})
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateMessage",
 		Method:      http.MethodPatch,
 		Path:        "/v1/agents/{email}/messages/{id}",

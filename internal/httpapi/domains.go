@@ -293,20 +293,20 @@ type DomainParam struct {
 }
 
 func (s *Server) registerDomains() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listDomains", Method: http.MethodGet, Path: "/v1/domains",
 		Summary: "List domains", Tags: []string{"domains"},
 		Description: "List the domains owned by the authenticated account, newest first, with cursor pagination.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListDomains)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getDomain", Method: http.MethodGet, Path: "/v1/domains/{domain}",
 		Summary: "Get a domain", Tags: []string{"domains"},
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleGetDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "registerDomain", Method: http.MethodPost, Path: "/v1/domains",
 		Summary: "Register a domain", Tags: []string{"domains"},
 		Security: []map[string][]string{{"bearer": {}}}, DefaultStatus: http.StatusCreated,
@@ -318,14 +318,14 @@ func (s *Server) registerDomains() {
 		},
 	}, s.handleRegisterDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
 		Description: "Deprovisions the domain's sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "verifyDomain", Method: http.MethodPost, Path: "/v1/domains/{domain}/verify",
 		Summary: "Verify a domain", Tags: []string{"domains"},
 		Description: "Probe the domain's published DNS and, when the verification TXT (and inbound MX) are present, mark it verified. Always returns 200 with the per-record diagnostic — branch on the `verified` boolean in the body, not the HTTP status. A not-yet-published record is the normal `verified:false` outcome, not an error.",

@@ -31,7 +31,7 @@ type infoOutput struct {
 }
 
 func (s *Server) registerInfo() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getInfo",
 		Method:      http.MethodGet,
 		Path:        "/v1/info",
@@ -111,7 +111,7 @@ type agentOutput struct {
 }
 
 func (s *Server) registerAgents() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listAgents",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents",
@@ -121,7 +121,7 @@ func (s *Server) registerAgents() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListAgents)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAgent",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}",

@@ -17,9 +17,8 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
-from typing_extensions import Annotated
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -27,8 +26,8 @@ class ContactImportRow(BaseModel):
     """
     ContactImportRow
     """ # noqa: E501
-    address: Annotated[str, Field(strict=True, max_length=320)] = Field(description="Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\").")
-    display_name: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.")
+    address: StrictStr = Field(description="Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch.")
+    display_name: Optional[StrictStr] = Field(default=None, description="Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional caller-owned key/value data, opaque to e2a. Flat objects only; the same per-contact bounds apply, and a row that exceeds them fails on its own without affecting the rest of the batch.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["address", "display_name", "metadata"]

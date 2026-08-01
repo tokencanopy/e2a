@@ -318,4 +318,46 @@ describe("contacts commands", () => {
     expect(mockOutreach).not.toHaveBeenCalled();
     expect(mockSetOutreach).not.toHaveBeenCalled();
   });
+  // An empty --if-match must never silently become an unconditional write.
+  // The server rejects `If-Match:` with no value (400 invalid_request), but
+  // before it did, `--if-match "$ETAG"` with ETAG unset performed exactly the
+  // unguarded write the flag was there to prevent — and reported success.
+  it("rejects an empty --if-match instead of writing unconditionally", async () => {
+    const { contactsUpdate, outreachSet } = await import("../commands/contacts.js");
+
+    await expect(contactsUpdate("partner@fund.vc", { name: "X", ifMatch: "" }))
+      .rejects.toThrow("process.exit");
+    await expect(contactsUpdate("partner@fund.vc", { name: "X", ifMatch: "   " }))
+      .rejects.toThrow("process.exit");
+    await expect(outreachSet("partner@fund.vc", { stage: "s", ifMatch: "" }))
+      .rejects.toThrow("process.exit");
+
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining("--if-match requires an ETag value"),
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockSetOutreach).not.toHaveBeenCalled();
+  });
+
+  it("still sends a real --if-match, and omits the option entirely without one", async () => {
+    mockUpdate.mockResolvedValue({ address: "partner@fund.vc" });
+    mockSetOutreach.mockResolvedValue({ address: "partner@fund.vc" });
+    const { contactsUpdate, outreachSet } = await import("../commands/contacts.js");
+
+    await contactsUpdate("partner@fund.vc", { name: "X", ifMatch: '"abc"' });
+    expect(mockUpdate).toHaveBeenCalledWith(
+      "partner@fund.vc", { displayName: "X", metadata: undefined }, { ifMatch: '"abc"' },
+    );
+
+    await contactsUpdate("partner@fund.vc", { name: "Y" });
+    expect(mockUpdate).toHaveBeenLastCalledWith(
+      "partner@fund.vc", { displayName: "Y", metadata: undefined },
+    );
+
+    await outreachSet("partner@fund.vc", { stage: "s", ifMatch: '"def"' });
+    expect(mockSetOutreach).toHaveBeenCalledWith(
+      "bot@agents.e2a.dev", "partner@fund.vc",
+      { stage: "s", metadata: undefined }, { ifMatch: '"def"' },
+    );
+  });
 });
