@@ -1038,6 +1038,19 @@ async def test_suppressions_list_forwards_limit(httpx_mock):
     assert "cursor=cur_2" in str(reqs[1].url) and "limit=1" in str(reqs[1].url)
 
 
+@pytest.mark.anyio
+async def test_suppressions_list_omits_limit_when_unset(httpx_mock):
+    # The other half of the contract: leaving the page size unset must send NO
+    # limit at all, so the server default applies. A wrapper that forwarded the
+    # default as `limit=None` would serialize an empty `limit=` and change the
+    # request for every existing caller.
+    httpx_mock.add_response(json={"items": [_valid(SuppressionView, address="a@x.com")], "next_cursor": None})
+    async with _client() as c:
+        await c.account.suppressions.list().to_list(limit=5)
+    url = str(httpx_mock.get_requests()[-1].url)
+    assert "limit=" not in url, f"no limit must be sent when unset: {url}"
+
+
 # ── pagination: keyset-cursor list endpoints ────────────────────────
 # agents/domains/webhooks/deliveries/api-keys/templates/starters are all
 # keyset-paginated — the AutoPager must thread next_cursor to completion,
