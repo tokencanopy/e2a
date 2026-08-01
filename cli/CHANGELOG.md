@@ -46,6 +46,25 @@ output formats are unchanged, and there is no `threadId` request flag,
 filter, or thread endpoint. `--conversation-id` remains caller-owned
 application correlation.
 
+**Added:** `e2a suppressions` — inspect and manage recipient block lists.
+Account-wide suppressions are GA; agent-scoped suppression management (the
+`--agent` form of `list`/`remove`, and all of `add`) is beta and may change
+before it is declared stable. Subcommands: `list` (without `--agent`, the
+account-wide list — auto-populated by hard bounces and complaints and
+enforced for every inbox at send time, where a listed recipient fails with
+`recipient_suppressed`; with `--agent <email>`, that one inbox's
+unsubscribe/manual blocks; `--limit <n>` bounds the listing, 1–10000,
+default 100; output is TSV of address, source, reason, and created-at, or
+NDJSON with `--json`), `add <address> --agent <email>` (`--agent` is
+required — manual blocks are per-agent; there is no account-level create,
+account entries only ever come from bounces/complaints; `--reason <text>`
+attaches an optional note), and `remove <address>` (un-suppresses
+account-wide without `--agent`, removes only that agent's block with it; the
+CLI supplies the API's `?confirm=DELETE` guard). All subcommands require an
+account-scoped credential — an agent-scoped credential cannot manage even
+its own inbox's blocks. Un-suppress account-wide only for addresses known to
+be deliverable: removing a genuine bouncer hurts sender reputation.
+
 ## 2.1.0
 
 Additive only — no flag, output-field, or exit-code meaning changes to any
