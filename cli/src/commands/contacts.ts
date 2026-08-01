@@ -26,6 +26,19 @@ function jsonObject(raw: string | undefined, flag: string): Record<string, unkno
   }
 }
 
+// An explicitly-empty --if-match is a usage error, never an unconditional write.
+// The flag exists to make a write conditional; interpolating an empty variable
+// into it (`--if-match "$ETAG"` with ETAG unset) would otherwise quietly send a
+// header the server has to reject — and before the server rejected it, quietly
+// perform the unguarded write the caller was trying to prevent.
+function requireIfMatch(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  if (raw.trim() === "") {
+    fail(EXIT.USAGE, "--if-match requires an ETag value; omit the flag for an unconditional write");
+  }
+  return raw;
+}
+
 function positiveLimit(raw: string | undefined): number {
   if (raw === undefined) return 100;
   const value = Number(raw);
@@ -117,8 +130,9 @@ export async function contactsUpdate(address: string, opts: {
     metadata: jsonObject(opts.metadata, "--metadata"),
   };
   const contacts = createClient().contacts;
-  const row = opts.ifMatch
-    ? await contacts.update(address, patch, { ifMatch: opts.ifMatch })
+  const ifMatch = requireIfMatch(opts.ifMatch);
+  const row = ifMatch
+    ? await contacts.update(address, patch, { ifMatch })
     : await contacts.update(address, patch);
   process.stdout.write(opts.json ? JSON.stringify(row) + "\n" : row.address + "\n");
 }
@@ -315,8 +329,9 @@ export async function outreachSet(address: string, opts: {
   }
   const contacts = createClient().contacts;
   const agent = requireAgentEmail(opts.agent);
-  const row = opts.ifMatch
-    ? await contacts.setOutreach(agent, address, body, { ifMatch: opts.ifMatch })
+  const ifMatch = requireIfMatch(opts.ifMatch);
+  const row = ifMatch
+    ? await contacts.setOutreach(agent, address, body, { ifMatch })
     : await contacts.setOutreach(agent, address, body);
   process.stdout.write(opts.json ? JSON.stringify(row) + "\n" : row.address + "\n");
 }

@@ -19,6 +19,71 @@ MCP tool surface), see:
 - MCP server — [`mcp/README.md`](../mcp/README.md) (`@e2a/mcp-server`)
 - Webhook events & replay — [`events.md`](events.md)
 
+## Stability: GA and beta surface
+
+The core `/v1` surface is the **stable, generally-available (GA) contract**; a
+small, explicitly enumerated set of newer resources is **beta**. The
+machine-readable source of truth is **`x-stability-level`** in
+[`api/openapi.yaml`](../api/openapi.yaml): anything marked
+`x-stability-level: beta` may change before it is promoted to stable, and
+**everything not marked beta (or experimental) is GA**, covered by the
+[compatibility rules](#compatibility-rules) below. At the operation level that
+is currently 43 GA operations and 29 beta operations:
+
+| Resource group | Stability | Operations |
+| --- | --- | --- |
+| Account — whoami, export, delete, API keys, account-wide suppressions | **GA** | `getAccount`, `exportAccount`, `deleteAccount`, `listApiKeys`, `createApiKey`, `deleteApiKey`, `listSuppressions`, `deleteSuppression` |
+| Agents — CRUD, restore, test | **GA** | `listAgents`, `createAgent`, `getAgent`, `updateAgent`, `deleteAgent`, `restoreAgent`, `testAgent` |
+| Messages & attachments — send/reply/forward, list/get/update, trash/restore | **GA** | `sendMessage`, `replyToMessage`, `forwardMessage`, `listMessages`, `getMessage`, `updateMessage`, `deleteMessage`, `restoreMessage`, `getAttachment` |
+| Conversations | **GA** | `listConversations`, `getConversation` |
+| Domains — register, verify, delete | **GA** | `listDomains`, `registerDomain`, `getDomain`, `deleteDomain`, `verifyDomain` |
+| Webhooks — CRUD, secret rotation, deliveries, test | **GA** | `listWebhooks`, `createWebhook`, `getWebhook`, `updateWebhook`, `deleteWebhook`, `rotateWebhookSecret`, `listWebhookDeliveries`, `testWebhook` |
+| Events — durable log + redelivery | **GA** | `listEvents`, `getEvent`, `redeliverEvent` |
+| Meta — deployment discovery | **GA** | `getInfo` |
+| [Contacts & outreach](#contacts--outreach-v1contacts-v1agentsemailcontacts-beta) | **beta** | `createContact`, `listContacts`, `getContact`, `updateContact`, `deleteContact`, `importContacts`, `deleteImportBatch`, `listEngagements`, `getEngagement`, `upsertEngagement`, `deleteEngagement` |
+| [Templates & starter templates](#templates-v1templates-v1starter-templates-beta) | **beta** | `createTemplate`, `listTemplates`, `getTemplate`, `updateTemplate`, `deleteTemplate`, `validateTemplate`, `listStarterTemplates`, `getStarterTemplate` |
+| [Reviews (HITL queue)](#reviews-v1reviews-beta) | **beta** | `listReviews`, `getReview`, `approveReview`, `rejectReview` |
+| Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
+| Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
+| [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
+
+**Beta fields and capabilities on otherwise-GA operations** (property-level
+`x-stability-level: beta` in the spec — or, where only specific *values* of a
+stable field are beta, `x-experimental-values` on that field):
+
+- **Scheduled sending** — the `send_at` request field, the `scheduled_at`
+  response field, and the `scheduled` send-result `status` value on
+  send/reply/forward.
+- **`thread_id`** on message list/detail reads (server-owned, read-only
+  email-topology identity).
+- **Template references on send** — the `template_id` / `template_alias` /
+  `template_data` request fields.
+- **Managed unsubscribe** — the `unsubscribe: {mode: "managed"}` request
+  object and its raw `GET|POST /u/{token}` confirmation flow.
+- **Review-hold projections** — `hold_reason`, the review-detail `protection`
+  evidence, and the `flagged` / `flag_reason` verdict fields.
+- **Lifecycle transitions on events** — the optional `lifecycle_transitions`
+  payload field on the seven otherwise-stable event payload schemas
+  (`email.received`, `email.sent`, `email.failed`, `email.delivered`,
+  `email.bounced`, `email.complained`, `domain.suppression_added`). See
+  [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta)
+  and [events.md](events.md#lifecycle-transitions-on-events-beta).
+- **Account export interior schemas** — `GET /v1/account/export` is a GA
+  operation, but its interior record shapes are versioned by the export's
+  `schema_version` envelope field rather than the v1 freeze, and are
+  beta-marked to record that exemption.
+
+**Beta events:** `contact.due`, `agent.suppression_added`, and the payloads of
+the screening + review-hold event types (`email.flagged`, `email.blocked`,
+`email.review_requested`, `email.review_approved`, `email.review_rejected` —
+marked via `x-experimental-values` on the stable `type` field). The stable
+`error.code` vocabulary likewise marks only `blocked_by_policy` experimental.
+See [events.md](events.md).
+
+The exact operation-level list is repeated with methods and paths in
+[Beta operations](#beta-operations) below; everything else in this document is
+GA unless its heading or prose says `(beta)`.
+
 ## Conventions
 
 - **Base path.** Every endpoint below is under `/v1` unless explicitly noted
@@ -38,8 +103,46 @@ MCP tool surface), see:
   often decoded to a space by clients/proxies, which silently corrupts
   plus-tagged addresses (`a+tag@x.com`). The official SDKs encode this for you;
   hand-rolled clients must do it themselves.
+- **Email-address limits.** Two independent bounds apply to address-bearing
+  request fields, and they count different things:
+  - The schema's `maxLength: 320` bounds the whole submitted **string** —
+    display name + address combined — in Unicode **code points**.
+  - SMTP's mailbox limits bound the parsed **addr-spec** in **octets** (UTF-8
+    bytes): the local part is at most **64 octets** and the whole
+    `local@domain` at most **254 octets**. They are enforced synchronously, at
+    the edge, on the send paths: a violating `to`/`cc`/`bcc` entry on
+    send/reply/forward is `400 invalid_recipient`, and a violating `reply_to`
+    is `400 invalid_request`.
+
+  The octet limits are the ones that surprise callers, because they are not the
+  320 the schema advertises: a long plus-addressed local part
+  (`orders+2026-07-30-region-eu-west-batch-000123@…`) or a non-ASCII SMTPUTF8
+  local part can pass `maxLength` and still be rejected — one emoji is four
+  octets but only one code point.
+- **`Location` on `201`.** Creates that mint an addressable resource return a
+  path-relative `Location`. Its path segments are percent-encoded **per
+  segment**, which legally leaves the sub-delimiters `@ + & = : $`
+  **unescaped**: `/v1/contacts/a.partner@fund.vc` is a valid, expected value,
+  and so is the fully-escaped `/v1/contacts/a.partner%40fund.vc`. Neither form
+  is promised. Do not string-compare the header against a URL you built
+  locally — to recover the resource key, **percent-decode the final path
+  segment**, then compare.
+- **`ETag` / `If-Match`.** Reads that support optimistic concurrency return an
+  `ETag`: a **strong** validator, currently rendered as a quoted 32-hex
+  character token (`"9f86d081884c7d65…"`). Treat it as **opaque** — never
+  parse it, derive it, or construct one. Store the received value and replay it
+  **verbatim** in a later `If-Match`. Any accepted write moves the validator,
+  so a stale one cannot match and the conditional write is rejected with
+  `412 precondition_failed`.
 - **Pagination.** List endpoints return `{ items, next_cursor }`; pass
-  `next_cursor` back as `?cursor=…` to page forward. The SDKs auto-page.
+  `next_cursor` back as `?cursor=…` to page forward. The SDKs auto-page. A
+  cursor is bound to the exact request that issued it: the account that minted
+  it, the collection, its path parameters (the agent, webhook, or message it
+  was listed under), and the filters it was minted with. Replaying one on a
+  different list, a different parent, with different filters, or under a
+  different account's credentials is a `400 invalid_cursor` rather than a
+  silently wrong page. Cursors are opaque; treat them as ephemeral — on
+  `invalid_cursor`, drop the cursor and restart the query from the first page.
 - **Idempotency.** Nine mutating operations honor an opt-in `Idempotency-Key`
   header: `sendMessage`, `replyToMessage`, `forwardMessage`, `approveReview`,
   `createWebhook`, `rotateWebhookSecret`, and `createApiKey`, plus the beta
@@ -62,6 +165,46 @@ MCP tool surface), see:
     idempotency-store degradation or a mid-request crash the protection
     degrades to at-least-once — a keyed retry may re-execute the operation
     rather than replay the cached response.
+- **No NUL bytes on `/v1`.** No client-supplied string in a `/v1` request may
+  contain `U+0000` — anywhere in the JSON body (at any depth, including object
+  *keys*), or in a path, query, or header parameter. Violations are `400
+  invalid_request` with the offending field in `error.details.fields[].location`.
+  The rule is blanket rather than per-field on purpose: a `NUL` cannot be stored
+  in a text column at all, and a caller cannot tell from the outside which
+  strings are persisted and which are only composed, so the answer is the same
+  everywhere. In JSON, a `NUL` can only arrive as the `\u0000` escape.
+  (The guard is enforced on the `/v1` operations, which is the whole documented
+  client API. Non-`/v1` entry points — the dashboard's session-authenticated
+  `/api/*` routes, the public unsubscribe handler, and inbound SMTP — are
+  outside it and validate independently.)
+- **Conditional writes (`ETag` / `If-Match`).** Single-resource `GET`s return an
+  `ETag`; pass it back as `If-Match` on the write to reject a lost update with
+  `412 precondition_failed`. Three rules are worth stating because they are easy
+  to get wrong — two follow RFC 9110 §13.1.1, and the first **deliberately
+  deviates** from it, for the reason given there:
+  - Send the validator exactly as you received it. §13.1.1 specifies *strong*
+    comparison for `If-Match`, but the `W/` weak prefix is **tolerated** here on
+    purpose. `api.e2a.dev` is behind a Cloudflare edge that transforms responses
+    (it compresses; our origin does not), and Cloudflare downgrades a strong
+    `ETag` to its weak form whenever it transforms one — a downgrade we cannot
+    disable on our plan. Refusing the weak form would hand a client a permanent
+    `412` for echoing back exactly the validator it was given, and no retry
+    would ever clear it. The comparison still covers the full validator, which
+    changes on every accepted write, so a stale tag never matches.
+  - `If-Match: *` means "if any current representation exists": it succeeds on
+    an existing resource and is refused when there is none (it never creates).
+  - Sending the header with an **empty value** is `400 invalid_request`, not an
+    unconditional write. Omit the header entirely to write unconditionally —
+    otherwise an unset variable interpolated into the header would silently
+    perform the very write the guard was there to prevent.
+- **Bulk import: row-level vs request-level.** `POST /v1/contacts/import`
+  returns a per-row outcome so one bad row never rejects the upload. That
+  isolation covers a row's *content* — an unparseable or over-long address, an
+  over-long `display_name`, metadata outside the per-contact bounds — each of
+  which fails only its own row (`status: "failed"` with `invalid_recipient` or
+  `invalid_request`). Problems with the *request* still reject the whole thing:
+  malformed JSON, an unknown field, a missing `address` key, a `NUL` anywhere in
+  the body, more than 1000 rows, or a body over 20 MiB.
 - **Errors.** Non-2xx responses use a single `ErrorEnvelope` shape; branch on
   `error.code` (see [Error codes](#error-codes) below for the full vocabulary).
 - **Capacity limits — the permanent `402` / `429` split.** Two different limits
@@ -187,8 +330,10 @@ equals the `X-Request-Id` response header.
 
 ## Versioning & stability
 
-The `/v1` surface is the **stable, generally-available contract** as of e2a 1.0.
-Our commitment, and what you can rely on:
+The `/v1` surface is the **stable, generally-available contract** as of e2a
+**1.5.0**, the release that completed the API freeze. Earlier `v1.0.x`
+application/cherry-pick tags predate the freeze and are not `/v1`
+compatibility baselines. Our commitment, and what you can rely on:
 
 ### Beta operations
 
@@ -242,27 +387,27 @@ every `/v1` operation not listed here is covered by the GA freeze.
   strict (`additionalProperties: false`) — an unknown request field is rejected
   with a 422, which is intentional input validation (it catches typos like
   `body` vs `text`), not a stability concern.
-- **Beta surfaces are marked `x-stability-level: beta`** in the spec
-  for automated compatibility tools
-  (operations, schemas, and individual fields — e.g. the `template_*` fields on
-  send, `hold_reason`, the review-detail `protection` evidence, and the
-  `flagged` / `flag_reason` verdict) and `(beta)` in prose — today: templates,
-  starter templates, reviews, the agent protection config, agent-scoped
-  suppression management, managed unsubscribe (including its raw confirmation
-  flow), and scheduled sending (`send_at`, `scheduled_at`, and the `scheduled`
-  send-result value). They are **exempt from the
-  freeze**: they may change or be removed without a major version. Where only
-  specific *values* of a stable field are experimental (the screening +
-  review-hold event types `email.flagged`, `email.blocked`,
-  `email.review_requested`, `email.review_approved`, `email.review_rejected`),
-  the field carries `x-experimental-values` listing exactly those values —
-  their payloads may still change; all other event types are stable. Anything
-  not marked experimental is stable surface. The stable `ErrorBody.code`
-  discriminator similarly marks only `blocked_by_policy` experimental. One deliberate schema-level use
-  of the beta marker under a **stable** operation: the account export's
-  interior record schemas (`GET /v1/account/export`) are beta-marked because
-  they are versioned by the export's stable `schema_version` envelope field
-  rather than by the v1 freeze — see the account section below.
+- **Beta surfaces are marked `x-stability-level: beta`** in the spec for
+  automated compatibility tools (operations, schemas, and individual fields)
+  and `(beta)` in prose. The complete current inventory — resource groups,
+  beta fields on otherwise-GA operations, and beta events — is the
+  [Stability: GA and beta surface](#stability-ga-and-beta-surface) matrix at
+  the top of this document (the operation-level list is repeated with methods
+  and paths in [Beta operations](#beta-operations) above); this bullet states
+  the policy and deliberately does not repeat the list. Beta surface is
+  **exempt from the freeze**: it may change or be removed without a major
+  version. Where only specific *values* of a stable field are beta (the
+  screening + review-hold event types on webhook `events` fields, the
+  `scheduled` send-result `status` value), the field carries
+  `x-experimental-values` listing exactly those values — the field itself
+  stays stable, the listed values (and their payloads) may still change, and
+  every unlisted value is stable. The stable `ErrorBody.code` discriminator
+  similarly marks only `blocked_by_policy` experimental. Anything not marked
+  beta or experimental is stable surface. One deliberate schema-level use of
+  the beta marker under a **stable** operation: the account export's interior
+  record schemas (`GET /v1/account/export`) are beta-marked because they are
+  versioned by the export's stable `schema_version` envelope field rather
+  than by the v1 freeze — see the account section below.
 - **Enums in responses are open.** Treat any `type` / `*_status` / `event_type`
   value as an open string set: we may introduce new values (e.g. a new event
   type or delivery state) without a major bump, so a client **must not crash on
@@ -281,11 +426,12 @@ every `/v1` operation not listed here is covered by the GA freeze.
 - **Version discovery.** `GET /v1/info` reports the running API version (and
   deployment flags such as whether shared-domain slug registration is enabled),
   so clients can adapt instead of hard-coding assumptions.
-- **Deprecation & sunset.** Once `/v1` is GA, if we ever need to wind something
-  down it stays functional and is marked `deprecated` in the OpenAPI spec; we
-  will not remove it within GA `/v1`. (Pre-GA, the API is still being frozen:
-  the legacy agent-path `…/messages/{id}/approve|reject` endpoints were removed
-  in favor of the account-scoped `/v1/reviews/{id}/approve|reject` queue.)
+- **Deprecation & sunset.** If we ever need to wind something down, it stays
+  functional and is marked `deprecated` in the OpenAPI spec; we will not
+  remove it within GA `/v1`. (While the API was being frozen pre-GA, the
+  legacy agent-path `…/messages/{id}/approve|reject` endpoints were removed in
+  favor of the account-scoped `/v1/reviews/{id}/approve|reject` queue — the
+  last such removal before the freeze took effect.)
 
 The canonical machine-readable contract is always
 [`api/openapi.yaml`](../api/openapi.yaml); CI fails if it drifts from the server.
@@ -305,8 +451,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   both scopes. (Public *deployment* discovery is the separate `GET /v1/info`.)
 - `DELETE /v1/account?confirm=DELETE` — permanently delete the account and cascade
   all owned data; returns per-table row counts (GDPR Art. 17). Irreversible.
-- `GET /v1/account/export` — JSON dump of every record the account owns (GDPR
-  Art. 15). Omits internal identifiers; see [data-handling.md](data-handling.md).
+- `GET /v1/account/export` — self-service account-data export supporting
+  access requests: profile, agents, domains, API key metadata, messages,
+  usage events, protection events, OAuth connections, and suppressions.
+  Omits internal identifiers. It is not yet an exhaustive export of every
+  account-owned resource; examples currently omitted include contacts,
+  contact engagements, contact import batches, templates, webhook
+  subscriptions, and webhook event/delivery history. See
+  [data-handling.md](data-handling.md).
   The export **envelope** (the top-level keys and `schema_version`) is stable;
   the **interior** record shapes are versioned by `schema_version` and may
   evolve — branch on `schema_version` before interpreting interior records.
@@ -317,6 +469,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   without `agent_email` remain account-wide.
   Interior schemas carry `x-stability-level: beta` in the OpenAPI document to
   mark that exemption machine-readably; the operation itself is stable.
+  The exported `Message` record is **not** the same shape as the live
+  `MessageView`, by design. It deliberately omits the beta `thread_id`: thread
+  identity is a server-owned read projection of e2a's mailbox-local reply
+  topology, not a fact about the user's data, and the same reasoning already
+  keeps it out of stored events and webhook payloads. It does carry the beta
+  `scheduled_at` (marked `x-stability-level: beta`, like its `MessageView`
+  sibling) because a scheduled-but-unsent message is genuinely the account's
+  own pending data.
   Each exported message carries `attachments` as the same typed
   `AttachmentMetaView` metadata (`{filename, content_type, size_bytes, index}`,
   `size_bytes` = decoded payload) the live API uses; the attachment **bytes**
@@ -711,6 +871,132 @@ threads, and one email thread can contain several conversation IDs.
   cursor).
 - `GET …/conversations/{id}` — one application conversation with participants,
   labels, and member messages.
+
+### Contacts & Outreach (`/v1/contacts`, `/v1/agents/{email}/contacts`) (beta)
+
+Contacts are durable **account-level identity** for the people the account
+corresponds with; an **engagement** is one agent's outreach state for working a
+contact. e2a stores the state and derives real send/reply facts from mail
+activity, but it never composes or sends a follow-up on its own. The whole
+surface is **beta** and may change before it is declared stable.
+
+**Scope split:** the account-level contact operations require an
+account-scoped credential. The per-agent engagement operations additionally
+accept an **agent-scoped** credential for its own inbox — that is the
+outreach loop a single sending agent drives.
+
+Account-level contact identity:
+
+- `GET /v1/contacts` — list contacts, newest first, with cursor pagination
+  and filters: `source` (provenance — open set; known values `import`,
+  `manual`, `inbound`; it never changes after creation), `import_batch_id`,
+  `created_after` / `created_before`.
+- `POST /v1/contacts` — create one contact. The address is canonicalized
+  before storage, so a display-name form (`"A. Partner <partner@fund.vc>"`)
+  and the bare address are the same contact — a second create returns `409`.
+  Honors `Idempotency-Key`.
+- `GET /v1/contacts/{address}` — fetch one contact; returns an **`ETag`** for
+  use with `If-Match` on a later update.
+- `PATCH /v1/contacts/{address}` — partial update (`display_name`,
+  `metadata`); omitted fields are left unchanged, and `metadata` is replaced
+  wholesale when present. Address and provenance are immutable. An optional
+  `If-Match` from a prior read rejects a stale edit with
+  `412 precondition_failed`.
+- `DELETE /v1/contacts/{address}?confirm=DELETE` — remove a contact (and its
+  per-agent engagements). **Suppressions are not affected** — consent
+  outlives the contact record, so deleting a contact never makes a
+  previously-blocked address sendable.
+- `POST /v1/contacts/import` — bulk import, **at most 1,000 rows per
+  request** (paginate client-side above that). Returns a `batch_id` plus a
+  **per-row outcome** (`created | updated | skipped | failed`, with a
+  machine-branchable `code` and a `suppressed` flag), so one malformed row
+  never rejects the rest. Import is **inert**: it records identity and sends
+  nothing; suppressed addresses are still recorded (flagged) so the counts
+  stay honest. `on_conflict` is `merge` (default — refreshes `display_name`
+  and `metadata`, leaves provenance and everything hanging off the contact
+  untouched) or `skip`. Optional `agent_email` (+ initial `stage`) enrolls
+  every valid row with that live owned agent in the same transaction without
+  overwriting existing engagement state. Honors `Idempotency-Key` — strongly
+  recommended, since a keyed retry of a timed-out upload replays the original
+  `batch_id` and per-row results instead of importing twice.
+- `DELETE /v1/contacts/imports/{batch_id}?confirm=DELETE` — **reverse an
+  import.** Reversal is deliberately defensive: `import_batch_id` is origin
+  provenance (it records which batch *created* a row and never moves — a
+  later merge re-import keeps it pointing at the original batch), so the tag
+  alone cannot distinguish an untouched import artifact from state the
+  account has since built on. A batch-created row is therefore removed
+  **only when it is verifiably untouched**:
+  - an **engagement** is removed only if it has never been mutated since the
+    import (`updated_at` still equals `created_at`), carries no derived wire
+    activity (no first/last outbound, no last inbound, no last conversation,
+    no delivered due notification), and has no message history between its
+    agent and the address;
+  - a **contact** is removed only if it has never been mutated since the
+    import, has no message history (as sender or as a To/Cc/Bcc recipient),
+    and has **no surviving engagement** — including one created independently
+    of the import. Batch-created engagements are deleted first, so any
+    engagement still present is live outreach state the reversal must not
+    destroy.
+
+  Everything else is retained, and pre-existing outreach and suppressions are
+  never affected. The response reports each category;
+  `contacts_deleted + contacts_retained` accounts for every batch-created
+  contact that still exists at reversal time.
+
+Per-agent outreach state:
+
+- `GET /v1/agents/{email}/contacts` — list the contacts this agent is
+  working, with cursor pagination and filters: `stage`, `replied`,
+  `suppressed`, `next_action_before`, `last_outbound_before`. For a
+  follow-up sweep combine `replied=false`, `next_action_before=<now>`, and
+  `last_outbound_before=<stale cutoff>` — `last_outbound_at` is
+  server-maintained, so the last filter excludes anyone just contacted even
+  when the caller's own state write was lost (the duplicate-send safety net).
+- `GET /v1/agents/{email}/contacts/{address}` — one engagement; returns an
+  **`ETag`** for `If-Match` on a later upsert.
+- `PUT /v1/agents/{email}/contacts/{address}` — enroll a contact in this
+  agent's outreach (creates the contact if needed; returns `201` on first
+  enrolment, `200` on update) or update the **caller-owned** fields.
+  Omitted fields are left unchanged, so advancing the stage after a send
+  does not disturb the schedule. An optional `If-Match` makes the write
+  conditional (the engagement must already exist and still match, else
+  `412`); a conditional request never creates.
+- `DELETE /v1/agents/{email}/contacts/{address}?confirm=DELETE` — un-enroll.
+  The contact itself survives (identity is account-level and other agents may
+  still be working them) and suppressions are untouched — un-enrolling is not
+  consent and never restores sendability.
+
+**Caller-owned vs server-derived engagement fields.** The caller owns
+`stage` (opaque — there is no server-side state machine, any string is
+valid), `next_action_at` (when the caller wants to act next; e2a does not
+act on it), and `metadata`. Everything else is **server-owned and derived
+from real mail activity** — writes to these fields are rejected:
+`replied` (computed as `last_inbound_at > first_outbound_at`, i.e. "replied
+to us", not "has ever written"), `first_outbound_at` / `last_outbound_at` /
+`last_inbound_at`, `outbound_count` (successfully submitted sends since
+enrollment) / `inbound_count` (DMARC-authenticated inbound since enrollment —
+spoofed, held, blocked, and pre-enrollment messages are excluded),
+`last_conversation_id`, and the suppression mirror (`suppressed`,
+`suppression_source`, `suppression_reason` — the same state the send path
+enforces).
+
+**`contact.due` behavior.** When an engagement's `next_action_at` passes, a
+periodic sweep emits the beta, at-least-once `contact.due` event (see
+[events.md](events.md)). It is a **notification, not a send and not an
+execution mechanism**: e2a sends no mail and starts no agent. Only a deployed
+webhook receiver (or an events-log poller) can react to it and wake an agent
+runtime — it does not start an MCP, WebSocket, Claude Code, or Codex session
+by itself. To have e2a submit an already-composed message at a future time,
+use the separate scheduled-sending capability (`send_at`, above).
+
+**Metadata bounds** (contact and engagement `metadata`, and each import
+row's `metadata`): a **flat** JSON object (no nested objects/arrays) with at
+most **50 keys**, each key at most **128 bytes**, each value at most
+**4 KiB**, and the whole encoded object at most **16 KiB**. `metadata` is
+opaque to e2a — never interpreted, only stored and returned. An import row
+exceeding the bounds fails on its own without affecting the rest of the
+batch. Contact addresses are at most 320 Unicode code points and accept a
+bare address or an RFC 5322 mailbox form.
 
 ### Reviews (`/v1/reviews`) (beta)
 

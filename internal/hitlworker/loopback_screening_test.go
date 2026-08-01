@@ -25,7 +25,7 @@ func TestWorkerAutoApproveSelfSendScreensInboundLeg(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateAgentProtection(ctx, ag.ID, owner.ID, identity.ProtectionConfig{
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, owner.ID, identity.ProtectionConfig{
 		InboundGatePolicy: "allowlist", InboundAllowlist: []string{"trusted@friend.example.com"}, InboundGateAction: "review",
 		InboundScanSensitivity: "off",
 		OutboundGatePolicy:     "open", OutboundGateAction: "flag", OutboundScanSensitivity: "off",

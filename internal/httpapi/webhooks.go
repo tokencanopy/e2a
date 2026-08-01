@@ -231,7 +231,7 @@ type deleteWebhookInput struct {
 }
 
 func (s *Server) registerWebhooks() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "createWebhook", Method: http.MethodPost, Path: "/v1/webhooks",
 		Summary: "Create a webhook", Tags: []string{"webhooks"},
 		Description: "Register a webhook subscriber; the one-time signing secret is returned only on this response. Honors Idempotency-Key so a retried create replays the same webhook (same id + secret) instead of registering a second subscription; omit the key to intentionally create distinct subscriptions, including several to the same URL.",
@@ -243,27 +243,27 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleCreateWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listWebhooks", Method: http.MethodGet, Path: "/v1/webhooks",
 		Summary: "List webhooks", Tags: []string{"webhooks"},
 		Description: "List the webhooks owned by the authenticated account, newest first, with cursor pagination.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListWebhooks)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getWebhook", Method: http.MethodGet, Path: "/v1/webhooks/{id}",
 		Summary: "Get a webhook", Tags: []string{"webhooks"},
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleGetWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteWebhook", Method: http.MethodDelete, Path: "/v1/webhooks/{id}",
 		Summary: "Delete a webhook", Tags: []string{"webhooks"},
 		Description: "Delete a webhook subscriber by id. Requires ?confirm=DELETE. Returns 200 with a deletion object ({deleted:true, id}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateWebhook", Method: http.MethodPatch, Path: "/v1/webhooks/{id}",
 		Summary: "Update a webhook", Tags: []string{"webhooks"},
 		Description: "Partial update. url/events/filters are full-replace when present. Re-enabling within the auto-disable cooldown returns 409.",
@@ -275,7 +275,7 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleUpdateWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "rotateWebhookSecret", Method: http.MethodPost, Path: "/v1/webhooks/{id}/rotate-secret",
 		Summary: "Rotate a webhook signing secret", Tags: []string{"webhooks"},
 		Description: "Mint a new signing secret; the previous one stays valid for a 24h grace window. Returns the new secret (shown once). Honors Idempotency-Key so a retried rotate replays the same secret instead of rotating twice (rotate has no request body, so the dedup hash covers the route alone — the same key on a different webhook id is a 422 idempotency_key_reuse).",
@@ -287,14 +287,14 @@ func (s *Server) registerWebhooks() {
 		},
 	}, s.handleRotateWebhookSecret)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "testWebhook", Method: http.MethodPost, Path: "/v1/webhooks/{id}/test",
 		Summary: "Fire a synthetic event", Tags: []string{"webhooks"},
 		Description: "Schedule a one-off synthetic delivery to this webhook for development. Returns the delivery id.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleTestWebhook)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listWebhookDeliveries", Method: http.MethodGet, Path: "/v1/webhooks/{id}/deliveries",
 		Summary: "List webhook deliveries", Tags: []string{"webhooks"},
 		Description: "The per-webhook delivery log (read-only debug view).",
@@ -396,13 +396,26 @@ type ListDeliveriesInput struct {
 }
 
 // deliveriesCursor is the opaque keyset position for the delivery log: the last
-// row's (created_at, id) plus the status filter it was minted under, so a
-// continuation that changes status is rejected rather than silently returning a
-// wrong page (mirrors the messages/events filter-binding).
+// row's (created_at, id) plus the PARENT WEBHOOK and the status filter it was
+// minted under, so a continuation that changes either is rejected rather than
+// silently returning a wrong page (mirrors the messages/events filter-binding).
+//
+// WebhookID is what makes this list's binding complete. The resource
+// discriminator only proves a cursor came from *some* deliveries list, and this
+// endpoint is parameterized by {id}: without the parent, a cursor minted on
+// webhook A was accepted on webhook B and A's keyset anchor was handed to B's
+// query — an arbitrarily truncated, commonly empty page. Both webhooks are
+// caller-owned (the handler checks GetWebhook before it touches the cursor), so
+// this was never cross-tenant leakage, but it is the same silent-wrong-answer
+// failure the resource binding exists to eliminate. Every other parameterized
+// list already pins its parent: messages/conversations pin AgentID,
+// engagements/agent suppressions pin AgentEmail, message_lifecycle pins
+// AgentID + MessageID.
 type deliveriesCursor struct {
 	CreatedAt time.Time `json:"c"`
 	ID        string    `json:"i"`
 	Status    string    `json:"s,omitempty"`
+	WebhookID string    `json:"w,omitempty"`
 }
 type listDeliveriesOutput struct {
 	Body Page[WebhookDeliveryView]
@@ -422,8 +435,12 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	}
 	var cur deliveriesCursor
 	if in.Cursor != "" {
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(user.ID, cursorWebhookDeliveries, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if cur.WebhookID != in.ID {
+			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
+				"cursor was created for a different webhook — start a new query without a cursor")
 		}
 		if cur.Status != in.Status {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -454,8 +471,8 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, deliveriesCursor{
-			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status,
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorWebhookDeliveries, deliveriesCursor{
+			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status, WebhookID: in.ID,
 		})
 		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
@@ -658,7 +675,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	if err != nil {
 		return nil, err
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(user.ID, cursorWebhooks, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +696,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	var nextCursor string
 	if hasMore {
 		last := hooks[len(hooks)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorWebhooks, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

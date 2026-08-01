@@ -84,14 +84,14 @@ type deleteAPIKeyInput struct {
 type deleteAPIKeyOutput struct{ Body DeleteApiKeyResult }
 
 func (s *Server) registerAPIKeys() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listApiKeys", Method: http.MethodGet, Path: "/v1/account/api-keys",
 		Summary: "List API keys", Tags: []string{"account"},
 		Description: "API keys for the account (metadata only — secrets are shown once, at creation). Account scope only: an agent-scoped credential cannot manage keys.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListAPIKeys)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "createApiKey", Method: http.MethodPost, Path: "/v1/account/api-keys",
 		Summary: "Create an API key", Tags: []string{"account"},
 		Description: "Mint a new API key; the plaintext key is returned once. scope=account is workspace admin (agent/domain/key management); scope=agent binds the key to one inbox so it can act only as that agent. Account scope only.",
@@ -103,7 +103,7 @@ func (s *Server) registerAPIKeys() {
 		},
 	}, s.handleCreateAPIKey)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteApiKey", Method: http.MethodDelete, Path: "/v1/account/api-keys/{id}",
 		Summary: "Revoke an API key", Tags: []string{"account"},
 		Description: "Revoke a key by id. Integrations using it stop authenticating immediately. Account scope only. Requires ?confirm=DELETE. Returns 200 with a deletion object ({deleted:true, id}).",
@@ -124,7 +124,7 @@ func (s *Server) handleListAPIKeys(ctx context.Context, in *listAPIKeysInput) (*
 	if s.deps.ListAPIKeys == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "API keys are not available on this deployment")
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(user.ID, cursorAPIKeys, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func (s *Server) handleListAPIKeys(ctx context.Context, in *listAPIKeysInput) (*
 	var nextCursor string
 	if hasMore {
 		last := keys[len(keys)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorAPIKeys, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

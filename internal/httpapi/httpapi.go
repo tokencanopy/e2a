@@ -104,13 +104,23 @@ type (
 	AgentDeleter func(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
+	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the
+	// agent as restored. The store reads that row inside the restore's own
+	// transaction, so the response cannot describe a state this restore never
+	// produced — a post-commit re-read raced concurrent renames and re-trashes.
+	AgentRestoreOp func(ctx context.Context, agentID, userID string) (*identity.AgentIdentity, error)
 )
 
 // MessageTrashOp mirrors the store's per-message trash mutations
-// (SoftDeleteMessage / RestoreMessage / PurgeMessage): scoped to
-// (messageID, agentID), returning the sentinel errors ErrMessageHeld /
-// ErrNotInTrash / ErrMessageNotFound for the handler to map.
+// (SoftDeleteMessage / PurgeMessage): scoped to (messageID, agentID),
+// returning the sentinel errors ErrMessageHeld / ErrNotInTrash /
+// ErrMessageNotFound for the handler to map.
 type MessageTrashOp func(ctx context.Context, messageID, agentID string) error
+
+// MessageRestoreOp is MessageTrashOp's returning form, used by RestoreMessage
+// for the same reason AgentRestoreOp exists: the restored view comes from
+// inside the restore transaction rather than a racy re-read afterwards.
+type MessageRestoreOp func(ctx context.Context, messageID, agentID string) (*identity.Message, error)
 
 // Deps are the collaborators the v1 layer needs. Everything is injected so
 // the package has no hidden globals and is straightforward to test.
@@ -142,20 +152,23 @@ type Deps struct {
 	ResolveMX          MXResolver
 	EnforceAgentCreate AgentCreateEnforcer
 	// UpdateAgentName updates an agent's display name (the only mutable field on
-	// the agent PATCH after the screening config moved to /protection).
-	UpdateAgentName func(ctx context.Context, agentID, userID, name string) error
+	// the agent PATCH after the screening config moved to /protection) and
+	// returns the agent as written — read inside the write's transaction, so
+	// the PATCH response describes this write and not a concurrent one.
+	UpdateAgentName func(ctx context.Context, agentID, userID, name string) (*identity.AgentIdentity, error)
 	// UpdateAgentProtection writes the full per-agent protection posture (gate +
-	// scan sensitivity + holds) for the /v1/agents/{email}/protection resource.
-	// Returns a validation error for an invalid posture, which the handler maps
-	// to 400 invalid_request.
-	UpdateAgentProtection func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) error
+	// scan sensitivity + holds) for the /v1/agents/{email}/protection resource
+	// and returns the agent as written, on the same in-transaction contract as
+	// UpdateAgentName. Returns a validation error for an invalid posture, which
+	// the handler maps to 400 invalid_request.
+	UpdateAgentProtection func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) (*identity.AgentIdentity, error)
 	// DeleteAgent is the DEFAULT delete: soft (move to trash, restorable for
 	// identity.TrashRetention, docs/design/trash-soft-delete.md).
 	// PermanentDeleteAgent is the irreversible hard delete behind
 	// ?permanent=true; RestoreAgent brings a trashed agent back.
 	DeleteAgent          AgentTrashOp
 	PermanentDeleteAgent AgentDeleter
-	RestoreAgent         AgentTrashOp
+	RestoreAgent         AgentRestoreOp
 	// GetAgentAnyState loads an agent regardless of trash state (DeletedAt set
 	// when trashed) — the resolution path for restore / permanent delete, which
 	// must find agents the live GetAgent treats as nonexistent.
@@ -167,7 +180,7 @@ type Deps struct {
 	// /v1/agents/{email}/messages/{id}): soft delete, restore, and the
 	// trash-only permanent purge.
 	DeleteMessage  MessageTrashOp
-	RestoreMessage MessageTrashOp
+	RestoreMessage MessageRestoreOp
 	PurgeMessage   MessageTrashOp
 
 	// domains. ListDomains is keyset-paginated on (created_at, domain): the
@@ -523,6 +536,10 @@ func New(deps Deps) *Server {
 	s.suppressRawBodyOctetStream()
 	s.applyEvolutionStance()
 	s.applyResponseHeaderContract()
+	// Last: publish the enforced-but-previously-unexpressed field bounds. It
+	// runs after applyEvolutionStance so the stance pass cannot overwrite the
+	// keywords it adds.
+	s.applyContactMetadataBounds()
 
 	// WebSocket transport — registered directly on chi (not Huma; it's a raw
 	// upgrade, not a JSON operation). First-class /v1 inbound transport.

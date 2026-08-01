@@ -22,7 +22,7 @@ export class CreateContactRequest {
     */
     'displayName'?: string;
     /**
-    * Optional caller-owned key/value data, opaque to e2a. Flat objects only.
+    * Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests.
     */
     'metadata'?: { [key: string]: any; };
 

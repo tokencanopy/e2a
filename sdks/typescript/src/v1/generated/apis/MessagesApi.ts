@@ -775,7 +775,7 @@ export class MessagesApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP\&#39;s mailbox octet limits, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP\&#39;s mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).", body, response.headers);
         }
         if (isCodeInRange("402", response.httpStatusCode)) {
             const body: LimitExceededEnvelope = ObjectSerializer.deserialize(
@@ -1011,7 +1011,7 @@ export class MessagesApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP\&#39;s mailbox octet limits, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP\&#39;s mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).", body, response.headers);
         }
         if (isCodeInRange("402", response.httpStatusCode)) {
             const body: LimitExceededEnvelope = ObjectSerializer.deserialize(
@@ -1132,7 +1132,7 @@ export class MessagesApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP\&#39;s mailbox octet limits, or a future send_at whose only recipient is the sending agent\&#39;s own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP\&#39;s mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).", body, response.headers);
         }
         if (isCodeInRange("402", response.httpStatusCode)) {
             const body: LimitExceededEnvelope = ObjectSerializer.deserialize(

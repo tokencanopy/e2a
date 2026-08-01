@@ -1,5 +1,64 @@
 # Changelog
 
+## 5.5.0
+
+Additive only. Every 5.4.0 call site keeps working identically. The new
+contacts/outreach and scheduled-sending surfaces are **beta** and may change
+before they are declared stable. Available on both ``AsyncE2AClient`` and the
+synchronous ``E2AClient``. The complete GA-vs-beta stability matrix for the
+whole ``/v1`` surface is documented in
+[docs/api.md → Stability: GA and beta surface](../../docs/api.md#stability-ga-and-beta-surface).
+
+### Added
+- **``client.contacts`` — account contacts and per-agent outreach (beta).**
+  Account-level contact identity: ``list`` (filter by ``source``,
+  ``import_batch_id``, creation window; auto-paging), ``get`` /
+  ``get_with_etag``, ``create`` (honors ``idempotency_key``), ``update``
+  (optional ``if_match`` rejects a stale editor with a typed 412), and
+  ``delete`` (the SDK supplies the ``?confirm=DELETE`` guard). Bulk import:
+  ``import_`` accepts up to 1,000 rows per request and returns a per-row
+  outcome (``created | updated | skipped | failed``, plus a ``suppressed``
+  flag), so one malformed row never rejects the upload — pass a stable
+  ``idempotency_key`` so a timed-out import can be retried without
+  double-importing. ``delete_import(batch_id)`` reverses an import; the
+  server removes only verifiably untouched rows the batch created — anything
+  edited, corresponded with, or enrolled in surviving outreach since the
+  import is retained and reported in the returned counts.
+- **Per-agent outreach on ``client.contacts`` (beta).** ``outreach(email, ...)``
+  lists the contacts an agent is working, with server-derived reply and
+  delivery facts (``replied``, ``last_outbound_at``, ``outbound_count``, …).
+  For a duplicate-safe follow-up sweep pass ``replied=False`` together with
+  **both** ``next_action_before`` and ``last_outbound_before`` —
+  ``last_outbound_at`` is server-maintained, so the second filter excludes
+  anyone just contacted even if your own state write was lost.
+  ``get_outreach`` / ``get_outreach_with_etag``, ``set_outreach``
+  (caller-owned ``stage``, ``next_action_at``, ``metadata``; derived fields
+  are server-owned and rejected; optional ``if_match``), and
+  ``delete_outreach`` complete the loop. An agent-scoped credential may drive
+  outreach for its own inbox; the account-level contact methods need account
+  scope.
+- **Scheduled sending via ``send_at`` (beta)** on the ``messages.send`` /
+  ``.reply`` / ``.forward`` request bodies. A future ``send_at`` (RFC 3339
+  with an explicit UTC offset, at most 90 days ahead) returns
+  ``status="scheduled"`` — durable acceptance, **do not re-send** — with
+  ``scheduled_at`` echoing the future submission time (a "not before" bound,
+  accurate to the scheduler poll interval). ``wait="sent"`` does **not** wait
+  for the scheduled time: a future ``send_at`` returns ``status="scheduled"``
+  immediately. Scheduling does not survive a review hold (approval sends
+  immediately). Cancel by trashing the message before provider submission
+  starts (``messages.delete``); restoring before ``scheduled_at`` re-arms it,
+  restoring at or after leaves the message live with
+  ``delivery_status="failed"`` and the send canceled.
+- **Beta ``thread_id`` on message reads** (``MessageView`` /
+  ``MessageSummaryView``) — a server-owned, read-only, mailbox-local
+  email-topology identity. It is omitted for legacy messages without an
+  assignment; ``conversation_id`` remains caller-owned application
+  correlation and its filter is unchanged. There is no thread filter, request
+  field, or thread endpoint.
+- **``contact.due`` (beta)** joins the webhook event vocabulary: emitted
+  at-least-once when an engagement's ``next_action_at`` passes. It is a
+  notification for a deployed webhook receiver; see ``docs/events.md``.
+
 ## 5.4.0
 
 Additive only. Every 5.3.0 call site keeps working identically; the new
@@ -28,6 +87,25 @@ parameters are keyword-only with defaults that preserve 5.3.0 behavior.
   ``pending``). ``outbound`` restates whether agents can send as their own
   address (``none`` | ``pending`` | ``verified`` | ``failed``, with detail in
   ``sending_error``). Both are open string sets — tolerate unknown values.
+
+- **`client.contacts`** — manage the people an account corresponds with:
+  `list`/`get`/`get_with_etag`/`create`/`update`/`delete` (account-scoped,
+  optimistic concurrency via `if_match`), plus `import_`/`delete_import` for
+  structured-row bulk imports. `client.contacts.outreach(email, ...)` and its
+  `get_outreach`/`get_outreach_with_etag`/`set_outreach`/`delete_outreach`
+  counterparts track one agent's per-contact engagement (stage, next action,
+  reply/suppression state) and may be driven by an agent-scoped credential.
+  Available on both `AsyncE2AClient` and the synchronous `E2AClient`.
+- **``send_at`` on ``messages.send`` / ``.reply`` / ``.forward``** — schedule a
+  future send with a timezone-aware ``datetime``, no more than 90 days ahead.
+  Beta and may change before it is declared stable. The durable ``scheduled``
+  result is success, not a reason to retry; even with ``wait="sent"`` it
+  returns immediately rather than holding the HTTP request until the future
+  time.
+- **``message.thread_id``** — an optional beta, server-owned, read-only
+  identity for the mailbox-local reply graph, exposed on message list/detail
+  models. Legacy messages can omit it. There is no ``thread_id`` request
+  field, list filter, thread endpoint, or complete-thread retrieval method.
 
 ### Fixed
 - **``unsubscribe=`` no longer mutates the caller's request model.** When the

@@ -904,6 +904,46 @@ describe("e2a MCP server", () => {
     );
   });
 
+  // An empty if_match is not a validator. Accepting one would send
+  // `If-Match:` with no value, which degraded a guarded write to an
+  // unconditional one before the API started rejecting it — the model would
+  // believe it had held the guard. Omitting the field is how you ask for an
+  // unconditional write.
+  it("rejects an empty if_match on both conditional contact tools", async () => {
+    for (const call of [
+      {
+        name: "update_contact",
+        arguments: { address: "partner@fund.vc", display_name: "X", if_match: "" },
+      },
+      {
+        name: "set_outreach_contact",
+        arguments: {
+          email: "raise@example.com",
+          address: "partner@fund.vc",
+          stage: "touch2",
+          if_match: "",
+        },
+      },
+    ]) {
+      const result = await client.callTool(call);
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain("if_match");
+    }
+    expect(stub.updateContact).not.toHaveBeenCalled();
+    expect(stub.setOutreach).not.toHaveBeenCalled();
+
+    // Omitting it entirely is still a valid unconditional write.
+    await client.callTool({
+      name: "update_contact",
+      arguments: { address: "partner@fund.vc", display_name: "X" },
+    });
+    expect(stub.updateContact).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { displayName: "X" },
+      undefined,
+    );
+  });
+
   it("import_contacts maps enrollment without inventing a send action", async () => {
     await client.callTool({
       name: "import_contacts",

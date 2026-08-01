@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.2.0
+
+Additive only — no flag, output-field, or exit-code meaning changes to any
+command that shipped in 2.1.0. The new contacts and scheduled-sending
+surfaces are **beta** and may change before they are declared stable. The
+complete GA-vs-beta stability matrix for the whole `/v1` surface is
+documented in
+[docs/api.md → Stability: GA and beta surface](../docs/api.md#stability-ga-and-beta-surface).
+
+**Added:** `e2a contacts` (beta) — manage account-level contact identity and
+per-agent outreach state, with suppression visibility. Subcommands:
+`list | get | create | update | delete` for contacts (account scope;
+`--source`, `--import-batch`, `--created-after`/`--created-before` filters on
+`list`; `--idempotency-key` on `create`; `--if-match <etag>` on `update` to
+reject a stale edit), `import` (reads an RFC 4180 CSV; `--email-column`,
+`--name-column`, `--on-conflict merge|skip`, `--dry-run` to preview without
+writing, `--agent`/`--stage` to enroll rows in an agent's outreach in the same
+transaction, `--idempotency-key` to safely replay a timed-out upload; up to
+1,000 rows per request with per-row outcomes), `imports delete
+<import-batch-id>` (reverses one import batch — the server removes only
+verifiably untouched rows the batch created and reports what it kept), and
+`outreach list | get | set | delete` for per-agent outreach state
+(`--stage`, `--replied`, `--suppressed`, `--next-action-before`,
+`--last-outbound-before` filters on `outreach list`; `--if-match` on
+`outreach set`; also usable with an agent-scoped credential for its bound
+inbox). `contacts delete` removes the account contact and its per-agent
+outreach rows; suppression and consent records survive.
+
+**Added:** `--send-at <rfc3339>` (beta) on `e2a send` and `e2a reply` —
+scheduled sending. Requires an explicit UTC offset and can be at most 90 days
+ahead. A future schedule exits `0` with `status=scheduled`: the message is
+durably queued for future submission, so do not retry. `scheduled_at` in
+`--json` output is the future submission time — a "not before" bound, not an
+exact fire time. Direct self-send cannot be scheduled (permanent request
+error) unless a review hold takes precedence — held sends drop the schedule
+and send on approval. Trashing the message before provider submission starts
+cancels the send; restoring it before the send time re-arms it, restoring at
+or after that time restores the message but leaves the send canceled.
+
+**Added:** on servers that expose it, SDK-shaped JSON from `messages
+list`/`messages get`/`listen` may include the optional beta `threadId` — a
+server-owned, read-only, mailbox-local email-thread identity. Human-readable
+output formats are unchanged, and there is no `threadId` request flag,
+filter, or thread endpoint. `--conversation-id` remains caller-owned
+application correlation.
+
 ## 2.1.0
 
 Additive only — no flag, output-field, or exit-code meaning changes to any
@@ -39,6 +85,23 @@ completed with warnings only; `9` — diagnostics found a definite
 configuration failure. `0`/`1`/`4` keep their existing meanings for healthy,
 transient-connectivity, and authentication outcomes. Every network operation
 is bounded by a 5-second timeout.
+
+**Added:** `e2a contacts` — manage account-level contact identity and
+per-agent outreach state, with suppression visibility (`list`/`get`/
+`create`/`update`/`delete`/`import`/`imports delete`, plus `outreach
+list`/`get`/`set`/`delete`). Contact identity operations require account
+scope; `outreach` also supports an agent-scoped credential for its bound
+inbox. `create`/`import` accept `--idempotency-key`; `update`/`outreach set`
+accept `--if-match <etag>` to reject a stale edit.
+
+**Added:** `--send-at` on `send`/`reply` — schedule a future send (RFC 3339
+with an explicit UTC offset, at most 90 days ahead). Beta and may change
+before it is declared stable. A future schedule exits `0` with
+`status=scheduled` and is durably queued, so do not retry.
+
+**Added:** beta `threadId` on message list/get/listen JSON — a server-owned,
+read-only mailbox-local identity, distinct from the caller-owned
+`conversation_id` filter. Human-readable formats are unchanged.
 
 ## 2.0.0
 

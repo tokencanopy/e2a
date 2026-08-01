@@ -163,7 +163,7 @@ type attachmentOutput struct {
 }
 
 func (s *Server) registerAttachments() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAttachment",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages/{id}/attachments/{index}",

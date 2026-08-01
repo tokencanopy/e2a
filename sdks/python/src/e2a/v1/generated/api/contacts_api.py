@@ -639,7 +639,7 @@ class ContactsApi:
     ) -> DeleteEngagementResult:
         """Un-enrol a contact (beta)
 
-        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -714,7 +714,7 @@ class ContactsApi:
     ) -> ApiResponse[DeleteEngagementResult]:
         """Un-enrol a contact (beta)
 
-        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -789,7 +789,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Un-enrol a contact (beta)
 
-        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+        Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
 
         :param email: (required)
         :type email: str
@@ -1746,7 +1746,7 @@ class ContactsApi:
     ) -> ContactImportResult:
         """Import contacts in bulk (beta)
 
-        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
@@ -1817,7 +1817,7 @@ class ContactsApi:
     ) -> ApiResponse[ContactImportResult]:
         """Import contacts in bulk (beta)
 
-        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
@@ -1888,7 +1888,7 @@ class ContactsApi:
     ) -> RESTResponseType:
         """Import contacts in bulk (beta)
 
-        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+        Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
 
         :param import_contacts_request: (required)
         :type import_contacts_request: ImportContactsRequest
@@ -2784,7 +2784,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2806,7 +2806,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -2859,7 +2859,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2881,7 +2881,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -2934,7 +2934,7 @@ class ContactsApi:
         self,
         address: StrictStr,
         update_contact_request: UpdateContactRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -2956,7 +2956,7 @@ class ContactsApi:
         :type address: str
         :param update_contact_request: (required)
         :type update_contact_request: UpdateContactRequest
-        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -3089,7 +3089,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3113,7 +3113,7 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
-        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -3169,7 +3169,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3193,7 +3193,7 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
-        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -3249,7 +3249,7 @@ class ContactsApi:
         email: StrictStr,
         address: StrictStr,
         upsert_engagement_request: UpsertEngagementRequest,
-        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.")] = None,
+        if_match: Annotated[Optional[StrictStr], Field(description="Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -3273,7 +3273,7 @@ class ContactsApi:
         :type address: str
         :param upsert_engagement_request: (required)
         :type upsert_engagement_request: UpsertEngagementRequest
-        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412.
+        :param if_match: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
         :type if_match: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request

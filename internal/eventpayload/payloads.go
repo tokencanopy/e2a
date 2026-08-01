@@ -16,10 +16,14 @@
 // server-side builder tests and the TS/Python SDK payload tests all assert
 // against the same fixture bytes.
 //
-// BETA events (email.flagged, email.blocked, email.review_requested,
+// A few BETA payloads are also typed here and listed in BetaEvents
+// (AgentSuppressionAddedData, ContactDueData): typing and fixturing a payload
+// documents and locks it without freezing it — `x-stability-level: beta` keeps
+// it outside the GA compatibility guarantee. The screening and review-hold
+// events (email.flagged, email.blocked, email.review_requested,
 // email.review_approved, email.review_rejected) intentionally stay
-// map[string]any at their trigger sites — their payloads are open/unstable
-// and must NOT be typed here until they are declared stable.
+// map[string]any at their trigger sites — those payloads are still open and
+// must NOT be typed here until their shape settles.
 //
 // This package stays lightweight (mail parsing plus the lifecycle wire model)
 // so delivery producers can import it without dragging in webhookpub's storage
@@ -243,6 +247,51 @@ type AgentSuppressionAddedData struct {
 	AgentEmail string `json:"agent_email"`
 	Address    string `json:"address"`
 	Source     string `json:"source" doc:"How the suppression was created. Known values: unsubscribe, manual."`
+}
+
+// ContactDueContact is the contact identity embedded in a contact.due payload.
+// It is carried INLINE on purpose: the event wakes an agent-scoped consumer,
+// and requiring a follow-up read would force an account-wide contact-read
+// credential onto something that only needs one person's details.
+type ContactDueContact struct {
+	Address string `json:"address" doc:"The contact's canonical address — identical to the payload's top-level address."`
+	// DisplayName is always present, empty when the contact has no name.
+	DisplayName string `json:"display_name" doc:"The contact's display name; empty string when unset."`
+	// Metadata is always present — an empty object when the contact carries
+	// none. Flat and caller-owned: e2a never interprets it. The bounds are
+	// enforced on the contacts write path (see ContactView.metadata).
+	Metadata map[string]any `json:"metadata" doc:"The contact's caller-owned metadata, verbatim and uninterpreted. An empty object when the contact carries none."`
+}
+
+// ContactDueData is the `data` payload of a contact.due event — an outreach
+// engagement's next_action_at has passed, so e2a wakes the agent. It is a
+// WAKE-UP, never a suggestion: it deliberately carries no body, subject, or
+// proposed content. e2a wakes; the agent decides and writes.
+//
+// Built by internal/contactdue from identity.DueEngagement. The event fires at
+// most once per (engagement, next_action_at) — the claim advances
+// notified_next_action_at in the same transaction as the outbox write — and
+// its id is deterministic over that pair, so a retried sweep collapses.
+//
+// BETA (see BetaEvents): published and fixture-locked, but not GA-frozen.
+//
+// Field ORDER here is the alphabetical order encoding/json used while this
+// payload was still built as a map[string]any, so typing it changed no emitted
+// byte. internal/contactdue's TestEventForDueIsByteIdenticalToTheLegacyMap is
+// the evidence; it is what keeps this ordering meaningful.
+type ContactDueData struct {
+	Address    string            `json:"address" doc:"The contact's canonical address — who the agent owes an action to."`
+	AgentEmail string            `json:"agent_email" doc:"The agent that owns this outreach — its id and address (an agent's id IS its email)."`
+	Contact    ContactDueContact `json:"contact" doc:"The contact's identity, inlined so an agent-scoped consumer needs no account-wide contact read."`
+	// LastConversationID is omitted when the agent has never corresponded with
+	// this contact — i.e. there is no thread to continue.
+	LastConversationID string `json:"last_conversation_id,omitempty" doc:"Conversation id of the most recent exchange with this contact, to continue that thread. Omitted when there is none."`
+	// LastOutboundAt is omitted when nothing has been sent yet.
+	LastOutboundAt *time.Time `json:"last_outbound_at,omitempty" format:"date-time" doc:"When this agent last sent to the contact. Omitted when it never has."`
+	NextActionAt   time.Time  `json:"next_action_at" format:"date-time" doc:"The schedule instant that came due — the value set on the engagement, not the time the sweep observed it."`
+	OutboundCount  int        `json:"outbound_count" doc:"How many messages this agent has sent to the contact since the engagement was created. Computed at claim time, not a stored counter."`
+	Replied        bool       `json:"replied" doc:"True when the contact has replied since this agent's first outbound to them."`
+	Stage          string     `json:"stage" doc:"The caller-owned outreach stage, verbatim. e2a never interprets it; empty when unset."`
 }
 
 // AttachmentMetadata extracts the per-attachment metadata of a raw RFC 5322

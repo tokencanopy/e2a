@@ -125,9 +125,18 @@ func ValidateProtectionConfig(c ProtectionConfig) error {
 // columns (the API source of truth) AND the derived scan toggle + float
 // thresholds the piguard engine reads, so the two never diverge and the engine
 // needs no change. Returns an error if the agent isn't found or not owned.
-func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID string, c ProtectionConfig) error {
+//
+// It returns the agent AS WRITTEN, re-read INSIDE the write's transaction.
+// Reading afterwards from the pool was a torn read: the PUT is a full replace,
+// so a concurrent PUT landing between the commit and the re-read handed the
+// caller the OTHER writer's posture as the result of their own request — the
+// worst shape of this bug, because the response looks authoritative. A
+// concurrent trash likewise turned a committed write into a 500 "failed to
+// reload agent". Same recipe as UpdateEngagementIfUnchanged; the read includes
+// trashed rows for the reason given on UpdateAgentName.
+func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID string, c ProtectionConfig) (*AgentIdentity, error) {
 	if err := ValidateProtectionConfig(c); err != nil {
-		return err
+		return nil, err
 	}
 	inB := sensitivityBands[c.InboundScanSensitivity]
 	outB := sensitivityBands[c.OutboundScanSensitivity]
@@ -142,7 +151,13 @@ func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID strin
 		outAllow = []string{}
 	}
 
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE agent_identities SET
 		    inbound_policy = $3, inbound_allowlist = $4, inbound_policy_action = $5,
 		    inbound_scan = $6, inbound_scan_review_threshold = $7, inbound_scan_block_threshold = $8,
@@ -164,10 +179,17 @@ func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID strin
 		c.SuppressNotifications,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("agent not found or not owned by user")
+		return nil, fmt.Errorf("agent not found or not owned by user")
 	}
-	return nil
+	a, err := loadAgentByID(ctx, tx, agentID, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
 }

@@ -30,6 +30,8 @@ models/Attachment.ts
 models/AttachmentMetaView.ts
 models/AttachmentView.ts
 models/Authentication.ts
+models/ContactDueContact.ts
+models/ContactDueData.ts
 models/ContactEngagementView.ts
 models/ContactImportItemResult.ts
 models/ContactImportResult.ts

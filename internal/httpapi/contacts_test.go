@@ -872,3 +872,141 @@ func TestListContactsCursorPinsFilters(t *testing.T) {
 		t.Errorf("continuation with changed filter = %d %v; want 400 invalid_cursor", code, body)
 	}
 }
+
+// TestPatchContactRejectsEmptyIfMatch is the regression for the guard that
+// silently wasn't one. On staging sha-32ce45dc, `If-Match: ` (present, no
+// value) on PATCH /v1/contacts/{address} returned 200 with a NEW ETag
+// (req_91af2b0f6fe551c8df501fda, confirmed over a raw TLS socket so it is not a
+// client artifact) — the conditional write the caller asked for silently became
+// an unconditional one, and the 200 told the caller the guard had held.
+//
+// RFC 9110 §13.1.1 requires at least one member in the field value, so an empty
+// one is a malformed request (400), not a precondition that failed (412). The
+// quoted-empty form `""` IS a syntactically valid validator and keeps its 412.
+func TestPatchContactRejectsEmptyIfMatch(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	seedContact(t, srv, "empty-ifmatch@example.com", "Before")
+	path := "/v1/contacts/empty-ifmatch%40example.com"
+
+	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": ""})
+	if code != http.StatusBadRequest || errCode(body) != "invalid_request" {
+		t.Fatalf("PATCH with empty If-Match = %d %v; want 400 invalid_request", code, body)
+	}
+
+	// The write must not have happened.
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["display_name"] != "Before" {
+		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+	}
+
+	// A quoted-empty validator is well-formed and simply does not match.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": `""`})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf(`PATCH with If-Match: "" = %d %v; want 412 precondition_failed`, code, body)
+	}
+
+	// Omitting the header entirely is still an unconditional write.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("PATCH without If-Match = %d %v; want 200", code, body)
+	}
+}
+
+// TestETagMatchesToleratesTheWeakPrefix pins a deviation from RFC 9110 §13.1.1
+// that is deliberate and load-bearing, so that a future reader who checks only
+// the RFC does not "fix" it into an outage.
+//
+// api.e2a.dev is behind a Cloudflare proxy that actively transforms responses
+// (br compression is confirmed live; our origin sets no `encode` directive, so
+// the compression is the edge's). Cloudflare downgrades a strong ETag to a weak
+// one whenever it transforms a response, and "Respect Strong ETags" is
+// Enterprise-only while e2a.dev is on the Free plan. A client can therefore be
+// handed `W/"abc"` for a row whose origin validator is `"abc"`, echo back
+// exactly what it received, and — under a strict comparison — get a PERMANENT
+// 412 no retry clears. Staging is DNS-only (unproxied), so the conformance gate
+// structurally cannot catch that; it would be a prod-only break.
+//
+// The guard is not weakened by this: the compared body is the full validator,
+// which moves on every accepted write, so a stale tag never matches.
+//
+// NOTE ON WHAT THIS TEST IS: it is a FENCE, not a regression test. It passes
+// against unmodified main, because nothing about the matching behaviour
+// changed — its whole job is to fail loudly for whoever next reads §13.1.1 and
+// tightens the comparison. Do not cite it as evidence that a bug was fixed.
+func TestETagMatchesToleratesTheWeakPrefix(t *testing.T) {
+	const current = `"88eba810c0136ae642cf65a30025858b"`
+	cases := []struct {
+		name    string
+		ifMatch string
+		want    bool
+	}{
+		{"exact strong validator", current, true},
+		{"weak form of the current validator", `W/` + current, true},
+		{"weak form inside a comma list", `W/"other", W/` + current, true},
+		{"strong form inside a comma list", `"other", ` + current, true},
+		{"mixed weak and strong in a list", `W/"other", ` + current, true},
+		// Tolerating the prefix must not tolerate the wrong validator: a stale
+		// tag stays stale however it is dressed.
+		{"weak form of a different validator", `W/"deadbeef"`, false},
+		{"weak list with no matching member", `W/"aaa", W/"bbb"`, false},
+		{"unrelated strong validator", `"deadbeef"`, false},
+		// RFC 9110 spells the weak prefix "W/" exactly, so lowercase is not a
+		// weak validator and does not match.
+		{"lowercase w/ is not a weak prefix", `w/` + current, false},
+		{"wildcard", "*", true},
+		{"wildcard with surrounding space", "  *  ", true},
+		{"garbage", "garbage", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := etagMatches(tc.ifMatch, current); got != tc.want {
+				t.Fatalf("etagMatches(%q) = %v, want %v", tc.ifMatch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPatchContactAcceptsAWeakenedValidator is the wire-level half: a client
+// whose validator was weakened in transit must still be able to complete its
+// conditional write, and a stale one must still be refused.
+func TestPatchContactAcceptsAWeakenedValidator(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	seedContact(t, srv, "weak-etag@example.com", "Before")
+	path := "/v1/contacts/weak-etag%40example.com"
+
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	etag := headers.Get("ETag")
+	if code != http.StatusOK || etag == "" {
+		t.Fatalf("GET = %d ETag=%q; want 200 with an ETag", code, etag)
+	}
+
+	// The weak form of the CURRENT validator — what a client sees through a
+	// transforming CDN — still completes the write.
+	code, body, _ := sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "After"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusOK {
+		t.Fatalf("PATCH with a weakened current validator = %d %v; want 200 — a CDN-weakened ETag must not permanently 412", code, body)
+	}
+
+	// That write moved the validator, so re-sending the old one — weak or not —
+	// is now stale and must be refused.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "Stale"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PATCH with a weakened STALE validator = %d %v; want 412", code, body)
+	}
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["display_name"] != "After" {
+		t.Fatalf("GET after refused write = %d %v; want the row left at \"After\"", code, after)
+	}
+
+	// `*` matches any existing representation.
+	code, body, _ = sendJSONFull(t, http.MethodPatch, srv.URL+path, "account",
+		map[string]any{"display_name": "Star"}, map[string]string{"If-Match": "*"})
+	if code != http.StatusOK {
+		t.Fatalf("PATCH with If-Match: * on an existing contact = %d %v; want 200", code, body)
+	}
+}

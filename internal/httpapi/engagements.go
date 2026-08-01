@@ -132,13 +132,13 @@ type listEngagementsOutput struct {
 type UpsertEngagementRequest struct {
 	Stage        *string        `json:"stage,omitempty" maxLength:"128" doc:"Set the outreach stage. Omit to leave unchanged."`
 	NextActionAt *time.Time     `json:"next_action_at,omitempty" nullable:"true" doc:"Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule."`
-	Metadata     map[string]any `json:"metadata,omitempty" doc:"Replace the relationship metadata. Omit to leave unchanged."`
+	Metadata     map[string]any `json:"metadata,omitempty" doc:"Replace the relationship metadata wholesale. Omit to leave unchanged; send an empty object to clear it."`
 }
 
 type upsertEngagementInput struct {
 	Email   string `path:"email"`
 	Address string `path:"address"`
-	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412."`
+	IfMatch string `header:"If-Match" doc:"Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally."`
 	Body    UpsertEngagementRequest
 	RawBody []byte
 }
@@ -180,17 +180,17 @@ type deleteEngagementOutput struct {
 func (s *Server) registerEngagements() {
 	createdEngagement := s.jsonResponse(reflect.TypeOf(ContactEngagementView{}), "ContactEngagementView",
 		"Created — the contact was newly enrolled in this agent's outreach.")
+	// The 201 is hand-declared (Huma cannot infer two success statuses from a
+	// single DefaultStatus), so its headers are declared here too. They point
+	// at the SHARED header components so this response promises the same
+	// validator semantics and the same path-encoding convention the
+	// auto-derived 200 does — see contract_headers.go, which enriches every
+	// declared ETag/Location with one wording.
 	createdEngagement.Headers = map[string]*huma.Param{
-		"ETag": {
-			Description: "Opaque revision token for a later If-Match update.",
-			Schema:      &huma.Schema{Type: "string"},
-		},
-		"Location": {
-			Description: "Canonical URL of the newly created engagement.",
-			Schema:      &huma.Schema{Type: "string", Format: "uri-reference"},
-		},
+		"ETag":     headerRef(headerETag),
+		"Location": headerRef(headerResourceLocation),
 	}
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listEngagements", Method: http.MethodGet, Path: "/v1/agents/{email}/contacts",
 		Summary: "List an agent's outreach (beta)", Tags: []string{"contacts"},
 		Description: "Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. " + engagementBetaDescription,
@@ -198,7 +198,7 @@ func (s *Server) registerEngagements() {
 		Extensions:  beta(),
 	}, s.handleListEngagements)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getEngagement", Method: http.MethodGet, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Get one outreach record (beta)", Tags: []string{"contacts"},
 		Description: "Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. " + engagementBetaDescription,
@@ -206,7 +206,7 @@ func (s *Server) registerEngagements() {
 		Extensions:  beta(),
 	}, s.handleGetEngagement)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "upsertEngagement", Method: http.MethodPut, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Enrol or update outreach state (beta)", Tags: []string{"contacts"},
 		Description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
@@ -223,10 +223,15 @@ func (s *Server) registerEngagements() {
 		Extensions: beta(),
 	}, s.handleUpsertEngagement)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteEngagement", Method: http.MethodDelete, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Un-enrol a contact (beta)", Tags: []string{"contacts"},
-		Description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. " + engagementBetaDescription,
+		// The agent-scope sentence is not decoration: all four outreach
+		// operations route through resolveOutreachAgent → requireAgentAccess,
+		// so an agent-scoped credential may un-enrol on its own agent exactly
+		// as it may read and write. Omitting the sentence here (the only one of
+		// the four that did) read as if delete were account-only.
+		Description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleDeleteEngagement)
@@ -269,8 +274,10 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var afterID string
 	if in.Cursor != "" {
 		var cur engagementsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil ||
-			cur.AgentEmail != ag.ID || cur.Filters != fingerprint {
+		if err := s.decodeCursor(p.User.ID, cursorEngagements, in.Cursor, &cur); err != nil {
+			return nil, err
+		}
+		if cur.AgentEmail != ag.ID || cur.Filters != fingerprint {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
 		}
 		afterCreatedAt, afterID = cur.CreatedAt, cur.ID
@@ -288,7 +295,7 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var next string
 	if hasMore {
 		last := rows[len(rows)-1]
-		next, err = EncodeCursor(s.deps.CursorSecret, engagementsCursor{
+		next, err = EncodeCursor(s.deps.CursorSecret, p.User.ID, cursorEngagements, engagementsCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, AgentEmail: ag.ID, Filters: fingerprint,
 		})
 		if err != nil {
@@ -391,6 +398,9 @@ func (s *Server) handleUpsertEngagement(ctx context.Context, in *upsertEngagemen
 	}
 	if s.deps.UpsertEngagement == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "contacts are not available on this deployment")
+	}
+	if env := emptyIfMatchError(ctx, in.IfMatch); env != nil {
+		return nil, env
 	}
 	address, err := validateContactAddress(in.Address)
 	if err != nil {

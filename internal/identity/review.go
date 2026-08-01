@@ -287,7 +287,7 @@ func (s *Store) transitionReview(ctx context.Context, messageID, agentID, newSta
 				UPDATE contact_engagements ce
 				   SET last_inbound_at = GREATEST(COALESCE(ce.last_inbound_at, m.created_at), m.created_at),
 				       last_conversation_id = COALESCE(NULLIF(m.conversation_id, ''), ce.last_conversation_id),
-				       updated_at = now()
+				       updated_at = `+monotonicUpdatedAt("ce")+`
 				  FROM messages m
 				  JOIN agent_identities ai ON ai.id = m.agent_id
 				 WHERE m.id = $1

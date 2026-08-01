@@ -265,6 +265,17 @@ func TestValidateAttachments(t *testing.T) {
 			{Filename: "e", Data: b64(half)}, {Filename: "f", Data: b64(half + 1)},
 		}, "payload_too_large"},
 		{"bad-base64", []outbound.Attachment{{Filename: "a", Data: "!!!not-base64!!!"}}, "invalid_attachment"},
+		// Header injection through an attachment MIME header. The composer has
+		// always refused these; the point of checking here is the STATUS. On
+		// staging sha-32ce45dc they escaped as 500 internal_error
+		// (req_e7be6c6d4b2ed074056b2717 CR, req_5221059f93a505a8755e18f6 LF,
+		// req_d80a0151080139d2ac01d320 content_type) — a permanent client error
+		// that SDK retry logic treats as transient and hammers.
+		{"filename-cr", []outbound.Attachment{{Filename: "a\rb.txt", Data: b64(4)}}, "invalid_attachment"},
+		{"filename-lf", []outbound.Attachment{{Filename: "a\nb.txt", Data: b64(4)}}, "invalid_attachment"},
+		{"filename-crlf", []outbound.Attachment{{Filename: "ok.txt\r\nContent-Type: text/html", Data: b64(4)}}, "invalid_attachment"},
+		{"content-type-crlf", []outbound.Attachment{{Filename: "a.txt", ContentType: "text/plain\r\nX-I: 1", Data: b64(4)}}, "invalid_attachment"},
+		{"content-type-clean", []outbound.Attachment{{Filename: "a.txt", ContentType: "text/plain", Data: b64(4)}}, ""},
 		{"too-many", func() []outbound.Attachment {
 			a := make([]outbound.Attachment, maxAttachmentCount+1)
 			for i := range a {
@@ -284,6 +295,29 @@ func TestValidateAttachments(t *testing.T) {
 			}
 			if env == nil || env.Code() != tc.want {
 				t.Fatalf("want error code %q, got %v", tc.want, env)
+			}
+		})
+	}
+}
+
+// TestSendAttachmentHeaderInjectionIsA400 is the wire-level half of the CR/LF
+// cases above: the caller must see 400 invalid_attachment, the same answer the
+// filename length cap already gives, rather than the 500 that staging returned.
+func TestSendAttachmentHeaderInjectionIsA400(t *testing.T) {
+	cases := map[string]map[string]any{
+		"filename CR":       {"filename": "a\rb.txt", "content_type": "text/plain", "data": b64(4)},
+		"filename LF":       {"filename": "a\nb.txt", "content_type": "text/plain", "data": b64(4)},
+		"content_type CRLF": {"filename": "a.txt", "content_type": "text/plain\r\nX-Injected: 1", "data": b64(4)},
+	}
+	for name, att := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := testServer(t)
+			code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+				"to": []string{"alice@x.com"}, "subject": "att", "text": "t",
+				"attachments": attField(att),
+			})
+			if code != 400 || errCode(body) != "invalid_attachment" {
+				t.Fatalf("got %d %v; want 400 invalid_attachment", code, body)
 			}
 		})
 	}

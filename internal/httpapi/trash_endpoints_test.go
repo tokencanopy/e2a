@@ -39,9 +39,16 @@ func withTrashDeps(c *trashCalls) func(*Deps) {
 			c.lastMessageID, c.lastMessageAgent = messageID, agentID
 			return nil
 		}
-		d.RestoreMessage = func(ctx context.Context, messageID, agentID string) error {
+		// Restore answers with the message view itself (the store builds it
+		// inside the restore transaction), so the fake returns the row.
+		d.RestoreMessage = func(ctx context.Context, messageID, agentID string) (*identity.Message, error) {
 			c.restoreMsg++
-			return nil
+			return &identity.Message{
+				ID: messageID, AgentID: agentID, Direction: "inbound",
+				Sender: "alice@gmail.com", Subject: "restored",
+				ThreadID:  assignedThreadID,
+				CreatedAt: time.Unix(1700000000, 0).UTC(),
+			}, nil
 		}
 		d.DeleteAgent = func(ctx context.Context, agentID, userID string) error {
 			c.softAgent++
@@ -53,9 +60,12 @@ func withTrashDeps(c *trashCalls) func(*Deps) {
 			c.lastAgentID = agentID
 			return 4, nil
 		}
-		d.RestoreAgent = func(ctx context.Context, agentID, userID string) error {
+		// Restore answers with the LIVE agent the store read inside the
+		// restore transaction — hence sampleAgent (no deleted_at).
+		d.RestoreAgent = func(ctx context.Context, agentID, userID string) (*identity.AgentIdentity, error) {
 			c.restoreAg++
-			return nil
+			a := sampleAgent()
+			return &a, nil
 		}
 	}
 }
@@ -225,16 +235,7 @@ func TestDeleteMessageSoftSendInProgress(t *testing.T) {
 
 func TestRestoreMessage(t *testing.T) {
 	var c trashCalls
-	srv := testServer(t, withTrashDeps(&c), func(d *Deps) {
-		d.GetMessage = func(ctx context.Context, messageID, agentID string) (*identity.Message, error) {
-			return &identity.Message{
-				ID: messageID, AgentID: agentID, Direction: "inbound",
-				Sender: "alice@gmail.com", Subject: "restored",
-				ThreadID:  assignedThreadID,
-				CreatedAt: time.Unix(1700000000, 0).UTC(),
-			}, nil
-		}
-	})
+	srv := testServer(t, withTrashDeps(&c))
 	code, body := sendJSON(t, "POST", srv.URL+"/v1/agents/support%40acme.com/messages/msg_1/restore", "good", nil)
 	if code != 200 {
 		t.Fatalf("want 200, got %d %v", code, body)
@@ -255,8 +256,8 @@ func TestRestoreMessage(t *testing.T) {
 
 func TestRestoreMessageNotInTrash(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.RestoreMessage = func(ctx context.Context, messageID, agentID string) error {
-			return identity.ErrNotInTrash
+		d.RestoreMessage = func(ctx context.Context, messageID, agentID string) (*identity.Message, error) {
+			return nil, identity.ErrNotInTrash
 		}
 	})
 	code, body := sendJSON(t, "POST", srv.URL+"/v1/agents/support%40acme.com/messages/msg_live/restore", "good", nil)
@@ -468,7 +469,8 @@ func TestRestoreAgent(t *testing.T) {
 	if c.restoreAg != 1 {
 		t.Fatalf("restore called %d times", c.restoreAg)
 	}
-	// The response is the LIVE re-read (sampleAgent), so no deleted_at.
+	// The response is the store's LIVE in-transaction read (sampleAgent), so
+	// no deleted_at.
 	if body["email"] != "support@acme.com" {
 		t.Fatalf("unexpected restored agent %v", body)
 	}
@@ -481,8 +483,8 @@ func TestRestoreAgentNotInTrash(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
 		// The store is the source of truth for the trash-state decision: a
 		// live agent's restore returns ErrNotInTrash.
-		d.RestoreAgent = func(ctx context.Context, agentID, userID string) error {
-			return identity.ErrNotInTrash
+		d.RestoreAgent = func(ctx context.Context, agentID, userID string) (*identity.AgentIdentity, error) {
+			return nil, identity.ErrNotInTrash
 		}
 		d.GetAgentAnyState = func(ctx context.Context, address string) (*identity.AgentIdentity, error) {
 			a := sampleAgent() // live — DeletedAt nil
@@ -606,7 +608,7 @@ func TestDeleteMessagePermanentIsAccountOnly(t *testing.T) {
 // must not continue a trash (?deleted=true) listing, and vice versa.
 func TestListAgentsCursorBoundToView(t *testing.T) {
 	srv := testServer(t)
-	liveCursor, err := EncodeCursor("", keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com"})
+	liveCursor, err := EncodeCursor("", "u_1", cursorAgents, keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com"})
 	if err != nil {
 		t.Fatalf("EncodeCursor: %v", err)
 	}
@@ -614,7 +616,7 @@ func TestListAgentsCursorBoundToView(t *testing.T) {
 	if code != 400 || errCode(body) != "invalid_cursor" {
 		t.Fatalf("live cursor on trash view: want 400 invalid_cursor, got %d %v", code, body)
 	}
-	trashCursor, err := EncodeCursor("", keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com", Deleted: true})
+	trashCursor, err := EncodeCursor("", "u_1", cursorAgents, keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "a@acme.com", Deleted: true})
 	if err != nil {
 		t.Fatalf("EncodeCursor: %v", err)
 	}

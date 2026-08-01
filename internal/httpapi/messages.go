@@ -413,7 +413,7 @@ type messagesCursor struct {
 }
 
 func (s *Server) registerMessages() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listMessages",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages",
@@ -423,7 +423,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListMessages)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteMessage",
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -433,7 +433,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "restoreMessage",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/messages/{id}/restore",
@@ -443,7 +443,7 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleRestoreMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getMessage",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -468,7 +468,7 @@ func (s *Server) registerMessages() {
 		return &messageOutput{Body: view}, nil
 	})
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateMessage",
 		Method:      http.MethodPatch,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -635,14 +635,18 @@ func (s *Server) handleRestoreMessage(ctx context.Context, in *MessageIDParam) (
 	if err != nil {
 		return nil, err
 	}
-	if s.deps.RestoreMessage == nil || s.deps.GetMessage == nil {
+	if s.deps.RestoreMessage == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "restore unavailable")
 	}
-	if err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID); err != nil {
+	// The store builds the restored view INSIDE the restore's own transaction
+	// (same detail projection, read-marking included). Re-reading here after
+	// the restore committed was a torn read: a concurrent re-trash or purge in
+	// the gap answered 500 "failed to reload message" on a committed restore.
+	msg, err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID)
+	if err != nil {
 		return nil, mapTrashErr(err, "message")
 	}
-	msg, err := s.deps.GetMessage(ctx, in.MessageID, ag.ID)
-	if err != nil || msg == nil {
+	if msg == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload message")
 	}
 	return &messageOutput{Body: messageViewFromIdentity(msg)}, nil
@@ -730,8 +734,8 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	var afterID string
 	if in.Cursor != "" {
 		var cur messagesCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(ag.UserID, cursorMessages, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.AgentID != ag.ID || cur.Status != status || cur.Direction != direction || cur.Sort != sort ||
 			cur.From != in.From || cur.SubjectContains != in.SubjectContains ||
@@ -785,7 +789,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	var nextCursor string
 	if hasMore {
 		last := msgs[len(msgs)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, messagesCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, ag.UserID, cursorMessages, messagesCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID,
 			Status: status, Direction: direction, AgentID: ag.ID, Sort: sort,
 			From: in.From, SubjectContains: in.SubjectContains, ConversationID: in.ConversationID,

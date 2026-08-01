@@ -1478,6 +1478,98 @@ scenarios:
         expect:
           status: 200
 
+  - name: contacts_import_row_length_isolation
+    description: >
+      Per-row isolation for content-LENGTH violations. The 320-code-point
+      bounds on address and display_name used to be item-level maxLength in
+      the request schema, where one over-long spreadsheet cell rejected the
+      whole upload with 422 and nothing imported. They are now per-row
+      handler checks like every other content rule: the batch answers 200,
+      the offending row alone reports failed with invalid_request, and its
+      valid neighbours import. The over-long display_name row sits BETWEEN
+      two valid rows — exactly the shape the schema bound used to reject
+      wholesale. The reversal then removes what the batch created.
+    steps:
+      - id: import_with_overlong_row
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts:
+            - address: iso-one@imp.vc
+              display_name: Iso One
+            - address: iso-long@imp.vc
+              # 336 code points — over the 320 bound this row alone must fail on.
+              display_name: "Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-"
+            - address: iso-two@imp.vc
+              display_name: Iso Two
+        capture:
+          batch_id: batch_id
+        expect:
+          status: 200
+          body_contains:
+            - batch_id
+            - results
+          body_match:
+            created: 2
+            failed: 1
+            skipped: 0
+            "results[0].status": created
+            "results[0].address": iso-one@imp.vc
+            "results[1].status": failed
+            "results[1].code": invalid_request
+            "results[1].address": iso-long@imp.vc
+            "results[2].status": created
+            "results[2].address": iso-two@imp.vc
+
+      - id: first_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-one@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso One
+            source: import
+
+      - id: failed_row_left_no_contact
+        action: request
+        method: GET
+        path: /v1/contacts/iso-long@imp.vc
+        expect:
+          status: 404
+
+      - id: second_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-two@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso Two
+
+      - id: reverse_batch
+        action: request
+        method: DELETE
+        path: /v1/contacts/imports/{batch_id}?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            contacts_deleted: 2
+            contacts_retained: 0
+
+    cleanup:
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed both rows (404 here); after a mid-scenario failure these are
+      # what keep the scenario self-cleaning for the next run.
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-one@imp.vc?confirm=DELETE
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-two@imp.vc?confirm=DELETE
+
   - name: contact_outreach
     description: >
       Per-agent outreach state. Enrolment creates the contact if absent, a
@@ -1562,5 +1654,91 @@ scenarios:
       - action: request
         method: DELETE
         path: /v1/contacts/investor@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+
+  - name: cursor_binding_foreign_cursor_rejected
+    description: >
+      Pagination cursors are bound to the exact query that minted them — the
+      collection, its parent path parameters, its filters, and the minting
+      account. Replaying a genuinely minted cursor anywhere else must surface
+      400 invalid_cursor, never a silently mispositioned (typically empty)
+      200 page. The runners share a single test account, so the cross-account
+      replay cannot be staged in this DSL; that axis binds via the MAC key
+      and is deliberately indistinguishable from the forged-cursor case
+      asserted last here — its two-account matrix lives in
+      internal/httpapi/cursor_binding_test.go.
+    steps:
+      # Two contacts so a limit=1 first page yields a real continuation cursor.
+      - id: seed_first
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-a@bind.vc
+        expect:
+          status: 201
+
+      - id: seed_second
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-b@bind.vc
+        expect:
+          status: 201
+
+      - id: mint
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+        capture:
+          contacts_cursor: next_cursor
+
+      - id: foreign_endpoint_rejected
+        # A real /v1/contacts cursor presented to /v1/agents: pre-binding this
+        # verified (same HMAC secret, same keyset shape) and anchored the
+        # agents query at a meaningless position; now it is a 400.
+        action: request
+        method: GET
+        path: /v1/agents?cursor={contacts_cursor}
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+      - id: own_continuation_still_walks
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1&cursor={contacts_cursor}
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+
+      - id: forged_cursor_rejected
+        # The same surface a foreign ACCOUNT's cursor produces: a plain MAC
+        # failure, indistinguishable from tampering.
+        action: request
+        method: GET
+        path: /v1/contacts?cursor=not-a-real-cursor
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-a@bind.vc?confirm=DELETE
+        expect:
+          status: 200
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-b@bind.vc?confirm=DELETE
         expect:
           status: 200

@@ -215,7 +215,7 @@ func TestHITLReplyHoldCommitsOneIdempotentThreadDecision(t *testing.T) {
 	cfg.OutboundGatePolicy = "allowlist"
 	cfg.OutboundAllowlist = []string{"trusted@example.net"}
 	cfg.OutboundGateAction = "review"
-	if err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
 		t.Fatalf("enable outbound review: %v", err)
 	}
 	ag, err = store.GetAgentByEmail(ctx, ag.EmailAddress())
@@ -329,7 +329,7 @@ func TestHumanApprovedSelfSendPreservesHeldThreadAcrossLocalTwins(t *testing.T) 
 	cfg.OutboundGatePolicy = "allowlist"
 	cfg.OutboundAllowlist = []string{"trusted@example.net"}
 	cfg.OutboundGateAction = "review"
-	if err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
 		t.Fatalf("enable outbound review: %v", err)
 	}
 	ag, err := store.GetAgentByEmail(ctx, ag.EmailAddress())

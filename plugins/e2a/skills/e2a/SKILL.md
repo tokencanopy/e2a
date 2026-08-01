@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
-version: 23
+version: 24
 ---
 
 # Using e2a
 
-<!-- version: 23 -->
+<!-- version: 24 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -116,11 +116,16 @@ but it never writes or sends a follow-up on its own.
    activity timestamps, counts, and the latest conversation from real mail.
    Preserve the normal `pending_review` no-retry rule.
 
-`next_action_at` is not a scheduled send. It makes the row available to the due
-query and emits `contact.due`. Only a deployed webhook receiver can use that
-event to wake an agent runtime; it does not launch a local coding-agent session
-over MCP or WebSocket. Claude Code and similar interactive clients work the
-queue when the user starts or resumes them.
+`next_action_at` is not a scheduled send — it sends nothing. It makes the row
+available to the due query and emits `contact.due`, a notification. Only a
+deployed webhook receiver can use that event to wake an agent runtime; it
+does not launch a local coding-agent session over MCP or WebSocket. Claude
+Code and similar interactive clients work the queue when the user starts or
+resumes them. If you want e2a itself to submit an already-composed message at
+a future time, that is the separate beta `send_at` scheduled-send capability
+(see "Schedule a send for later" below) — do not conflate the two: `send_at`
+delivers without anyone waking up, `next_action_at` only flags that someone
+should.
 
 ### Compose before sending
 
@@ -164,7 +169,27 @@ Before sending, verify that the first sentence states what changed or what is ne
 2. Check the response:
    - `status: sent` — done.
    - `status: accepted` — also success, not a maybe. The send was durably persisted and queued for submission (async pipeline). Do NOT re-send. The terminal outcome (delivered or failed) arrives later via webhook events (`email.sent` / `email.failed`) or by polling `get_message`/`list_messages`.
+   - `status: scheduled` — also success (beta). A future `send_at` was durably queued; this is durable acceptance exactly like `accepted`, so do NOT retry or re-send — the schedule is already armed, and a second call is a second email. The returned `scheduled_at` is the **future submission time** (a "not before" bound), not a delivery receipt.
    - `status: pending_review` — accepted but not dispatched. Do not retry; report the status and `message_id`, then stop.
+
+### Schedule a send for later (beta)
+
+Pass `send_at` (RFC 3339 with an explicit UTC offset, at most 90 days ahead)
+on send, reply, or forward to defer submission. Know these edges:
+
+- **`wait=sent` does not wait until the future time.** A future `send_at`
+  returns `status: scheduled` immediately; the bounded wait applies only to
+  immediate sends.
+- Scheduling does not survive a review hold: a held message drops `send_at`
+  and sends on approval.
+- To cancel, delete (trash) the message before submission starts. Restoring
+  it before `scheduled_at` re-arms the send; restoring at or after
+  `scheduled_at` restores the message but leaves the send canceled.
+- Scheduled sending (`send_at`) and outreach scheduling (`next_action_at`)
+  are different concepts — see the outreach workflow above. `send_at`
+  submits one already-composed message at a future time with no further
+  action from anyone; `next_action_at` sends nothing and only marks when the
+  caller intends to act next.
 
 ### Templates (beta): recurring sends without free-writing
 

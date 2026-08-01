@@ -157,7 +157,7 @@ func TestMessageTrashLifecycle(t *testing.T) {
 	}
 
 	// Restore: back in the live list, gone from trash, DeletedAt cleared.
-	if err := store.RestoreMessage(ctx, doomed.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, doomed.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	if _, ok := listIDs(t, store, agentID, false)[doomed.ID]; !ok {
@@ -168,14 +168,14 @@ func TestMessageTrashLifecycle(t *testing.T) {
 	}
 
 	// Restore/purge on a live message → ErrNotInTrash.
-	if err := store.RestoreMessage(ctx, doomed.ID, agentID); !errors.Is(err, identity.ErrNotInTrash) {
+	if _, err := store.RestoreMessage(ctx, doomed.ID, agentID); !errors.Is(err, identity.ErrNotInTrash) {
 		t.Errorf("RestoreMessage(live) = %v, want ErrNotInTrash", err)
 	}
 	if err := store.PurgeMessage(ctx, doomed.ID, agentID); !errors.Is(err, identity.ErrNotInTrash) {
 		t.Errorf("PurgeMessage(live) = %v, want ErrNotInTrash", err)
 	}
 	// Missing message → ErrMessageNotFound.
-	if err := store.RestoreMessage(ctx, "msg_nope", agentID); !errors.Is(err, identity.ErrMessageNotFound) {
+	if _, err := store.RestoreMessage(ctx, "msg_nope", agentID); !errors.Is(err, identity.ErrMessageNotFound) {
 		t.Errorf("RestoreMessage(missing) = %v, want ErrMessageNotFound", err)
 	}
 	if err := store.SoftDeleteMessage(ctx, "msg_nope", agentID); !errors.Is(err, identity.ErrMessageNotFound) {
@@ -332,7 +332,7 @@ func TestRestoreMessageCancelsPastDueScheduledSend(t *testing.T) {
 	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("SoftDeleteMessage(future): %v", err)
 	}
-	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage(future): %v", err)
 	}
 	if len(canceller.jobIDs) != 0 {
@@ -347,7 +347,7 @@ func TestRestoreMessageCancelsPastDueScheduledSend(t *testing.T) {
 	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("SoftDeleteMessage(past): %v", err)
 	}
-	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage(past): %v", err)
 	}
 	if got := canceller.jobIDs; len(got) != 1 || got[0] != 501 {
@@ -406,7 +406,8 @@ func TestRestoreMessageUsesCutoffAfterWaitingForRowLock(t *testing.T) {
 
 	restoreDone := make(chan error, 1)
 	go func() {
-		restoreDone <- store.RestoreMessage(ctx, message.ID, agentID)
+		_, err := store.RestoreMessage(ctx, message.ID, agentID)
+		restoreDone <- err
 	}()
 	time.Sleep(1100 * time.Millisecond)
 	if err := blocker.Commit(ctx); err != nil {
@@ -442,7 +443,7 @@ func TestRestoreMessagePreservesProviderAcceptEvidence(t *testing.T) {
 	if err := store.SoftDeleteMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("SoftDeleteMessage: %v", err)
 	}
-	if err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, message.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 
@@ -487,7 +488,7 @@ func TestRestoreAgentCancelsOnlyPastDueScheduledSends(t *testing.T) {
 	if err := store.SoftDeleteAgent(ctx, agentID, userID); err != nil {
 		t.Fatalf("SoftDeleteAgent: %v", err)
 	}
-	if err := store.RestoreAgent(ctx, agentID, userID); err != nil {
+	if _, err := store.RestoreAgent(ctx, agentID, userID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 	if got := canceller.jobIDs; len(got) != 1 || got[0] != 502 {
@@ -544,7 +545,7 @@ func TestRestoreMessageKeepsIndefiniteRetention(t *testing.T) {
 		  WHERE id = $1`, m.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	if err := store.RestoreMessage(ctx, m.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, m.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	var expires *time.Time
@@ -671,7 +672,7 @@ func TestAgentTrashLifecycle(t *testing.T) {
 	}
 
 	// Restore: back everywhere, messages intact.
-	if err := store.RestoreAgent(ctx, agentID, userID); err != nil {
+	if _, err := store.RestoreAgent(ctx, agentID, userID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 	if _, err := store.GetAgentByID(ctx, agentID); err != nil {
@@ -681,7 +682,7 @@ func TestAgentTrashLifecycle(t *testing.T) {
 		t.Error("agent's message missing after restore")
 	}
 	// Restore on a live agent → ErrNotInTrash.
-	if err := store.RestoreAgent(ctx, agentID, userID); !errors.Is(err, identity.ErrNotInTrash) {
+	if _, err := store.RestoreAgent(ctx, agentID, userID); !errors.Is(err, identity.ErrNotInTrash) {
 		t.Errorf("RestoreAgent(live) = %v, want ErrNotInTrash", err)
 	}
 
@@ -737,7 +738,7 @@ func TestAgentTrashPausesMessageClocks(t *testing.T) {
 		t.Fatalf("messages of trashed agent survived = %d (err=%v), want 2", n, err)
 	}
 
-	if err := store.RestoreAgent(ctx, agentID, userID); err != nil {
+	if _, err := store.RestoreAgent(ctx, agentID, userID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 	// The inbound message remains indefinitely retained.
@@ -836,7 +837,7 @@ func TestLoadOutboundForSendSkipsTrash(t *testing.T) {
 		t.Fatalf("LoadOutboundForSend(trashed msg) = (%v, %v), want (nil, nil)", p, err)
 	}
 	// Restore the message, trash the whole AGENT → also gone.
-	if err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	if err := store.SoftDeleteAgent(ctx, agentID, userID); err != nil {
