@@ -6,6 +6,33 @@ knowledge of the project. For deeper prose, see `README.md` (product),
 `CONTRIBUTING.md` (contributor workflow), `docs/` (API reference,
 deployment, design docs), and `SECURITY.md`.
 
+## Public repository data boundary (non-negotiable)
+
+This repository and all of its GitHub surfaces are public. **Never put real
+customer data or non-public production-derived data in source files, tests,
+fixtures, generated artifacts, commit messages, branch names,
+PR/issue/discussion titles or bodies, review comments, screenshots, log
+excerpts, or benchmark output.** This includes email and agent addresses,
+customer domains or names, user/account/agent/message/contact IDs, message
+content or subjects, customer-specific URLs or IP addresses, timestamps tied to
+customer activity, and delivery, bounce, or incident details that can be
+correlated to a customer. An address on `agents.e2a.dev` is a customer
+identifier, not a safe example value. Public service metadata deliberately
+documented for users, such as `https://api.e2a.dev`, is not customer data.
+
+Before any GitHub-facing write, replace production-derived values with synthetic
+ones such as `example.com`, `.test`, `.invalid`, `agents.localhost`, or clearly
+fictional resource IDs. Describe production evidence only in anonymized,
+non-correlatable terms (for example, "a production customer saw repeated SMTP
+rejections"). Keep exact evidence only in an approved private incident or
+operations system. Relevance to a fix is not an exception to this boundary.
+
+If customer data is found before push, stop and rewrite the affected files and
+commits. If it reaches GitHub, treat it as a data exposure: stop propagation,
+notify Josh/security, sanitize the PR or issue, rewrite reachable Git history,
+check related refs/forks/caches, and contact GitHub Support when cached views or
+references need purging. Deleting the visible text alone is not sufficient.
+
 ## Project overview
 
 e2a is an **authenticated email gateway for AI agents**: it gives an agent a
