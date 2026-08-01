@@ -86,6 +86,23 @@ configuration failure. `0`/`1`/`4` keep their existing meanings for healthy,
 transient-connectivity, and authentication outcomes. Every network operation
 is bounded by a 5-second timeout.
 
+**Added:** `e2a contacts` — manage account-level contact identity and
+per-agent outreach state, with suppression visibility (`list`/`get`/
+`create`/`update`/`delete`/`import`/`imports delete`, plus `outreach
+list`/`get`/`set`/`delete`). Contact identity operations require account
+scope; `outreach` also supports an agent-scoped credential for its bound
+inbox. `create`/`import` accept `--idempotency-key`; `update`/`outreach set`
+accept `--if-match <etag>` to reject a stale edit.
+
+**Added:** `--send-at` on `send`/`reply` — schedule a future send (RFC 3339
+with an explicit UTC offset, at most 90 days ahead). Beta and may change
+before it is declared stable. A future schedule exits `0` with
+`status=scheduled` and is durably queued, so do not retry.
+
+**Added:** beta `threadId` on message list/get/listen JSON — a server-owned,
+read-only mailbox-local identity, distinct from the caller-owned
+`conversation_id` filter. Human-readable formats are unchanged.
+
 ## 2.0.0
 
 A major bump: the published 1.6.0 and this tree had diverged
