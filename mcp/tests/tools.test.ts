@@ -749,10 +749,39 @@ describe("e2a MCP server", () => {
     expect(payload).not.toHaveProperty("next_cursor");
   });
 
-  it("delete_suppression removes one account-level block", async () => {
+  it("suppression deletion schemas require literal boolean confirmation", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["delete_suppression", "delete_agent_suppression"]) {
+      const schema = tools.find((tool) => tool.name === name)?.inputSchema as {
+        required?: string[];
+        properties?: Record<string, { type?: string; const?: unknown }>;
+        additionalProperties?: boolean;
+      } | undefined;
+      expect(schema, `${name} input schema`).toBeDefined();
+      expect(schema?.required).toContain("confirm");
+      expect(schema?.properties?.confirm).toMatchObject({ type: "boolean", const: true });
+      expect(schema?.additionalProperties).toBe(false);
+    }
+  });
+
+  it("delete_suppression requires explicit confirmation", async () => {
+    for (const arguments_ of [
+      { address: "gone@example.net" },
+      { address: "gone@example.net", confirm: false },
+    ]) {
+      const res = await client.callTool({
+        name: "delete_suppression",
+        arguments: arguments_,
+      });
+      expect(res.isError).toBe(true);
+    }
+    expect(stub.deleteSuppression).not.toHaveBeenCalled();
+  });
+
+  it("delete_suppression removes one account-level block when confirmed", async () => {
     const res = await client.callTool({
       name: "delete_suppression",
-      arguments: { address: "gone@example.net" },
+      arguments: { address: "gone@example.net", confirm: true },
     });
     expect(stub.deleteSuppression).toHaveBeenCalledWith("gone@example.net");
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
@@ -806,10 +835,24 @@ describe("e2a MCP server", () => {
     expect(bad.isError).toBe(true);
   });
 
-  it("delete_agent_suppression removes only the exact agent-recipient block", async () => {
+  it("delete_agent_suppression requires explicit confirmation", async () => {
+    for (const arguments_ of [
+      { email: "bot@example.com", address: "optout@example.net" },
+      { email: "bot@example.com", address: "optout@example.net", confirm: false },
+    ]) {
+      const res = await client.callTool({
+        name: "delete_agent_suppression",
+        arguments: arguments_,
+      });
+      expect(res.isError).toBe(true);
+    }
+    expect(stub.deleteAgentSuppression).not.toHaveBeenCalled();
+  });
+
+  it("delete_agent_suppression removes only the exact agent-recipient block when confirmed", async () => {
     const res = await client.callTool({
       name: "delete_agent_suppression",
-      arguments: { email: "bot@example.com", address: "optout@example.net" },
+      arguments: { email: "bot@example.com", address: "optout@example.net", confirm: true },
     });
     expect(stub.deleteAgentSuppression).toHaveBeenCalledWith("bot@example.com", "optout@example.net");
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);

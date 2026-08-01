@@ -45,10 +45,18 @@ export function registerSuppressionTools(server: McpServer, client: McpClient): 
       title: "Un-suppress a recipient account-wide",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Remove an address from the account-wide suppression list so sends to it succeed again. Only do this when the address is known to be deliverable — removing a genuinely bouncing or complaining recipient hurts sender reputation. Account scope only.",
-      inputSchema: strictInputSchema({ address: suppressedAddress }),
+        "Remove an address from the account-wide suppression list so sends to it succeed again. Only do this when the address is known to be deliverable — removing a genuinely bouncing or complaining recipient hurts sender reputation. Requires confirm:true so an LLM cannot restore sendability on ambiguous context. Account scope only.",
+      inputSchema: strictInputSchema({
+        address: suppressedAddress,
+        confirm: z.literal(true).describe("Must be true to proceed."),
+      }),
     },
-    async (args) => runTool(() => client.deleteSuppression(args.address)),
+    async (args) => {
+      if (args.confirm !== true) {
+        throw new Error("delete_suppression requires confirm:true.");
+      }
+      return runTool(() => client.deleteSuppression(args.address));
+    },
   );
 
   server.registerTool(
@@ -94,9 +102,18 @@ export function registerSuppressionTools(server: McpServer, client: McpClient): 
       title: "Remove an agent recipient suppression (beta)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Remove only the exact agent-scoped block so this agent can mail the address again. Account-wide bounce/complaint suppressions are separate and unaffected. Account scope only.",
-      inputSchema: strictInputSchema({ email: agentEmail, address: suppressedAddress }),
+        "Remove only the exact agent-scoped block so this agent can mail the address again. Account-wide bounce/complaint suppressions are separate and unaffected. Requires confirm:true so an LLM cannot remove an unsubscribe or manual block on ambiguous context. Account scope only.",
+      inputSchema: strictInputSchema({
+        email: agentEmail,
+        address: suppressedAddress,
+        confirm: z.literal(true).describe("Must be true to proceed."),
+      }),
     },
-    async (args) => runTool(() => client.deleteAgentSuppression(args.email, args.address)),
+    async (args) => {
+      if (args.confirm !== true) {
+        throw new Error("delete_agent_suppression requires confirm:true.");
+      }
+      return runTool(() => client.deleteAgentSuppression(args.email, args.address));
+    },
   );
 }

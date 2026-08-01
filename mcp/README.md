@@ -244,10 +244,10 @@ unsubscribe/manual blocks for one exact sending agent.
 | Tool | Description |
 | --- | --- |
 | `list_suppressions` | List the account-wide suppression list (address, source `bounce`/`complaint`/`manual`, reason, source message id). |
-| `delete_suppression` | Un-suppress a recipient account-wide. Only for addresses known to be deliverable — removing a genuine bouncer hurts sender reputation. |
+| `delete_suppression` | Un-suppress a recipient account-wide. Requires `confirm: true`; only use it for addresses known to be deliverable — removing a genuine bouncer hurts sender reputation. |
 | `list_agent_suppressions` | List one agent's blocked recipients (`unsubscribe`/`manual`). |
 | `create_agent_suppression` | Idempotently add a manual block for one agent; other agents can still mail the address. |
-| `delete_agent_suppression` | Remove only the exact agent-scoped block. |
+| `delete_agent_suppression` | Remove only the exact agent-scoped block. Requires `confirm: true` because the block may represent an unsubscribe. |
 
 ### Templates (beta)
 
