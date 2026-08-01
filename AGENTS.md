@@ -341,6 +341,29 @@ manually on every API change even though the template won't remind you.
   feature, extend all three interpreters in parity, add runner-level regressions
   in every language, and prefer dynamic placeholders over fixtures that age or
   collide under concurrent runs.
+- **New SDK surface needs live coverage in per-PR CI, not only staging.** The
+  post-merge staging conformance gate must never be the FIRST live exercise
+  of a method — that is how `If-Match: undefined` shipped (#774). The
+  ts-contract job enforces a denominator: every ergonomic client method must
+  be exercised by `sdks/typescript/test/v1/contract-client.test.ts` or carry
+  an explicit allowlist entry in `contract-coverage.test.ts` (a ratchet —
+  shrink it; grow it only with a reason the contract server can't run the
+  path).
+- **Generated clients are pipeline artifacts — never hand-edit them.** Any
+  behavior fix belongs in the generation pipeline (`make generate-sdk`, e.g.
+  the TS post-processing step `scripts/guard-optional-header-params.py`), so
+  regeneration cannot undo it. Static audits pin the load-bearing emission
+  shapes per PR — optional header params must stay guarded in both generated
+  clients (TS: `test/v1/optional-header-params.test.ts`; Python:
+  `tests/test_generated_header_guards.py`) — because the freshness gate alone
+  re-blesses whatever a new generator version emits.
+- **Data-modifying CTEs must not re-select from the table they modified.** In
+  Postgres the outer query runs on the statement snapshot, which predates the
+  CTE's own writes — `WITH x AS (UPDATE t … RETURNING …) SELECT … FROM t`
+  returns the pre-update row (this broke `UpdateEngagementIfUnchanged`'s ETag
+  chain, #775). Read FROM the CTE's RETURNING output, or split write and read
+  into two statements in one transaction. Guarded repo-wide by
+  `internal/sqlguard` (waiver: `// cte-snapshot-safe: <reason>`).
 - **Schema-change rule**: when changing a table shape, add/update DB-backed
   tests in every package that writes direct SQL against that table — the
   idempotent migration runner will not catch drifted runtime SQL.
