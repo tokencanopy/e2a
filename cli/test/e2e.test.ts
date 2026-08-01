@@ -143,6 +143,7 @@ describe.skipIf(!live)("cli live parity", () => {
       "protection",
       "reply",
       "send",
+      "suppressions",
       "whoami",
     ]);
     recordAdvertised(commands);
@@ -287,6 +288,37 @@ describe.skipIf(!live)("cli live parity", () => {
     const setOff = run(["protection", "set", bot, "--outbound-review", "off", "--json"]);
     expect(setOff.code, setOff.stderr).toBe(0);
     recordCovered("protection");
+  });
+
+  it("suppressions: agent-scoped add → list → remove, plus account-wide list", () => {
+    const slug = Date.now().toString(36);
+    const bot = `cli-live-supp-${slug}@${DOMAIN}`;
+    const blocked = `cli-supp-blocked-${slug}@example.invalid`;
+
+    const created = run(["agents", "create", bot, "--name", "cli supp e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    // Account-wide add is impossible by design — account entries come only from
+    // bounces/complaints — so coverage exercises the agent-scoped manual block.
+    const add = run(["suppressions", "add", blocked, "--agent", bot, "--reason", "cli e2e", "--json"]);
+    expect(add.code, add.stderr).toBe(0);
+    expect(JSON.parse(add.stdout).address).toBe(blocked);
+
+    const listAgent = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAgent.code, listAgent.stderr).toBe(0);
+    expect(listAgent.stdout).toContain(blocked);
+
+    const removed = run(["suppressions", "remove", blocked, "--agent", bot, "--json"]);
+    expect(removed.code, removed.stderr).toBe(0);
+    expect(run(["suppressions", "list", "--agent", bot, "--json"]).stdout).not.toContain(blocked);
+
+    // Account-wide list is read-only and typically empty on staging (no bounce
+    // simulators there); assert it merely resolves for a bare account key.
+    const listAccount = run(["suppressions", "list", "--json"]);
+    expect(listAccount.code, listAccount.stderr).toBe(0);
+
+    recordCovered("suppressions");
   });
 
   it("contacts: create/get/list/update/delete + import/imports delete + outreach tree", () => {
