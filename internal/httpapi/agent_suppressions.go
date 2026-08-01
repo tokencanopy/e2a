@@ -128,7 +128,7 @@ func (s *Server) handleListAgentSuppressions(ctx context.Context, in *listAgentS
 	var afterAddress string
 	if in.Cursor != "" {
 		var cur agentSuppressionsCursor
-		if err := s.decodeCursor(cursorAgentSuppressions, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(p.User.ID, cursorAgentSuppressions, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		if identity.NormalizeEmail(cur.AgentEmail) != ag.ID {
@@ -148,7 +148,7 @@ func (s *Server) handleListAgentSuppressions(ctx context.Context, in *listAgentS
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorAgentSuppressions, agentSuppressionsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, p.User.ID, cursorAgentSuppressions, agentSuppressionsCursor{
 			CreatedAt: last.CreatedAt, Address: last.Address, AgentEmail: ag.ID,
 		})
 		if err != nil {

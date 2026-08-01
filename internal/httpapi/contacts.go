@@ -318,7 +318,7 @@ func (s *Server) handleListContacts(ctx context.Context, in *listContactsInput) 
 	var afterID string
 	if in.Cursor != "" {
 		var cur contactsCursor
-		if err := s.decodeCursor(cursorContacts, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(user.ID, cursorContacts, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		if cur.Filters != fingerprint {
@@ -341,7 +341,7 @@ func (s *Server) handleListContacts(ctx context.Context, in *listContactsInput) 
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorContacts, contactsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorContacts, contactsCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, Filters: fingerprint,
 		})
 		if err != nil {

@@ -102,7 +102,13 @@ const (
 // Wrapping (rather than adding an `r` field to each of the sixteen cursor
 // structs) is what makes the binding impossible to forget — the resource
 // is a required argument of EncodeCursor/DecodeCursor, so a new list
-// endpoint cannot accidentally mint an unbound cursor.
+// endpoint cannot accidentally mint an unbound cursor. The same mechanism
+// covers the second binding axis, the minting ACCOUNT: the account ID is
+// likewise a required argument (threaded from the handler's authenticated
+// principal, never pulled implicitly from a context), so a missed site is
+// a compile error, not a silently unbound cursor. The account does NOT
+// appear as an envelope field — see cursorKey for why it lives in the MAC
+// key instead.
 type cursorEnvelope struct {
 	Resource string          `json:"r"`
 	Payload  json.RawMessage `json:"p"`
@@ -128,13 +134,14 @@ type keysetCursor struct {
 }
 
 // decodeCursor is the one place list handlers turn a client-supplied cursor
-// into their own cursor struct. It binds the cursor to `resource` and
+// into their own cursor struct. It binds the cursor to `resource` and to the
+// calling account (`accountID` — the authenticated Principal.User.ID) and
 // converts every failure into the right 400 invalid_cursor envelope, so no
-// handler has to remember either step.
+// handler has to remember any of those steps.
 //
 // An empty cursor is the first page: dst is left untouched and nil returned.
-func (s *Server) decodeCursor(resource CursorResource, cursor string, dst any) error {
-	err := DecodeCursor([]string{s.deps.CursorSecret}, resource, cursor, dst)
+func (s *Server) decodeCursor(accountID string, resource CursorResource, cursor string, dst any) error {
+	err := DecodeCursor([]string{s.deps.CursorSecret}, accountID, resource, cursor, dst)
 	switch {
 	case err == nil:
 		return nil
@@ -156,12 +163,12 @@ func (s *Server) decodeCursor(resource CursorResource, cursor string, dst any) e
 // resource argument is compile-enforced while the view argument is not: a future
 // endpoint that grows a ?deleted= filter but keeps calling decodeKeyset would
 // silently lose its view binding with no compile error. Fail loudly instead.
-func (s *Server) decodeKeyset(resource CursorResource, cursor string) (time.Time, string, error) {
+func (s *Server) decodeKeyset(accountID string, resource CursorResource, cursor string) (time.Time, string, error) {
 	if cursor == "" {
 		return time.Time{}, "", nil
 	}
 	var cur keysetCursor
-	if err := s.decodeCursor(resource, cursor, &cur); err != nil {
+	if err := s.decodeCursor(accountID, resource, cursor, &cur); err != nil {
 		return time.Time{}, "", err
 	}
 	if cur.Deleted {
@@ -175,12 +182,12 @@ func (s *Server) decodeKeyset(resource CursorResource, cursor string) (time.Time
 // verifies the cursor was minted for the SAME view (live vs deleted), so a
 // live-list cursor replayed with ?deleted=true (or vice versa) is a 400
 // instead of a silently truncated other-view listing.
-func (s *Server) decodeKeysetView(resource CursorResource, cursor string, deleted bool) (time.Time, string, error) {
+func (s *Server) decodeKeysetView(accountID string, resource CursorResource, cursor string, deleted bool) (time.Time, string, error) {
 	if cursor == "" {
 		return time.Time{}, "", nil
 	}
 	var cur keysetCursor
-	if err := s.decodeCursor(resource, cursor, &cur); err != nil {
+	if err := s.decodeCursor(accountID, resource, cursor, &cur); err != nil {
 		return time.Time{}, "", err
 	}
 	if cur.Deleted != deleted {
@@ -192,13 +199,13 @@ func (s *Server) decodeKeysetView(resource CursorResource, cursor string, delete
 
 // encodeKeyset mints the next-page cursor from the last row's (created_at, id).
 // A marshal failure maps to a 500 envelope (matches the other list handlers).
-func (s *Server) encodeKeyset(resource CursorResource, createdAt time.Time, id string) (string, error) {
-	return s.encodeKeysetView(resource, createdAt, id, false)
+func (s *Server) encodeKeyset(accountID string, resource CursorResource, createdAt time.Time, id string) (string, error) {
+	return s.encodeKeysetView(accountID, resource, createdAt, id, false)
 }
 
 // encodeKeysetView is encodeKeyset carrying the trash-view flag.
-func (s *Server) encodeKeysetView(resource CursorResource, createdAt time.Time, id string, deleted bool) (string, error) {
-	c, err := EncodeCursor(s.deps.CursorSecret, resource, keysetCursor{CreatedAt: createdAt, ID: id, Deleted: deleted})
+func (s *Server) encodeKeysetView(accountID string, resource CursorResource, createdAt time.Time, id string, deleted bool) (string, error) {
+	c, err := EncodeCursor(s.deps.CursorSecret, accountID, resource, keysetCursor{CreatedAt: createdAt, ID: id, Deleted: deleted})
 	if err != nil {
 		return "", NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
 	}
@@ -230,17 +237,25 @@ const defaultPageLimit = 100
 // resource is the minting collection; it is embedded in the signed payload
 // so DecodeCursor can reject a cursor replayed on a different endpoint.
 //
+// accountID is the minting account (the authenticated Principal.User.ID —
+// the level every list query is already scoped at, deliberately NOT the API
+// key ID, whose rotation would break in-flight pagination, and NOT the
+// scope/agent, so an account-scoped key can resume a cursor an agent-scoped
+// key minted over the same rows). It binds the cursor via the MAC key — see
+// cursorKey — so account A's cursor fails verification for account B on the
+// same endpoint instead of anchoring B's query at a meaningless position.
+//
 // Format:
 //
 //	envelope     = {"r": resource, "p": json_payload}
-//	base64url(envelope) + "." + base64url(hmac_sha256(secret, base64url(envelope)))
+//	base64url(envelope) + "." + base64url(hmac_sha256(cursorKey(secret, accountID), base64url(envelope)))
 //
 // The MAC is computed over the LITERAL emitted base64url(json) segment (not
 // a re-marshaled struct) so encode and verify are byte-canonical and cannot
 // drift. secret is the deployment HMAC secret (config.Signing.HMACSecret) —
 // the same deployment key used by approval tokens,
 // so there is no new key to manage.
-func EncodeCursor(secret string, resource CursorResource, payload any) (string, error) {
+func EncodeCursor(secret, accountID string, resource CursorResource, payload any) (string, error) {
 	inner, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -250,7 +265,7 @@ func EncodeCursor(secret string, resource CursorResource, payload any) (string, 
 		return "", err
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(raw)
-	sig := cursorMAC([]byte(secret), []byte(encoded))
+	sig := cursorMAC(cursorKey(secret, accountID), []byte(encoded))
 	return encoded + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
@@ -270,13 +285,20 @@ func EncodeCursor(secret string, resource CursorResource, payload any) (string, 
 // ErrCursorResourceMismatch — the fix for foreign cursors being silently
 // accepted as keyset anchors across account-level lists.
 //
+// accountID is the account doing the decoding. Because the account binds
+// via the derived MAC key (cursorKey), a cursor minted by a different
+// account simply fails signature verification and falls out as the plain
+// ErrInvalidCursor — deliberately indistinguishable from a forged or
+// tampered cursor, so the error surface gains no new code and a caller
+// learns nothing about whether a stolen cursor was "well-formed".
+//
 // Old unsigned cursors (plain base64url(json) with no "." signature segment,
 // as emitted before issue #144 M2) no longer verify and are hard-rejected
 // with ErrInvalidCursor. Pre-envelope signed cursors are likewise rejected:
 // they carry no resource, so there is nothing to bind them to. Cursors are
 // ephemeral, so a client mid-pagination simply restarts the query — the
 // same trade the M2 signing change already made.
-func DecodeCursor(secrets []string, resource CursorResource, cursor string, dst any) error {
+func DecodeCursor(secrets []string, accountID string, resource CursorResource, cursor string, dst any) error {
 	if cursor == "" {
 		return nil
 	}
@@ -290,7 +312,7 @@ func DecodeCursor(secrets []string, resource CursorResource, cursor string, dst 
 	}
 	matched := false
 	for _, secret := range secrets {
-		if hmac.Equal(providedSig, cursorMAC([]byte(secret), []byte(parts[0]))) {
+		if hmac.Equal(providedSig, cursorMAC(cursorKey(secret, accountID), []byte(parts[0]))) {
 			matched = true
 			break
 		}
@@ -325,4 +347,24 @@ func cursorMAC(secret, payload []byte) []byte {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write(payload)
 	return mac.Sum(nil)
+}
+
+// cursorKeyDomain domain-separates the per-account cursor key derivation
+// from any other HMAC use of the deployment secret (approval tokens sign
+// with the raw secret; cursors sign with a derived key).
+const cursorKeyDomain = "e2a/cursor/v1|"
+
+// cursorKey derives the per-account cursor MAC key:
+//
+//	key = HMAC-SHA256(secret, "e2a/cursor/v1|" + accountID)
+//
+// Binding the account into the KEY rather than into the envelope is
+// deliberate: the envelope is signed but NOT encrypted (plain base64url),
+// and cursors travel in query strings — a plaintext account ID would leak
+// into access logs, referrer headers, and anything else that records URLs.
+// Key derivation keeps the envelope schema untouched and makes a foreign
+// account's cursor fail plain MAC verification, indistinguishable from a
+// forgery.
+func cursorKey(secret, accountID string) []byte {
+	return cursorMAC([]byte(secret), []byte(cursorKeyDomain+accountID))
 }

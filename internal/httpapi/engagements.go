@@ -269,7 +269,7 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var afterID string
 	if in.Cursor != "" {
 		var cur engagementsCursor
-		if err := s.decodeCursor(cursorEngagements, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(p.User.ID, cursorEngagements, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		if cur.AgentEmail != ag.ID || cur.Filters != fingerprint {
@@ -290,7 +290,7 @@ func (s *Server) handleListEngagements(ctx context.Context, in *listEngagementsI
 	var next string
 	if hasMore {
 		last := rows[len(rows)-1]
-		next, err = EncodeCursor(s.deps.CursorSecret, cursorEngagements, engagementsCursor{
+		next, err = EncodeCursor(s.deps.CursorSecret, p.User.ID, cursorEngagements, engagementsCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, AgentEmail: ag.ID, Filters: fingerprint,
 		})
 		if err != nil {

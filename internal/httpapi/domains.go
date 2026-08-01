@@ -410,7 +410,7 @@ func (s *Server) handleListDomains(ctx context.Context, in *listDomainsInput) (*
 	}
 	// The keyset tiebreak for domains is the domain string (its unique key), so
 	// the cursor's `id` slot carries the after-domain.
-	afterCreatedAt, afterDomain, err := s.decodeKeyset(cursorDomains, in.Cursor)
+	afterCreatedAt, afterDomain, err := s.decodeKeyset(user.ID, cursorDomains, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +435,7 @@ func (s *Server) handleListDomains(ctx context.Context, in *listDomainsInput) (*
 	var nextCursor string
 	if hasMore {
 		last := domains[len(domains)-1]
-		if nextCursor, err = s.encodeKeyset(cursorDomains, last.CreatedAt, last.Domain); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorDomains, last.CreatedAt, last.Domain); err != nil {
 			return nil, err
 		}
 	}

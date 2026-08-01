@@ -435,7 +435,7 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	}
 	var cur deliveriesCursor
 	if in.Cursor != "" {
-		if err := s.decodeCursor(cursorWebhookDeliveries, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(user.ID, cursorWebhookDeliveries, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		if cur.WebhookID != in.ID {
@@ -471,7 +471,7 @@ func (s *Server) handleListWebhookDeliveries(ctx context.Context, in *ListDelive
 	var nextCursor string
 	if hasMore {
 		last := rows[len(rows)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorWebhookDeliveries, deliveriesCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorWebhookDeliveries, deliveriesCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID, Status: in.Status, WebhookID: in.ID,
 		})
 		if err != nil {
@@ -675,7 +675,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	if err != nil {
 		return nil, err
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(cursorWebhooks, in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(user.ID, cursorWebhooks, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -696,7 +696,7 @@ func (s *Server) handleListWebhooks(ctx context.Context, in *listWebhooksInput) 
 	var nextCursor string
 	if hasMore {
 		last := hooks[len(hooks)-1]
-		if nextCursor, err = s.encodeKeyset(cursorWebhooks, last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorWebhooks, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

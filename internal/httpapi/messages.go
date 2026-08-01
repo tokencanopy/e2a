@@ -730,7 +730,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	var afterID string
 	if in.Cursor != "" {
 		var cur messagesCursor
-		if err := s.decodeCursor(cursorMessages, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(ag.UserID, cursorMessages, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		if cur.AgentID != ag.ID || cur.Status != status || cur.Direction != direction || cur.Sort != sort ||
@@ -785,7 +785,7 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	var nextCursor string
 	if hasMore {
 		last := msgs[len(msgs)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorMessages, messagesCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, ag.UserID, cursorMessages, messagesCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID,
 			Status: status, Direction: direction, AgentID: ag.ID, Sort: sort,
 			From: in.From, SubjectContains: in.SubjectContains, ConversationID: in.ConversationID,

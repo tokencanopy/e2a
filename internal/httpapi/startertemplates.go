@@ -104,7 +104,12 @@ func (s *Server) registerStarterTemplates() {
 }
 
 func (s *Server) handleListStarterTemplates(ctx context.Context, in *listStarterTemplatesInput) (*listStarterTemplatesOutput, error) {
-	if _, err := s.requireAccountUser(ctx); err != nil {
+	// The catalog is global, but the cursor is still bound to the calling
+	// account like every other collection — the handler is auth-gated, so a
+	// principal is always in hand, and a blanket rule stays auditable where a
+	// per-collection carve-out list would be how holes reappear.
+	user, err := s.requireAccountUser(ctx)
+	if err != nil {
 		return nil, err
 	}
 	cat := startertemplates.Catalog() // already alias-sorted (ascending)
@@ -113,7 +118,7 @@ func (s *Server) handleListStarterTemplates(ctx context.Context, in *listStarter
 	var afterAlias string
 	if in.Cursor != "" {
 		var cur starterTemplatesCursor
-		if err := s.decodeCursor(cursorStarterTemplates, in.Cursor, &cur); err != nil {
+		if err := s.decodeCursor(user.ID, cursorStarterTemplates, in.Cursor, &cur); err != nil {
 			return nil, err
 		}
 		afterAlias = cur.Alias
@@ -136,7 +141,7 @@ func (s *Server) handleListStarterTemplates(ctx context.Context, in *listStarter
 	var nextCursor string
 	if hasMore {
 		var err error
-		if nextCursor, err = EncodeCursor(s.deps.CursorSecret, cursorStarterTemplates, starterTemplatesCursor{Alias: lastAlias}); err != nil {
+		if nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorStarterTemplates, starterTemplatesCursor{Alias: lastAlias}); err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
 		}
 	}
