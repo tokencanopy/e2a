@@ -98,10 +98,36 @@ async function apiDeleteAgent(email: string): Promise<string | undefined> {
   }
 }
 
+// Agent suppressions deliberately survive both soft and permanent agent
+// deletion, so deleting only the throwaway inbox cannot clean up a failed
+// suppressions test. Remove each created row first; 404 means the happy path
+// already removed it.
+async function apiDeleteAgentSuppression(agent: string, address: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(
+      `${URL_}/v1/agents/${encodeURIComponent(agent)}/suppressions/${encodeURIComponent(address)}?confirm=DELETE`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${KEY}` },
+      },
+    );
+    if (res.ok || res.status === 404) return undefined;
+    return `${agent} / ${address}: HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 200)}`;
+  } catch (err) {
+    return `${agent} / ${address}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 const createdAgents: string[] = [];
+const createdAgentSuppressions: Array<{ agent: string; address: string }> = [];
 afterAll(async () => {
   const cleanupFailures: string[] = [];
   try {
+    // Suppressions must be removed while the owning agent is still live.
+    for (const { agent, address } of createdAgentSuppressions) {
+      const failure = await apiDeleteAgentSuppression(agent, address);
+      if (failure) cleanupFailures.push(failure);
+    }
     for (const a of createdAgents) {
       const failure = await apiDeleteAgent(a);
       if (failure) cleanupFailures.push(failure);
@@ -303,6 +329,7 @@ describe.skipIf(!live)("cli live parity", () => {
     // bounces/complaints — so coverage exercises the agent-scoped manual block.
     const add = run(["suppressions", "add", blocked, "--agent", bot, "--reason", "cli e2e", "--json"]);
     expect(add.code, add.stderr).toBe(0);
+    createdAgentSuppressions.push({ agent: bot, address: blocked });
     expect(JSON.parse(add.stdout).address).toBe(blocked);
 
     const listAgent = run(["suppressions", "list", "--agent", bot, "--json"]);
@@ -311,7 +338,9 @@ describe.skipIf(!live)("cli live parity", () => {
 
     const removed = run(["suppressions", "remove", blocked, "--agent", bot, "--json"]);
     expect(removed.code, removed.stderr).toBe(0);
-    expect(run(["suppressions", "list", "--agent", bot, "--json"]).stdout).not.toContain(blocked);
+    const listAfterRemove = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAfterRemove.code, listAfterRemove.stderr).toBe(0);
+    expect(listAfterRemove.stdout).not.toContain(blocked);
 
     // Account-wide list is read-only and typically empty on staging (no bounce
     // simulators there); assert it merely resolves for a bare account key.
