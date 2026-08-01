@@ -146,7 +146,9 @@ function SuppressionsContent({ email }: { email: string }) {
         </div>
         <div className="flex gap-2">
           <Button variant="ghost" onClick={() => void refresh()}>Refresh</Button>
-          <Button onClick={() => setShowAdd((value) => !value)}>Suppress an address</Button>
+          <Button className="whitespace-nowrap" onClick={() => setShowAdd((value) => !value)}>
+            Suppress an address
+          </Button>
         </div>
       </div>
 

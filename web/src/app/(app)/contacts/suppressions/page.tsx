@@ -177,36 +177,40 @@ export default function AccountSuppressionsPage() {
 
       <div className="hidden overflow-x-auto rounded-[var(--r-lg)] border md:block"
         style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}>
-        <table className="w-full min-w-[860px] text-left text-[13px]">
+        <table className="w-full min-w-[720px] text-left text-[13px]">
           <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>
             <th className="px-4 py-3 font-medium">Address</th>
             <th className="px-4 py-3 font-medium">Source</th>
             <th className="px-4 py-3 font-medium">Reason</th>
-            <th className="px-4 py-3 font-medium">Source message</th>
             <th className="px-4 py-3 font-medium">Added</th>
             <th className="px-4 py-3 font-medium text-right">Actions</th>
           </tr></thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>Loading suppressions…</td></tr>
+              <tr><td colSpan={5} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>Loading suppressions…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={6} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>
+              <tr><td colSpan={5} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>
                 {listFailed
                   ? "The list could not be loaded, so it is not shown."
                   : "No suppressed recipients. Hard bounces and complaints land here automatically."}
               </td></tr>
             ) : rows.map((row) => (
               <tr key={row.address} style={{ borderBottom: "1px solid var(--border-sub)" }}>
-                <td className="px-4 py-3 font-mono text-[12px]" style={{ color: "var(--fg)" }}>{row.address}</td>
+                <td className="px-4 py-3">
+                  <div className="font-mono text-[12px]" style={{ color: "var(--fg)" }}>{row.address}</div>
+                  {row.source_message_id && (
+                    <div className="mt-0.5 font-mono text-[11px]" style={{ color: "var(--fg-subtle)" }}
+                      title="Message that triggered this suppression">
+                      {row.source_message_id}
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3">{sourceChip(row.source)}</td>
                 <td className="px-4 py-3 max-w-[340px] truncate" style={{ color: "var(--fg-muted)" }}
                   title={row.reason || undefined}>
                   {row.reason || "—"}
                 </td>
-                <td className="px-4 py-3 font-mono text-[11px]" style={{ color: "var(--fg-muted)" }}>
-                  {row.source_message_id || "—"}
-                </td>
-                <td className="px-4 py-3" style={{ color: "var(--fg-muted)" }}>
+                <td className="px-4 py-3 whitespace-nowrap" style={{ color: "var(--fg-muted)" }}>
                   {new Date(row.created_at).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3 text-right">
