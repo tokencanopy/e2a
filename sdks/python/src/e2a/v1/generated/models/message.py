@@ -64,7 +64,7 @@ class Message(BaseModel):
     reviewed_by_user_id: Optional[StrictStr] = None
     scan_action: Optional[StrictStr] = None
     scan_score: Optional[Union[StrictFloat, StrictInt]] = None
-    scheduled_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = Field(default=None, description="Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows.")
     sent_as: Optional[StrictStr] = None
     size_bytes: Optional[StrictInt] = Field(default=None, description="RAW MIME byte length of the whole stored message (octet length of raw_message). Distinct from an attachment's size_bytes (DECODED payload size). Dominant term of storage-quota accounting (usage.storage_bytes).")
     status: Optional[StrictStr] = None

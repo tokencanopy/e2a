@@ -28,7 +28,7 @@ class UpsertEngagementRequest(BaseModel):
     """
     UpsertEngagementRequest
     """ # noqa: E501
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Replace the relationship metadata. Omit to leave unchanged.")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Replace the relationship metadata wholesale. Omit to leave unchanged; send an empty object to clear it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests.")
     next_action_at: Optional[datetime] = Field(default=None, description="Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.")
     stage: Optional[Annotated[str, Field(strict=True, max_length=128)]] = Field(default=None, description="Set the outreach stage. Omit to leave unchanged.")
     additional_properties: Dict[str, Any] = {}

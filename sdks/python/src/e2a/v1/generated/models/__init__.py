@@ -26,6 +26,8 @@ from e2a.v1.generated.models.attachment import Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView
 from e2a.v1.generated.models.authentication import Authentication
+from e2a.v1.generated.models.contact_due_contact import ContactDueContact
+from e2a.v1.generated.models.contact_due_data import ContactDueData
 from e2a.v1.generated.models.contact_engagement_view import ContactEngagementView
 from e2a.v1.generated.models.contact_import_item_result import ContactImportItemResult
 from e2a.v1.generated.models.contact_import_result import ContactImportResult

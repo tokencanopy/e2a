@@ -179,7 +179,14 @@ beta event types must still parse. The stable mapping is:
 | `domain.sending_failed` | `DomainSendingFailedData` | `domain`, `sending_status` | `reason` |
 | `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (open set — known values `bounce`, `complaint`; tolerate unknown values) | `reason`, `message_id` |
 | `agent.suppression_added` (**beta**) | `AgentSuppressionAddedData` | `agent_email`, `address`, `source` (`unsubscribe` \| `manual`) | — |
-| `contact.due` (**beta**) | — (untyped, built in `internal/contactdue`) | `agent_email`, `address`, `stage`, `next_action_at`, `replied`, `outbound_count`, `contact` (`address`, `display_name`, `metadata`) | `last_outbound_at`, `last_conversation_id` |
+| `contact.due` (**beta**) | `ContactDueData` | `agent_email`, `address`, `stage` (caller-owned; empty string when unset), `next_action_at`, `replied`, `outbound_count`, `contact` (`address`, `display_name` — empty string when unset, `metadata` — empty object when none) | `last_outbound_at`, `last_conversation_id` |
+
+The last two rows are **beta**: their `data` schemas are published under the
+separate `x-e2a-beta-event-data-schemas` map on `EventEnvelope.data`, never the
+stable one, and their components carry `x-stability-level: beta`. They are
+fixture-locked exactly like the stable payloads — beta means the shape may
+still change deliberately, not that it may change by accident — but they sit
+outside the GA compatibility guarantee.
 
 Notes:
 

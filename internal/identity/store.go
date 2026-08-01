@@ -367,7 +367,13 @@ type Message struct {
 	// submitted (migration 084). Nil for immediate sends and every inbound row.
 	// The row stays delivery_status='accepted' while scheduled; this timestamp is
 	// the introspection marker (the actual deferral lives on the River job).
-	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
+	//
+	// The doc string mirrors MessageView/MessageSummaryView.scheduled_at so the
+	// exported record and the live read views describe one field one way;
+	// stability.go marks it beta on all three, because scheduled sending is a
+	// beta capability wherever it surfaces. It arrived here undocumented and
+	// unmarked, which read as a stable export field it was never meant to be.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."`
 	CreatedAt   time.Time  `json:"created_at"`
 	// ExpiresAt is nil for indefinitely retained messages. It remains on the
 	// model for compatibility with account exports and legacy database rows.

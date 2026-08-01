@@ -51,6 +51,8 @@ __all__ = [
     "AttachmentMetaView",
     "AttachmentView",
     "Authentication",
+    "ContactDueContact",
+    "ContactDueData",
     "ContactEngagementView",
     "ContactImportItemResult",
     "ContactImportResult",
@@ -233,6 +235,8 @@ from e2a.v1.generated.models.attachment import Attachment as Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView as AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView as AttachmentView
 from e2a.v1.generated.models.authentication import Authentication as Authentication
+from e2a.v1.generated.models.contact_due_contact import ContactDueContact as ContactDueContact
+from e2a.v1.generated.models.contact_due_data import ContactDueData as ContactDueData
 from e2a.v1.generated.models.contact_engagement_view import ContactEngagementView as ContactEngagementView
 from e2a.v1.generated.models.contact_import_item_result import ContactImportItemResult as ContactImportItemResult
 from e2a.v1.generated.models.contact_import_result import ContactImportResult as ContactImportResult

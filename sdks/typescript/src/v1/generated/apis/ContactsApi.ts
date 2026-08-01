@@ -131,7 +131,7 @@ export class ContactsApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
-     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable.
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
      * Un-enrol a contact (beta)
      * @param email 
      * @param address 

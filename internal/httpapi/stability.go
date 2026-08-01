@@ -265,7 +265,12 @@ func (s *Server) applyEvolutionStance() {
 	for _, schema := range []string{"SendEmailRequest", "ReplyRequest", "ForwardRequest"} {
 		markProperty(schemas, schema, "send_at", extStabilityLevel, stabilityBeta)
 	}
-	for _, schema := range []string{"MessageSummaryView", "MessageView", "SendResultView"} {
+	// "Message" is the account-export record. It gained scheduled_at with the
+	// rest of the family but neither a description nor this marker, so the
+	// export alone presented a beta field as though it were stable. (Its
+	// containing schema is already beta-marked as an export interior record;
+	// the property marker is what survives a future promotion of the record.)
+	for _, schema := range []string{"MessageSummaryView", "MessageView", "SendResultView", "Message"} {
 		markProperty(schemas, schema, "scheduled_at", extStabilityLevel, stabilityBeta)
 	}
 	markProperty(schemas, "SendResultView", "status", extExperimentalValues, []string{"scheduled"})

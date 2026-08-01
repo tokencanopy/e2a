@@ -132,7 +132,7 @@ type listEngagementsOutput struct {
 type UpsertEngagementRequest struct {
 	Stage        *string        `json:"stage,omitempty" maxLength:"128" doc:"Set the outreach stage. Omit to leave unchanged."`
 	NextActionAt *time.Time     `json:"next_action_at,omitempty" nullable:"true" doc:"Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule."`
-	Metadata     map[string]any `json:"metadata,omitempty" doc:"Replace the relationship metadata. Omit to leave unchanged."`
+	Metadata     map[string]any `json:"metadata,omitempty" doc:"Replace the relationship metadata wholesale. Omit to leave unchanged; send an empty object to clear it."`
 }
 
 type upsertEngagementInput struct {
@@ -180,15 +180,15 @@ type deleteEngagementOutput struct {
 func (s *Server) registerEngagements() {
 	createdEngagement := s.jsonResponse(reflect.TypeOf(ContactEngagementView{}), "ContactEngagementView",
 		"Created — the contact was newly enrolled in this agent's outreach.")
+	// The 201 is hand-declared (Huma cannot infer two success statuses from a
+	// single DefaultStatus), so its headers are declared here too. They point
+	// at the SHARED header components so this response promises the same
+	// validator semantics and the same path-encoding convention the
+	// auto-derived 200 does — see contract_headers.go, which enriches every
+	// declared ETag/Location with one wording.
 	createdEngagement.Headers = map[string]*huma.Param{
-		"ETag": {
-			Description: "Opaque revision token for a later If-Match update.",
-			Schema:      &huma.Schema{Type: "string"},
-		},
-		"Location": {
-			Description: "Canonical URL of the newly created engagement.",
-			Schema:      &huma.Schema{Type: "string", Format: "uri-reference"},
-		},
+		"ETag":     headerRef(headerETag),
+		"Location": headerRef(headerResourceLocation),
 	}
 	registerOp(s.API, huma.Operation{
 		OperationID: "listEngagements", Method: http.MethodGet, Path: "/v1/agents/{email}/contacts",
@@ -226,7 +226,12 @@ func (s *Server) registerEngagements() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteEngagement", Method: http.MethodDelete, Path: "/v1/agents/{email}/contacts/{address}",
 		Summary: "Un-enrol a contact (beta)", Tags: []string{"contacts"},
-		Description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. " + engagementBetaDescription,
+		// The agent-scope sentence is not decoration: all four outreach
+		// operations route through resolveOutreachAgent → requireAgentAccess,
+		// so an agent-scoped credential may un-enrol on its own agent exactly
+		// as it may read and write. Omitting the sentence here (the only one of
+		// the four that did) read as if delete were account-only.
+		Description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. " + engagementBetaDescription,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleDeleteEngagement)

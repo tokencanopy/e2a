@@ -17,20 +17,28 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.contact_due_contact import ContactDueContact
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ContactImportRow(BaseModel):
+class ContactDueData(BaseModel):
     """
-    ContactImportRow
+    ContactDueData
     """ # noqa: E501
-    address: StrictStr = Field(description="Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch.")
-    display_name: Optional[StrictStr] = Field(default=None, description="Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. A row that exceeds a bound fails on its own, without affecting the rest of the batch. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests.")
+    address: StrictStr = Field(description="The contact's canonical address — who the agent owes an action to.")
+    agent_email: StrictStr = Field(description="The agent that owns this outreach — its id and address (an agent's id IS its email).")
+    contact: ContactDueContact = Field(description="The contact's identity, inlined so an agent-scoped consumer needs no account-wide contact read.")
+    last_conversation_id: Optional[StrictStr] = Field(default=None, description="Conversation id of the most recent exchange with this contact, to continue that thread. Omitted when there is none.")
+    last_outbound_at: Optional[datetime] = Field(default=None, description="When this agent last sent to the contact. Omitted when it never has.")
+    next_action_at: datetime = Field(description="The schedule instant that came due — the value set on the engagement, not the time the sweep observed it.")
+    outbound_count: StrictInt = Field(description="How many messages this agent has sent to the contact since the engagement was created. Computed at claim time, not a stored counter.")
+    replied: StrictBool = Field(description="True when the contact has replied since this agent's first outbound to them.")
+    stage: StrictStr = Field(description="The caller-owned outreach stage, verbatim. e2a never interprets it; empty when unset.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["address", "display_name", "metadata"]
+    __properties: ClassVar[List[str]] = ["address", "agent_email", "contact", "last_conversation_id", "last_outbound_at", "next_action_at", "outbound_count", "replied", "stage"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -50,7 +58,7 @@ class ContactImportRow(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ContactImportRow from a JSON string"""
+        """Create an instance of ContactDueData from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,6 +81,9 @@ class ContactImportRow(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of contact
+        if self.contact:
+            _dict['contact'] = self.contact.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -82,7 +93,7 @@ class ContactImportRow(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ContactImportRow from a dict"""
+        """Create an instance of ContactDueData from a dict"""
         if obj is None:
             return None
 
@@ -91,8 +102,14 @@ class ContactImportRow(BaseModel):
 
         _obj = cls.model_validate({
             "address": obj.get("address"),
-            "display_name": obj.get("display_name"),
-            "metadata": obj.get("metadata")
+            "agent_email": obj.get("agent_email"),
+            "contact": ContactDueContact.from_dict(obj["contact"]) if obj.get("contact") is not None else None,
+            "last_conversation_id": obj.get("last_conversation_id"),
+            "last_outbound_at": obj.get("last_outbound_at"),
+            "next_action_at": obj.get("next_action_at"),
+            "outbound_count": obj.get("outbound_count"),
+            "replied": obj.get("replied"),
+            "stage": obj.get("stage")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

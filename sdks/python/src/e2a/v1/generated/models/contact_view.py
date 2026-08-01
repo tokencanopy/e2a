@@ -31,7 +31,7 @@ class ContactView(BaseModel):
     created_at: datetime
     display_name: StrictStr = Field(description="Human-readable name. May be empty.")
     import_batch_id: Optional[StrictStr] = Field(default=None, description="The import that created this contact, when source is import. Absent otherwise.")
-    metadata: Dict[str, Any] = Field(description="Caller-owned key/value data. e2a never interprets it. Flat objects only; see the field bounds in the API docs.")
+    metadata: Dict[str, Any] = Field(description="Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.")
     source: StrictStr = Field(description="How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound.")
     updated_at: datetime
     additional_properties: Dict[str, Any] = {}

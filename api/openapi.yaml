@@ -1,5 +1,9 @@
 components:
   headers:
+    ETag:
+      description: "Opaque STRONG entity-tag validator for the returned representation, currently a quoted 32-hex-character token (e.g. \"9f86d081884c7d65…\"). Treat it as opaque: never parse, derive, or construct one. Store the received value and replay it VERBATIM in a later If-Match to make a write conditional. Any accepted write moves the validator, so a stale value cannot match and the conditional write is rejected with 412 precondition_failed."
+      schema:
+        type: string
     RateLimitLimit:
       description: Request quota for the current limiter window.
       schema:
@@ -12,6 +16,11 @@ components:
       description: Seconds until the current limiter window resets.
       schema:
         type: integer
+    ResourceLocation:
+      description: "Canonical path-relative URL of the affected resource. Path segments are percent-encoded PER SEGMENT, which legally leaves the sub-delimiters @ + & = : $ unescaped — /v1/contacts/a.partner@fund.vc is an expected value, and so is the fully-escaped /v1/contacts/a.partner%40fund.vc. Neither form is promised, so never string-compare this header against a URL built locally: percent-decode the final path segment to recover the canonical resource key, then compare that."
+      schema:
+        format: uri-reference
+        type: string
     RetryAfter:
       description: Positive integer seconds to wait before retrying a transient 429 or 503 response.
       schema:
@@ -427,6 +436,68 @@ components:
         - dkim
         - dmarc
       type: object
+    ContactDueContact:
+      additionalProperties: true
+      properties:
+        address:
+          description: The contact's canonical address — identical to the payload's top-level address.
+          type: string
+        display_name:
+          description: The contact's display name; empty string when unset.
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: The contact's caller-owned metadata, verbatim and uninterpreted. An empty object when the contact carries none.
+          type: object
+      required:
+        - address
+        - display_name
+        - metadata
+      type: object
+      x-stability-level: beta
+    ContactDueData:
+      additionalProperties: true
+      properties:
+        address:
+          description: The contact's canonical address — who the agent owes an action to.
+          type: string
+        agent_email:
+          description: The agent that owns this outreach — its id and address (an agent's id IS its email).
+          type: string
+        contact:
+          $ref: "#/components/schemas/ContactDueContact"
+          description: The contact's identity, inlined so an agent-scoped consumer needs no account-wide contact read.
+        last_conversation_id:
+          description: Conversation id of the most recent exchange with this contact, to continue that thread. Omitted when there is none.
+          type: string
+        last_outbound_at:
+          description: When this agent last sent to the contact. Omitted when it never has.
+          format: date-time
+          type: string
+        next_action_at:
+          description: The schedule instant that came due — the value set on the engagement, not the time the sweep observed it.
+          format: date-time
+          type: string
+        outbound_count:
+          description: How many messages this agent has sent to the contact since the engagement was created. Computed at claim time, not a stored counter.
+          format: int64
+          type: integer
+        replied:
+          description: True when the contact has replied since this agent's first outbound to them.
+          type: boolean
+        stage:
+          description: The caller-owned outreach stage, verbatim. e2a never interprets it; empty when unset.
+          type: string
+      required:
+        - address
+        - agent_email
+        - contact
+        - next_action_at
+        - outbound_count
+        - replied
+        - stage
+      type: object
+      x-stability-level: beta
     ContactEngagementView:
       additionalProperties: true
       properties:
@@ -587,7 +658,10 @@ components:
           type: string
         metadata:
           additionalProperties: {}
-          description: Optional caller-owned key/value data, opaque to e2a. Flat objects only; the same per-contact bounds apply, and a row that exceeds them fails on its own without affecting the rest of the batch.
+          description: "Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. A row that exceeds a bound fails on its own, without affecting the rest of the batch. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
           type: object
       required:
         - address
@@ -610,7 +684,7 @@ components:
           type: string
         metadata:
           additionalProperties: {}
-          description: Caller-owned key/value data. e2a never interprets it. Flat objects only; see the field bounds in the API docs.
+          description: Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.
           type: object
         source:
           description: "How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound."
@@ -815,7 +889,10 @@ components:
           type: string
         metadata:
           additionalProperties: {}
-          description: Optional caller-owned key/value data, opaque to e2a. Flat objects only.
+          description: "Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
           type: object
       required:
         - address
@@ -2112,6 +2189,7 @@ components:
           type: object
           x-e2a-beta-event-data-schemas:
             agent.suppression_added: "#/components/schemas/AgentSuppressionAddedData"
+            contact.due: "#/components/schemas/ContactDueData"
           x-e2a-event-data-schemas:
             domain.sending_failed: "#/components/schemas/DomainSendingFailedData"
             domain.sending_verified: "#/components/schemas/DomainSendingVerifiedData"
@@ -2197,13 +2275,13 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -2216,7 +2294,7 @@ components:
           maxLength: 1048576
           type: string
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
+          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
           maxLength: 320
           type: string
         send_at:
@@ -2228,7 +2306,7 @@ components:
           maxLength: 1048576
           type: string
         to:
-          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -2512,8 +2590,10 @@ components:
           format: double
           type: number
         scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."
           format: date-time
           type: string
+          x-stability-level: beta
         sent_as:
           type: string
         size_bytes:
@@ -3601,13 +3681,13 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -3622,7 +3702,7 @@ components:
         reply_all:
           type: boolean
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
+          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
           maxLength: 320
           type: string
         send_at:
@@ -3770,13 +3850,13 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -3790,7 +3870,7 @@ components:
           maxLength: 1048576
           type: string
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. "Support <support@acme.com>"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
+          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. "Support <support@acme.com>"). At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
           maxLength: 320
           type: string
         send_at:
@@ -3820,7 +3900,7 @@ components:
           maxLength: 1048576
           type: string
         to:
-          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -4196,7 +4276,10 @@ components:
           type: string
         metadata:
           additionalProperties: {}
-          description: Replace the metadata object wholesale. Omit to leave unchanged.
+          description: "Replace the metadata object wholesale. Omit to leave unchanged; send an empty object to clear it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
           type: object
       type: object
       x-stability-level: beta
@@ -4290,7 +4373,10 @@ components:
       properties:
         metadata:
           additionalProperties: {}
-          description: Replace the relationship metadata. Omit to leave unchanged.
+          description: "Replace the relationship metadata wholesale. Omit to leave unchanged; send an empty object to clear it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
           type: object
         next_action_at:
           description: Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.
@@ -5318,7 +5404,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/contacts/{address}:
     delete:
-      description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Beta: the outreach surface may change before it is declared stable."
+      description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
       operationId: deleteEngagement
       parameters:
         - in: path
@@ -5392,8 +5478,7 @@ paths:
               schema:
                 type: string
             ETag:
-              schema:
-                type: string
+              $ref: "#/components/headers/ETag"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         default:
@@ -5446,11 +5531,9 @@ paths:
           description: OK
           headers:
             ETag:
-              schema:
-                type: string
+              $ref: "#/components/headers/ETag"
             Location:
-              schema:
-                type: string
+              $ref: "#/components/headers/ResourceLocation"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         "201":
@@ -5461,14 +5544,9 @@ paths:
           description: Created — the contact was newly enrolled in this agent's outreach.
           headers:
             ETag:
-              description: Opaque revision token for a later If-Match update.
-              schema:
-                type: string
+              $ref: "#/components/headers/ETag"
             Location:
-              description: Canonical URL of the newly created engagement.
-              schema:
-                format: uri-reference
-                type: string
+              $ref: "#/components/headers/ResourceLocation"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         default:
@@ -5808,7 +5886,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6148,7 +6226,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6329,7 +6407,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6866,8 +6944,7 @@ paths:
           description: Created
           headers:
             Location:
-              schema:
-                type: string
+              $ref: "#/components/headers/ResourceLocation"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         default:
@@ -7040,8 +7117,7 @@ paths:
               schema:
                 type: string
             ETag:
-              schema:
-                type: string
+              $ref: "#/components/headers/ETag"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         default:
@@ -7089,8 +7165,7 @@ paths:
           description: OK
           headers:
             ETag:
-              schema:
-                type: string
+              $ref: "#/components/headers/ETag"
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
         default:
@@ -8467,6 +8542,8 @@ servers:
 x-e2a-standalone-schema-refs:
   AgentSuppressionAddedData:
     $ref: "#/components/schemas/AgentSuppressionAddedData"
+  ContactDueData:
+    $ref: "#/components/schemas/ContactDueData"
   DomainSendingFailedData:
     $ref: "#/components/schemas/DomainSendingFailedData"
   DomainSendingVerifiedData:

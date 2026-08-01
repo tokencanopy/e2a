@@ -536,6 +536,10 @@ func New(deps Deps) *Server {
 	s.suppressRawBodyOctetStream()
 	s.applyEvolutionStance()
 	s.applyResponseHeaderContract()
+	// Last: publish the enforced-but-previously-unexpressed field bounds. It
+	// runs after applyEvolutionStance so the stance pass cannot overwrite the
+	// keywords it adds.
+	s.applyContactMetadataBounds()
 
 	// WebSocket transport — registered directly on chi (not Huma; it's a raw
 	// upgrade, not a JSON operation). First-class /v1 inbound transport.

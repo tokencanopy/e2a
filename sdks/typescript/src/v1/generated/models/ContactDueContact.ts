@@ -12,19 +12,19 @@
 
 import { HttpFile } from '../http/http.js';
 
-export class CreateContactRequest {
+export class ContactDueContact {
     /**
-    * Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"); it is stored canonicalized. At most 320 Unicode code points.
+    * The contact\'s canonical address — identical to the payload\'s top-level address.
     */
     'address': string;
     /**
-    * Optional human-readable name.
+    * The contact\'s display name; empty string when unset.
     */
-    'displayName'?: string;
+    'displayName': string;
     /**
-    * Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests.
+    * The contact\'s caller-owned metadata, verbatim and uninterpreted. An empty object when the contact carries none.
     */
-    'metadata'?: { [key: string]: any; };
+    'metadata': { [key: string]: any; };
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -51,7 +51,7 @@ export class CreateContactRequest {
         }    ];
 
     static getAttributeTypeMap() {
-        return CreateContactRequest.attributeTypeMap;
+        return ContactDueContact.attributeTypeMap;
     }
 
     public constructor() {
