@@ -58,7 +58,12 @@ EVENT_GATE_STAGING_ONLY_ALLOWLIST = {
 
 # mcp_coverage_gate.py refuses to run when its allowlist names a tool the
 # shard does not advertise, so every synthetic advertisement must include them.
-MCP_GATE_ALLOWLISTED_TOOLS = {"send_email", "approve_pending_message", "reject_pending_message"}
+MCP_GATE_ALLOWLISTED_TOOLS = {
+    "send_email",
+    "approve_pending_message",
+    "reject_pending_message",
+    "delete_suppression",
+}
 
 # Synthetic target shard: staging, so the staging-only allowlist tiers apply.
 STAGING_TARGET = {"apiUrl": "https://api-staging.e2a.dev", "isProd": False}

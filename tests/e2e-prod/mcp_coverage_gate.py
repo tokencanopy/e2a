@@ -53,6 +53,22 @@ ALLOWLIST: dict[str, str] = {
     "send_email": "deprecated alias for send_message (covered)",
     "approve_pending_message": "deprecated alias for approve_review (covered)",
     "reject_pending_message": "deprecated alias for reject_review (covered)",
+    # delete_suppression removes a row from the ACCOUNT-wide suppression list,
+    # and no honest happy path exists on the staging gate: there is no create
+    # API for account suppressions (/v1/account/suppressions exposes only GET
+    # and DELETE) — rows originate solely from real SES bounce/complaint
+    # feedback, and staging's e2a-staging-smtp IAM policy denies
+    # ses:SendRawEmail to the bounce/complaint simulators, so there is never a
+    # row to delete. Mirrors deleteSuppression in coverage_gate.py's
+    # STAGING_ONLY_ALLOWLIST (whose prod happy path runs over REST in
+    # suites/prod/31-ses-feedback.test.ts — no MCP analogue runs on prod). The
+    # tool's continued *advertisement* is still asserted: it stays in the
+    # tools/list denominator (this gate's stale-allowlist check exits 2 if the
+    # server stops advertising it) and 36-mcp-suppressions.test.ts requires it
+    # by name.
+    "delete_suppression": "account suppressions are created only by real SES "
+    "bounce/complaint feedback (no create API); staging denies the SES "
+    "simulators, so no row ever exists to delete",
 }
 
 
