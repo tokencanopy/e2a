@@ -1193,10 +1193,10 @@ class SuppressionsResource:
         self._api = api
         self._c = client
 
-    def list(self) -> AutoPager[SuppressionView]:
+    def list(self, *, limit: Optional[int] = None) -> AutoPager[SuppressionView]:
         # Cursor-paginated (A-5): walks next_cursor to completion.
         async def fetch(cursor: Optional[str]) -> Page:
-            resp = await self._c._read(lambda h: self._api.list_suppressions(cursor=cursor, _headers=h))
+            resp = await self._c._read(lambda h: self._api.list_suppressions(cursor=cursor, limit=limit, _headers=h))
             return _page(resp.items, resp.next_cursor)
 
         return AutoPager(fetch)
