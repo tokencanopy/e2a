@@ -102,9 +102,9 @@ Usage:
         --limit <n> --json           Bound output; JSON emits NDJSON
   e2a suppressions add <address>     Block a recipient for one agent (beta)
         --agent <email>              Required: manual blocks are per-agent
-        --reason <text>              Optional reason recorded on the block
+        --reason <text> --json       Optional reason; JSON emits the record
   e2a suppressions remove <address>  Un-suppress (account-wide without --agent)
-        --agent <email>              Remove only the agent-scoped block
+        --agent <email> --json       Remove only the agent-scoped block; JSON receipt
   e2a send [options]                Send an email as the agent
         --to <email>               Recipient (repeatable)
         --subject <s>              Subject line
@@ -445,7 +445,7 @@ async function main() {
         });
       } else if (sub === "add") {
         checkFlags(rest, ["--agent", "--reason", "--json"]);
-        const [address] = getPositionals(rest, 1, "usage: e2a suppressions add <address> --agent <email> [--reason <text>]");
+        const [address] = getPositionals(rest, 1, "usage: e2a suppressions add <address> --agent <email> [--reason <text>] [--json]");
         await suppressionsAdd(address, {
           agent: getFlagChecked(rest, "--agent"),
           reason: getFlagChecked(rest, "--reason"),
@@ -453,7 +453,7 @@ async function main() {
         });
       } else if (sub === "remove") {
         checkFlags(rest, ["--agent", "--json"]);
-        const [address] = getPositionals(rest, 1, "usage: e2a suppressions remove <address> [--agent <email>]");
+        const [address] = getPositionals(rest, 1, "usage: e2a suppressions remove <address> [--agent <email>] [--json]");
         await suppressionsRemove(address, {
           agent: getFlagChecked(rest, "--agent"),
           json: hasFlag(rest, "--json"),

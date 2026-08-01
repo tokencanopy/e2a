@@ -95,4 +95,19 @@ describe("AgentHeader — test-send action (moved from the dashboard card)", () 
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("links the Suppressions tab to the slug the layout detects", () => {
+    // The tab's slug and layout.tsx's detectTab branch must agree, or the tab
+    // renders inactive on its own page. Pin both ends here.
+    render(<AgentHeader agent={verified} tab="suppressions" />);
+
+    const tab = screen.getByRole("link", { name: "Suppressions" });
+    expect(tab).toHaveAttribute(
+      "href",
+      "/inboxes/suppressions?email=support%40acme.dev",
+    );
+    expect(tab).toHaveAttribute("aria-current", "page");
+    // Sibling tabs stay present and inactive.
+    expect(screen.getByRole("link", { name: "Inbox" })).not.toHaveAttribute("aria-current");
+  });
 });

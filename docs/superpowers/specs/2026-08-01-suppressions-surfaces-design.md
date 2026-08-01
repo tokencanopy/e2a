@@ -214,14 +214,42 @@ Jest with mocked fetch), command ↔ SDK (CLI, vitest), tool ↔ SDK wrapper
   `--agent` → usage error; `npm test --workspace @e2a/cli`.
 - **MCP**: tier-completeness test (automatic), plus tool tests exercising the
   five wrappers; `npm test --workspace @e2a/mcp-server`.
-- **Cross-cutting**: `git diff --exit-code api/openapi.yaml sdks/` proves the
-  no-API-change claim; full workspace builds (SDK → CLI → MCP).
+- **Cross-cutting**: `git diff --exit-code api/openapi.yaml` proves the
+  no-wire-change claim (`sdks/` deliberately carries the additive `{ limit }`);
+  full workspace builds (SDK → CLI → MCP).
 - **Manual**: against local stack (`make docker-up`), verify tab render, an
   add/remove round-trip, and the contacts view-switcher.
 
 Most likely regressions: `detectTab` ordering (a new sub-path must be matched
 before the messages default), and the 5-tab strip on mobile (checked via the
 existing `responsive.test.tsx` pattern).
+
+## Post-review addenda (applied)
+
+Two independent review passes converged on one class: error paths that left a
+safety list reading as "nothing is blocked". Applied on top of the slices:
+
+- **Path-segment guard** (`contacts/_lib/suppressionPath.ts`, `checkedAddress`
+  in the CLI): `encodeURIComponent` does not encode `.`, so an all-dots address
+  survives encoding and the URL parser then collapses
+  `DELETE .../suppressions/..` onto the PARENT resource — `/v1/account` or
+  `/v1/agents/{email}`, both real DELETE endpoints accepting the same
+  `?confirm=DELETE` token. Not live-exploitable (the server rejects such
+  addresses on create, and chi does not redirect the collapsed path), but the
+  only thing standing in the way was a routing-library default, so the address
+  is now validated at every client boundary before a request is built.
+- **`listFailed` distinct from `error`**: only a failed LIST load suppresses
+  the empty state; a failed remove is an action error and leaves the list
+  trustworthy. Prevents "No suppressed recipients" rendering under a failed
+  fetch.
+- **Reconverge on failed remove**, **one delete in flight at a time**, and
+  **address-deduped page appends** (a server re-emitting a row across pages
+  otherwise produced duplicate React keys, each with its own Remove button).
+
+Deliberately not changed (consistent with existing sibling pages/commands):
+"Load more" results resetting on Refresh, `Number()` leniency in `--limit`,
+and the missing-`?email=` permanent loading state — all pre-existing house behavior
+worth a separate pass across all pages rather than a divergence here.
 
 ## Open questions
 

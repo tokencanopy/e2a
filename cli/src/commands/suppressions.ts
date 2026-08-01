@@ -11,6 +11,21 @@ import { sanitizeTsvField } from "./messages.js";
 
 export interface OutputOptions { json?: boolean }
 
+// The SDK interpolates the address as a URL path segment, and
+// `encodeURIComponent` does NOT encode "." — so an all-dots address survives
+// encoding and the URL parser then removes it as a relative path segment
+// BEFORE the request is sent, collapsing DELETE .../suppressions/.. onto the
+// parent resource (/v1/account or /v1/agents/{email}) — both real DELETE
+// endpoints that accept the very same ?confirm=DELETE token. Reject it here;
+// no valid email address is all dots anyway.
+function checkedAddress(raw: string): string {
+  const address = raw.trim();
+  if (!address || /^\.+$/.test(address)) {
+    fail(EXIT.USAGE, `"${raw}" is not a valid recipient address`);
+  }
+  return address;
+}
+
 function positiveLimit(raw: string | undefined): number {
   if (raw === undefined) return 100;
   const value = Number(raw);
@@ -55,7 +70,7 @@ export async function suppressionsAdd(address: string, opts: {
     fail(EXIT.USAGE, "suppressions add requires --agent <email>: manual blocks are per-agent (there is no account-level create; account entries come from bounces/complaints)");
   }
   const row = await createClient().agents.createSuppression(opts.agent, {
-    address,
+    address: checkedAddress(address),
     ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
   });
   process.stdout.write(opts.json ? JSON.stringify(row) + "\n" : `suppressed ${row.address} for ${row.agentEmail}\n`);
@@ -65,9 +80,10 @@ export async function suppressionsRemove(address: string, opts: {
   agent?: string;
   json?: boolean;
 }): Promise<void> {
+  const checked = checkedAddress(address);
   const client = createClient();
   const result = opts.agent
-    ? await client.agents.deleteSuppression(opts.agent, address)
-    : await client.account.suppressions.delete(address);
+    ? await client.agents.deleteSuppression(opts.agent, checked)
+    : await client.account.suppressions.delete(checked);
   process.stdout.write(opts.json ? JSON.stringify(result) + "\n" : `deleted ${result.address}\n`);
 }

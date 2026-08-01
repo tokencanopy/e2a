@@ -101,3 +101,96 @@ it("surfaces the server error when suppressions are unavailable", async () => {
     "agent suppressions are not available on this deployment",
   );
 });
+
+it("never shows the all-clear empty state while the list failed to load", async () => {
+  // A suppression list is a safety list: "no blocked recipients" after a failed
+  // fetch reads as the exact inverse of the truth.
+  fetchMock.mockResolvedValue({
+    ok: false,
+    status: 501,
+    json: async () => ({ error: { message: "agent suppressions are not available on this deployment" } }),
+  });
+  render(<SuppressionsPage />);
+
+  await screen.findByRole("alert");
+  expect(screen.queryByText(/No blocked recipients for this inbox/)).not.toBeInTheDocument();
+});
+
+it("reconverges with the server when a remove fails", async () => {
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [unsubscribeRow] }) })
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: { message: "address not on the agent suppression list" } }),
+    })
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [] }) });
+  const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+  render(<SuppressionsPage />);
+
+  await userEvent.click((await screen.findAllByRole("button", { name: `Remove ${unsubscribeRow.address}` }))[0]);
+
+  // Failed delete still refetches, so a row removed elsewhere disappears
+  // instead of lingering as if still blocked.
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  await waitFor(() =>
+    expect(screen.queryByText(unsubscribeRow.address)).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("address not on the agent suppression list");
+  confirmSpy.mockRestore();
+});
+
+it("refuses to build a request from a path-traversal address", async () => {
+  // encodeURIComponent leaves "." alone, so an address of ".." would collapse
+  // DELETE /v1/agents/x/suppressions/.. onto the AGENT resource itself.
+  fetchMock.mockResolvedValue({
+    ok: true,
+    json: async () => ({ items: [{ ...unsubscribeRow, address: ".." }] }),
+  });
+  const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+  render(<SuppressionsPage />);
+
+  await userEvent.click((await screen.findAllByRole("button", { name: "Remove .." }))[0]);
+
+  expect(fetchMock).toHaveBeenCalledTimes(1); // list only; no DELETE issued
+  expect(await screen.findByRole("alert")).toHaveTextContent(/not a valid address/i);
+  confirmSpy.mockRestore();
+});
+
+it("does not double-submit a remove on a double click", async () => {
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [unsubscribeRow] }) })
+    .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({
+      ok: true, json: async () => ({ deleted: true, address: unsubscribeRow.address }),
+    }), 30)))
+    .mockResolvedValue({ ok: true, json: async () => ({ items: [] }) });
+  const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+  render(<SuppressionsPage />);
+
+  const button = (await screen.findAllByRole("button", { name: `Remove ${unsubscribeRow.address}` }))[0];
+  await userEvent.click(button);
+  await userEvent.click(button);
+
+  await waitFor(() => expect(screen.queryByText(unsubscribeRow.address)).not.toBeInTheDocument());
+  const deletes = fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "DELETE");
+  expect(deletes).toHaveLength(1);
+  confirmSpy.mockRestore();
+});
+
+it("keeps appended pages free of duplicate rows", async () => {
+  const second = { ...unsubscribeRow, address: "later@example.net" };
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [unsubscribeRow], next_cursor: "c2" }) })
+    // A server that re-emits a row across pages must not produce duplicate keys.
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [unsubscribeRow, second] }) });
+  render(<SuppressionsPage />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Load more suppressions" }));
+
+  await waitFor(() => expect(screen.getAllByText("later@example.net").length).toBeGreaterThan(0));
+  const [url] = fetchMock.mock.calls[1] as [string];
+  expect(url).toContain("cursor=c2");
+  // One row per address across both pages (mobile + desktop render each once).
+  const rendered = screen.getAllByText(unsubscribeRow.address);
+  expect(rendered).toHaveLength(2);
+});

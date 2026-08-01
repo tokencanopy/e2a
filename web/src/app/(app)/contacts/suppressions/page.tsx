@@ -5,6 +5,7 @@ import { Button } from "../../../components/loft/Button";
 import { Chip } from "../../../components/loft/Chip";
 import { PageShell } from "../../../components/loft/PageShell";
 import { ViewTabs } from "../_lib/ViewTabs";
+import { appendUniqueByAddress, encodeAddressSegment } from "../_lib/suppressionPath";
 
 // The ACCOUNT-WIDE suppression list: auto-populated by hard bounces and
 // complaints (plus server-side manual entries), enforced for sends from every
@@ -40,6 +41,11 @@ export default function AccountSuppressionsPage() {
   const [error, setError] = useState("");
   const [nextCursor, setNextCursor] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
+  const [removing, setRemoving] = useState("");
+  // Distinct from `error`: only a failed LIST load may suppress the
+  // "nothing is suppressed" empty state. A failed remove is an action error —
+  // the list itself is still trustworthy.
+  const [listFailed, setListFailed] = useState(false);
 
   const refresh = useCallback(async (cursor = "", append = false, signal?: AbortSignal) => {
     if (append) setLoadingMore(true);
@@ -53,12 +59,20 @@ export default function AccountSuppressionsPage() {
       });
       if (!response.ok) throw new Error(await apiError(response));
       const body: { items: Suppression[]; next_cursor?: string | null } = await response.json();
-      setRows((current) => append ? [...current, ...(body.items ?? [])] : (body.items ?? []));
+      setRows((current) => append
+        ? appendUniqueByAddress(current, body.items ?? [])
+        : (body.items ?? []));
       setNextCursor(body.next_cursor ?? "");
       setError("");
+      setListFailed(false);
     } catch (err) {
       if (!signal?.aborted) {
         setError(err instanceof Error ? err.message : "Failed to load suppressions");
+        // Never leave a half-loaded list behind an error: on a safety list,
+        // stale-or-empty rows read as "nothing is blocked".
+        if (!append) setRows([]);
+        setNextCursor("");
+        setListFailed(true);
       }
     } finally {
       if (!signal?.aborted) {
@@ -75,20 +89,36 @@ export default function AccountSuppressionsPage() {
   }, [refresh]);
 
   const remove = async (row: Suppression) => {
+    if (removing) return; // one delete in flight at a time
+    // Build the path BEFORE prompting: an address that cannot be safely
+    // encoded is not actionable, so there is nothing to confirm, and no
+    // request must be issued.
+    let path: string;
+    try {
+      path = `/v1/account/suppressions/${encodeAddressSegment(row.address)}?confirm=DELETE`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid address");
+      return;
+    }
     if (!confirm(
       `Remove ${row.address} from the suppression list? Every inbox can email it again — ` +
       "removing an address that genuinely bounced or complained hurts sender reputation. " +
       "Only continue if you know it is deliverable.",
     )) return;
+    setRemoving(row.address);
     try {
-      const response = await fetch(
-        `/v1/account/suppressions/${encodeURIComponent(row.address)}?confirm=DELETE`,
-        { method: "DELETE", credentials: "include" },
-      );
+      const response = await fetch(path, { method: "DELETE", credentials: "include" });
       if (!response.ok) throw new Error(await apiError(response));
+      setError("");
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to remove suppression");
+      const message = err instanceof Error ? err.message : "Failed to remove suppression";
+      // A failed delete still refetches so the list reconverges; re-set the
+      // action error afterwards, since a successful refresh clears it.
+      await refresh();
+      setError(message);
+    } finally {
+      setRemoving("");
     }
   };
 
@@ -113,10 +143,12 @@ export default function AccountSuppressionsPage() {
             Loading suppressions…
           </div>
         ) : rows.length === 0 ? (
-          <div className="rounded-[var(--r-lg)] border p-4 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--bg-panel)", color: "var(--fg-muted)" }}>
-            No suppressed recipients. Hard bounces and complaints land here automatically.
-          </div>
+          listFailed ? null : (
+            <div className="rounded-[var(--r-lg)] border p-4 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--bg-panel)", color: "var(--fg-muted)" }}>
+              No suppressed recipients. Hard bounces and complaints land here automatically.
+            </div>
+          )
         ) : rows.map((row) => (
           <article key={row.address} className="rounded-[var(--r-lg)] border p-4"
             style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}>
@@ -136,7 +168,7 @@ export default function AccountSuppressionsPage() {
                   <> · <span className="font-mono">{row.source_message_id}</span></>
                 )}
               </span>
-              <Button variant="ghost" aria-label={`Remove ${row.address}`}
+              <Button variant="ghost" aria-label={`Remove ${row.address}`} disabled={removing !== ""}
                 style={{ color: "var(--danger-strong)" }} onClick={() => void remove(row)}>Remove</Button>
             </div>
           </article>
@@ -159,7 +191,9 @@ export default function AccountSuppressionsPage() {
               <tr><td colSpan={6} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>Loading suppressions…</td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={6} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>
-                No suppressed recipients. Hard bounces and complaints land here automatically.
+                {listFailed
+                  ? "The list could not be loaded, so it is not shown."
+                  : "No suppressed recipients. Hard bounces and complaints land here automatically."}
               </td></tr>
             ) : rows.map((row) => (
               <tr key={row.address} style={{ borderBottom: "1px solid var(--border-sub)" }}>
@@ -176,7 +210,7 @@ export default function AccountSuppressionsPage() {
                   {new Date(row.created_at).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" aria-label={`Remove ${row.address}`}
+                  <Button variant="ghost" aria-label={`Remove ${row.address}`} disabled={removing !== ""}
                     style={{ color: "var(--danger-strong)" }} onClick={() => void remove(row)}>Remove</Button>
                 </td>
               </tr>

@@ -18,14 +18,13 @@ import type { DashboardAgent } from "../types";
 
 export type AgentTab = "messages" | "outreach" | "suppressions" | "trash" | "settings";
 
-// The agent-detail surface is intentionally scoped to two tabs:
-//   • Messages — the threaded inbox with inline conversation detail.
-//   • Settings — per-agent editors (mode, webhook URL, HITL config,
-//     delete).
+// Tabs on the agent-detail surface. Each entry's `slug` must match a
+// `detectTab` branch in inboxes/(view)/layout.tsx, or the tab renders
+// inactive on its own page (pinned by a test in AgentHeader.test.tsx).
 // Overview + Webhooks were considered and dropped: Overview duplicated
-// the dashboard agent card; Webhooks folded into Settings. When a
-// third tab is added, restore the `ready` flag + disabled-tab branch
-// (see git history at 63876fc).
+// the dashboard agent card; Webhooks folded into Settings. Disabled
+// placeholder tabs are no longer used — see git history at 63876fc for
+// the `ready` flag if one is ever needed again.
 const TABS: { key: AgentTab; label: string; slug: string }[] = [
   { key: "messages", label: "Inbox", slug: "messages" },
   { key: "outreach", label: "Outreach", slug: "outreach" },

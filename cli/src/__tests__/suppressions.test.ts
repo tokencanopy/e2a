@@ -118,6 +118,26 @@ describe("suppressions commands", () => {
     expect(String(stdout.mock.calls[0][0])).toBe("deleted gone@example.net\n");
   });
 
+  it("rejects a dot-segment address before issuing any request", async () => {
+    // encodeURIComponent leaves "." alone, so ".." survives into the URL and
+    // the URL parser then collapses the path onto the PARENT resource —
+    // /v1/account or /v1/agents/{email}, both real DELETE endpoints taking the
+    // same ?confirm=DELETE token the suppression delete already supplies.
+    const { suppressionsRemove, suppressionsAdd } = await import("../commands/suppressions.js");
+    for (const bad of ["..", ".", "   ", "..."]) {
+      await expect(suppressionsRemove(bad, {})).rejects.toThrow("process.exit");
+      await expect(
+        suppressionsRemove(bad, { agent: "bot@agents.localhost" }),
+      ).rejects.toThrow("process.exit");
+      await expect(
+        suppressionsAdd(bad, { agent: "bot@agents.localhost" }),
+      ).rejects.toThrow("process.exit");
+    }
+    expect(mockAccountDelete).not.toHaveBeenCalled();
+    expect(mockAgentDelete).not.toHaveBeenCalled();
+    expect(mockAgentCreate).not.toHaveBeenCalled();
+  });
+
   it("remove routes to the agent list with --agent", async () => {
     mockAgentDelete.mockResolvedValue({ deleted: true, address: "optout@example.net" });
     const { suppressionsRemove } = await import("../commands/suppressions.js");

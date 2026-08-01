@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Button } from "../../../../components/loft/Button";
 import { Chip } from "../../../../components/loft/Chip";
+import { appendUniqueByAddress, encodeAddressSegment } from "../../../contacts/_lib/suppressionPath";
 
 // Per-agent recipient blocks: unsubscribes plus manual entries, scoped to this
 // exact sending inbox. Account-wide bounce/complaint suppressions are a
@@ -48,6 +49,11 @@ function SuppressionsContent({ email }: { email: string }) {
   const [showAdd, setShowAdd] = useState(false);
   const [nextCursor, setNextCursor] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
+  const [removing, setRemoving] = useState("");
+  // Distinct from `error`: only a failed LIST load may suppress the
+  // "nothing is blocked" empty state. A failed remove is an action error —
+  // the list itself is still trustworthy.
+  const [listFailed, setListFailed] = useState(false);
 
   const refresh = useCallback(async (cursor = "", append = false, signal?: AbortSignal) => {
     if (!email) return;
@@ -62,12 +68,20 @@ function SuppressionsContent({ email }: { email: string }) {
       );
       if (!response.ok) throw new Error(await apiError(response));
       const body: { items: AgentSuppression[]; next_cursor?: string | null } = await response.json();
-      setRows((current) => append ? [...current, ...(body.items ?? [])] : (body.items ?? []));
+      setRows((current) => append
+        ? appendUniqueByAddress(current, body.items ?? [])
+        : (body.items ?? []));
       setNextCursor(body.next_cursor ?? "");
       setError("");
+      setListFailed(false);
     } catch (err) {
       if (!signal?.aborted) {
         setError(err instanceof Error ? err.message : "Failed to load suppressions");
+        // Never leave a half-loaded list behind an error: on a safety list,
+        // stale-or-empty rows read as "nothing is blocked".
+        if (!append) setRows([]);
+        setNextCursor("");
+        setListFailed(true);
       }
     } finally {
       if (!signal?.aborted) {
@@ -84,16 +98,33 @@ function SuppressionsContent({ email }: { email: string }) {
   }, [refresh]);
 
   const remove = async (row: AgentSuppression) => {
-    if (!confirm(`Let ${email} email ${row.address} again? This removes only this inbox's block.`)) return;
+    if (removing) return; // one delete in flight at a time
+    // Build the path BEFORE prompting: an address that cannot be safely
+    // encoded is not actionable, so there is nothing to confirm, and no
+    // request must be issued.
+    let path: string;
     try {
-      const response = await fetch(
-        `/v1/agents/${encodeURIComponent(email)}/suppressions/${encodeURIComponent(row.address)}?confirm=DELETE`,
-        { method: "DELETE", credentials: "include" },
-      );
+      path = `/v1/agents/${encodeAddressSegment(email)}/suppressions/${encodeAddressSegment(row.address)}?confirm=DELETE`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid address");
+      return;
+    }
+    if (!confirm(`Let ${email} email ${row.address} again? This removes only this inbox's block.`)) return;
+    setRemoving(row.address);
+    try {
+      const response = await fetch(path, { method: "DELETE", credentials: "include" });
       if (!response.ok) throw new Error(await apiError(response));
+      setError("");
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to remove suppression");
+      const message = err instanceof Error ? err.message : "Failed to remove suppression";
+      // A failed delete (typically a 404 because it was removed elsewhere)
+      // still refetches, so the list reconverges with the server; re-set the
+      // action error afterwards, since a successful refresh clears it.
+      await refresh();
+      setError(message);
+    } finally {
+      setRemoving("");
     }
   };
 
@@ -142,11 +173,13 @@ function SuppressionsContent({ email }: { email: string }) {
             Loading suppressions…
           </div>
         ) : rows.length === 0 ? (
-          <div className="rounded-[var(--r-lg)] border p-4 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--bg-panel)", color: "var(--fg-muted)" }}>
-            No blocked recipients for this inbox. Unsubscribe requests land here automatically; manual blocks
-            can be added above.
-          </div>
+          listFailed ? null : (
+            <div className="rounded-[var(--r-lg)] border p-4 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--bg-panel)", color: "var(--fg-muted)" }}>
+              No blocked recipients for this inbox. Unsubscribe requests land here automatically; manual blocks
+              can be added above.
+            </div>
+          )
         ) : rows.map((row) => (
           <article key={row.address} className="rounded-[var(--r-lg)] border p-4"
             style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}>
@@ -163,7 +196,7 @@ function SuppressionsContent({ email }: { email: string }) {
               <span className="text-[11px]" style={{ color: "var(--fg-muted)" }}>
                 Added {new Date(row.created_at).toLocaleDateString()}
               </span>
-              <Button variant="ghost" aria-label={`Remove ${row.address}`}
+              <Button variant="ghost" aria-label={`Remove ${row.address}`} disabled={removing !== ""}
                 style={{ color: "var(--danger-strong)" }} onClick={() => void remove(row)}>Remove</Button>
             </div>
           </article>
@@ -185,8 +218,9 @@ function SuppressionsContent({ email }: { email: string }) {
               <tr><td colSpan={5} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>Loading suppressions…</td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={5} className="px-4 py-8" style={{ color: "var(--fg-muted)" }}>
-                No blocked recipients for this inbox. Unsubscribe requests land here automatically; manual
-                blocks can be added above.
+                {listFailed
+                  ? "The list could not be loaded, so it is not shown."
+                  : "No blocked recipients for this inbox. Unsubscribe requests land here automatically; manual blocks can be added above."}
               </td></tr>
             ) : rows.map((row) => (
               <tr key={row.address} style={{ borderBottom: "1px solid var(--border-sub)" }}>
@@ -200,7 +234,7 @@ function SuppressionsContent({ email }: { email: string }) {
                   {new Date(row.created_at).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" aria-label={`Remove ${row.address}`}
+                  <Button variant="ghost" aria-label={`Remove ${row.address}`} disabled={removing !== ""}
                     style={{ color: "var(--danger-strong)" }} onClick={() => void remove(row)}>Remove</Button>
                 </td>
               </tr>
