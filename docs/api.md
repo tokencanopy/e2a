@@ -48,7 +48,8 @@ is currently 43 GA operations and 29 beta operations:
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
 
 **Beta fields and capabilities on otherwise-GA operations** (property-level
-`x-stability-level: beta` in the spec):
+`x-stability-level: beta` in the spec — or, where only specific *values* of a
+stable field are beta, `x-experimental-values` on that field):
 
 - **Scheduled sending** — the `send_at` request field, the `scheduled_at`
   response field, and the `scheduled` send-result `status` value on
@@ -61,6 +62,12 @@ is currently 43 GA operations and 29 beta operations:
   object and its raw `GET|POST /u/{token}` confirmation flow.
 - **Review-hold projections** — `hold_reason`, the review-detail `protection`
   evidence, and the `flagged` / `flag_reason` verdict fields.
+- **Lifecycle transitions on events** — the optional `lifecycle_transitions`
+  payload field on the seven otherwise-stable event payload schemas
+  (`email.received`, `email.sent`, `email.failed`, `email.delivered`,
+  `email.bounced`, `email.complained`, `domain.suppression_added`). See
+  [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta)
+  and [events.md](events.md#lifecycle-transitions-on-events-beta).
 - **Account export interior schemas** — `GET /v1/account/export` is a GA
   operation, but its interior record shapes are versioned by the export's
   `schema_version` envelope field rather than the v1 freeze, and are
@@ -302,27 +309,27 @@ every `/v1` operation not listed here is covered by the GA freeze.
   strict (`additionalProperties: false`) — an unknown request field is rejected
   with a 422, which is intentional input validation (it catches typos like
   `body` vs `text`), not a stability concern.
-- **Beta surfaces are marked `x-stability-level: beta`** in the spec
-  for automated compatibility tools
-  (operations, schemas, and individual fields — e.g. the `template_*` fields on
-  send, `hold_reason`, the review-detail `protection` evidence, and the
-  `flagged` / `flag_reason` verdict) and `(beta)` in prose — today: templates,
-  starter templates, reviews, the agent protection config, agent-scoped
-  suppression management, managed unsubscribe (including its raw confirmation
-  flow), and scheduled sending (`send_at`, `scheduled_at`, and the `scheduled`
-  send-result value). They are **exempt from the
-  freeze**: they may change or be removed without a major version. Where only
-  specific *values* of a stable field are experimental (the screening +
-  review-hold event types `email.flagged`, `email.blocked`,
-  `email.review_requested`, `email.review_approved`, `email.review_rejected`),
-  the field carries `x-experimental-values` listing exactly those values —
-  their payloads may still change; all other event types are stable. Anything
-  not marked experimental is stable surface. The stable `ErrorBody.code`
-  discriminator similarly marks only `blocked_by_policy` experimental. One deliberate schema-level use
-  of the beta marker under a **stable** operation: the account export's
-  interior record schemas (`GET /v1/account/export`) are beta-marked because
-  they are versioned by the export's stable `schema_version` envelope field
-  rather than by the v1 freeze — see the account section below.
+- **Beta surfaces are marked `x-stability-level: beta`** in the spec for
+  automated compatibility tools (operations, schemas, and individual fields)
+  and `(beta)` in prose. The complete current inventory — resource groups,
+  beta fields on otherwise-GA operations, and beta events — is the
+  [Stability: GA and beta surface](#stability-ga-and-beta-surface) matrix at
+  the top of this document (the operation-level list is repeated with methods
+  and paths in [Beta operations](#beta-operations) above); this bullet states
+  the policy and deliberately does not repeat the list. Beta surface is
+  **exempt from the freeze**: it may change or be removed without a major
+  version. Where only specific *values* of a stable field are beta (the
+  screening + review-hold event types on webhook `events` fields, the
+  `scheduled` send-result `status` value), the field carries
+  `x-experimental-values` listing exactly those values — the field itself
+  stays stable, the listed values (and their payloads) may still change, and
+  every unlisted value is stable. The stable `ErrorBody.code` discriminator
+  similarly marks only `blocked_by_policy` experimental. Anything not marked
+  beta or experimental is stable surface. One deliberate schema-level use of
+  the beta marker under a **stable** operation: the account export's interior
+  record schemas (`GET /v1/account/export`) are beta-marked because they are
+  versioned by the export's stable `schema_version` envelope field rather
+  than by the v1 freeze — see the account section below.
 - **Enums in responses are open.** Treat any `type` / `*_status` / `event_type`
   value as an open string set: we may introduce new values (e.g. a new event
   type or delivery state) without a major bump, so a client **must not crash on
