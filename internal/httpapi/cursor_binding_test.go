@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/webhook"
 )
 
@@ -26,8 +28,15 @@ import (
 // and the client concluded "no events" when there were plenty. A silent
 // wrong answer is worse than a 400.
 //
-// These tests assert the whole N x N matrix: every list endpoint rejects
-// every other list endpoint's cursor, and still walks its own.
+// The same wrong-answer class exists across ACCOUNTS: account A's cursor on
+// account B's /v1/events verified under the deployment-global secret and
+// anchored B's (still hard-scoped) query at a meaningless position. The
+// account therefore binds too — via the MAC key (see cursorKey), so the
+// rejection is a plain invalid_cursor indistinguishable from a forgery.
+//
+// These tests assert both axes: every list endpoint rejects every other
+// list endpoint's cursor AND every other account's cursor for the same
+// endpoint, while still walking its own.
 
 // cursorRow is the shape all the fakes below key on: a keyset position and
 // an id, seeded newest-first so each endpoint yields >1 page at limit=1.
@@ -69,10 +78,31 @@ func page(rows []cursorRow, limit int, afterAt time.Time, afterID string) []curs
 	return out
 }
 
-// cursorBindingServer wires every cursor-minting account-level list with a
+// Two accounts, each with its own agent, so the matrix can vary the
+// principal as well as the endpoint. Bearer "good" is u_1 (as everywhere
+// else in this package); bearer "other" is u_2.
+const (
+	bindingAgentA = "agent-a@acme.com" // owned by u_1
+	bindingAgentB = "agent-b@acme.com" // owned by u_2
+)
+
+func cursorBindingAuth(r *http.Request) (*identity.User, error) {
+	switch r.Header.Get("Authorization") {
+	case "Bearer good":
+		return &identity.User{ID: "u_1", Email: "owner@acme.com"}, nil
+	case "Bearer other":
+		return &identity.User{ID: "u_2", Email: "owner@bee.com"}, nil
+	}
+	return nil, errors.New("unauthorized")
+}
+
+// cursorBindingServer wires every cursor-minting list endpoint with a
 // keyset-honoring fake, so each endpoint can mint a REAL cursor through the
 // real handler — the foreign cursors under test are genuine API output, not
-// hand-built payloads.
+// hand-built payloads. Account-level fakes serve the same rows to both
+// accounts (the binding under test rejects the cursor before any query);
+// agent-level fakes key rows on the agent, so each account paginates its
+// own agent's data.
 func cursorBindingServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	agents := cursorRows("agt", "@acme.com", 3)
@@ -85,9 +115,14 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 	supps := cursorRows("sup", "@x.com", 3)
 	contacts := cursorRows("cnt", "", 3)
 	deliveries := cursorRows("dlv", "", 3)
+	msgs := map[string][]cursorRow{bindingAgentA: cursorRows("msa", "", 3), bindingAgentB: cursorRows("msb", "", 3)}
+	convos := map[string][]cursorRow{bindingAgentA: cursorRows("cva", "", 3), bindingAgentB: cursorRows("cvb", "", 3)}
+	engs := map[string][]cursorRow{bindingAgentA: cursorRows("ega", "", 3), bindingAgentB: cursorRows("egb", "", 3)}
+	agSupps := map[string][]cursorRow{bindingAgentA: cursorRows("asa", "@x.com", 3), bindingAgentB: cursorRows("asb", "@x.com", 3)}
+	lifecycles := map[string][]cursorRow{bindingAgentA: cursorRows("mla", "", 3), bindingAgentB: cursorRows("mlb", "", 3)}
 
 	srv := httptest.NewServer(New(Deps{
-		Authenticator: bearerGood,
+		Authenticator: cursorBindingAuth,
 		EventsEnabled: true,
 
 		ListAgents: func(_ context.Context, _ string, limit int, at time.Time, id string) ([]identity.AgentIdentity, error) {
@@ -173,39 +208,109 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 			}
 			return out, nil
 		},
+
+		// Agent-parameterized collections: one agent per account.
+		GetAgent: func(_ context.Context, address string) (*identity.AgentIdentity, error) {
+			switch a := identity.NormalizeEmail(address); a {
+			case bindingAgentA:
+				return &identity.AgentIdentity{ID: a, Email: a, Domain: "acme.com", UserID: "u_1"}, nil
+			case bindingAgentB:
+				return &identity.AgentIdentity{ID: a, Email: a, Domain: "acme.com", UserID: "u_2"}, nil
+			}
+			return nil, identity.ErrAgentNotFound
+		},
+		ListMessages: func(_ context.Context, f identity.MessageListFilter) ([]identity.Message, error) {
+			out := []identity.Message{}
+			for _, r := range page(msgs[f.AgentID], f.Limit, f.AfterTime, f.AfterID) {
+				out = append(out, identity.Message{
+					ID: r.id, AgentID: f.AgentID, Direction: "inbound",
+					Recipient: f.AgentID, Subject: "s", InboxStatus: "unread", CreatedAt: r.at,
+				})
+			}
+			return out, nil
+		},
+		ListConversations: func(_ context.Context, f identity.ConversationListFilter) ([]identity.ConversationSummary, error) {
+			out := []identity.ConversationSummary{}
+			for _, r := range page(convos[f.AgentID], f.Limit, f.AfterLastMessageAt, f.AfterConversationID) {
+				out = append(out, identity.ConversationSummary{
+					ID: r.id, LastMessageAt: r.at, FirstMessageAt: r.at,
+					MessageCount: 1, InboundCount: 1, LatestSubject: "s", LatestSender: "x@x.com",
+				})
+			}
+			return out, nil
+		},
+		ListEngagements: func(_ context.Context, _, agentID string, _ identity.EngagementFilter, limit int, at time.Time, id string) ([]identity.ContactEngagement, error) {
+			out := []identity.ContactEngagement{}
+			for _, r := range page(engs[agentID], limit, at, id) {
+				out = append(out, identity.ContactEngagement{
+					ID: r.id, AgentEmail: agentID, Address: r.id + "@x.com", ContactID: r.id,
+					Stage: "active", CreatedAt: r.at, UpdatedAt: r.at,
+				})
+			}
+			return out, nil
+		},
+		ListAgentSuppressions: func(_ context.Context, _, agentID string, limit int, at time.Time, addr string) ([]identity.AgentSuppression, error) {
+			out := []identity.AgentSuppression{}
+			for _, r := range page(agSupps[agentID], limit, at, addr) {
+				out = append(out, identity.AgentSuppression{AgentEmail: agentID, Address: r.id, Source: "manual", CreatedAt: r.at})
+			}
+			return out, nil
+		},
+		ListMessageLifecycle: func(_ context.Context, messageID, agentID string) ([]messagelifecycle.MessageLifecycleTransition, error) {
+			out := []messagelifecycle.MessageLifecycleTransition{}
+			for _, r := range lifecycles[agentID] {
+				out = append(out, messagelifecycle.MessageLifecycleTransition{
+					ID: r.id, MessageID: messageID, Direction: "inbound", OccurredAt: r.at,
+				})
+			}
+			return out, nil
+		},
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// cursorBoundEndpoints is every list endpoint the binding must cover. Each
-// yields >1 page at limit=1, so `mint` below always returns a real cursor.
+// cursorBoundEndpoints is every cursor-minting collection the binding must
+// cover — all sixteen. pathA is account A's instance of the collection and
+// pathB account B's; they differ only for the agent-parameterized lists
+// (each account walks its own agent). Each yields >1 page at limit=1, so
+// `mint` below always returns a real cursor.
 var cursorBoundEndpoints = []struct {
-	name string
-	path string
+	name  string
+	pathA string
+	pathB string
 }{
-	{"agents", "/v1/agents?limit=1"},
-	{"domains", "/v1/domains?limit=1"},
-	{"webhooks", "/v1/webhooks?limit=1"},
-	{"templates", "/v1/templates?limit=1"},
-	{"api_keys", "/v1/account/api-keys?limit=1"},
-	{"reviews", "/v1/reviews?limit=1"},
-	{"events", "/v1/events?limit=1"},
-	{"account_suppressions", "/v1/account/suppressions?limit=1"},
-	{"contacts", "/v1/contacts?limit=1"},
+	{"agents", "/v1/agents?limit=1", "/v1/agents?limit=1"},
+	{"domains", "/v1/domains?limit=1", "/v1/domains?limit=1"},
+	{"webhooks", "/v1/webhooks?limit=1", "/v1/webhooks?limit=1"},
+	{"templates", "/v1/templates?limit=1", "/v1/templates?limit=1"},
+	{"api_keys", "/v1/account/api-keys?limit=1", "/v1/account/api-keys?limit=1"},
+	{"reviews", "/v1/reviews?limit=1", "/v1/reviews?limit=1"},
+	{"events", "/v1/events?limit=1", "/v1/events?limit=1"},
+	{"account_suppressions", "/v1/account/suppressions?limit=1", "/v1/account/suppressions?limit=1"},
+	{"contacts", "/v1/contacts?limit=1", "/v1/contacts?limit=1"},
 	// Both of these were ALSO accepting foreign cursors pre-fix and were
 	// missed by the original bug report's list of eight: deliveries with no
 	// status filter matched a foreign cursor's empty status, and
 	// starter-templates decoded a foreign cursor's absent alias as "" and
 	// silently re-served page 1. Verified against a clean origin/main.
-	{"webhook_deliveries", "/v1/webhooks/wh_1/deliveries?limit=1"},
-	{"starter_templates", "/v1/starter-templates?limit=1"},
+	{"webhook_deliveries", "/v1/webhooks/wh_1/deliveries?limit=1", "/v1/webhooks/wh_1/deliveries?limit=1"},
+	{"starter_templates", "/v1/starter-templates?limit=1", "/v1/starter-templates?limit=1"},
+	// The five agent-scoped collections were already foreign-cursor-safe via
+	// their mandatory agent/filter fingerprints, so their presence here is
+	// coverage of the blanket rule, not a behavior fix.
+	{"messages", "/v1/agents/agent-a%40acme.com/messages?limit=1", "/v1/agents/agent-b%40acme.com/messages?limit=1"},
+	{"conversations", "/v1/agents/agent-a%40acme.com/conversations?limit=1", "/v1/agents/agent-b%40acme.com/conversations?limit=1"},
+	{"engagements", "/v1/agents/agent-a%40acme.com/contacts?limit=1", "/v1/agents/agent-b%40acme.com/contacts?limit=1"},
+	{"agent_suppressions", "/v1/agents/agent-a%40acme.com/suppressions?limit=1", "/v1/agents/agent-b%40acme.com/suppressions?limit=1"},
+	{"message_lifecycle", "/v1/agents/agent-a%40acme.com/messages/msg_1/lifecycle?limit=1", "/v1/agents/agent-b%40acme.com/messages/msg_1/lifecycle?limit=1"},
 }
 
-// mint drives one real first-page request and returns its next_cursor.
-func mint(t *testing.T, srv *httptest.Server, path string) string {
+// mint drives one real first-page request as `bearer` and returns its
+// next_cursor.
+func mint(t *testing.T, srv *httptest.Server, path, bearer string) string {
 	t.Helper()
-	code, body := getJSON(t, srv.URL+path, "good")
+	code, body := getJSON(t, srv.URL+path, bearer)
 	if code != http.StatusOK {
 		t.Fatalf("%s: first page status %d body %v", path, code, body)
 	}
@@ -224,7 +329,7 @@ func TestCursor_ForeignEndpointCursorRejected(t *testing.T) {
 
 	cursors := make(map[string]string, len(cursorBoundEndpoints))
 	for _, ep := range cursorBoundEndpoints {
-		cursors[ep.name] = mint(t, srv, ep.path)
+		cursors[ep.name] = mint(t, srv, ep.pathA, "good")
 	}
 
 	for _, target := range cursorBoundEndpoints {
@@ -233,7 +338,7 @@ func TestCursor_ForeignEndpointCursorRejected(t *testing.T) {
 				continue
 			}
 			t.Run(source.name+"_cursor_on_"+target.name, func(t *testing.T) {
-				u := srv.URL + target.path + "&cursor=" + url.QueryEscape(cursors[source.name])
+				u := srv.URL + target.pathA + "&cursor=" + url.QueryEscape(cursors[source.name])
 				code, body := getJSON(t, u, "good")
 				if code != http.StatusBadRequest {
 					t.Fatalf("foreign cursor accepted: status %d body %v", code, body)
@@ -246,13 +351,56 @@ func TestCursor_ForeignEndpointCursorRejected(t *testing.T) {
 	}
 }
 
+// TestCursor_ForeignAccountCursorRejected is the second binding axis: a
+// cursor minted by account A, presented by account B on the SAME collection,
+// must be a 400 invalid_cursor — pre-fix it verified under the
+// deployment-global secret and silently mispositioned B's (still
+// account-scoped) query. Both accounts' own cursors keep walking.
+func TestCursor_ForeignAccountCursorRejected(t *testing.T) {
+	srv := cursorBindingServer(t)
+	for _, ep := range cursorBoundEndpoints {
+		t.Run(ep.name, func(t *testing.T) {
+			cursorA := mint(t, srv, ep.pathA, "good")
+
+			// Baseline: account B's own view of the collection has rows.
+			code, body := getJSON(t, srv.URL+ep.pathB, "other")
+			if code != http.StatusOK {
+				t.Fatalf("baseline for account B: status %d body %v", code, body)
+			}
+			if items, _ := body["items"].([]any); len(items) == 0 {
+				t.Fatalf("baseline for account B returned no rows; the fixture is wrong")
+			}
+
+			// A's cursor in B's hands: rejected, indistinguishable from a forgery.
+			code, body = getJSON(t, srv.URL+ep.pathB+"&cursor="+url.QueryEscape(cursorA), "other")
+			if code != http.StatusBadRequest {
+				t.Fatalf("foreign-account cursor accepted: status %d body %v", code, body)
+			}
+			if errCode(body) != "invalid_cursor" {
+				t.Fatalf("want code invalid_cursor, got %v", body)
+			}
+
+			// The counterweight: A→A and B→B continuations both stay valid.
+			code, body = getJSON(t, srv.URL+ep.pathA+"&cursor="+url.QueryEscape(cursorA), "good")
+			if code != http.StatusOK {
+				t.Fatalf("account A's own cursor rejected: status %d body %v", code, body)
+			}
+			cursorB := mint(t, srv, ep.pathB, "other")
+			code, body = getJSON(t, srv.URL+ep.pathB+"&cursor="+url.QueryEscape(cursorB), "other")
+			if code != http.StatusOK {
+				t.Fatalf("account B's own cursor rejected: status %d body %v", code, body)
+			}
+		})
+	}
+}
+
 // TestCursor_ContactsCursorOnEventsIsRejected pins the exact live
 // reproduction from staging: a contacts cursor replayed on /v1/events used
 // to return 200 with an empty items array while the same query without a
 // cursor returned rows.
 func TestCursor_ContactsCursorOnEventsIsRejected(t *testing.T) {
 	srv := cursorBindingServer(t)
-	contactsCursor := mint(t, srv, "/v1/contacts?limit=1")
+	contactsCursor := mint(t, srv, "/v1/contacts?limit=1", "good")
 
 	// Sanity: without a cursor, /v1/events has rows to return.
 	code, body := getJSON(t, srv.URL+"/v1/events?limit=3", "good")
@@ -270,33 +418,38 @@ func TestCursor_ContactsCursorOnEventsIsRejected(t *testing.T) {
 }
 
 // TestCursor_OwnCursorStillWalks is the counterweight: binding must not
-// break normal pagination. Each endpoint's own cursor still advances, and
-// page 2 is disjoint from page 1.
+// break normal pagination. Each endpoint's own cursor still advances for
+// each account, and page 2 is disjoint from page 1.
 func TestCursor_OwnCursorStillWalks(t *testing.T) {
 	srv := cursorBindingServer(t)
 	for _, ep := range cursorBoundEndpoints {
-		t.Run(ep.name, func(t *testing.T) {
-			code, first := getJSON(t, srv.URL+ep.path, "good")
-			if code != http.StatusOK {
-				t.Fatalf("page 1: status %d body %v", code, first)
-			}
-			cursor, _ := first["next_cursor"].(string)
-			if cursor == "" {
-				t.Fatalf("page 1 produced no cursor: %v", first)
-			}
-			code, second := getJSON(t, srv.URL+ep.path+"&cursor="+url.QueryEscape(cursor), "good")
-			if code != http.StatusOK {
-				t.Fatalf("page 2: status %d body %v", code, second)
-			}
-			firstItems, _ := first["items"].([]any)
-			secondItems, _ := second["items"].([]any)
-			if len(firstItems) != 1 || len(secondItems) != 1 {
-				t.Fatalf("want 1 item per page, got %d and %d", len(firstItems), len(secondItems))
-			}
-			if fmt.Sprint(firstItems[0]) == fmt.Sprint(secondItems[0]) {
-				t.Fatalf("page 2 repeated page 1's row: %v", firstItems[0])
-			}
-		})
+		for _, acct := range []struct{ bearer, path string }{
+			{"good", ep.pathA},
+			{"other", ep.pathB},
+		} {
+			t.Run(ep.name+"_"+acct.bearer, func(t *testing.T) {
+				code, first := getJSON(t, srv.URL+acct.path, acct.bearer)
+				if code != http.StatusOK {
+					t.Fatalf("page 1: status %d body %v", code, first)
+				}
+				cursor, _ := first["next_cursor"].(string)
+				if cursor == "" {
+					t.Fatalf("page 1 produced no cursor: %v", first)
+				}
+				code, second := getJSON(t, srv.URL+acct.path+"&cursor="+url.QueryEscape(cursor), acct.bearer)
+				if code != http.StatusOK {
+					t.Fatalf("page 2: status %d body %v", code, second)
+				}
+				firstItems, _ := first["items"].([]any)
+				secondItems, _ := second["items"].([]any)
+				if len(firstItems) != 1 || len(secondItems) != 1 {
+					t.Fatalf("want 1 item per page, got %d and %d", len(firstItems), len(secondItems))
+				}
+				if fmt.Sprint(firstItems[0]) == fmt.Sprint(secondItems[0]) {
+					t.Fatalf("page 2 repeated page 1's row: %v", firstItems[0])
+				}
+			})
+		}
 	}
 }
 
@@ -306,11 +459,11 @@ func TestCursor_OwnCursorStillWalks(t *testing.T) {
 func TestCursor_ResourceIsSignedNotJustTagged(t *testing.T) {
 	const secret = "0123456789abcdef0123456789abcdef"
 	pos := keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "x_1"}
-	asEvents, err := EncodeCursor(secret, cursorEvents, pos)
+	asEvents, err := EncodeCursor(secret, "u_1", cursorEvents, pos)
 	if err != nil {
 		t.Fatal(err)
 	}
-	asAgents, err := EncodeCursor(secret, cursorAgents, pos)
+	asAgents, err := EncodeCursor(secret, "u_1", cursorAgents, pos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +471,7 @@ func TestCursor_ResourceIsSignedNotJustTagged(t *testing.T) {
 		t.Fatal("the resource must change the cursor bytes")
 	}
 	var out keysetCursor
-	if err := DecodeCursor([]string{secret}, cursorAgents, asEvents, &out); err != ErrCursorResourceMismatch {
+	if err := DecodeCursor([]string{secret}, "u_1", cursorAgents, asEvents, &out); err != ErrCursorResourceMismatch {
 		t.Fatalf("events cursor decoded as agents: %v", err)
 	}
 	// ErrCursorResourceMismatch must still satisfy the broad sentinel so
@@ -326,11 +479,63 @@ func TestCursor_ResourceIsSignedNotJustTagged(t *testing.T) {
 	if !errors.Is(ErrCursorResourceMismatch, ErrInvalidCursor) {
 		t.Fatal("ErrCursorResourceMismatch must wrap ErrInvalidCursor")
 	}
-	if err := DecodeCursor([]string{secret}, cursorEvents, asEvents, &out); err != nil {
+	if err := DecodeCursor([]string{secret}, "u_1", cursorEvents, asEvents, &out); err != nil {
 		t.Fatalf("own-resource decode: %v", err)
 	}
 	if out != pos {
 		t.Fatalf("round-trip mismatch: %+v want %+v", out, pos)
+	}
+}
+
+// TestCursor_AccountBindsViaMACKeyNotEnvelope pins the shape of the account
+// binding: the account changes the MAC (so a foreign account's cursor fails
+// verification as a plain ErrInvalidCursor, indistinguishable from a
+// forgery) but never appears in the envelope — the envelope is signed, not
+// encrypted, and cursors travel in query strings and logs. Secret rotation
+// must keep working through the derived key.
+func TestCursor_AccountBindsViaMACKeyNotEnvelope(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	pos := keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "x_1"}
+	asA, err := EncodeCursor(secret, "u_alpha", cursorEvents, pos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asB, err := EncodeCursor(secret, "u_bravo", cursorEvents, pos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asA == asB {
+		t.Fatal("the account must change the cursor bytes")
+	}
+	// Identical payload segment, differing only in the MAC: the account is
+	// in the key, not the envelope.
+	payloadA, _, _ := strings.Cut(asA, ".")
+	payloadB, _, _ := strings.Cut(asB, ".")
+	if payloadA != payloadB {
+		t.Fatalf("payload segments differ — the account leaked into the envelope:\n%s\n%s", payloadA, payloadB)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payloadA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "u_alpha") {
+		t.Fatalf("plaintext account ID in the envelope: %s", raw)
+	}
+	var out keysetCursor
+	if err := DecodeCursor([]string{secret}, "u_bravo", cursorEvents, asA, &out); err != ErrInvalidCursor {
+		t.Fatalf("foreign-account cursor: want plain ErrInvalidCursor, got %v", err)
+	}
+	if err := DecodeCursor([]string{secret}, "u_alpha", cursorEvents, asA, &out); err != nil {
+		t.Fatalf("own-account decode: %v", err)
+	}
+	if out != pos {
+		t.Fatalf("round-trip mismatch: %+v want %+v", out, pos)
+	}
+	// Rotation: a cursor signed under an old secret keeps verifying when the
+	// old secret is still in the accepted list — derivation happens per
+	// candidate secret inside the loop.
+	if err := DecodeCursor([]string{"a-newer-secret-value-padding-32ch", secret}, "u_alpha", cursorEvents, asA, &out); err != nil {
+		t.Fatalf("rotation verify through derived key: %v", err)
 	}
 }
 
@@ -375,7 +580,7 @@ func deliveriesBindingServer(t *testing.T) *httptest.Server {
 // webhook pinned, webhook A's keyset anchor was handed to webhook B's query.
 func TestDeliveriesCursor_ForeignWebhookRejected(t *testing.T) {
 	srv := deliveriesBindingServer(t)
-	cursorA := mint(t, srv, "/v1/webhooks/wh_a/deliveries?limit=1")
+	cursorA := mint(t, srv, "/v1/webhooks/wh_a/deliveries?limit=1", "good")
 
 	// Baseline: webhook B has rows of its own to return.
 	code, body := getJSON(t, srv.URL+"/v1/webhooks/wh_b/deliveries?limit=3", "good")
@@ -413,20 +618,20 @@ func TestDeliveriesCursor_OwnWebhookStillWalks(t *testing.T) {
 // instead of silently losing its view binding.
 func TestDecodeKeyset_RejectsTrashViewCursor(t *testing.T) {
 	srv := &Server{deps: Deps{CursorSecret: "0123456789abcdef0123456789abcdef"}}
-	deleted, err := EncodeCursor(srv.deps.CursorSecret, cursorReviews,
+	deleted, err := EncodeCursor(srv.deps.CursorSecret, "u_1", cursorReviews,
 		keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "r_1", Deleted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := srv.decodeKeyset(cursorReviews, deleted); err == nil {
+	if _, _, err := srv.decodeKeyset("u_1", cursorReviews, deleted); err == nil {
 		t.Fatal("decodeKeyset accepted a trash-view cursor")
 	}
-	live, err := EncodeCursor(srv.deps.CursorSecret, cursorReviews,
+	live, err := EncodeCursor(srv.deps.CursorSecret, "u_1", cursorReviews,
 		keysetCursor{CreatedAt: time.Unix(1700000000, 0).UTC(), ID: "r_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, id, err := srv.decodeKeyset(cursorReviews, live); err != nil || id != "r_1" {
+	if _, id, err := srv.decodeKeyset("u_1", cursorReviews, live); err != nil || id != "r_1" {
 		t.Fatalf("decodeKeyset rejected a live cursor: id=%q err=%v", id, err)
 	}
 }
