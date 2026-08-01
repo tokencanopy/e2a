@@ -13,6 +13,7 @@ import { useAgents } from "../../../components/hooks/useAgents";
 function detectTab(pathname: string): AgentTab {
   if (pathname.startsWith("/inboxes/settings")) return "settings";
   if (pathname.startsWith("/inboxes/outreach")) return "outreach";
+  if (pathname.startsWith("/inboxes/suppressions")) return "suppressions";
   if (pathname.startsWith("/inboxes/trash")) return "trash";
   // Default to messages — the only other live tab today, and the
   // canonical landing destination from the dashboard's "Open inbox →"

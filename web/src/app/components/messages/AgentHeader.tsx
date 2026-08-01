@@ -16,7 +16,7 @@ import { CounterpartyAvatar } from "./CounterpartyAvatar";
 import { sendAgentTestEmail } from "../onboarding/api";
 import type { DashboardAgent } from "../types";
 
-export type AgentTab = "messages" | "outreach" | "trash" | "settings";
+export type AgentTab = "messages" | "outreach" | "suppressions" | "trash" | "settings";
 
 // The agent-detail surface is intentionally scoped to two tabs:
 //   • Messages — the threaded inbox with inline conversation detail.
@@ -29,6 +29,7 @@ export type AgentTab = "messages" | "outreach" | "trash" | "settings";
 const TABS: { key: AgentTab; label: string; slug: string }[] = [
   { key: "messages", label: "Inbox", slug: "messages" },
   { key: "outreach", label: "Outreach", slug: "outreach" },
+  { key: "suppressions", label: "Suppressions", slug: "suppressions" },
   { key: "trash", label: "Trash", slug: "trash" },
   { key: "settings", label: "Settings", slug: "settings" },
 ];
@@ -173,8 +174,9 @@ export function AgentHeader({
         )}
       </div>
 
-      {/* Tab strip */}
-      <div className="flex items-center gap-1 mt-1">
+      {/* Tab strip — five tabs; horizontal scroll on narrow screens rather
+          than wrapping into the header. */}
+      <div className="flex items-center gap-1 mt-1 overflow-x-auto whitespace-nowrap">
         {TABS.map((t) => {
           const active = t.key === tab;
           const baseStyle = {
