@@ -1,5 +1,3 @@
-[![MCP Toplist](https://mcptoplist.com/badge/io.github.Mnexa-AI%2Fmcp-server.svg)](https://mcptoplist.com/server/io.github.Mnexa-AI%2Fmcp-server)
-
 <div align="center">
 
 <picture>
@@ -16,6 +14,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 [![License](https://img.shields.io/github/license/tokencanopy/e2a)](LICENSE)
 [![npm @e2a/sdk](https://img.shields.io/npm/v/%40e2a%2Fsdk?label=%40e2a%2Fsdk)](https://www.npmjs.com/package/@e2a/sdk)
 [![PyPI e2a](https://img.shields.io/pypi/v/e2a)](https://pypi.org/project/e2a/)
+[![MCP Toplist](https://img.shields.io/badge/MCP%20Toplist-Top%201%25-4F46FF)](https://mcptoplist.com/server/dev.e2a%2Fmcp-server)
 
 [Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
