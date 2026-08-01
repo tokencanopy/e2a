@@ -47,6 +47,7 @@ from e2a.v1.generated.models import (
     TemplateView,
     WebhookDeliveryView,
     WebhookView,
+    ReplyRequest,
     SendEmailRequest,
     UnsubscribeOptions,
 )
@@ -788,6 +789,45 @@ async def test_forward_threads_managed_unsubscribe(httpx_mock):
     req = httpx_mock.get_requests()[-1]
     assert "/v1/agents/bot%40test.dev/messages/msg_1/forward" in str(req.url)
     assert json.loads(req.content)["unsubscribe"] == {"mode": "managed"}
+
+
+@pytest.mark.anyio
+async def test_reply_threads_quote_history(httpx_mock):
+    # Experimental: the quote_history kwarg lands on the generated request
+    # model and serializes onto the wire.
+    httpx_mock.add_response(json={"message_id": "msg_q1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "yo"},
+            quote_history=True,
+        )
+    req = httpx_mock.get_requests()[-1]
+    assert "/v1/agents/bot%40test.dev/messages/msg_1/reply" in str(req.url)
+    assert json.loads(req.content)["quote_history"] is True
+
+
+@pytest.mark.anyio
+async def test_reply_quote_history_kwarg_does_not_mutate_caller_model(httpx_mock):
+    # Regression: _coerce returns the caller's own model when body is already a
+    # ReplyRequest — the kwarg must land on a copy, not on the caller's object,
+    # or reusing one model across replies leaks quote_history into later
+    # replies.
+    httpx_mock.add_response(json={"message_id": "msg_q2", "status": "sent"})
+    request = ReplyRequest(text="yo")
+    async with _client() as c:
+        await c.messages.reply("bot@test.dev", "msg_1", request, quote_history=True)
+    assert json.loads(httpx_mock.get_requests()[-1].content)["quote_history"] is True
+    assert request.quote_history is None
+
+
+@pytest.mark.anyio
+async def test_reply_without_quote_history_omits_field(httpx_mock):
+    httpx_mock.add_response(json={"message_id": "msg_q3", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply("bot@test.dev", "msg_1", {"text": "yo"})
+    assert "quote_history" not in json.loads(httpx_mock.get_requests()[-1].content)
 
 
 @pytest.mark.anyio

@@ -22,10 +22,15 @@ import {
 import type { EmailSentData, WebhookEvent } from "../../src/v1/webhook-signature.js";
 import type { WSEvent } from "../../src/v1/ws.js";
 import { E2AClient } from "../../src/v1/client.js";
+import type { ReplyInput } from "../../src/v1/client.js";
 import type { InboundEmail } from "../../src/v1/inbound.js";
 
 const senderFilter: ListMessagesParams = { from_: "alice@example.com" };
 void senderFilter;
+
+// Experimental: quoteHistory is an optional boolean on reply input.
+const quotedReply: ReplyInput = { text: "ok", quoteHistory: true };
+void quotedReply;
 
 const summaryThreadIDIsOptional: Pick<MessageSummaryView, "threadId"> = {};
 const detailThreadIDIsOptional: Pick<MessageView, "threadId"> = {};

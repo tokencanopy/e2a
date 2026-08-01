@@ -678,6 +678,14 @@ declared stable.
   message reaches a terminal-or-held state or a bounded timeout; a future
   `send_at` instead returns `status=scheduled` immediately and does not wait
   until that time.
+- `quote_history` **(experimental)** on reply: when `true`, the server appends
+  the referenced message beneath the reply body as mail-client-style quoted
+  history — an `On <date>, <sender> wrote:` attribution line, the original
+  text `>`-prefixed, and (when an `html` body is supplied) the original HTML
+  in a blockquote. Composed at accept time, so a held reply shows the reviewer
+  the final quoted content. Only body parts the caller supplies are quoted (a
+  text-only reply stays text-only). Defaults to `false` (bodies are sent
+  exactly as provided). May change or be removed before it is declared stable.
 - `send_at` **(beta)** on send/reply/forward must be RFC 3339 with an explicit
   UTC offset, can be at most 90 days ahead, and **survives a review hold**: a
   held message keeps its `send_at` (surfaced as `scheduled_at` on the

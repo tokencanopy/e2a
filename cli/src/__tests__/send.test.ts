@@ -248,6 +248,27 @@ describe("send/reply commands", () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it("passes --quote-history through to the SDK reply call", async () => {
+    mockReply.mockResolvedValue({ messageId: "msg_q", status: "sent" });
+    const { reply } = await import("../commands/send.js");
+
+    await reply("msg_orig", { body: "answer", quoteHistory: true });
+
+    expect(mockReply.mock.calls[0][2].quoteHistory).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("omits quoteHistory from the reply body when the flag is not set", async () => {
+    mockReply.mockResolvedValue({ messageId: "msg_nq", status: "sent" });
+    const { reply } = await import("../commands/send.js");
+
+    await reply("msg_orig", { body: "answer", quoteHistory: false });
+
+    // Absent-or-false stays off the wire so the request matches the
+    // documented server default exactly.
+    expect(mockReply.mock.calls[0][2].quoteHistory).toBeUndefined();
+  });
+
   it("sends markup-only HTML whose derived text fallback is empty", async () => {
     mockReadFileSync.mockReturnValue('<img src="cid:logo"><table><tr><td></td></tr></table>');
     mockSend.mockResolvedValue({ messageId: "msg_img", status: "sent" });

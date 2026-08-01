@@ -31,6 +31,7 @@ export interface ReplyOptions {
   idempotencyKey?: string;
   attach?: string[];
   sendAt?: string;
+  quoteHistory?: boolean;
 }
 
 // --reply-to is repeatable (an RFC 5322 Reply-To may name several addresses).
@@ -77,7 +78,7 @@ function readAttachments(paths: string[] | undefined): Attachment[] | undefined 
 const SEND_USAGE =
   "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
 const REPLY_USAGE =
-  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
+  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--quote-history] [--agent <inbox>] [--json]";
 
 /**
  * Parse the optional --send-at flag into a Date for scheduled send. Requires an
@@ -211,7 +212,16 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
   const result = await client.messages.reply(
     agentEmail,
     messageId,
-    { text: body, html: htmlBody, replyTo: replyToArg(opts.replyTo), attachments: readAttachments(opts.attach), sendAt },
+    {
+      text: body,
+      html: htmlBody,
+      replyTo: replyToArg(opts.replyTo),
+      attachments: readAttachments(opts.attach),
+      sendAt,
+      // Experimental server-side quoted history. Absent-or-false stays off the
+      // wire so the request matches the documented default exactly.
+      quoteHistory: opts.quoteHistory || undefined,
+    },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
   emitSendResult(result, opts.json);

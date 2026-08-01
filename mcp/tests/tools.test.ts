@@ -449,6 +449,18 @@ describe("e2a MCP server", () => {
     }
   });
 
+  it("labels reply_to_message's quote_history as experimental with the server default", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    const properties = (byName.get("reply_to_message")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    })?.properties ?? {};
+    const description = properties.quote_history?.description ?? "";
+    expect(description).toMatch(/experimental.*may change or be removed/i);
+    expect(description).toMatch(/quoted history/i);
+    expect(description).toMatch(/defaults to false/i);
+  });
+
   it("documents how conversation_id binds email to an agent runtime thread", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -1197,6 +1209,31 @@ describe("e2a MCP server", () => {
       "msg_in",
       ["destination@example.com"],
       expect.objectContaining({ sendAt: expected }),
+      {},
+      undefined,
+    );
+  });
+
+  it("reply_to_message maps the experimental quote_history flag to quoteHistory", async () => {
+    await client.callTool({
+      name: "reply_to_message",
+      arguments: { message_id: "msg_in", text: "thanks", quote_history: true },
+    });
+    expect(stub.reply).toHaveBeenCalledWith(
+      "msg_in",
+      expect.objectContaining({ quoteHistory: true }),
+      {},
+      undefined,
+    );
+
+    // Omitted stays off the SDK call so the wire matches the server default.
+    await client.callTool({
+      name: "reply_to_message",
+      arguments: { message_id: "msg_in", text: "thanks" },
+    });
+    expect(stub.reply).toHaveBeenLastCalledWith(
+      "msg_in",
+      { text: "thanks" },
       {},
       undefined,
     );

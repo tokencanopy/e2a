@@ -452,6 +452,25 @@ describe("E2AClient", () => {
     expect(result.scheduledAt).toEqual(sendAt);
   });
 
+  it("messages.reply serializes the experimental quoteHistory flag", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_quoted_reply", status: "sent" });
+
+    await client.messages.reply("bot@test.dev", "msg_1", {
+      text: "Quoted reply",
+      quoteHistory: true,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).quote_history).toBe(true);
+  });
+
+  it("messages.reply omits quote_history when quoteHistory is not set", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_plain_reply", status: "sent" });
+
+    await client.messages.reply("bot@test.dev", "msg_1", { text: "Plain reply" });
+
+    expect(JSON.parse(lastCall().init.body as string)).not.toHaveProperty("quote_history");
+  });
+
   it("messages.forward serializes sendAt and parses the scheduled result", async () => {
     const sendAt = new Date("2026-08-01T16:00:00.000Z");
     globalThis.fetch = mockFetch(202, {
