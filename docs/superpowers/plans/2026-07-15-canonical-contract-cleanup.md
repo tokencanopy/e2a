@@ -275,7 +275,7 @@ multiple statuses for `invalid_request` and `domain_not_verified`.
 
 - [ ] **Step 2: Write a failing Markdown-table drift test**
 
-Read `../../docs/api.md`, restrict parsing to the `## Error codes` section,
+Read `../../api.md`, restrict parsing to the `## Error codes` section,
 parse rows whose first cell contains backticked codes, split grouped code cells
 on commas, and compare code/status pairs with the catalog. Report missing,
 extra, and mismatched entries separately.
