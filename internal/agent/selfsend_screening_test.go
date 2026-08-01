@@ -27,7 +27,7 @@ func protectedSelfAgent(t *testing.T, store *identity.Store, label string, cfg i
 	t.Helper()
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, label)
-	if err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
+	if _, err := store.UpdateAgentProtection(ctx, ag.ID, user.ID, cfg); err != nil {
 		t.Fatalf("UpdateAgentProtection: %v", err)
 	}
 	refreshed, err := store.GetAgentByEmail(ctx, ag.EmailAddress())

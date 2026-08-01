@@ -63,20 +63,20 @@ type eventOutput struct {
 }
 
 func (s *Server) registerEvents() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listEvents", Method: http.MethodGet, Path: "/v1/events",
 		Summary: "List events", Tags: []string{"events"},
 		Description: "The webhook-event delivery log, filterable by type/agent/conversation/message and time range, with cursor pagination.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListEvents)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getEvent", Method: http.MethodGet, Path: "/v1/events/{id}",
 		Summary: "Get an event", Tags: []string{"events"},
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleGetEvent)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "redeliverEvent", Method: http.MethodPost, Path: "/v1/events/{id}/redeliver",
 		Summary: "Redeliver an event", Tags: []string{"events"},
 		Description:   "Re-enqueue webhook delivery for an event. With a webhook_id, replays to that subscriber; without, fans out to every originally-matched subscriber. Auto-deduplicated within a short window — receivers must dedup on event id. Returns 202 Accepted: the redelivery is durably enqueued for async submission, not delivered synchronously — the per-subscriber outcome surfaces via the delivery log, and each delivery's status is 'pending' (or 'scheduled' for the fan-out).",
@@ -277,8 +277,8 @@ func (s *Server) handleListEvents(ctx context.Context, in *ListEventsInput) (*li
 	}
 	var cur eventsCursor
 	if in.Cursor != "" {
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(user.ID, cursorEvents, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.Ty != in.Type || cur.Ag != in.AgentID || cur.Co != in.ConversationID ||
 			cur.Ms != in.MessageID || cur.Si != rfc3339PtrOrEmpty(since) || cur.Un != rfc3339PtrOrEmpty(until) {
@@ -303,7 +303,7 @@ func (s *Server) handleListEvents(ctx context.Context, in *ListEventsInput) (*li
 	var nextCursor string
 	if hasMore {
 		last := events[len(events)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, eventsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorEvents, eventsCursor{
 			C: last.CreatedAt, I: last.ID,
 			Ty: in.Type, Ag: in.AgentID, Co: in.ConversationID, Ms: in.MessageID,
 			Si: rfc3339PtrOrEmpty(since), Un: rfc3339PtrOrEmpty(until),

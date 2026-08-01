@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -25,13 +26,31 @@ const (
 	maxContactImportRows      = 1000
 	maxContactImportBodyBytes = 20 << 20
 
+	// Per-row content bounds. These are the same numbers the single-contact
+	// create enforces via its schema, but they are enforced HERE, in the
+	// handler, rather than as item-level maxLength in the request schema.
+	//
+	// The distinction is the whole point of the endpoint. A schema violation is
+	// a whole-request 422 with nothing imported, which for a 1000-row upload
+	// means one over-long name in the spreadsheet loses all 999 good rows —
+	// exactly the failure mode "one malformed row never rejects the rest of the
+	// upload" promises callers it does not have. Every other per-row check
+	// (address parse, metadata bounds) already fails its own row and lets the
+	// batch through; length is now the same kind of check.
+	//
+	// Request-SHAPE bounds stay in the schema, where a whole-request rejection
+	// is the right answer: maxItems on contacts, and the length caps on the
+	// request-level agent_email and stage fields.
+	maxContactAddressLen     = 320
+	maxContactDisplayNameLen = 320
+
 	contactImportBetaDescription = "Beta: the contact import surface may change before it is declared stable."
 )
 
 // ContactImportRow is one row of an upload.
 type ContactImportRow struct {
-	Address     string         `json:"address" required:"true" maxLength:"320" doc:"Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\")."`
-	DisplayName *string        `json:"display_name,omitempty" maxLength:"320" doc:"Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one."`
+	Address     string         `json:"address" required:"true" doc:"Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch."`
+	DisplayName *string        `json:"display_name,omitempty" doc:"Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one."`
 	Metadata    map[string]any `json:"metadata,omitempty" doc:"Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. A row that exceeds a bound fails on its own, without affecting the rest of the batch."`
 }
 
@@ -96,16 +115,16 @@ type deleteImportBatchOutput struct {
 }
 
 func (s *Server) registerContactImport() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "importContacts", Method: http.MethodPost, Path: "/v1/contacts/import",
 		Summary: "Import contacts in bulk (beta)", Tags: []string{"contacts"},
-		Description:  "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. " + contactImportBetaDescription,
+		Description:  "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. " + contactImportBetaDescription,
 		Security:     []map[string][]string{{"bearer": {}}},
 		MaxBodyBytes: maxContactImportBodyBytes,
 		Extensions:   beta(),
 	}, s.handleImportContacts)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteImportBatch", Method: http.MethodDelete, Path: "/v1/contacts/imports/{batch_id}",
 		Summary: "Reverse a contact import (beta)", Tags: []string{"contacts"},
 		Description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. " + contactImportBetaDescription,
@@ -153,6 +172,16 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 	rows := make([]identity.ContactImportRow, len(in.Body.Contacts))
 	prevalidated := make([]*ContactImportItemResult, len(in.Body.Contacts))
 	for i, row := range in.Body.Contacts {
+		// Length first, and per row rather than in the schema: see the
+		// maxContactAddressLen comment. Checked on the RAW value before parsing
+		// so an over-long string is refused on a cheap rune count.
+		if n := utf8.RuneCountInString(row.Address); n > maxContactAddressLen {
+			prevalidated[i] = &ContactImportItemResult{
+				Index: i, Status: identity.ImportStatusFailed, Code: "invalid_recipient",
+				Message: fmt.Sprintf("address is %d characters; at most %d are allowed", n, maxContactAddressLen),
+			}
+			continue
+		}
 		address, addrErr := validateContactAddress(row.Address)
 		if addrErr != nil {
 			prevalidated[i] = &ContactImportItemResult{
@@ -160,6 +189,15 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 				Code: "invalid_recipient", Message: "address must be a valid email address",
 			}
 			continue
+		}
+		if row.DisplayName != nil {
+			if n := utf8.RuneCountInString(*row.DisplayName); n > maxContactDisplayNameLen {
+				prevalidated[i] = &ContactImportItemResult{
+					Index: i, Address: address, Status: identity.ImportStatusFailed, Code: "invalid_request",
+					Message: fmt.Sprintf("display_name is %d characters; at most %d are allowed", n, maxContactDisplayNameLen),
+				}
+				continue
+			}
 		}
 		if metaErr := validateContactMetadata(row.Metadata); metaErr != nil {
 			prevalidated[i] = &ContactImportItemResult{

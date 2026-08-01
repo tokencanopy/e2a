@@ -640,11 +640,11 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		UpdateAgentName: func(ctx context.Context, agentID, userID, name string) error {
-			return nil
+		UpdateAgentName: func(ctx context.Context, agentID, userID, name string) (*identity.AgentIdentity, error) {
+			return &identity.AgentIdentity{ID: agentID, RegisteredDomain: "acme.com", Email: agentID, Name: name, UserID: userID}, nil
 		},
-		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) error {
-			return nil
+		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) (*identity.AgentIdentity, error) {
+			return &identity.AgentIdentity{ID: agentID, RegisteredDomain: "acme.com", Email: agentID, UserID: userID}, nil
 		},
 		DeleteAgent: func(ctx context.Context, agentID, userID string) error {
 			if userID != "u_1" {

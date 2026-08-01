@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "e2a"
-version = "5.4.0"
+version = "5.5.0"
 description = "Python SDK for the e2a protocol — email-to-agent authentication"
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,6 +33,12 @@ dependencies = [
     "urllib3>=1.25",
     "typing-extensions>=4.7",
 ]
+
+[tool.hatch.build.targets.sdist]
+# Defensive: local pytest-cov data files must never ship in the sdist (they
+# embed absolute local paths). They are also gitignored; this guards a build
+# from a tree where one exists anyway.
+exclude = [".coverage*"]
 
 [tool.hatch.build.targets.wheel]
 # src layout: ship the e2a package (incl. PEP 561 py.typed markers at every

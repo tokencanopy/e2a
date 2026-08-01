@@ -51,6 +51,10 @@ cli/coverage/
 sdks/typescript/coverage/
 mcp/coverage/
 
+# pytest-cov data files (python -m pytest --cov): SQLite databases that
+# embed absolute local worktree paths, so they must never be committed.
+sdks/python/.coverage*
+
 # TS SDK ergonomic-surface coverage-gate shards (npm run test:live --workspace @e2a/sdk)
 sdks/typescript/test/coverage/reports/
 

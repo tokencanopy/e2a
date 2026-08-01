@@ -100,7 +100,7 @@ type rejectReviewInput struct {
 }
 
 func (s *Server) registerReviews() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listReviews", Method: http.MethodGet, Path: "/v1/reviews",
 		Summary: "List messages awaiting review (beta)", Tags: []string{"reviews"},
 		Description: "The review queue: every message held in pending_review across the account's inboxes — outbound drafts awaiting send approval AND inbound messages held by a screening gate. Account-scoped credentials only; agents cannot see (or resolve) holds. " + reviewsBetaDoc,
@@ -108,7 +108,7 @@ func (s *Server) registerReviews() {
 		Extensions:  beta(),
 	}, s.handleListReviews)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getReview", Method: http.MethodGet, Path: "/v1/reviews/{id}",
 		Summary: "Get a held message (full detail, beta)", Tags: []string{"reviews"},
 		Description: "Full detail of one held message — body + recipients (and, for inbound, the screening/auth context) — for a reviewer to make a decision. Account-scoped only. " + reviewsBetaDoc,
@@ -116,7 +116,7 @@ func (s *Server) registerReviews() {
 		Extensions:  beta(),
 	}, s.handleGetReview)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "approveReview", Method: http.MethodPost, Path: "/v1/reviews/{id}/approve",
 		Summary: "Approve a held message (beta)", Tags: []string{"reviews"},
 		Description:  "Approve a hold. Branches on direction: an outbound draft is durably queued for asynchronous delivery (honoring Idempotency-Key + optional reviewer overrides); an inbound hold is released to the inbox. Returns 202 with status=accepted for queued outbound delivery and 200 for an inbound release or local self-send loopback. Account-scoped only — an agent cannot approve its own hold. Approving an outbound draft applies the same per-agent send-rate limit as a direct send: 429 rate_limited when the agent is over its throughput limit (back off Retry-After seconds and retry). The merged outbound draft after applying reviewer overrides is subject to the same composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. The final merged recipient set (to, cc, and bcc, including reviewer overrides) is also re-checked against the account suppression list: any suppressed recipient returns 422 recipient_suppressed and the hold stays pending_review — remove the suppression (DELETE /v1/account/suppressions/{address}) and approve again. " + reviewsBetaDoc,
@@ -143,7 +143,7 @@ func (s *Server) registerReviews() {
 		},
 	}, s.handleApproveReview)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "rejectReview", Method: http.MethodPost, Path: "/v1/reviews/{id}/reject",
 		Summary: "Reject a held message (beta)", Tags: []string{"reviews"},
 		Description: "Reject a hold. An outbound draft is discarded (never sent); an inbound hold is dropped (never reaches the agent; payload retained hidden for forensics). Account-scoped only. " + reviewsBetaDoc,
@@ -160,7 +160,7 @@ func (s *Server) handleListReviews(ctx context.Context, in *listReviewsInput) (*
 	if s.deps.ListReviews == nil {
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "reviews are not available on this deployment")
 	}
-	afterCreatedAt, afterID, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterID, err := s.decodeKeyset(p.User.ID, cursorReviews, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (s *Server) handleListReviews(ctx context.Context, in *listReviewsInput) (*
 	var nextCursor string
 	if hasMore {
 		last := items[len(items)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.ID); err != nil {
+		if nextCursor, err = s.encodeKeyset(p.User.ID, cursorReviews, last.CreatedAt, last.ID); err != nil {
 			return nil, err
 		}
 	}

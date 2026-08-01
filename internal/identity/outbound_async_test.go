@@ -492,7 +492,7 @@ func TestMarkOutboundSentTxSkipsTrashRace(t *testing.T) {
 		}
 	})
 
-	if err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	t.Run("trashed agent", func(t *testing.T) {
@@ -569,7 +569,7 @@ func TestMarkOutboundFailedTxSkipsTrashRace(t *testing.T) {
 		}
 	})
 
-	if err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
+	if _, err := store.RestoreMessage(ctx, msg.ID, agentID); err != nil {
 		t.Fatalf("RestoreMessage: %v", err)
 	}
 	t.Run("trashed agent", func(t *testing.T) {

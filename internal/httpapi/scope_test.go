@@ -62,11 +62,15 @@ func scopeTestServer(t *testing.T) *httptest.Server {
 			}
 			return nil, errors.New("not found")
 		},
-		UpdateAgentName: func(ctx context.Context, agentID, userID, name string) error {
-			return nil
+		UpdateAgentName: func(ctx context.Context, agentID, userID, name string) (*identity.AgentIdentity, error) {
+			a := sampleAgent()
+			a.ID, a.Name = agentID, name
+			return &a, nil
 		},
-		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) error {
-			return nil
+		UpdateAgentProtection: func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) (*identity.AgentIdentity, error) {
+			a := sampleAgent()
+			a.ID = agentID
+			return &a, nil
 		},
 		DeleteAgent: func(ctx context.Context, agentID, userID string) error { return nil },
 		Legacy:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) }),

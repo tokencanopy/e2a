@@ -14,11 +14,11 @@ import { HttpFile } from '../http/http.js';
 
 export class ContactImportRow {
     /**
-    * Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\").
+    * Email address. Accepts a bare address or an RFC 5322 mailbox (\"A. Partner <partner@fund.vc>\"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch.
     */
     'address': string;
     /**
-    * Optional human-readable name. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
+    * Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
     */
     'displayName'?: string;
     /**

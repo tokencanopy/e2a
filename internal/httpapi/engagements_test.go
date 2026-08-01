@@ -605,3 +605,76 @@ func TestUpsertEngagementClearsScheduleWithNull(t *testing.T) {
 		t.Errorf("next_action_at = %v after clearing with null, want nil", body["next_action_at"])
 	}
 }
+
+// TestEngagementUpdateRejectsEmptyIfMatch mirrors the contact case: on staging
+// sha-32ce45dc, PUT /v1/agents/{email}/contacts/{address} with a present-but-
+// empty If-Match returned 200 and a new ETag (req_d7bcfbf956f33b6064bc2601),
+// degrading a guarded write to an unconditional one.
+func TestEngagementUpdateRejectsEmptyIfMatch(t *testing.T) {
+	srv := newEngagementsServer(t, nil)
+	path := raisePath + "/partner%40fund.vc"
+	enrollVia(t, srv, "account", "partner@fund.vc", map[string]any{"stage": "touch1"})
+
+	code, body, _ := sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "touch2"}, map[string]string{"If-Match": ""})
+	if code != http.StatusBadRequest || errCode(body) != "invalid_request" {
+		t.Fatalf("PUT with empty If-Match = %d %v; want 400 invalid_request", code, body)
+	}
+
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["stage"] != "touch1" {
+		t.Fatalf("GET after refused write = %d %v; want the untouched row", code, after)
+	}
+
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "touch2"}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("PUT without If-Match = %d %v; want 200", code, body)
+	}
+}
+
+// TestEngagementUpdateAcceptsAWeakenedValidator mirrors the contact case: a
+// validator weakened by a transforming CDN must still complete the write (see
+// etagMatches for why that tolerance is deliberate), while a stale one is
+// still refused.
+func TestEngagementUpdateAcceptsAWeakenedValidator(t *testing.T) {
+	srv := newEngagementsServer(t, nil)
+	path := raisePath + "/partner%40fund.vc"
+	enrollVia(t, srv, "account", "partner@fund.vc", map[string]any{"stage": "touch1"})
+
+	code, _, headers := sendJSONFull(t, http.MethodGet, srv.URL+path, "account", nil, nil)
+	etag := headers.Get("ETag")
+	if code != http.StatusOK || etag == "" {
+		t.Fatalf("GET = %d ETag=%q; want 200 with an ETag", code, etag)
+	}
+
+	code, body, _ := sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "touch2"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusOK {
+		t.Fatalf("PUT with a weakened current validator = %d %v; want 200", code, body)
+	}
+
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "stale"}, map[string]string{"If-Match": "W/" + etag})
+	if code != http.StatusPreconditionFailed || errCode(body) != "precondition_failed" {
+		t.Fatalf("PUT with a weakened STALE validator = %d %v; want 412", code, body)
+	}
+	code, after := sendJSON(t, http.MethodGet, srv.URL+path, "account", nil)
+	if code != http.StatusOK || after["stage"] != "touch2" {
+		t.Fatalf("GET after refused write = %d %v; want the row left at touch2", code, after)
+	}
+
+	// `If-Match: *` means "if any current representation exists": it succeeds
+	// here and, per the existing contract, refuses to enrol a missing record
+	// rather than creating one.
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+path, "account",
+		map[string]any{"stage": "star"}, map[string]string{"If-Match": "*"})
+	if code != http.StatusOK {
+		t.Fatalf("PUT with If-Match: * on an existing engagement = %d %v; want 200", code, body)
+	}
+	code, body, _ = sendJSONFull(t, http.MethodPut, srv.URL+raisePath+"/absent%40fund.vc", "account",
+		map[string]any{"stage": "star"}, map[string]string{"If-Match": "*"})
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT with If-Match: * on a missing engagement = %d %v; want 412", code, body)
+	}
+}

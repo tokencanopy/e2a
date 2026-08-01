@@ -1459,6 +1459,21 @@ func (s *Store) GetAgentByIDAnyState(ctx context.Context, id string) (*AgentIden
 }
 
 func (s *Store) getAgentByID(ctx context.Context, id string, includeDeleted bool) (*AgentIdentity, error) {
+	return loadAgentByID(ctx, s.pool, id, includeDeleted)
+}
+
+// agentRowQuerier is the read half of *pgxpool.Pool and pgx.Tx. It exists so
+// loadAgentByID can serve both the stand-alone getters and the write paths
+// that must re-read the agent INSIDE their own transaction.
+type agentRowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// loadAgentByID is the one agent projection, parameterized by executor. The
+// domain JOIN (domain_verified lives on `domains`, not `agent_identities`) is
+// why the agent write paths cannot answer with a plain UPDATE … RETURNING, and
+// call this inside their own transaction instead.
+func loadAgentByID(ctx context.Context, exec agentRowQuerier, id string, includeDeleted bool) (*AgentIdentity, error) {
 	q := `SELECT a.id, a.registered_domain, a.user_id, a.name, a.public, a.created_at,
 		        a.hitl_ttl_seconds, a.hitl_expiration_action, a.suppress_notifications,
 		        COALESCE(a.inbound_policy, 'open'), a.inbound_allowlist,
@@ -1477,7 +1492,7 @@ func (s *Store) getAgentByID(ctx context.Context, id string, includeDeleted bool
 		q += ` AND a.deleted_at IS NULL`
 	}
 	a := &AgentIdentity{}
-	err := s.pool.QueryRow(ctx, q, id).Scan(&a.ID, &a.RegisteredDomain, &a.UserID, &a.Name, &a.Public, &a.CreatedAt,
+	err := exec.QueryRow(ctx, q, id).Scan(&a.ID, &a.RegisteredDomain, &a.UserID, &a.Name, &a.Public, &a.CreatedAt,
 		&a.HITLTTLSeconds, &a.HITLExpirationAction, &a.SuppressNotifications,
 		&a.InboundPolicy, &a.InboundAllowlist,
 		&a.InboundPolicyAction,
@@ -1662,24 +1677,48 @@ func ValidateAgentName(name string) error {
 	return nil
 }
 
-// UpdateAgentName sets an agent's display name for an agent owned by userID.
-// The name is a UI label only — the agent's identity is its email. Returns an
-// error if the agent isn't found or not owned.
-func (s *Store) UpdateAgentName(ctx context.Context, agentID, userID, name string) error {
+// UpdateAgentName sets an agent's display name for an agent owned by userID
+// and returns the agent AS WRITTEN. The name is a UI label only — the agent's
+// identity is its email. Returns an error if the agent isn't found or not
+// owned.
+//
+// The read-back happens INSIDE the write's transaction. Reading afterwards
+// from the pool was a torn read: the UPDATE takes the row lock, but once it
+// commits a concurrent rename could land before the re-read and the caller saw
+// the OTHER writer's name echoed back as the result of their own PATCH, while
+// a concurrent trash/delete turned a committed rename into a 500 "failed to
+// reload agent". Same recipe as UpdateEngagementIfUnchanged. The re-read
+// includes trashed rows on purpose: the row it reports is the one this
+// statement wrote, and AgentView carries deleted_at, so a racing trash is
+// reported honestly instead of as a server error.
+func (s *Store) UpdateAgentName(ctx context.Context, agentID, userID, name string) (*AgentIdentity, error) {
 	if err := ValidateAgentName(name); err != nil {
-		return err
+		return nil, err
 	}
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE agent_identities SET name = $3 WHERE id = $1 AND user_id = $2`,
 		agentID, userID, name,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("agent not found or not owned by user")
+		return nil, fmt.Errorf("agent not found or not owned by user")
 	}
-	return nil
+	a, err := loadAgentByID(ctx, tx, agentID, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // Agents are joined with domain verification AND enriched with per-agent stats
@@ -1890,8 +1929,16 @@ func (s *Store) SoftDeleteAgent(ctx context.Context, agentID, userID string) err
 // hold cannot silently lapse while the inbox is trashed.
 // Returns ErrNotInTrash when the agent exists but is live, and ErrAgentNotFound
 // when it doesn't exist (or isn't the caller's).
-func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error {
-	return s.WithTx(ctx, func(tx pgx.Tx) error {
+//
+// It returns the restored agent, read INSIDE the restore transaction. Reading
+// afterwards from the pool was a torn read: a concurrent rename could land
+// between the commit and the re-read (the response then showed the other
+// writer's name), and a concurrent re-trash made a committed restore answer
+// 500 "failed to reload agent". The in-transaction read follows the row lock
+// this transaction already holds, so it always describes this restore.
+func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*AgentIdentity, error) {
+	var restored *AgentIdentity
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
 		var deletedAt *time.Time
 		err := tx.QueryRow(ctx,
 			`SELECT deleted_at FROM agent_identities
@@ -1962,7 +2009,7 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 		if _, err := tx.Exec(ctx,
 			`UPDATE contact_engagements
 			    SET notified_next_action_at = next_action_at,
-			        updated_at = now()
+			        updated_at = `+monotonicUpdatedAt("")+`
 			  WHERE user_id = $1
 			    AND agent_id = $2
 			    AND next_action_at IS NOT NULL
@@ -1973,15 +2020,25 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 		}
 		// Give back the trash time to pending holds on the agent's LIVE
 		// messages only. Message retention itself is indefinite.
-		_, err = tx.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`UPDATE messages
 			    SET approval_expires_at = CASE
 			          WHEN status = 'pending_review' AND approval_expires_at IS NOT NULL
 			          THEN approval_expires_at + (now() - $2::timestamptz)
 			          ELSE approval_expires_at END
-			  WHERE agent_id = $1 AND deleted_at IS NULL`, agentID, *deletedAt)
+			  WHERE agent_id = $1 AND deleted_at IS NULL`, agentID, *deletedAt); err != nil {
+			return err
+		}
+		// The LIVE projection: this transaction just cleared deleted_at, so a
+		// row is guaranteed, and finding one still proves the agent is visible
+		// again — the property the handler's post-restore read used to assert.
+		restored, err = loadAgentByID(ctx, tx, agentID, false)
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return restored, nil
 }
 
 // agentPurgeBatch bounds one janitor pass of PurgeDeletedAgents: one agent
@@ -4255,6 +4312,15 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 // the dashboard trash can open a deleted message — Gmail's "view message in
 // trash". Callers branch on DeletedAt when trash rows must not qualify.
 func (s *Store) GetMessageWithContent(ctx context.Context, messageID, agentID string) (*Message, error) {
+	return getMessageWithContent(ctx, s.pool, messageID, agentID)
+}
+
+// getMessageWithContent is GetMessageWithContent parameterized by executor, so
+// a write path (RestoreMessage) can produce its own authoritative post-write
+// view from INSIDE its transaction instead of re-reading from the pool after
+// the commit. The CTE is snapshot-safe: its outer SELECT reads the CTE's own
+// RETURNING output (`FROM upd`), never the modified table.
+func getMessageWithContent(ctx context.Context, exec agentRowQuerier, messageID, agentID string) (*Message, error) {
 	m := &Message{}
 	var authHeadersJSON []byte
 	var authentication, authVerdict []byte
@@ -4263,7 +4329,7 @@ func (s *Store) GetMessageWithContent(ctx context.Context, messageID, agentID st
 	// the detail view is a superset of the summary view, so it must carry the
 	// same webhook_status/webhook_error the list exposes. Mirrors the
 	// wd.status/wd.last_error JOIN used by GetMessagesByAgent/GetConversationByID.
-	err := s.pool.QueryRow(ctx,
+	err := exec.QueryRow(ctx,
 		`WITH upd AS (
 		   UPDATE messages SET inbox_status = CASE WHEN inbox_status = 'unread' THEN 'read' ELSE inbox_status END
 		   WHERE id = $1 AND agent_id = $2
@@ -4589,10 +4655,19 @@ func (s *Store) SoftDeleteMessage(ctx context.Context, messageID, agentID string
 }
 
 // RestoreMessage brings an indefinitely retained trashed message back to the
-// inbox. Returns ErrNotInTrash when the message exists but is live,
-// ErrMessageNotFound otherwise.
-func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) error {
-	return s.WithTx(ctx, func(tx pgx.Tx) error {
+// inbox and returns the restored message. Returns ErrNotInTrash when the
+// message exists but is live, ErrMessageNotFound otherwise.
+//
+// The post-restore view is produced INSIDE the restore transaction. Reading it
+// afterwards from the pool was a torn read: a concurrent re-trash or purge
+// landing in the gap made a committed restore answer 500 "failed to reload
+// message", and any concurrent mutation could describe the message by state
+// this restore never produced. The in-transaction read follows the row lock
+// this transaction already holds. The detail projection still marks an unread
+// inbound message read, exactly as the handler's post-restore read did.
+func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) (*Message, error) {
+	var restored *Message
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
 		var deletedAt *time.Time
 		var scheduledAt *time.Time
 		var deliveryStatus string
@@ -4627,9 +4702,16 @@ func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) e
 				return err
 			}
 		}
-		_, err = tx.Exec(ctx, `UPDATE messages SET deleted_at = NULL WHERE id = $1`, messageID)
+		if _, err := tx.Exec(ctx, `UPDATE messages SET deleted_at = NULL WHERE id = $1`, messageID); err != nil {
+			return err
+		}
+		restored, err = getMessageWithContent(ctx, tx, messageID, agentID)
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return restored, nil
 }
 
 // PurgeMessage permanently deletes a message that is already in the trash
