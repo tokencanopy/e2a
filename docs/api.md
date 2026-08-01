@@ -245,8 +245,10 @@ equals the `X-Request-Id` response header.
 
 ## Versioning & stability
 
-The `/v1` surface is the **stable, generally-available contract** as of e2a 1.0.
-Our commitment, and what you can rely on:
+The `/v1` surface is the **stable, generally-available contract** as of e2a
+**1.5.0**, the release that completed the API freeze. Earlier `v1.0.x`
+application/cherry-pick tags predate the freeze and are not `/v1`
+compatibility baselines. Our commitment, and what you can rely on:
 
 ### Beta operations
 
@@ -339,11 +341,12 @@ every `/v1` operation not listed here is covered by the GA freeze.
 - **Version discovery.** `GET /v1/info` reports the running API version (and
   deployment flags such as whether shared-domain slug registration is enabled),
   so clients can adapt instead of hard-coding assumptions.
-- **Deprecation & sunset.** Once `/v1` is GA, if we ever need to wind something
-  down it stays functional and is marked `deprecated` in the OpenAPI spec; we
-  will not remove it within GA `/v1`. (Pre-GA, the API is still being frozen:
-  the legacy agent-path `…/messages/{id}/approve|reject` endpoints were removed
-  in favor of the account-scoped `/v1/reviews/{id}/approve|reject` queue.)
+- **Deprecation & sunset.** If we ever need to wind something down, it stays
+  functional and is marked `deprecated` in the OpenAPI spec; we will not
+  remove it within GA `/v1`. (While the API was being frozen pre-GA, the
+  legacy agent-path `…/messages/{id}/approve|reject` endpoints were removed in
+  favor of the account-scoped `/v1/reviews/{id}/approve|reject` queue — the
+  last such removal before the freeze took effect.)
 
 The canonical machine-readable contract is always
 [`api/openapi.yaml`](../api/openapi.yaml); CI fails if it drifts from the server.
