@@ -111,7 +111,18 @@ async function apiDeleteAgentSuppression(agent: string, address: string): Promis
         headers: { Authorization: `Bearer ${KEY}` },
       },
     );
-    if (res.ok || res.status === 404) return undefined;
+    if (res.ok) return undefined;
+    if (res.status === 404) {
+      // A missing row is clean only while the agent is still live. The delete
+      // handler also returns 404 for a missing/trashed agent, in which case the
+      // durable row may still exist but is no longer manageable through it.
+      const agentRes = await fetch(`${URL_}/v1/agents/${encodeURIComponent(agent)}`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      if (agentRes.ok) return undefined;
+      return `${agent} / ${address}: suppression cleanup returned 404 and live-agent check returned ` +
+        `HTTP ${agentRes.status} ${agentRes.statusText}: ${(await agentRes.text()).slice(0, 200)}`;
+    }
     return `${agent} / ${address}: HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 200)}`;
   } catch (err) {
     return `${agent} / ${address}: ${err instanceof Error ? err.message : String(err)}`;
@@ -122,13 +133,20 @@ const createdAgents: string[] = [];
 const createdAgentSuppressions: Array<{ agent: string; address: string }> = [];
 afterAll(async () => {
   const cleanupFailures: string[] = [];
+  const agentsWithSuppressionCleanupFailures = new Set<string>();
   try {
     // Suppressions must be removed while the owning agent is still live.
     for (const { agent, address } of createdAgentSuppressions) {
       const failure = await apiDeleteAgentSuppression(agent, address);
-      if (failure) cleanupFailures.push(failure);
+      if (failure) {
+        cleanupFailures.push(failure);
+        agentsWithSuppressionCleanupFailures.add(agent);
+      }
     }
     for (const a of createdAgents) {
+      // Keep the agent live when its durable suppression could not be removed;
+      // deleting it would make that row inaccessible through the API.
+      if (agentsWithSuppressionCleanupFailures.has(a)) continue;
       const failure = await apiDeleteAgent(a);
       if (failure) cleanupFailures.push(failure);
     }
@@ -327,9 +345,11 @@ describe.skipIf(!live)("cli live parity", () => {
 
     // Account-wide add is impossible by design — account entries come only from
     // bounces/complaints — so coverage exercises the agent-scoped manual block.
+    // Register cleanup before the POST: a committed write followed by a lost or
+    // malformed response is still a side effect we must attempt to remove.
+    createdAgentSuppressions.push({ agent: bot, address: blocked });
     const add = run(["suppressions", "add", blocked, "--agent", bot, "--reason", "cli e2e", "--json"]);
     expect(add.code, add.stderr).toBe(0);
-    createdAgentSuppressions.push({ agent: bot, address: blocked });
     expect(JSON.parse(add.stdout).address).toBe(blocked);
 
     const listAgent = run(["suppressions", "list", "--agent", bot, "--json"]);
