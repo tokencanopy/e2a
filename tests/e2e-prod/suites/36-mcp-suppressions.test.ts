@@ -127,11 +127,29 @@ after(async () => {
   writeReport(`./reports/${SUITE}.json`);
 });
 
-test("mcp-suppressions: tools/list advertises all 5 suppression tools", async () => {
-  const list = await mcp.call<{ tools: Array<{ name: string }> }>("tools/list");
+test("mcp-suppressions: tools/list advertises all 5 suppression tools with fail-closed delete schemas", async () => {
+  const list = await mcp.call<{
+    tools: Array<{
+      name: string;
+      inputSchema?: {
+        required?: string[];
+        properties?: Record<string, { type?: string; const?: unknown }>;
+        additionalProperties?: boolean;
+      };
+    }>;
+  }>("tools/list");
   const names = new Set(list.tools.map((t) => t.name));
   const missing = REQUIRED_TOOLS.filter((n) => !names.has(n));
   assert.deepEqual(missing, [], `deployed MCP server must advertise every suppression tool; missing: ${missing.join(", ")}`);
+
+  for (const name of ["delete_suppression", "delete_agent_suppression"]) {
+    const schema = list.tools.find((tool) => tool.name === name)?.inputSchema;
+    assert.ok(schema, `${name} advertises an input schema`);
+    assert.ok(schema.required?.includes("confirm"), `${name} requires confirm`);
+    assert.equal(schema.properties?.confirm?.type, "boolean", `${name}.confirm is boolean`);
+    assert.equal(schema.properties?.confirm?.const, true, `${name}.confirm accepts only true`);
+    assert.equal(schema.additionalProperties, false, `${name} rejects unknown arguments`);
+  }
 });
 
 // create_agent_suppression + list_agent_suppressions + delete_agent_suppression

@@ -749,6 +749,21 @@ describe("e2a MCP server", () => {
     expect(payload).not.toHaveProperty("next_cursor");
   });
 
+  it("suppression deletion schemas require literal boolean confirmation", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["delete_suppression", "delete_agent_suppression"]) {
+      const schema = tools.find((tool) => tool.name === name)?.inputSchema as {
+        required?: string[];
+        properties?: Record<string, { type?: string; const?: unknown }>;
+        additionalProperties?: boolean;
+      } | undefined;
+      expect(schema, `${name} input schema`).toBeDefined();
+      expect(schema?.required).toContain("confirm");
+      expect(schema?.properties?.confirm).toMatchObject({ type: "boolean", const: true });
+      expect(schema?.additionalProperties).toBe(false);
+    }
+  });
+
   it("delete_suppression requires explicit confirmation", async () => {
     for (const arguments_ of [
       { address: "gone@example.net" },
