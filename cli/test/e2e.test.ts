@@ -98,11 +98,55 @@ async function apiDeleteAgent(email: string): Promise<string | undefined> {
   }
 }
 
+// Agent suppressions deliberately survive both soft and permanent agent
+// deletion, so deleting only the throwaway inbox cannot clean up a failed
+// suppressions test. Remove each created row first; 404 means the happy path
+// already removed it.
+async function apiDeleteAgentSuppression(agent: string, address: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(
+      `${URL_}/v1/agents/${encodeURIComponent(agent)}/suppressions/${encodeURIComponent(address)}?confirm=DELETE`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${KEY}` },
+      },
+    );
+    if (res.ok) return undefined;
+    if (res.status === 404) {
+      // A missing row is clean only while the agent is still live. The delete
+      // handler also returns 404 for a missing/trashed agent, in which case the
+      // durable row may still exist but is no longer manageable through it.
+      const agentRes = await fetch(`${URL_}/v1/agents/${encodeURIComponent(agent)}`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      if (agentRes.ok) return undefined;
+      return `${agent} / ${address}: suppression cleanup returned 404 and live-agent check returned ` +
+        `HTTP ${agentRes.status} ${agentRes.statusText}: ${(await agentRes.text()).slice(0, 200)}`;
+    }
+    return `${agent} / ${address}: HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 200)}`;
+  } catch (err) {
+    return `${agent} / ${address}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 const createdAgents: string[] = [];
+const createdAgentSuppressions: Array<{ agent: string; address: string }> = [];
 afterAll(async () => {
   const cleanupFailures: string[] = [];
+  const agentsWithSuppressionCleanupFailures = new Set<string>();
   try {
+    // Suppressions must be removed while the owning agent is still live.
+    for (const { agent, address } of createdAgentSuppressions) {
+      const failure = await apiDeleteAgentSuppression(agent, address);
+      if (failure) {
+        cleanupFailures.push(failure);
+        agentsWithSuppressionCleanupFailures.add(agent);
+      }
+    }
     for (const a of createdAgents) {
+      // Keep the agent live when its durable suppression could not be removed;
+      // deleting it would make that row inaccessible through the API.
+      if (agentsWithSuppressionCleanupFailures.has(a)) continue;
       const failure = await apiDeleteAgent(a);
       if (failure) cleanupFailures.push(failure);
     }
@@ -143,6 +187,7 @@ describe.skipIf(!live)("cli live parity", () => {
       "protection",
       "reply",
       "send",
+      "suppressions",
       "whoami",
     ]);
     recordAdvertised(commands);
@@ -287,6 +332,42 @@ describe.skipIf(!live)("cli live parity", () => {
     const setOff = run(["protection", "set", bot, "--outbound-review", "off", "--json"]);
     expect(setOff.code, setOff.stderr).toBe(0);
     recordCovered("protection");
+  });
+
+  it("suppressions: agent-scoped add → list → remove, plus account-wide list", () => {
+    const slug = Date.now().toString(36);
+    const bot = `cli-live-supp-${slug}@${DOMAIN}`;
+    const blocked = `cli-supp-blocked-${slug}@example.invalid`;
+
+    const created = run(["agents", "create", bot, "--name", "cli supp e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    // Account-wide add is impossible by design — account entries come only from
+    // bounces/complaints — so coverage exercises the agent-scoped manual block.
+    // Register cleanup before the POST: a committed write followed by a lost or
+    // malformed response is still a side effect we must attempt to remove.
+    createdAgentSuppressions.push({ agent: bot, address: blocked });
+    const add = run(["suppressions", "add", blocked, "--agent", bot, "--reason", "cli e2e", "--json"]);
+    expect(add.code, add.stderr).toBe(0);
+    expect(JSON.parse(add.stdout).address).toBe(blocked);
+
+    const listAgent = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAgent.code, listAgent.stderr).toBe(0);
+    expect(listAgent.stdout).toContain(blocked);
+
+    const removed = run(["suppressions", "remove", blocked, "--agent", bot, "--json"]);
+    expect(removed.code, removed.stderr).toBe(0);
+    const listAfterRemove = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAfterRemove.code, listAfterRemove.stderr).toBe(0);
+    expect(listAfterRemove.stdout).not.toContain(blocked);
+
+    // Account-wide list is read-only and typically empty on staging (no bounce
+    // simulators there); assert it merely resolves for a bare account key.
+    const listAccount = run(["suppressions", "list", "--json"]);
+    expect(listAccount.code, listAccount.stderr).toBe(0);
+
+    recordCovered("suppressions");
   });
 
   it("contacts: create/get/list/update/delete + import/imports delete + outreach tree", () => {
