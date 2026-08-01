@@ -121,15 +121,15 @@ Hosts that support OAuth connectors can instead add `https://api.e2a.dev/mcp` as
 
 ## Tools
 
-The server exposes up to **71** tools spanning agents, messages, human-in-the-loop
+The server exposes up to **76** tools spanning agents, messages, human-in-the-loop
 approval, attachments, domains, events, webhooks, API keys, contacts/outreach,
-and email templates (beta).
+email templates (beta), and suppressions.
 **The visible set depends on your credential's scope:** an **agent**-scoped
 credential sees the 20 runtime/inbox tools (read, send, reply, restore
 messages, per-agent outreach); an **account**-scoped credential also sees the
-51 admin/setup tools (agent/domain/webhook/event/template/API-key/contact
-management — **and HITL review discovery plus approve/reject, which is an
-account-owner action, never agent self-approval**) — all 71.
+56 admin/setup tools (agent/domain/webhook/event/template/API-key/contact/
+suppression management — **and HITL review discovery plus approve/reject, which
+is an account-owner action, never agent self-approval**) — all 76.
 Every tool carries MCP annotations (`readOnlyHint`/`destructiveHint`/
 `idempotentHint`) so hosts can auto-approve reads and flag destructive actions.
 The tables below highlight the most commonly used ones — your MCP host's tool list
@@ -232,6 +232,22 @@ records identity and enrolls outreach without sending anything.
 | `list_outreach_contacts` / `get_outreach_contact` | List or fetch the contacts an agent is working, with server-derived reply/delivery facts. |
 | `set_outreach_contact` | Enroll a contact in an agent's outreach, or update the agent-owned fields (stage, next action). |
 | `delete_outreach_contact` | Un-enroll a contact from an agent's outreach; the contact and its suppressions survive. |
+
+### Suppressions
+
+Recipient block lists at two scopes, all admin/account-scoped (the server
+rejects agent-scoped credentials on every one — an agent must not read or edit
+blocklists). The account list is auto-populated by hard bounces and complaints
+and applies to sends from every agent; the agent list (beta) holds
+unsubscribe/manual blocks for one exact sending agent.
+
+| Tool | Description |
+| --- | --- |
+| `list_suppressions` | List the account-wide suppression list (address, source `bounce`/`complaint`/`manual`, reason, source message id). |
+| `delete_suppression` | Un-suppress a recipient account-wide. Only for addresses known to be deliverable — removing a genuine bouncer hurts sender reputation. |
+| `list_agent_suppressions` | List one agent's blocked recipients (`unsubscribe`/`manual`). |
+| `create_agent_suppression` | Idempotently add a manual block for one agent; other agents can still mail the address. |
+| `delete_agent_suppression` | Remove only the exact agent-scoped block. |
 
 ### Templates (beta)
 

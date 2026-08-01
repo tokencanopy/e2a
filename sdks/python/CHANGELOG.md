@@ -58,6 +58,10 @@ whole ``/v1`` surface is documented in
 - **``contact.due`` (beta)** joins the webhook event vocabulary: emitted
   at-least-once when an engagement's ``next_action_at`` passes. It is a
   notification for a deployed webhook receiver; see ``docs/events.md``.
+- **``account.suppressions.list(limit=...)``** — the account suppression list
+  now accepts the same optional keyword-only page-size parameter its sibling
+  resources (``account.api_keys.list``, ``agents.list_suppressions``) already
+  take. Mirrors the TypeScript SDK's ``account.suppressions.list({ limit })``.
 
 ## 5.4.0
 

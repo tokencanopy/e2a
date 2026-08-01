@@ -818,9 +818,10 @@ class WebhooksResource {
 
 class SuppressionsResource {
   constructor(private readonly api: PromiseAccountApi) {}
-  list(): AutoPager<SuppressionView> {
+  list(params: { limit?: number } = {}): AutoPager<SuppressionView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
     return new AutoPager(async (cursor) => {
-      const page = await call(() => this.api.listSuppressions(cursor));
+      const page = await call(() => this.api.listSuppressions(cursor, params.limit));
       return { items: page.items ?? [], next_cursor: page.nextCursor };
     });
   }

@@ -56,6 +56,10 @@ import type {
   DeleteContactResult,
   DeleteImportBatchResult,
   DeleteEngagementResult,
+  SuppressionView,
+  AgentSuppressionView,
+  CreateAgentSuppressionRequest,
+  DeleteSuppressionResult,
 } from "@e2a/sdk/v1";
 import type { McpConfig } from "./config.js";
 import type { Scope } from "./tools/tiers.js";
@@ -248,6 +252,35 @@ export class McpClient {
 
   deleteOutreach(address: string, explicitAddress?: string): Promise<DeleteEngagementResult> {
     return this.sdk.contacts.deleteOutreach(this.resolveAddress(explicitAddress), address);
+  }
+
+  // ── Suppressions ────────────────────────────────────────────────
+  // Account list: auto-populated bounce/complaint blocks spanning every agent.
+  // Agent list: unsubscribe/manual blocks scoped to one exact sending agent.
+
+  listSuppressions(params: { cursor?: string; limit?: number } = {}): Promise<Page<SuppressionView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.account.suppressions.list(rest).page(cursor);
+  }
+
+  deleteSuppression(address: string): Promise<DeleteSuppressionResult> {
+    return this.sdk.account.suppressions.delete(address);
+  }
+
+  listAgentSuppressions(
+    email: string,
+    params: { cursor?: string; limit?: number } = {},
+  ): Promise<Page<AgentSuppressionView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.agents.listSuppressions(email, rest).page(cursor);
+  }
+
+  createAgentSuppression(email: string, body: CreateAgentSuppressionRequest): Promise<AgentSuppressionView> {
+    return this.sdk.agents.createSuppression(email, body);
+  }
+
+  deleteAgentSuppression(email: string, address: string): Promise<DeleteSuppressionResult> {
+    return this.sdk.agents.deleteSuppression(email, address);
   }
 
   // ── Messages ────────────────────────────────────────────────────

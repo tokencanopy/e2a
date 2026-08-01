@@ -85,7 +85,19 @@ test("the e2a skill teaches the contacts and outreach loop without overclaiming 
   assert.match(outreach, /set_outreach_contact/);
   assert.match(outreach, /deployed webhook/i);
   assert.match(outreach, /does not launch.*local coding-agent/i);
-  assert.match(source, /MCP surface is \*\*71 tools\*\* \(20 runtime\/inbox \+ 51 admin\/setup\)/);
+  // Derive the expected total from the frozen tool-name baseline rather than
+  // repeating it here: hardcoding the count meant every tool addition had to
+  // update the skill AND this assertion, and the second one was easy to miss.
+  const toolNames = JSON.parse(await readFile("mcp/tool-names.v1.json", "utf8"));
+  const claim = source.match(
+    /MCP surface is \*\*(\d+) tools\*\* \((\d+) runtime\/inbox \+ (\d+) admin\/setup\)/,
+  );
+  assert.ok(claim, "the e2a skill must state the MCP surface size");
+  const [, total, runtime, admin] = claim.map(Number);
+  assert.equal(total, toolNames.length,
+    "skill tool count must match mcp/tool-names.v1.json");
+  assert.equal(runtime + admin, total,
+    "the runtime + admin split must add up to the stated total");
 });
 
 test("the setup guide reaches a verified first inbox", async () => {

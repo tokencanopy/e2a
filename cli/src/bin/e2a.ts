@@ -27,6 +27,7 @@ import {
   contactsImport, contactsDeleteImport, outreachList, outreachGet, outreachSet,
   outreachDelete,
 } from "../commands/contacts.js";
+import { suppressionsList, suppressionsAdd, suppressionsRemove } from "../commands/suppressions.js";
 import { EXIT, exitCodeForAPIError } from "../exit.js";
 import { E2AError } from "@e2a/sdk/v1";
 import { createRequire } from "module";
@@ -96,6 +97,14 @@ Usage:
         --stage <s>|--clear-stage --next-action <rfc3339|clear> --metadata <json>
         --if-match <etag>            Reject stale outreach state
   e2a contacts outreach delete <address>
+  e2a suppressions list              List blocked recipients (account-wide without --agent)
+        --agent <email>              Per-agent unsubscribe/manual blocks instead
+        --limit <n> --json           Bound output; JSON emits NDJSON
+  e2a suppressions add <address>     Block a recipient for one agent (beta)
+        --agent <email>              Required: manual blocks are per-agent
+        --reason <text> --json       Optional reason; JSON emits the record
+  e2a suppressions remove <address>  Un-suppress (account-wide without --agent)
+        --agent <email> --json       Remove only the agent-scoped block; JSON receipt
   e2a send [options]                Send an email as the agent
         --to <email>               Recipient (repeatable)
         --subject <s>              Subject line
@@ -419,6 +428,38 @@ async function main() {
         await keysDelete(getPositionals(rest, 1, "usage: e2a keys delete <key-id>")[0]);
       } else {
         process.stderr.write("Usage: e2a keys [create [--agent <inbox>]|list|delete <id>]\n");
+        process.exit(EXIT.USAGE);
+      }
+      break;
+    }
+    case "suppressions": {
+      const sub = args[0];
+      const rest = args.slice(1);
+      if (sub === "list") {
+        checkFlags(rest, ["--agent", "--limit", "--json"]);
+        getPositionals(rest, 0, "usage: e2a suppressions list [--agent <email>] [--limit <n>] [--json]");
+        await suppressionsList({
+          agent: getFlagChecked(rest, "--agent"),
+          limit: getFlagChecked(rest, "--limit"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "add") {
+        checkFlags(rest, ["--agent", "--reason", "--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a suppressions add <address> --agent <email> [--reason <text>] [--json]");
+        await suppressionsAdd(address, {
+          agent: getFlagChecked(rest, "--agent"),
+          reason: getFlagChecked(rest, "--reason"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "remove") {
+        checkFlags(rest, ["--agent", "--json"]);
+        const [address] = getPositionals(rest, 1, "usage: e2a suppressions remove <address> [--agent <email>] [--json]");
+        await suppressionsRemove(address, {
+          agent: getFlagChecked(rest, "--agent"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else {
+        process.stderr.write("Usage: e2a suppressions [list|add <address> --agent <email>|remove <address>]\n");
         process.exit(EXIT.USAGE);
       }
       break;
