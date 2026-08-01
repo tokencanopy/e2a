@@ -635,14 +635,18 @@ func (s *Server) handleRestoreMessage(ctx context.Context, in *MessageIDParam) (
 	if err != nil {
 		return nil, err
 	}
-	if s.deps.RestoreMessage == nil || s.deps.GetMessage == nil {
+	if s.deps.RestoreMessage == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "restore unavailable")
 	}
-	if err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID); err != nil {
+	// The store builds the restored view INSIDE the restore's own transaction
+	// (same detail projection, read-marking included). Re-reading here after
+	// the restore committed was a torn read: a concurrent re-trash or purge in
+	// the gap answered 500 "failed to reload message" on a committed restore.
+	msg, err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID)
+	if err != nil {
 		return nil, mapTrashErr(err, "message")
 	}
-	msg, err := s.deps.GetMessage(ctx, in.MessageID, ag.ID)
-	if err != nil || msg == nil {
+	if msg == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload message")
 	}
 	return &messageOutput{Body: messageViewFromIdentity(msg)}, nil

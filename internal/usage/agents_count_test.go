@@ -199,7 +199,7 @@ func TestCountAgentsByUser_ExcludesTrashedAgents(t *testing.T) {
 		t.Fatalf("live list = %d rows, want 1 (mirror invariant)", len(list))
 	}
 	// Restore brings the slot usage back.
-	if err := idStore.RestoreAgent(ctx, "b@trashcount.example.com", user.ID); err != nil {
+	if _, err := idStore.RestoreAgent(ctx, "b@trashcount.example.com", user.ID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 	if n, err := usageStore.CountAgentsByUser(ctx, user.ID); err != nil || n != 2 {

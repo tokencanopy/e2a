@@ -232,7 +232,7 @@ func TestRestoreAgentShiftsHoldClockAndKeepsHoldPending(t *testing.T) {
 		`UPDATE messages SET approval_expires_at = now() - interval '5 minutes' WHERE id=$1`, msg.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RestoreAgent(ctx, a.ID, user.ID); err != nil {
+	if _, err := store.RestoreAgent(ctx, a.ID, user.ID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 

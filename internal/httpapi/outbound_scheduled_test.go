@@ -243,12 +243,12 @@ func TestTrashRestoreScheduledMessage(t *testing.T) {
 			deleted = true
 			return nil
 		}
-		d.RestoreMessage = func(_ context.Context, messageID, agentID string) error {
+		d.RestoreMessage = func(_ context.Context, messageID, agentID string) (*identity.Message, error) {
 			if !deleted {
-				return identity.ErrNotInTrash
+				return nil, identity.ErrNotInTrash
 			}
 			deleted = false
-			return nil
+			return msg(), nil
 		}
 		d.GetMessage = func(_ context.Context, messageID, agentID string) (*identity.Message, error) {
 			return msg(), nil // direct GET is intentionally any-state
