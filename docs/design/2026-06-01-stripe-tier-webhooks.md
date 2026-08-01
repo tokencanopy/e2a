@@ -259,15 +259,15 @@ The trigger commit and the outbox commit are now one atomic write. Crash anywher
 
 **Three trigger call sites need migration:**
 
-1. [internal/relay/server.go:323-355](internal/relay/server.go#L323-L355) — `email.received`. Currently `CreateInboundMessage` opens its own implicit tx (pool.Exec). **Use `PublishTx`** (pre-side-effect). Failure-mode contract: tx COMMIT fails → return 4xx to MTA. MTA retries; deterministic event ID + `ON CONFLICT (id) DO NOTHING` makes the outbox write idempotent regardless of whether a prior attempt's `messages` row survived. See §5.1 for the full SMTP-retry truth table. **Scope warning:** today the relay has *no* explicit `pgx.Tx` plumbing (`grep "Begin\|WithTx" internal/relay/server.go` is empty). The slice-3 refactor needs to thread a `tx pgx.Tx` parameter through `CreateInboundMessage` and probably through `LookupConversationID` (which writes to `conversations` and should be inside the same tx). Conservative estimate: ~150 LOC of plumbing + tests, separate from the actual `PublishTx` call.
-2. [internal/agent/api.go:220-225](internal/agent/api.go#L220-L225) — split by event:
+1. [internal/relay/server.go:323-355](../../internal/relay/server.go#L323-L355) — `email.received`. Currently `CreateInboundMessage` opens its own implicit tx (pool.Exec). **Use `PublishTx`** (pre-side-effect). Failure-mode contract: tx COMMIT fails → return 4xx to MTA. MTA retries; deterministic event ID + `ON CONFLICT (id) DO NOTHING` makes the outbox write idempotent regardless of whether a prior attempt's `messages` row survived. See §5.1 for the full SMTP-retry truth table. **Scope warning:** today the relay has *no* explicit `pgx.Tx` plumbing (`grep "Begin\|WithTx" internal/relay/server.go` is empty). The slice-3 refactor needs to thread a `tx pgx.Tx` parameter through `CreateInboundMessage` and probably through `LookupConversationID` (which writes to `conversations` and should be inside the same tx). Conservative estimate: ~150 LOC of plumbing + tests, separate from the actual `PublishTx` call.
+2. [internal/agent/api.go:220-225](../../internal/agent/api.go#L220-L225) — split by event:
    - Outbound `email.sent`: **Use `PublishBestEffortTx`** (post-side-effect). SES has already accepted the message before the outbox write attempts.
    - HITL `email.pending_approval`: **Use `PublishTx`** (pre-side-effect — the pending row hasn't shipped to SES yet).
    - HITL `email.approved`: **Use `PublishBestEffortTx`** (post-side-effect — the approved draft has already gone to SES).
    - HITL `email.rejected`: **Use `PublishTx`** (pre-side-effect — rejection is a no-op on SES; just a row write).
-3. [internal/agent/webhooks_api.go:540](internal/agent/webhooks_api.go#L540) (`/test` endpoint) — bypasses the outbox entirely. Goes directly to `InsertPendingForTest` because there's no event to durably record (test events aren't customer-meaningful, and we want them invisible to `/events`). The publisher interface must doc-comment this explicitly: test deliveries do not flow through `Publish*`.
+3. [internal/agent/webhooks_api.go:540](../../internal/agent/webhooks_api.go#L540) (`/test` endpoint) — bypasses the outbox entirely. Goes directly to `InsertPendingForTest` because there's no event to durably record (test events aren't customer-meaningful, and we want them invisible to `/events`). The publisher interface must doc-comment this explicitly: test deliveries do not flow through `Publish*`.
 
-**Backwards compat with the existing flag.** [internal/webhookpub/publisher.go:53-79](internal/webhookpub/publisher.go#L53-L79) has a `FeatureFlag`. When `WEBHOOKS_OUTBOX_ENABLED=false`, `Publish(ctx, e)` keeps the **legacy in-process fan-out path** (current `Publish` behavior — read enabled webhooks, filter, `InsertPending`). When the flag is true, `Publish` becomes a thin wrapper that opens a tx and calls `PublishTx` itself; `PublishTx` writes the outbox row and `NOTIFY`s. **Each migrated trigger site owns the branch:**
+**Backwards compat with the existing flag.** [internal/webhookpub/publisher.go:53-79](../../internal/webhookpub/publisher.go#L53-L79) has a `FeatureFlag`. When `WEBHOOKS_OUTBOX_ENABLED=false`, `Publish(ctx, e)` keeps the **legacy in-process fan-out path** (current `Publish` behavior — read enabled webhooks, filter, `InsertPending`). When the flag is true, `Publish` becomes a thin wrapper that opens a tx and calls `PublishTx` itself; `PublishTx` writes the outbox row and `NOTIFY`s. **Each migrated trigger site owns the branch:**
 
 ```go
 // At each migrated trigger site (slice 3-4):
@@ -425,7 +425,7 @@ CREATE INDEX IF NOT EXISTS idx_webhook_events_expires
 - **`schema_version`** is a defensive forward-compat hatch. V1 always emits 1; v2 might emit 2 for envelope shape changes.
 - **`matched_webhook_ids TEXT[]`** snapshots the publisher's match decision. Cheap (typically 0-3 entries), enables the bulk-replay-since query without re-running filter logic at replay time.
 - **`status='no_match'`** distinguishes "publisher ran, no subscriber wanted it" from "publisher hasn't run yet." Important for ops debugging ("why didn't my webhook fire?").
-- **`expires_at`** mirrors `messages` 30-day TTL. Both tables drain on the same janitor; we extend the cleanup loop in [cmd/e2a/main.go:355-378](cmd/e2a/main.go#L355-L378).
+- **`expires_at`** mirrors `messages` 30-day TTL. Both tables drain on the same janitor; we extend the cleanup loop in [cmd/e2a/main.go:355-378](../../cmd/e2a/main.go#L355-L378).
 
 **FK behavior choices:**
 
@@ -691,11 +691,11 @@ SubscriberRetryWorker (unchanged): drains webhook_subscriber_deliveries
 
 #### Outbound (`email.sent`)
 
-Same shape. The trigger is the `/send` handler in [internal/agent/api.go:220-225](internal/agent/api.go#L220-L225). Today's `publishAsync` becomes `PublishTx` invoked inside the existing transaction that records the outbound message.
+Same shape. The trigger is the `/send` handler in [internal/agent/api.go:220-225](../../internal/agent/api.go#L220-L225). Today's `publishAsync` becomes `PublishTx` invoked inside the existing transaction that records the outbound message.
 
 #### HITL (`email.pending_approval` / `email.approved` / `email.rejected`)
 
-Identical pattern. Triggers live in [internal/agent/webhooks_api.go](internal/agent/webhooks_api.go) (for the HITL approval/rejection handlers in slice 3 of #180). Wrap each trigger in a transaction that includes the outbox write.
+Identical pattern. Triggers live in [internal/agent/webhooks_api.go](../../internal/agent/webhooks_api.go) (for the HITL approval/rejection handlers in slice 3 of #180). Wrap each trigger in a transaction that includes the outbox write.
 
 #### Future deliverability (`email.bounced`, `email.complained`, `email.delivered`, `email.delivery_delayed`)
 
@@ -763,7 +763,7 @@ Authorization: Bearer e2a_...
 - `page_size` — 1–100, default 50.
 - `token` — opaque cursor returned by previous response. (Same parameter name as the existing messages endpoint.)
 
-**Cursor format:** opaque JSON blob containing `(created_at_ns, id, filter_snapshot)`. Same shape as the existing `messages` cursor at [internal/agent/api.go:2620-2643](internal/agent/api.go#L2620-L2643). Continuation requests with mismatched filter params return 400 — prevents silent paging into wrong result sets when a customer changes params between pages.
+**Cursor format:** opaque JSON blob containing `(created_at_ns, id, filter_snapshot)`. Same shape as the existing `messages` cursor at [internal/agent/api.go:2620-2643](../../internal/agent/api.go#L2620-L2643). Continuation requests with mismatched filter params return 400 — prevents silent paging into wrong result sets when a customer changes params between pages.
 
 **`status` field** on each event is the outbox state machine value (`pending`, `processed`, `no_match`). Surfacing it directly distinguishes "matched but pending" (deliveries are in flight) from "no_match" (no subscriber wanted this event) — without forcing the customer to derive it from `delivery_status.matched_webhooks`.
 
@@ -843,7 +843,7 @@ Content-Type: application/json
 
 Common ask: "my entire subscriber pool missed this event during an outage." Without this, customers have to make N round-trips. With it, one call.
 
-**Idempotency on the API call:** Same body posted twice within 5 minutes returns the same `delivery_id` and is a no-op for the second call. Implemented via the existing `idempotencyStore` ([cmd/e2a/main.go:387-394](cmd/e2a/main.go#L387-L394)) keyed on `(user_id, event_id, webhook_id_or_empty, "replay")`.
+**Idempotency on the API call:** Same body posted twice within 5 minutes returns the same `delivery_id` and is a no-op for the second call. Implemented via the existing `idempotencyStore` ([cmd/e2a/main.go:387-394](../../cmd/e2a/main.go#L387-L394)) keyed on `(user_id, event_id, webhook_id_or_empty, "replay")`.
 
 #### `POST /api/v1/webhooks/{id}/redeliver-since`
 
@@ -872,7 +872,7 @@ Content-Type: application/json
 - `since` must be ≤ 7 days ago. Cap exists to prevent accidental full-history replays; can be raised later. 400 if older.
 - Rate limit: 1 call per webhook per minute. 429 with `Retry-After`.
 
-**Rate-limit implementation caveat.** The existing rate limiter at [internal/ratelimit/ratelimit.go](internal/ratelimit/ratelimit.go) is **in-memory per process** — under N replicas the effective limit is N/min/webhook. Acceptable for v1 because the cost of an extra replay call is bounded (5 minutes of `idx_wsd_event_id` work even under abuse). Document this in customer docs. If we later need a sharp cross-replica cap, promote to a Postgres-backed counter on `webhooks.last_replay_at` with a CAS-on-timestamp check.
+**Rate-limit implementation caveat.** The existing rate limiter at [internal/ratelimit/ratelimit.go](../../internal/ratelimit/ratelimit.go) is **in-memory per process** — under N replicas the effective limit is N/min/webhook. Acceptable for v1 because the cost of an extra replay call is bounded (5 minutes of `idx_wsd_event_id` work even under abuse). Document this in customer docs. If we later need a sharp cross-replica cap, promote to a Postgres-backed counter on `webhooks.last_replay_at` with a CAS-on-timestamp check.
 
 #### Error responses
 
@@ -924,11 +924,11 @@ ALTER TABLE webhook_subscriber_deliveries
     ALTER COLUMN expires_at  SET DEFAULT now() + interval '90 days';
 ```
 
-Both `ALTER COLUMN ... SET DEFAULT` are metadata-only (no row rewrite) on Postgres 11+, so safe on prod-sized tables. Per [CLAUDE.md](CLAUDE.md) migration safety rules.
+Both `ALTER COLUMN ... SET DEFAULT` are metadata-only (no row rewrite) on Postgres 11+, so safe on prod-sized tables. Per [CLAUDE.md](../../CLAUDE.md) migration safety rules.
 
 ### 4.8 Signing & `WebhookSigner` interface (scaffold only)
 
-Current signing is hardcoded into [subscriber_deliverer.go:115-130](internal/webhook/subscriber_deliverer.go#L115-L130). To prepare for a future Svix-format swap without prejudicing the v1 design, extract:
+Current signing is hardcoded into [subscriber_deliverer.go:115-130](../../internal/webhook/subscriber_deliverer.go#L115-L130). To prepare for a future Svix-format swap without prejudicing the v1 design, extract:
 
 ```go
 // internal/webhook/signer.go (new)
@@ -973,7 +973,7 @@ func (StripeStyleSigner) Sign(ctx SignContext) http.Header {
 func (StripeStyleSigner) Name() string { return "stripe-style" }
 ```
 
-`SubscriberDeliverer` takes a `WebhookSigner` at construction. The existing [Deliver](internal/webhook/subscriber_deliverer.go#L75) signature stays as-is — the deliverer just calls `d.signer.Sign(SignContext{...})` instead of inlining `buildSignatureHeader`. No ripple to retry/store/auto-disable code.
+`SubscriberDeliverer` takes a `WebhookSigner` at construction. The existing [Deliver](../../internal/webhook/subscriber_deliverer.go#L75) signature stays as-is — the deliverer just calls `d.signer.Sign(SignContext{...})` instead of inlining `buildSignatureHeader`. No ripple to retry/store/auto-disable code.
 
 ```go
 type SubscriberDeliverer struct {
@@ -1020,7 +1020,7 @@ Available as `client.events`.
 
 #### MCP server
 
-Three new tools in [mcp/src/tools/](mcp/src/tools/):
+Three new tools in [mcp/src/tools/](../../mcp/src/tools/):
 
 | Tool | Input | Output |
 |---|---|---|
@@ -1035,7 +1035,7 @@ Bumps the tool count from 18 to 21. Update sites that hard-code the count:
 - `skills/using-e2a/SKILL.md:260` ("18 MCP tools: agents (5), messages (5), HITL (4), domains (4)…") — extend with "Events (3)"
 - Upstream docs PRs at [langchain-ai/docs#4150](https://github.com/langchain-ai/docs/pull/4150) (open) and [google/adk-docs#1793](https://github.com/google/adk-docs/pull/1793) (merged): the merged ADK doc will need a follow-up edit; the open LangChain doc PR can be updated before merge.
 
-No production code asserts the count — [mcp/tests/http.test.ts:357](mcp/tests/http.test.ts#L357) uses `toBeGreaterThan(0)` — so the count surface is purely documentation.
+No production code asserts the count — [mcp/tests/http.test.ts:357](../../mcp/tests/http.test.ts#L357) uses `toBeGreaterThan(0)` — so the count surface is purely documentation.
 
 #### CLI
 
@@ -1128,7 +1128,7 @@ A future event type `email.opened` ships, then we deprecate it.
 - Old `webhook_events` rows keep their original `type='email.opened'`. Queryable forever (within retention).
 - Old subscriber rows on `webhook_subscriber_deliveries.event_type` keep firing as long as the catalog accepts them.
 - New webhooks created with `events: ["email.opened"]` continue to be valid but match no future triggers (because the trigger stops emitting).
-- Catalog validation in [webhookpub/event.go](internal/webhookpub/event.go) gates `events` array contents at webhook create/update — we'd remove the deprecated value from the catalog gradually.
+- Catalog validation in [webhookpub/event.go](../../internal/webhookpub/event.go) gates `events` array contents at webhook create/update — we'd remove the deprecated value from the catalog gradually.
 
 Customer-visible behavior: a deprecated event type silently stops firing. Reasonable for the lifecycle pattern.
 
@@ -1184,9 +1184,9 @@ The HITL feature in #180 fires three events covering the most common transitions
 - *Pending expired*: poll `/pending` and filter on `approval_expires_at < now() AND status = 'pending'`. Or after the Stripe-tier event log ships: `GET /events?type=email.pending_approval&since=…` and reconcile against `/pending` to find rows that never transitioned.
 
 **Forward path.** Adding either event later is purely additive:
-1. New constant in [internal/webhookpub/event.go](internal/webhookpub/event.go) (e.g. `EventEmailSendFailed`).
+1. New constant in [internal/webhookpub/event.go](../../internal/webhookpub/event.go) (e.g. `EventEmailSendFailed`).
 2. New payload builder (similar to `buildRejectedEvent`).
-3. New `PublishTx` call site: for `send_failed`, in the SES error branch of [hitl_api.go:362-388](internal/agent/hitl_api.go#L362-L388) (pre-side-effect — strong guarantee); for `approval_expired`, in the future expiry worker.
+3. New `PublishTx` call site: for `send_failed`, in the SES error branch of [hitl_api.go:362-388](../../internal/agent/hitl_api.go#L362-L388) (pre-side-effect — strong guarantee); for `approval_expired`, in the future expiry worker.
 4. Webhook catalog validation accepts the new event type.
 
 No schema change, no breaking change to existing subscribers. Customers who want the new event opt in by adding it to their `events` array.
@@ -1230,7 +1230,7 @@ For v1's single-primary model this is a non-issue.
 ### 6.4 Extensibility: new event types
 
 Adding `email.bounced` (or any other event) requires:
-1. New constant in [webhookpub/event.go](internal/webhookpub/event.go).
+1. New constant in [webhookpub/event.go](../../internal/webhookpub/event.go).
 2. New payload builder.
 3. New trigger site that calls `publisher.PublishTx(...)` inside its existing transaction.
 4. SDK regeneration via `make generate-sdk`.
@@ -1407,7 +1407,7 @@ Some customers may want >30 day retention. Plumb a `webhook_events_retention_day
 
 ## Appendix A: Concrete code shape — `Publisher` interface evolution
 
-**Today** ([internal/webhookpub/publisher.go:28-30](internal/webhookpub/publisher.go#L28-L30)):
+**Today** ([internal/webhookpub/publisher.go:28-30](../../internal/webhookpub/publisher.go#L28-L30)):
 
 ```go
 type Publisher interface {
@@ -1460,7 +1460,7 @@ type Publisher interface {
 }
 ```
 
-**`deliveryInserter` interface evolution** (currently at [internal/webhookpub/publisher.go:44-46](internal/webhookpub/publisher.go#L44-L46)):
+**`deliveryInserter` interface evolution** (currently at [internal/webhookpub/publisher.go:44-46](../../internal/webhookpub/publisher.go#L44-L46)):
 
 ```go
 type deliveryInserter interface {
@@ -1496,7 +1496,7 @@ type deliveryInserter interface {
 }
 ```
 
-**`InsertPendingForTest` forward-compat invariant.** The existing test-endpoint inserter at [internal/webhook/subscriber_store.go:178-190](internal/webhook/subscriber_store.go#L178-L190) currently doesn't write `event_id` or `replay_id` (those columns don't exist yet pre-#180). After migration 026, it must explicitly INSERT with `event_id = NULL, replay_id = NULL` so the partial unique index ignores test rows. Adding the columns without updating the test inserter is a silent bug — document this as part of slice 6's migration checklist.
+**`InsertPendingForTest` forward-compat invariant.** The existing test-endpoint inserter at [internal/webhook/subscriber_store.go:178-190](../../internal/webhook/subscriber_store.go#L178-L190) currently doesn't write `event_id` or `replay_id` (those columns don't exist yet pre-#180). After migration 026, it must explicitly INSERT with `event_id = NULL, replay_id = NULL` so the partial unique index ignores test rows. Adding the columns without updating the test inserter is a silent bug — document this as part of slice 6's migration checklist.
 
 ## Appendix B: Migration 026 full text
 
