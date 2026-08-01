@@ -288,6 +288,28 @@ reject a stale edit. `import` reads an RFC 4180 CSV (`--email-column`,
 `--name-column`, `--on-conflict merge|skip`, `--dry-run` to preview without
 writing); `imports delete` reverses one import batch.
 
+### `e2a suppressions`
+
+Inspect and manage recipient block lists. Without `--agent`, commands target
+the ACCOUNT-wide list — auto-populated by hard bounces and complaints and
+enforced for every inbox (sends fail with `recipient_suppressed`). With
+`--agent`, they target that inbox's beta unsubscribe/manual blocks. All
+commands require account scope.
+
+```bash
+e2a suppressions list                                   # account-wide list
+e2a suppressions list --agent bot@acme.com --json       # one inbox's blocks
+e2a suppressions add alice@example.com --agent bot@acme.com --reason "asked us to stop"
+e2a suppressions remove alice@example.com               # account-wide
+e2a suppressions remove alice@example.com --agent bot@acme.com
+```
+
+`add` requires `--agent` — manual blocks are per-agent; account entries only
+come from bounces/complaints. `remove` without `--agent` un-suppresses
+account-wide: do that only for addresses known to be deliverable, since
+removing a genuine bouncer hurts sender reputation. `list` supports `--limit`
+and `--json` (NDJSON instead of TSV: address, source, reason, created-at).
+
 ### `e2a listen`
 
 Stream inbound email for an agent over WebSocket in real time. The connection is

@@ -55,9 +55,12 @@ why" and remove an entry from (a) the dashboard, (b) `e2a suppressions`, and
     (requires `?confirm=DELETE`). `Page[AgentSuppressionView]`
     (`agent_email, address, reason?, source: unsubscribe|manual, created_at`).
   - Both return `501 not_implemented` when the deployment lacks the deps.
-- **SDKs**: TS `client.suppressions.list()/delete()` +
+- **SDKs**: TS `client.account.suppressions.list()/delete()` +
   `client.agents.listSuppressions/createSuppression/deleteSuppression`;
-  Python equivalents. Nothing to add.
+  Python equivalents. (Implementation deviation, discovered mid-build: the TS
+  account `suppressions.list()` took no page-size parameter, unlike its
+  sibling resources — it gained an additive optional `{ limit }` so the MCP
+  tool could expose the standard `cursor`+`limit` pagination shape.)
 - **Web**: Next.js static export, `"use client"` pages, raw `fetch` with
   `credentials: "include"` against same-origin `/v1/*` (see outreach page —
   the pattern to copy). Tabs live in `AgentHeader.tsx` (`TABS` array +
@@ -68,8 +71,8 @@ why" and remove an entry from (a) the dashboard, (b) `e2a suppressions`, and
 - **MCP**: tool modules in `mcp/src/tools/*.ts` registered in `server.ts`;
   thin `client.ts` wrapper over the TS SDK; **every tool must be added to
   exactly one tier set in `tools/tiers.ts`** (a test enforces completeness).
-- Assumption confirmed in prod: lists are tiny today (5 account rows, 0 agent
-  rows), but auto-grow on bounces — pagination must work from day one.
+- Assumption: suppression lists are small today but auto-grow on real bounce
+  traffic — pagination must work from day one.
 
 ## Proposed design
 

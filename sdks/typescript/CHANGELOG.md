@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Additive only.
+
+### Added
+- **`account.suppressions.list({ limit })`** — the account suppression list
+  now accepts the same optional page-size parameter its sibling resources
+  (`account.apiKeys.list`, `agents.listSuppressions`) already take.
+
 ## 5.4.0
 
 Additive only. Every 5.3.0 call site keeps compiling and behaving identically.

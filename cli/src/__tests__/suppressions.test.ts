@@ -60,15 +60,15 @@ describe("suppressions commands", () => {
   it("lists a single agent's suppressions with --agent", async () => {
     mockAgentList.mockReturnValue({
       toArray: vi.fn(async () => [{
-        agentEmail: "bot@agents.e2a.dev",
+        agentEmail: "bot@agents.localhost",
         address: "optout@example.net",
         source: "unsubscribe",
         createdAt: new Date("2026-07-20T09:00:00.000Z"),
       }]),
     });
     const { suppressionsList } = await import("../commands/suppressions.js");
-    await suppressionsList({ agent: "bot@agents.e2a.dev", json: true });
-    expect(mockAgentList).toHaveBeenCalledWith("bot@agents.e2a.dev", {});
+    await suppressionsList({ agent: "bot@agents.localhost", json: true });
+    expect(mockAgentList).toHaveBeenCalledWith("bot@agents.localhost", {});
     expect(mockAccountList).not.toHaveBeenCalled();
     const row = JSON.parse(String(stdout.mock.calls[0][0]));
     expect(row.address).toBe("optout@example.net");
@@ -92,17 +92,17 @@ describe("suppressions commands", () => {
 
   it("add creates a manual agent-scoped block with an optional reason", async () => {
     mockAgentCreate.mockResolvedValue({
-      agentEmail: "bot@agents.e2a.dev",
+      agentEmail: "bot@agents.localhost",
       address: "optout@example.net",
       source: "manual",
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     });
     const { suppressionsAdd } = await import("../commands/suppressions.js");
     await suppressionsAdd("optout@example.net", {
-      agent: "bot@agents.e2a.dev",
+      agent: "bot@agents.localhost",
       reason: "asked us to stop",
     });
-    expect(mockAgentCreate).toHaveBeenCalledWith("bot@agents.e2a.dev", {
+    expect(mockAgentCreate).toHaveBeenCalledWith("bot@agents.localhost", {
       address: "optout@example.net",
       reason: "asked us to stop",
     });
@@ -121,8 +121,8 @@ describe("suppressions commands", () => {
   it("remove routes to the agent list with --agent", async () => {
     mockAgentDelete.mockResolvedValue({ deleted: true, address: "optout@example.net" });
     const { suppressionsRemove } = await import("../commands/suppressions.js");
-    await suppressionsRemove("optout@example.net", { agent: "bot@agents.e2a.dev", json: true });
-    expect(mockAgentDelete).toHaveBeenCalledWith("bot@agents.e2a.dev", "optout@example.net");
+    await suppressionsRemove("optout@example.net", { agent: "bot@agents.localhost", json: true });
+    expect(mockAgentDelete).toHaveBeenCalledWith("bot@agents.localhost", "optout@example.net");
     expect(mockAccountDelete).not.toHaveBeenCalled();
     expect(JSON.parse(String(stdout.mock.calls[0][0]))).toEqual({
       deleted: true,
