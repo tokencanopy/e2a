@@ -451,8 +451,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   both scopes. (Public *deployment* discovery is the separate `GET /v1/info`.)
 - `DELETE /v1/account?confirm=DELETE` — permanently delete the account and cascade
   all owned data; returns per-table row counts (GDPR Art. 17). Irreversible.
-- `GET /v1/account/export` — JSON dump of every record the account owns (GDPR
-  Art. 15). Omits internal identifiers; see [data-handling.md](data-handling.md).
+- `GET /v1/account/export` — self-service account-data export supporting
+  access requests: profile, agents, domains, API key metadata, messages,
+  usage events, protection events, OAuth connections, and suppressions.
+  Omits internal identifiers. It is not yet an exhaustive export of every
+  account-owned resource; examples currently omitted include contacts,
+  contact engagements, contact import batches, templates, webhook
+  subscriptions, and webhook event/delivery history. See
+  [data-handling.md](data-handling.md).
   The export **envelope** (the top-level keys and `schema_version`) is stable;
   the **interior** record shapes are versioned by `schema_version` and may
   evolve — branch on `schema_version` before interpreting interior records.
