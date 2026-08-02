@@ -289,6 +289,12 @@ pending migrations against a `schema_migrations` tracker table.
    renumber existing files.
 4. **Forward-only** — there are no down migrations. If you need to
    undo something, write a new migration that does it.
+5. **Declare binary rollback compatibility** — `ROLLBACK_UNSAFE_BEFORE` is
+   embedded as `org.e2a.rollback-unsafe-before` in release images. Leave it at
+   `none` only while the previous released binary can still run safely after
+   every embedded migration applies. If a migration crosses that boundary,
+   set the first affected release semver and carry it forward cumulatively;
+   never reset it to `none` in a later release.
 
 Add or update tests in any Go package that writes raw SQL against the
 touched table. Higher-level e2e coverage doesn't catch query drift
