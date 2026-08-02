@@ -1,8 +1,14 @@
 name: Publish CLI
 
+# Dedicated tag, NOT the product "v*" release tag: the CLI depends on
+# @e2a/sdk, and the SDKs publish on their own ts-sdk-v* / python-v* tags
+# pushed after the product tag. Publishing the CLI from "v*" therefore
+# always raced ahead of the SDK it was built against (observed on v1.5.0:
+# @e2a/cli@2.2.0 hit npm ~4 minutes before @e2a/sdk@5.5.0). Push cli-v*
+# after ts-sdk-v* so the SDK is installable first.
 on:
   push:
-    tags: ["v*"]
+    tags: ["cli-v*"]
   workflow_dispatch:
 
 concurrency:

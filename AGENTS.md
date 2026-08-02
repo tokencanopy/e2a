@@ -437,7 +437,10 @@ manually on every API change even though the template won't remind you.
 - **Publishing** (all tag/dispatch-triggered GitHub workflows):
   - Python SDK: bump `sdks/python/pyproject.toml` version, tag `python-v*`.
   - TS SDK: bump `sdks/typescript/package.json` version, tag `ts-sdk-v*`.
-  - CLI: bump `cli/package.json` version, then GitHub release publish or
-    `gh workflow run "Publish CLI" --ref main`.
+  - CLI: bump `cli/package.json` version, tag `cli-v*` (or
+    `gh workflow run "Publish CLI" --ref main`). Deliberately NOT the
+    product `v*` tag: the CLI depends on `@e2a/sdk`, so push `cli-v*`
+    only after `ts-sdk-v*` — publishing from the product tag raced the
+    CLI onto npm before its SDK existed.
   - MCP: hosted-only — `publish-mcp-http.yml` pushes the HTTP image on tag;
     npm publish is retired.
