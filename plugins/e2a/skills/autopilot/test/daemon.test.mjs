@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
 
 import { JobSpool } from "../spool.mjs";
 import {
@@ -73,11 +74,12 @@ test("CLI child environment excludes unrelated credentials", () => {
   });
 });
 
-test("reconcile command uses the existing unread inbound list", () => {
+test("reconcile command scans all inbound mail from the durable cursor", () => {
   assert.deepEqual(
     buildReconcileArgs({
       baseArgs: [],
       agentEmail: "support@example.test",
+      since: "2026-08-01T00:00:00.000Z",
     }),
     [
       "messages",
@@ -87,10 +89,105 @@ test("reconcile command uses the existing unread inbound list", () => {
       "--direction",
       "inbound",
       "--read-status",
-      "unread",
+      "all",
+      "--since",
+      "2026-08-01T00:00:00.000Z",
       "--json",
     ],
   );
+});
+
+test("successful reconcile advances its cursor after enqueuing a read message", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-reconcile-cursor-"));
+  const cursorPath = path.join(root, "reconcile.json");
+  writeFileSync(
+    cursorPath,
+    `${JSON.stringify({ version: 1, since: "2026-08-01T00:00:00.000Z" })}\n`,
+    { mode: 0o600 },
+  );
+  const spool = new JobSpool(path.join(root, "jobs"));
+  const calls = [];
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool,
+    supervisor: { runNextJob: async () => ({ state: "idle" }) },
+    cli: { command: "/synthetic/e2a", baseArgs: [] },
+    reconcileStatePath: cursorPath,
+    now: () => Date.parse("2026-08-02T01:02:03.000Z"),
+    execFileImpl(_command, args, _options, callback) {
+      calls.push(args);
+      callback(
+        null,
+        '{"id":"msg_read_after_failed_forward","headerFrom":"customer@buyer.test","verifiedDomain":"buyer.test","readStatus":"read"}\n',
+      );
+    },
+  });
+
+  const result = await daemon.reconcile();
+
+  assert.equal(result.enqueued, 1);
+  assert.ok(calls[0].includes("all"));
+  assert.ok(calls[0].includes("2026-08-01T00:00:00.000Z"));
+  assert.equal(
+    JSON.parse(readFileSync(cursorPath, "utf8")).since,
+    "2026-08-02T01:02:03.000Z",
+  );
+});
+
+test("failed reconcile leaves the durable cursor unchanged", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-reconcile-cursor-"));
+  const cursorPath = path.join(root, "reconcile.json");
+  const original = { version: 1, since: "2026-08-01T00:00:00.000Z" };
+  writeFileSync(cursorPath, `${JSON.stringify(original)}\n`, { mode: 0o600 });
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool: new JobSpool(path.join(root, "jobs")),
+    supervisor: { runNextJob: async () => ({ state: "idle" }) },
+    cli: { command: "/synthetic/e2a", baseArgs: [] },
+    reconcileStatePath: cursorPath,
+    now: () => Date.parse("2026-08-02T01:02:03.000Z"),
+    execFileImpl(_command, _args, _options, callback) {
+      callback(null, "not-json\n");
+    },
+  });
+
+  assert.equal(await daemon.reconcile(), null);
+  assert.deepEqual(JSON.parse(readFileSync(cursorPath, "utf8")), original);
+});
+
+test("daemon schedules a persisted future retry on startup", async () => {
+  const nextRetry = Date.now() + 20;
+  let drains = 0;
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool: {
+      recoverRunning() {},
+      promoteReadyRetries() {},
+      nextRetryAt() { return nextRetry; },
+    },
+    supervisor: { async runNextJob() { drains += 1; return { state: "idle" }; } },
+    cli: { command: "/usr/bin/false", baseArgs: [] },
+  });
+
+  daemon.schedulePersistedRetry();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await daemon.stop();
+  assert.ok(drains >= 1);
 });
 
 test("reconcile output is all-or-nothing valid NDJSON", () => {
@@ -159,4 +256,36 @@ test("daemon schedules retry jobs for their durable availability time", async ()
   await daemon.stop();
 
   assert.ok(calls >= 3, `expected a scheduled retry drain, observed ${calls} calls`);
+});
+
+test("listener replacement exit is terminal instead of entering a restart fight", async () => {
+  let spawns = 0;
+  let child;
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool: { recoverRunning() {}, promoteReadyRetries() {} },
+    supervisor: { runNextJob: async () => ({ state: "idle" }) },
+    cli: { command: "/synthetic/e2a", baseArgs: [] },
+    spawnImpl() {
+      spawns += 1;
+      child = new EventEmitter();
+      child.kill = () => {};
+      return child;
+    },
+  });
+  daemon.receiver = { port: 8123, close: async () => {} };
+
+  daemon.spawnListener();
+  child.emit("spawn");
+  child.emit("exit", 5, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await daemon.stop();
+
+  assert.equal(spawns, 1);
+  assert.equal(daemon.restartTimer, null);
 });

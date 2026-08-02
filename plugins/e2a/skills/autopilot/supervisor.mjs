@@ -147,9 +147,9 @@ export function jobSocketRoot(stateRoot, temporaryRoot = tmpdir()) {
   return path.join(temporaryRoot, `e2a-autopilot-${digest}`);
 }
 
-function noticeKey(kind, messageId, text) {
+function noticeKey(kind, messageId) {
   const digest = createHash("sha256")
-    .update(JSON.stringify({ kind, messageId, text }), "utf8")
+    .update(JSON.stringify({ kind, messageId }), "utf8")
     .digest("hex");
   return `autopilot-notice-${digest}`;
 }
@@ -189,25 +189,38 @@ export class AutopilotSupervisor {
     if (!job) return { state: "idle" };
 
     let completion = null;
-    let escalation = null;
+    let escalation = job.effects?.escalation || null;
     const socketPath = path.join(this.socketRoot, `${shortJobKey(job.messageId)}.sock`);
     const gateway = new JobGateway({
       socketPath,
-      job: { jobId: job.messageId, messageId: job.messageId },
+      job: {
+        jobId: job.messageId,
+        messageId: job.messageId,
+        authorizedFrom: job.from,
+      },
       ownerEmail: this.policy.mailbox.ownerEmail,
       ccOwner: this.policy.outbound.ccOwner,
+      replyMode: this.policy.task.replyMode,
+      replyCheckpoint: job.effects?.reply,
+      escalationCheckpoint: job.effects?.escalation,
       mail: this.mail,
+      onReplySubmitted: async (value) => {
+        this.spool.checkpointEffects(job.messageId, { reply: value });
+      },
       onEscalate: async (value) => {
         const notification = await this.mail.notifyOwner({
           ownerEmail: this.policy.mailbox.ownerEmail,
           subject: "Autopilot needs attention",
           text: `Autopilot escalated message ${job.messageId}.\n\nReason: ${value.reason}`,
-          idempotencyKey: noticeKey("escalation", job.messageId, value.reason),
+          idempotencyKey: noticeKey("escalation", job.messageId),
         });
         escalation = {
           ...value,
           notificationStatus: notification.status,
         };
+        this.spool.checkpointEffects(job.messageId, {
+          escalation: { notificationStatus: notification.status },
+        });
       },
       onComplete: async (value) => {
         completion = value;
@@ -222,7 +235,7 @@ export class AutopilotSupervisor {
         socketPath: connection.socketPath,
         token: connection.token,
         helperPath: this.helperPath,
-        timeoutMs: 30 * 60 * 1_000,
+        timeoutMs: 5 * 60 * 1_000,
       });
       const result = await this.runtimeExecutor(invocation);
       if (result.timedOut) {
@@ -235,9 +248,8 @@ export class AutopilotSupervisor {
         return this.failJob(job.messageId, "runtime exited without completing the job");
       }
       const done = this.spool.complete(job.messageId, {
-        summary: completion.summary,
+        completed: true,
         escalated: Boolean(escalation),
-        ...(escalation ? { escalationReason: escalation.reason } : {}),
         ...(escalation
           ? { notificationStatus: escalation.notificationStatus }
           : {}),
@@ -261,7 +273,7 @@ export class AutopilotSupervisor {
           ownerEmail: this.policy.mailbox.ownerEmail,
           subject: "Autopilot stopped after repeated failures",
           text: `Autopilot could not complete message ${messageId}.\n\nLast failure: ${reason}`,
-          idempotencyKey: noticeKey("dead", messageId, reason),
+          idempotencyKey: noticeKey("dead", messageId),
         });
       } catch {
         // The durable dead-letter remains visible to `autopilot status` even

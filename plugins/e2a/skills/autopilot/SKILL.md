@@ -39,7 +39,10 @@ The interview must establish:
 8. Prompt-injection screening, recommended and default **on**. Turning it off
    requires a warned acknowledgement.
 9. Claude Code, Codex, OpenClaw, Hermes Agent, or a custom executable; its
-   absolute path, workspace, and isolation mode.
+   absolute path, workspace, and isolation mode. OpenClaw, Hermes, and custom
+   executables require an acknowledged external isolation boundary because
+   Autopilot cannot verify one for them. A built-in container runner is not
+   implemented in this release; use an explicitly reviewed custom wrapper.
 10. launchd, systemd, or foreground operation.
 
 Use the plugin-local entrypoint for the authoritative interview and policy:
@@ -119,10 +122,10 @@ and independent unread reconciliation cover silent WebSocket gaps.
 ## Runtime isolation
 
 Adapters are one-shot and receive a sanitized environment plus the job gateway.
-Claude Code and Codex use non-persistent, restricted invocations; OpenClaw uses
-its documented embedded headless command; Hermes uses one-shot safe mode. A
-custom command requires explicit acknowledgement because Autopilot cannot verify
-its isolation.
+Claude Code and Codex use non-persistent, restricted native invocations.
+OpenClaw uses its documented embedded headless command and Hermes uses one-shot
+safe mode, but neither is treated as an isolation boundary: both require the
+same explicit custom-isolation acknowledgement as a custom executable.
 
 The OS account is still a trust boundary. A hostile process running as the same
 user may inspect owner-readable files or process state. A prompt that says “do not

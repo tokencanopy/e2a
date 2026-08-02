@@ -57,6 +57,23 @@ const QUESTIONS = [
     prompt: "When must it escalate to a human instead of replying?",
   },
   {
+    id: "response_expectations",
+    kind: "text",
+    required: true,
+    when: support,
+    prompt:
+      "What response-time or service-level expectation should guide the support agent?",
+  },
+  {
+    id: "reply_mode",
+    kind: "choice",
+    choices: ["submit-for-review", "draft-only"],
+    default: "submit-for-review",
+    when: support,
+    prompt:
+      "Should the agent submit in-thread replies to e2a review, or only escalate a proposed draft? submit-for-review or draft-only [submit-for-review]",
+  },
+  {
     id: "tone",
     kind: "text",
     default: "Clear, warm, and concise.",
@@ -163,10 +180,10 @@ const QUESTIONS = [
   {
     id: "sandbox",
     kind: "choice",
-    choices: ["native", "container", "custom"],
-    default: "native",
+    choices: ["custom"],
+    default: "custom",
     prompt:
-      "Which isolation boundary will the runtime use? native, container, or custom [native]",
+      "There is no isolation profile Autopilot can verify: native coding-agent flags do not stop a same-user process from reading owner-readable files. Configure a container, VM, separate OS user, or equivalent wrapper, then choose custom. [custom]",
   },
   {
     id: "custom_sandbox_ack",
@@ -207,6 +224,10 @@ function publicQuestion(question, state) {
     typeof question.default === "function"
       ? question.default(state)
       : question.default;
+  const choices =
+    typeof question.choices === "function"
+      ? question.choices(state)
+      : question.choices;
   return {
     id: question.id,
     prompt:
@@ -214,7 +235,7 @@ function publicQuestion(question, state) {
         ? question.prompt(state)
         : question.prompt,
     kind: question.kind,
-    ...(question.choices ? { choices: [...question.choices] } : {}),
+    ...(choices ? { choices: [...choices] } : {}),
     ...(defaultValue !== undefined ? { default: defaultValue } : {}),
   };
 }
@@ -283,6 +304,10 @@ function parseAnswer(question, value, state) {
     typeof question.default === "function"
       ? question.default(state)
       : question.default;
+  const choices =
+    typeof question.choices === "function"
+      ? question.choices(state)
+      : question.choices;
 
   switch (question.kind) {
     case "text": {
@@ -297,8 +322,8 @@ function parseAnswer(question, value, state) {
     }
     case "choice": {
       const result = (raw || defaultValue || "").toLowerCase();
-      if (!question.choices.includes(result)) {
-        throw new Error(`Choose one of: ${question.choices.join(", ")}.`);
+      if (!choices.includes(result)) {
+        throw new Error(`Choose one of: ${choices.join(", ")}.`);
       }
       return result;
     }
@@ -339,6 +364,10 @@ function supportInstructions(answers) {
     `Never handle: ${answers.support_exclusions}`,
     `Approved knowledge sources: ${answers.knowledge_sources}`,
     `Escalate when: ${answers.escalation_rules}`,
+    `Response expectation: ${answers.response_expectations}`,
+    answers.reply_mode === "draft-only"
+      ? "Reply mode: draft-only. Do not submit a reply; escalate the proposed draft to the owner."
+      : "Reply mode: submit-for-review. Submit an in-thread reply; e2a human review remains authoritative.",
     `Reply tone: ${answers.tone}`,
     `Signature: ${answers.signature}`,
   ].join("\n");
@@ -362,6 +391,10 @@ export function buildPolicyFromInterview(state) {
     task: {
       profile: answers.profile,
       objective: answers.objective,
+      replyMode:
+        answers.profile === "customer-support"
+          ? answers.reply_mode
+          : "submit-for-review",
       instructions:
         answers.profile === "customer-support"
           ? supportInstructions(answers)

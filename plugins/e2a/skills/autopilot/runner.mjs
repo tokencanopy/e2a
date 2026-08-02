@@ -8,6 +8,7 @@ import { AutopilotDaemon } from "./daemon.mjs";
 import { E2aMailClient } from "./mail-client.mjs";
 import { JobSpool } from "./spool.mjs";
 import { AutopilotSupervisor } from "./supervisor.mjs";
+import { acquireSupervisorLock } from "./lock.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,7 @@ export function createInstalledDaemon({ environment = process.env, log } = {}) {
     spool,
     supervisor,
     cli: installed.cli,
+    reconcileStatePath: path.join(installed.stateRoot, "reconcile.json"),
     environment,
     log,
   });
@@ -52,7 +54,23 @@ export async function runInstalledDaemon({ environment = process.env } = {}) {
   const log = (message) => {
     process.stdout.write(`${new Date().toISOString()} ${message}\n`);
   };
-  const daemon = createInstalledDaemon({ environment, log });
+  const stateRoot = requiredEnvironmentFrom(environment, "E2A_AUTOPILOT_STATE_ROOT");
+  const lifetimeLock = acquireSupervisorLock(stateRoot);
+  let daemon;
+  try {
+    daemon = createInstalledDaemon({ environment, log });
+  } catch (error) {
+    lifetimeLock.release();
+    throw error;
+  }
+  const stopDaemon = daemon.stop.bind(daemon);
+  daemon.stop = async () => {
+    try {
+      await stopDaemon();
+    } finally {
+      lifetimeLock.release();
+    }
+  };
   let stopping = false;
   const stop = async (signal) => {
     if (stopping) return;
@@ -62,7 +80,12 @@ export async function runInstalledDaemon({ environment = process.env } = {}) {
   };
   process.once("SIGTERM", () => void stop("SIGTERM"));
   process.once("SIGINT", () => void stop("SIGINT"));
-  await daemon.start();
+  try {
+    await daemon.start();
+  } catch (error) {
+    await daemon.stop();
+    throw error;
+  }
   log("autopilot supervisor started");
   return daemon;
 }

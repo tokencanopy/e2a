@@ -14,9 +14,10 @@ const SUPPORTED_RUNTIMES = new Set([
   "hermes",
   "custom",
 ]);
-const SUPPORTED_SANDBOXES = new Set(["native", "container", "custom"]);
+const SUPPORTED_SANDBOXES = new Set(["custom"]);
 const SUPPORTED_SERVICES = new Set(["launchd", "systemd", "foreground"]);
 const SUPPORTED_INBOUND_MODES = new Set(["addresses", "domains"]);
+const SUPPORTED_REPLY_MODES = new Set(["submit-for-review", "draft-only"]);
 const OPT_OUTS = new Set([
   "outbound_review_opt_out",
   "owner_cc_opt_out",
@@ -47,6 +48,7 @@ export function createPolicy() {
       profile: "customer-support",
       objective: "",
       instructions: "",
+      replyMode: "submit-for-review",
     },
     mailbox: {
       agentEmail: "",
@@ -69,7 +71,7 @@ export function createPolicy() {
       adapter: "claude",
       command: "",
       workdir: "",
-      sandbox: "native",
+      sandbox: "custom",
     },
     service: {
       manager: process.platform === "darwin" ? "launchd" : "systemd",
@@ -88,6 +90,7 @@ export function normalizePolicy(input = {}) {
       profile: lowercase(input.task?.profile || defaults.task.profile),
       objective: text(input.task?.objective),
       instructions: text(input.task?.instructions),
+      replyMode: lowercase(input.task?.replyMode || defaults.task.replyMode),
     },
     mailbox: {
       agentEmail: lowercase(input.mailbox?.agentEmail),
@@ -139,6 +142,9 @@ export function validatePolicy(input) {
   }
   if (!policy.task.objective) {
     errors.push("Describe the task outcome the agent should produce.");
+  }
+  if (!SUPPORTED_REPLY_MODES.has(policy.task.replyMode)) {
+    errors.push(`Unsupported reply mode: ${policy.task.replyMode || "(missing)"}.`);
   }
   if (!EMAIL_RE.test(policy.mailbox.agentEmail)) {
     errors.push("Provide a valid e2a agent mailbox address.");
@@ -238,7 +244,37 @@ function enabled(value) {
   return value ? "enabled (recommended default)" : "DISABLED by warned opt-out";
 }
 
-export function renderPlan(input) {
+function installationContext(input) {
+  if (!input || typeof input !== "object") {
+    throw new Error("A resolved installation context is required for confirmation.");
+  }
+  const cliCommand = text(input.cliCommand);
+  const cliBaseArgs = Array.isArray(input.cliBaseArgs)
+    ? input.cliBaseArgs.map((value) => String(value))
+    : null;
+  const deploymentUrl = text(input.deploymentUrl);
+  const apiBaseUrl = text(input.apiBaseUrl);
+  if (
+    !cliCommand.startsWith("/") ||
+    !cliBaseArgs ||
+    !deploymentUrl ||
+    !apiBaseUrl ||
+    !input.priorProtection ||
+    !input.nextProtection
+  ) {
+    throw new Error("The resolved installation context is incomplete.");
+  }
+  return {
+    cliCommand,
+    cliBaseArgs,
+    deploymentUrl,
+    apiBaseUrl,
+    priorProtection: input.priorProtection,
+    nextProtection: input.nextProtection,
+  };
+}
+
+export function renderPlan(input, resolvedInstallation = null) {
   const policy = normalizePolicy(input);
   const errors = validatePolicy(policy);
   if (errors.length > 0) {
@@ -266,12 +302,18 @@ export function renderPlan(input) {
         ? path.join(homedir(), ".config", "systemd", "user", identity.systemdUnit)
         : "none (foreground/manual mode)";
   const inboundGate = policy.inbound.mode === "domains" ? "domain" : "allowlist";
+  const resolved = resolvedInstallation
+    ? installationContext(resolvedInstallation)
+    : null;
 
   return [
     "e2a Autopilot installation plan",
     "",
     `Task profile: ${policy.task.profile}`,
     `Task outcome: ${policy.task.objective}`,
+    `Reply capability: ${policy.task.replyMode}`,
+    "Task instructions:",
+    policy.task.instructions || "(none)",
     `Agent mailbox: ${policy.mailbox.agentEmail}`,
     `Owner: ${policy.mailbox.ownerEmail}`,
     `Inbound authorization mode: ${policy.inbound.mode}`,
@@ -295,6 +337,17 @@ export function renderPlan(input) {
     `Durable state: ${path.join(localRoot, "state")}`,
     `Logs: ${path.join(localRoot, "logs")}`,
     `Service definition: ${serviceDefinition}`,
+    ...(resolved
+      ? [
+          `Setup CLI: ${resolved.cliCommand} ${resolved.cliBaseArgs.join(" ")}`.trim(),
+          `CLI deployment origin: ${resolved.deploymentUrl}`,
+          `Protection API origin: ${resolved.apiBaseUrl}`,
+          `Protection before: ${JSON.stringify(resolved.priorProtection)}`,
+          `Protection after: ${JSON.stringify(resolved.nextProtection)}`,
+        ]
+      : [
+          "Setup CLI and protection changes: unresolved (run `autopilot plan` for an installable confirmation digest)",
+        ]),
     "",
     "Planned changes:",
     "- Create the owner-only files at the exact paths above.",
@@ -314,12 +367,22 @@ export function renderPlan(input) {
     "",
     "Implementation boundary:",
     "- No server, API, database, core CLI, SDK, or MCP code changes.",
-    "- The task runtime receives no e2a credential and cannot list, search, or delete mail.",
+    "- The job gateway never gives the task runtime an e2a credential or a mailbox list, search, or delete operation.",
+    "- Installation requires an operator-supplied external isolation boundary; Autopilot records the acknowledgement but cannot verify that boundary.",
+    "- Without a correctly configured container, VM, or separate-user boundary, a same-user runtime may inspect local process state or owner-readable files, including Autopilot credentials.",
     "- Owner CC is enforced by the local gateway, not the e2a server.",
     "- Later account-level protection changes cannot be detected continuously.",
   ].join("\n");
 }
 
-export function planDigest(input) {
-  return createHash("sha256").update(renderPlan(input), "utf8").digest("hex");
+export function planDigest(input, resolvedInstallation) {
+  const policy = normalizePolicy(input);
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) {
+    throw new Error(`Cannot confirm an invalid Autopilot policy:\n- ${errors.join("\n- ")}`);
+  }
+  const resolved = installationContext(resolvedInstallation);
+  return createHash("sha256")
+    .update(JSON.stringify({ policy, installation: resolved }), "utf8")
+    .digest("hex");
 }

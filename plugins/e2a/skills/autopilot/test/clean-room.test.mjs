@@ -6,9 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { AutopilotDaemon } from "../daemon.mjs";
-import { installAutopilot } from "../installer.mjs";
+import { installAutopilot, prepareAutopilotInstall } from "../installer.mjs";
 import { loadInstallation, localStatus } from "../operator.mjs";
-import { planDigest } from "../policy.mjs";
 import { JobSpool } from "../spool.mjs";
 import { AutopilotSupervisor } from "../supervisor.mjs";
 
@@ -29,7 +28,7 @@ function runHelper(command, invocation, input = "") {
   });
 }
 
-test("clean-room install, review release, reply, restart, dedupe, and status", async () => {
+test("clean-room install, authorized screening release, reply, restart, dedupe, and status", async () => {
   const home = mkdtempSync(path.join(tmpdir(), "autopilot-clean-room-"));
   const policy = {
     version: 1,
@@ -37,6 +36,7 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
       profile: "customer-support",
       objective: "Answer routine synthetic support requests.",
       instructions: "Use the synthetic handbook and escalate billing.",
+      replyMode: "submit-for-review",
     },
     mailbox: { agentEmail: "support@example.test", ownerEmail: "owner@example.test" },
     inbound: {
@@ -51,10 +51,10 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
       adapter: "codex",
       command: "/opt/synthetic/bin/codex",
       workdir: "/srv/synthetic-support",
-      sandbox: "native",
+      sandbox: "custom",
     },
     service: { manager: "foreground" },
-    acknowledgements: [],
+    acknowledgements: ["custom_sandbox_acknowledged"],
   };
   const openProtection = {
     inbound: { gate: { policy: "open", allowlist: [], action: "flag" }, scan: { sensitivity: "off" } },
@@ -66,7 +66,7 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
     async preflight() {
       return {
         deploymentUrl: "https://e2a.example.test",
-        apiBaseUrl: "https://api.e2a.example.test",
+        apiBaseUrl: "https://e2a.example.test",
         cliCommand: process.execPath,
         cliBaseArgs: ["/opt/synthetic/e2a.mjs"],
       };
@@ -80,9 +80,11 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
     async revokeKey() {},
   };
 
+  const prepared = await prepareAutopilotInstall({ policy, setup });
   const installation = await installAutopilot({
     policy,
-    confirmation: planDigest(policy),
+    confirmation: prepared.planDigest,
+    prepared,
     home,
     setup,
     skipExecutableChecks: true,
@@ -103,6 +105,7 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
     spool,
     supervisor: { async runNextJob() { return { state: "idle" }; } },
     cli: { command: process.execPath, baseArgs: ["/opt/synthetic/e2a.mjs"] },
+    reconcileStatePath: path.join(installation.paths.stateRoot, "reconcile.json"),
     execFileImpl(_command, _args, _options, callback) { callback(null, released); },
   });
   const firstReconcile = await daemon.reconcile();
@@ -120,7 +123,14 @@ test("clean-room install, review release, reply, restart, dedupe, and status", a
     stateRoot: installation.paths.stateRoot,
     helperPath,
     mail: {
-      async getMessage(id) { return { id, conversation_id: "conv_synthetic" }; },
+      async getMessage(id) {
+        return {
+          id,
+          conversation_id: "conv_synthetic",
+          header_from: "buyer@customer.test",
+          reply_to: [],
+        };
+      },
       async getThread(id) { return [{ id, conversation_id: "conv_synthetic" }]; },
       async reply(messageId, input) {
         replies.push({ messageId, ...input });

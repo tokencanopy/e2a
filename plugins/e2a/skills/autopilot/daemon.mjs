@@ -1,4 +1,7 @@
 import { execFile, spawn } from "node:child_process";
+import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { createForwardReceiver, isAuthorizedMessage } from "./supervisor.mjs";
 
@@ -26,7 +29,10 @@ export function buildListenerArgs({ baseArgs = [], agentEmail, port, forwardToke
   ];
 }
 
-export function buildReconcileArgs({ baseArgs = [], agentEmail }) {
+export function buildReconcileArgs({ baseArgs = [], agentEmail, since }) {
+  if (!since || Number.isNaN(Date.parse(since))) {
+    throw new Error("A valid durable reconciliation cursor is required.");
+  }
   return [
     ...baseArgs,
     "messages",
@@ -36,9 +42,38 @@ export function buildReconcileArgs({ baseArgs = [], agentEmail }) {
     "--direction",
     "inbound",
     "--read-status",
-    "unread",
+    "all",
+    "--since",
+    since,
     "--json",
   ];
+}
+
+export function readReconcileCursor(file) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(`Cannot read the durable reconciliation cursor: ${error.message}`);
+  }
+  if (value?.version !== 1 || typeof value.since !== "string" || Number.isNaN(Date.parse(value.since))) {
+    throw new Error("The durable reconciliation cursor is invalid.");
+  }
+  return value;
+}
+
+export function writeReconcileCursor(file, since) {
+  const temporary = path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${randomUUID()}.tmp`,
+  );
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, since })}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  renameSync(temporary, file);
+  chmodSync(file, 0o600);
 }
 
 export function formatListenerStart(command, args) {
@@ -115,6 +150,8 @@ export class AutopilotDaemon {
     receiverPort = 0,
     bounceIntervalMs = 15 * 60 * 1_000,
     reconcileIntervalMs = 10 * 60 * 1_000,
+    reconcileStatePath,
+    now = Date.now,
   }) {
     this.policy = policy;
     this.secrets = secrets;
@@ -128,6 +165,8 @@ export class AutopilotDaemon {
     this.receiverPort = receiverPort;
     this.bounceIntervalMs = bounceIntervalMs;
     this.reconcileIntervalMs = reconcileIntervalMs;
+    this.reconcileStatePath = reconcileStatePath;
+    this.now = now;
     this.receiver = null;
     this.listener = null;
     this.bounceTimer = null;
@@ -136,6 +175,7 @@ export class AutopilotDaemon {
     this.retryTimer = null;
     this.retryAt = null;
     this.restartBackoffMs = 1_000;
+    this.listenerStableTimer = null;
     this.bounceRequested = false;
     this.stopping = false;
     this.draining = false;
@@ -152,6 +192,7 @@ export class AutopilotDaemon {
   async start() {
     this.spool.recoverRunning();
     this.spool.promoteReadyRetries();
+    this.schedulePersistedRetry();
     this.receiver = await createForwardReceiver({
       port: this.receiverPort,
       token: this.secrets.forwardToken,
@@ -183,16 +224,27 @@ export class AutopilotDaemon {
     });
     this.listener = child;
     child.on("spawn", () => {
-      this.restartBackoffMs = 1_000;
+      this.listenerStableTimer = setTimeout(() => {
+        this.listenerStableTimer = null;
+        this.restartBackoffMs = 1_000;
+      }, 60_000);
     });
     child.on("error", () => {});
     child.on("exit", (code, signal) => {
+      if (this.listenerStableTimer) {
+        clearTimeout(this.listenerStableTimer);
+        this.listenerStableTimer = null;
+      }
       if (this.listener === child) this.listener = null;
       if (this.stopping) return;
       if (this.bounceRequested) {
         this.bounceRequested = false;
         this.log("listener restarted for scheduled connection refresh");
         this.spawnListener();
+        return;
+      }
+      if (code === 5) {
+        this.log("listener was replaced by another e2a listener; live forwarding is disabled and reconciliation remains active");
         return;
       }
       const delay = this.restartBackoffMs;
@@ -210,11 +262,18 @@ export class AutopilotDaemon {
 
   async reconcile() {
     if (this.stopping) return null;
-    const args = buildReconcileArgs({
-      baseArgs: this.cli.baseArgs,
-      agentEmail: this.policy.mailbox.agentEmail,
-    });
+    if (!this.reconcileStatePath) {
+      this.log("reconcile failed: missing_cursor_path");
+      return null;
+    }
     try {
+      const cursor = readReconcileCursor(this.reconcileStatePath);
+      const reconcileStartedAt = new Date(this.now()).toISOString();
+      const args = buildReconcileArgs({
+        baseArgs: this.cli.baseArgs,
+        agentEmail: this.policy.mailbox.agentEmail,
+        since: cursor.since,
+      });
       const stdout = await new Promise((resolve, reject) => {
         this.execFileImpl(
           this.cli.command,
@@ -228,6 +287,7 @@ export class AutopilotDaemon {
         spool: this.spool,
         messages: parseReconcileOutput(stdout),
       });
+      writeReconcileCursor(this.reconcileStatePath, reconcileStartedAt);
       this.log(
         `reconcile checked=${result.checked} enqueued=${result.enqueued} refused=${result.refused} deduplicated=${result.deduplicated}`,
       );
@@ -270,6 +330,11 @@ export class AutopilotDaemon {
     }, Math.max(0, availableAt - Date.now()));
   }
 
+  schedulePersistedRetry() {
+    const availableAt = this.spool.nextRetryAt?.();
+    if (Number.isFinite(availableAt)) this.scheduleRetry(availableAt);
+  }
+
   async stop() {
     this.stopping = true;
     for (const timer of [
@@ -277,6 +342,7 @@ export class AutopilotDaemon {
       this.reconcileTimer,
       this.restartTimer,
       this.retryTimer,
+      this.listenerStableTimer,
     ]) {
       if (timer) clearTimeout(timer);
     }

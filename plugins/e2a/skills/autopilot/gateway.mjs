@@ -35,6 +35,14 @@ function boundedText(value, field, max) {
   return value.trim();
 }
 
+function mailboxAddress(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim().toLowerCase();
+  const angle = trimmed.match(/<([^<>]+)>\s*$/);
+  const address = (angle?.[1] || trimmed).trim();
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) ? address : "";
+}
+
 class RequestError extends Error {
   constructor(status, message) {
     super(message);
@@ -63,19 +71,24 @@ async function readJson(request) {
   }
 }
 
-function replyIdempotencyKey(job, text, cc) {
+function replyIdempotencyKey(job) {
   const digest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        jobId: job.jobId,
-        messageId: job.messageId,
-        text,
-        cc,
-      }),
-      "utf8",
-    )
+    .update(JSON.stringify({ jobId: job.jobId, messageId: job.messageId }), "utf8")
     .digest("hex");
   return `autopilot-${digest}`;
+}
+
+function textDigest(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function normalizedReplyResult(value = {}) {
+  return {
+    status: typeof value.status === "string" ? value.status : "accepted",
+    ...((value.messageId ?? value.message_id)
+      ? { messageId: value.messageId ?? value.message_id }
+      : {}),
+  };
 }
 
 export class JobGateway {
@@ -84,13 +97,17 @@ export class JobGateway {
     job,
     ownerEmail,
     ccOwner,
+    replyMode = "submit-for-review",
+    replyCheckpoint = null,
+    escalationCheckpoint = null,
     mail,
+    onReplySubmitted = async () => {},
     onEscalate = async () => {},
     onComplete = async () => {},
   }) {
     if (!socketPath) throw new Error("A gateway socket path is required.");
-    if (!job?.messageId || !job?.jobId) {
-      throw new Error("A job ID and message ID are required.");
+    if (!job?.messageId || !job?.jobId || !mailboxAddress(job?.authorizedFrom)) {
+      throw new Error("A job ID, message ID, and authorized sender are required.");
     }
     if (!mail?.getMessage || !mail?.getThread || !mail?.reply) {
       throw new Error("The gateway requires scoped mail operations.");
@@ -99,14 +116,25 @@ export class JobGateway {
       throw new Error("Owner email is required when owner CC is enabled.");
     }
     this.socketPath = socketPath;
-    this.job = Object.freeze({ jobId: job.jobId, messageId: job.messageId });
+    this.job = Object.freeze({
+      jobId: job.jobId,
+      messageId: job.messageId,
+      authorizedFrom: mailboxAddress(job.authorizedFrom),
+    });
     this.ownerEmail = ownerEmail;
     this.ccOwner = Boolean(ccOwner);
+    this.replyMode = replyMode;
+    this.replyCheckpoint = replyCheckpoint;
+    this.escalationCheckpoint = escalationCheckpoint;
     this.mail = mail;
+    this.onReplySubmitted = onReplySubmitted;
     this.onEscalate = onEscalate;
     this.onComplete = onComplete;
     this.token = randomBytes(32).toString("base64url");
     this.server = null;
+    this.replyInFlight = false;
+    this.escalated = Boolean(escalationCheckpoint);
+    this.completed = false;
   }
 
   async start() {
@@ -165,6 +193,9 @@ export class JobGateway {
       }
 
       if (request.method === "POST" && request.url === "/v1/reply") {
+        if (this.replyMode === "draft-only") {
+          throw new RequestError(403, "Reply submission is disabled by the confirmed draft-only policy.");
+        }
         const body = await readJson(request);
         if (!exactKeys(body, ["text"])) {
           throw new RequestError(
@@ -173,35 +204,89 @@ export class JobGateway {
           );
         }
         const text = boundedText(body.text, "text", MAX_REQUEST_BYTES);
+        const digest = textDigest(text);
+        if (this.replyCheckpoint) {
+          if (this.replyCheckpoint.textDigest !== digest) {
+            throw new RequestError(409, "A reply was already submitted for this job.");
+          }
+          sendJson(response, 200, { result: this.replyCheckpoint.result });
+          return;
+        }
+        if (this.replyInFlight) {
+          throw new RequestError(409, "A reply submission is already in progress for this job.");
+        }
+        this.replyInFlight = true;
         const cc = this.ccOwner ? [this.ownerEmail] : [];
-        const result = await this.mail.reply(this.job.messageId, {
-          text,
-          cc,
-          replyAll: true,
-          idempotencyKey: replyIdempotencyKey(this.job, text, cc),
-        });
-        sendJson(response, 200, { result });
+        const idempotencyKey = replyIdempotencyKey(this.job);
+        try {
+          const source = await this.mail.getMessage(this.job.messageId);
+          const sourceFrom = mailboxAddress(source?.headerFrom ?? source?.header_from);
+          const replyTo = source?.replyTo ?? source?.reply_to ?? [];
+          if (sourceFrom !== this.job.authorizedFrom) {
+            throw new RequestError(409, "The current message sender no longer matches the authorized job sender.");
+          }
+          if (
+            !Array.isArray(replyTo) ||
+            replyTo.some((value) => mailboxAddress(value) !== this.job.authorizedFrom)
+          ) {
+            throw new RequestError(409, "Reply-To does not match the authorized sender; escalate this job instead.");
+          }
+          const result = normalizedReplyResult(
+            await this.mail.reply(this.job.messageId, {
+              text,
+              cc,
+              replyAll: false,
+              idempotencyKey,
+            }),
+          );
+          this.replyCheckpoint = {
+            idempotencyKey,
+            textDigest: digest,
+            status: result.status,
+            result,
+          };
+          await this.onReplySubmitted(this.replyCheckpoint);
+          sendJson(response, 200, { result });
+        } finally {
+          this.replyInFlight = false;
+        }
         return;
       }
 
       if (request.method === "POST" && request.url === "/v1/escalate") {
+        if (this.escalated) {
+          throw new RequestError(409, "This job has already been escalated.");
+        }
         const body = await readJson(request);
         if (!exactKeys(body, ["reason"])) {
           throw new RequestError(400, "Escalation accepts a reason only.");
         }
         const reason = boundedText(body.reason, "reason", 4_000);
-        await this.onEscalate({ ...this.job, reason });
+        this.escalated = true;
+        await this.onEscalate({
+          jobId: this.job.jobId,
+          messageId: this.job.messageId,
+          reason,
+        });
         sendJson(response, 200, { escalated: true });
         return;
       }
 
       if (request.method === "POST" && request.url === "/v1/complete") {
+        if (this.completed) {
+          throw new RequestError(409, "This job has already been completed.");
+        }
         const body = await readJson(request);
         if (!exactKeys(body, ["summary"])) {
           throw new RequestError(400, "Completion accepts a summary only.");
         }
         const summary = boundedText(body.summary, "summary", 4_000);
-        await this.onComplete({ ...this.job, summary });
+        this.completed = true;
+        await this.onComplete({
+          jobId: this.job.jobId,
+          messageId: this.job.messageId,
+          summary,
+        });
         sendJson(response, 200, { completed: true });
         return;
       }

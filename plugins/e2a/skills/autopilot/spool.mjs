@@ -197,6 +197,26 @@ export class JobSpool {
     });
   }
 
+  checkpointEffects(messageId, patch = {}) {
+    const located = this.locate(messageId);
+    if (!located || located.state !== "running") {
+      throw new Error(`Job ${messageId} is not running.`);
+    }
+    const previous = this.read(located.file);
+    const effects = {
+      ...(previous.effects || {}),
+      ...patch,
+    };
+    const job = {
+      ...previous,
+      effects,
+      updatedAt: this.now(),
+    };
+    delete job.file;
+    this.writeAtomic(located.file, job);
+    return this.read(located.file);
+  }
+
   fail(messageId, error, { maxAttempts = 3, baseDelayMs = 1_000 } = {}) {
     const located = this.locate(messageId);
     if (!located || located.state !== "running") {
@@ -245,6 +265,13 @@ export class JobSpool {
       });
     }
     return ready.length;
+  }
+
+  nextRetryAt() {
+    const values = this.list("retry")
+      .map((job) => job.availableAt)
+      .filter(Number.isFinite);
+    return values.length > 0 ? Math.min(...values) : null;
   }
 
   counts() {

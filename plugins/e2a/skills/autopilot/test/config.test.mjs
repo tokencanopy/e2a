@@ -16,6 +16,7 @@ function fixture() {
       profile: "customer-support",
       objective: "Resolve routine support requests.",
       instructions: "Use approved docs and escalate billing.",
+      replyMode: "submit-for-review",
     },
     mailbox: {
       agentEmail: "support@example.test",
@@ -33,10 +34,10 @@ function fixture() {
       adapter: "codex",
       command: "/usr/local/bin/codex",
       workdir: "/srv/autopilot/support",
-      sandbox: "native",
+      sandbox: "custom",
     },
     service: { manager: "foreground" },
-    acknowledgements: [],
+    acknowledgements: ["custom_sandbox_acknowledged"],
   };
   const secrets = {
     version: 1,

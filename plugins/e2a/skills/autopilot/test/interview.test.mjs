@@ -22,6 +22,8 @@ function completeSafeSupportInterview() {
   state = answer(state, "support_exclusions", "Refunds and legal requests.");
   state = answer(state, "knowledge_sources", "The approved product handbook.");
   state = answer(state, "escalation_rules", "Escalate billing, security, and uncertainty.");
+  state = answer(state, "response_expectations", "Reply within one business day.");
+  state = answer(state, "reply_mode", "");
   state = answer(state, "tone", "");
   state = answer(state, "signature", "Token Canopy Support");
   state = answer(state, "agent_email", "support@example.com");
@@ -38,7 +40,8 @@ function completeSafeSupportInterview() {
   state = answer(state, "runtime", "codex");
   state = answer(state, "runtime_command", "/usr/local/bin/codex");
   state = answer(state, "workdir", "/srv/autopilot/support");
-  state = answer(state, "sandbox", "native");
+  state = answer(state, "sandbox", "custom");
+  state = answer(state, "custom_sandbox_ack", "I understand");
   state = answer(state, "service", "");
   assert.equal(nextQuestion(state), null);
   return state;
@@ -64,6 +67,31 @@ test("custom profile skips support-only questions", () => {
   assert.equal(nextQuestion(state).id, "agent_email");
 });
 
+test("Hermes and OpenClaw require an acknowledged external isolation boundary", () => {
+  const state = createInterview({ platform: "linux" });
+  state.answers = {
+    objective: "Answer support requests.",
+    profile: "custom",
+    custom_instructions: "Use approved sources.",
+    agent_email: "support@example.com",
+    owner_email: "owner@example.com",
+    authorization_mode: "addresses",
+    authorized_senders: { addresses: ["buyer@customer.test"], domains: [] },
+    outbound_review: true,
+    owner_cc: true,
+    screening: true,
+    runtime: "hermes",
+    runtime_command: "/usr/local/bin/hermes",
+    workdir: "/srv/support",
+  };
+
+  const sandbox = nextQuestion(state);
+  assert.equal(sandbox.id, "sandbox");
+  assert.deepEqual(sandbox.choices, ["custom"]);
+  assert.equal(sandbox.default, "custom");
+  assert.match(sandbox.prompt, /no isolation profile Autopilot can verify/i);
+});
+
 test("turning off outbound review inserts a separate warned acknowledgement", () => {
   let state = createInterview({ platform: "linux" });
   const answers = [
@@ -73,6 +101,8 @@ test("turning off outbound review inserts a separate warned acknowledgement", ()
     ["support_exclusions", "Billing."],
     ["knowledge_sources", "Approved docs."],
     ["escalation_rules", "Escalate uncertainty."],
+    ["response_expectations", "Reply within one business day."],
+    ["reply_mode", ""],
     ["tone", ""],
     ["signature", "Support"],
     ["agent_email", "support@example.com"],
@@ -120,6 +150,8 @@ test("a completed support interview produces a valid conservative policy", () =>
   assert.equal(policy.task.profile, "customer-support");
   assert.match(policy.task.instructions, /Setup, usage, and troubleshooting/);
   assert.match(policy.task.instructions, /Never handle: Refunds and legal requests/);
+  assert.match(policy.task.instructions, /Response expectation: Reply within one business day/);
+  assert.match(policy.task.instructions, /Reply mode: submit-for-review/);
   assert.equal(policy.inbound.mode, "addresses");
   assert.deepEqual(policy.inbound.addresses, [
     "buyer@customer.test",
@@ -132,7 +164,7 @@ test("a completed support interview produces a valid conservative policy", () =>
   assert.equal(policy.screening.promptInjection, true);
   assert.equal(policy.runtime.adapter, "codex");
   assert.equal(policy.service.manager, "systemd");
-  assert.deepEqual(policy.acknowledgements, []);
+  assert.deepEqual(policy.acknowledgements, ["custom_sandbox_acknowledged"]);
 });
 
 test("interview state can be serialized and resumed without changing the next question", () => {

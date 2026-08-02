@@ -63,7 +63,15 @@ function request(socketPath, token, { method, route, body }) {
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            reject(new Error(`Job gateway rejected the operation (status ${response.statusCode}).`));
+            const detail =
+              typeof value?.error === "string" && value.error.length <= 500
+                ? ` ${value.error}`
+                : "";
+            reject(
+              new Error(
+                `Job gateway rejected the operation (status ${response.statusCode}).${detail}`,
+              ),
+            );
             return;
           }
           resolve(value);

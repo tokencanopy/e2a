@@ -23,14 +23,14 @@ function fixture(manager = "launchd") {
   const home = mkdtempSync(path.join(tmpdir(), "autopilot-operator-"));
   const policy = {
     version: 1,
-    task: { profile: "customer-support", objective: "Answer routine support.", instructions: "Escalate billing." },
+    task: { profile: "customer-support", objective: "Answer routine support.", instructions: "Escalate billing.", replyMode: "submit-for-review" },
     mailbox: { agentEmail: "support@example.test", ownerEmail: "owner@example.test" },
     inbound: { mode: "addresses", addresses: ["buyer@customer.test"], domains: [], fallback: "review" },
     outbound: { requireReview: true, ccOwner: true },
     screening: { promptInjection: true },
-    runtime: { adapter: "codex", command: "/usr/local/bin/codex", workdir: "/srv/support", sandbox: "native" },
+    runtime: { adapter: "codex", command: "/usr/local/bin/codex", workdir: "/srv/support", sandbox: "custom" },
     service: { manager },
-    acknowledgements: [],
+    acknowledgements: ["custom_sandbox_acknowledged"],
   };
   const paths = installationPaths(policy, home);
   for (const directory of [paths.root, paths.stateRoot, paths.logsRoot]) {

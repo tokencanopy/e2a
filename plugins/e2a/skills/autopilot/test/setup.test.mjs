@@ -73,7 +73,7 @@ test("domain mode and warned opt-outs map to existing protection fields", () => 
   });
   assert.equal(next.outbound.gate.policy, "domain");
   assert.equal(next.outbound.gate.action, "flag");
-  assert.equal(next.outbound.scan.sensitivity, "off");
+  assert.equal(next.outbound.scan.sensitivity, "low");
   assert.equal(protectionMatchesPolicy(next, optedOut), true);
 });
 
@@ -139,4 +139,20 @@ test("setup failures redact CLI output and credentials", async () => {
     assert.doesNotMatch(error.message, /e2a_acct_should_not_escape/);
     return true;
   });
+});
+
+test("setup refuses to send an account credential to insecure non-loopback HTTP", async () => {
+  const client = new E2aSetupClient({
+    command: "/opt/e2a/bin/e2a",
+    execFileImpl(_command, args, _options, callback) {
+      const tail = args.join(" ");
+      if (tail === "whoami --json") callback(null, '{"scope":"account"}\n');
+      else if (tail.startsWith("agents get")) callback(null, '{}\n');
+      else if (tail === "config get api_url") callback(null, "http://remote.example.test\n");
+      else if (tail === "config get api_key") callback(null, "e2a_acct_synthetic\n");
+      else callback(new Error("unexpected"), "");
+    },
+  });
+
+  await assert.rejects(client.preflight("support@example.test"), /must use HTTPS/);
 });

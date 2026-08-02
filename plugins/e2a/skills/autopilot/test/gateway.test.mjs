@@ -43,7 +43,7 @@ function request(socketPath, token, { method = "GET", route, body, auth = true }
   });
 }
 
-function fixture({ ccOwner = true } = {}) {
+function fixture({ ccOwner = true, replyMode = "submit-for-review", replyCheckpoint } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "autopilot-gateway-"));
   const calls = [];
   const mail = {
@@ -53,6 +53,7 @@ function fixture({ ccOwner = true } = {}) {
         id: messageId,
         conversationId: "conv_current",
         headerFrom: "customer@example.test",
+        replyTo: [],
         subject: "Need help",
         body: { text: "How do I configure this?" },
       };
@@ -70,9 +71,15 @@ function fixture({ ccOwner = true } = {}) {
   const completions = [];
   const gateway = new JobGateway({
     socketPath: path.join(root, "job.sock"),
-    job: { messageId: "msg_current", jobId: "job_current" },
+    job: {
+      messageId: "msg_current",
+      jobId: "job_current",
+      authorizedFrom: "customer@example.test",
+    },
     ownerEmail: "owner@example.com",
     ccOwner,
+    replyMode,
+    replyCheckpoint,
     mail,
     onEscalate: async (value) => escalations.push(value),
     onComplete: async (value) => completions.push(value),
@@ -119,7 +126,7 @@ test("gateway binds message and thread reads to the current job", async (t) => {
   ]);
 });
 
-test("reply injects owner CC, chooses recipients server-side, and uses a stable idempotency key", async (t) => {
+test("reply injects owner CC and permits only one durable logical reply", async (t) => {
   const { gateway, calls } = fixture();
   const connection = await gateway.start();
   t.after(() => gateway.close());
@@ -137,13 +144,53 @@ test("reply injects owner CC, chooses recipients server-side, and uses a stable 
 
   assert.equal(first.status, 200);
   assert.equal(first.body.result.status, "pending_review");
-  assert.equal(calls[0][0], "reply");
-  assert.equal(calls[0][1], "msg_current");
-  assert.deepEqual(calls[0][2].cc, ["owner@example.com"]);
-  assert.equal(calls[0][2].replyAll, true);
-  assert.match(calls[0][2].idempotencyKey, /^autopilot-[a-f0-9]{64}$/);
-  assert.equal(calls[0][2].idempotencyKey, calls[1][2].idempotencyKey);
+  const reply = calls.find(([name]) => name === "reply");
+  assert.equal(reply[1], "msg_current");
+  assert.deepEqual(reply[2].cc, ["owner@example.com"]);
+  assert.equal(reply[2].replyAll, false);
+  assert.match(reply[2].idempotencyKey, /^autopilot-[a-f0-9]{64}$/);
+  assert.equal(calls.filter(([name]) => name === "reply").length, 1);
   assert.deepEqual(first.body, second.body);
+});
+
+test("reply checkpoint prevents a changed retry from submitting a second message", async (t) => {
+  const firstFixture = fixture();
+  const firstConnection = await firstFixture.gateway.start();
+  const first = await request(firstConnection.socketPath, firstConnection.token, {
+    method: "POST",
+    route: "/v1/reply",
+    body: { text: "Original answer." },
+  });
+  await firstFixture.gateway.close();
+
+  const checkpoint = firstFixture.gateway.replyCheckpoint;
+  const retryFixture = fixture({ replyCheckpoint: checkpoint });
+  const retryConnection = await retryFixture.gateway.start();
+  t.after(() => retryFixture.gateway.close());
+  const changed = await request(retryConnection.socketPath, retryConnection.token, {
+    method: "POST",
+    route: "/v1/reply",
+    body: { text: "A different answer." },
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(changed.status, 409);
+  assert.equal(retryFixture.calls.filter(([name]) => name === "reply").length, 0);
+});
+
+test("draft-only policy rejects the reply operation", async (t) => {
+  const { gateway, calls } = fixture({ replyMode: "draft-only" });
+  const connection = await gateway.start();
+  t.after(() => gateway.close());
+
+  const response = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/reply",
+    body: { text: "This must remain a draft." },
+  });
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(calls, []);
 });
 
 test("reply rejects attempts to select recipients or another message", async (t) => {
@@ -166,6 +213,29 @@ test("reply rejects attempts to select recipients or another message", async (t)
   assert.deepEqual(calls, []);
 });
 
+test("reply refuses a sender-controlled Reply-To target", async (t) => {
+  const { gateway, calls } = fixture();
+  gateway.mail.getMessage = async (messageId) => {
+    calls.push(["getMessage", messageId]);
+    return {
+      id: messageId,
+      headerFrom: "customer@example.test",
+      replyTo: ["redirect@unrelated.test"],
+    };
+  };
+  const connection = await gateway.start();
+  t.after(() => gateway.close());
+
+  const response = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/reply",
+    body: { text: "Do not redirect this." },
+  });
+
+  assert.equal(response.status, 409);
+  assert.equal(calls.filter(([name]) => name === "reply").length, 0);
+});
+
 test("owner CC can only be omitted when the confirmed policy opted out", async (t) => {
   const { gateway, calls } = fixture({ ccOwner: false });
   const connection = await gateway.start();
@@ -178,7 +248,7 @@ test("owner CC can only be omitted when the confirmed policy opted out", async (
   });
 
   assert.equal(response.status, 200);
-  assert.deepEqual(calls[0][2].cc, []);
+  assert.deepEqual(calls.find(([name]) => name === "reply")[2].cc, []);
 });
 
 test("gateway exposes escalation and completion but no mailbox list or delete route", async (t) => {
@@ -214,4 +284,17 @@ test("gateway exposes escalation and completion but no mailbox list or delete ro
   assert.deepEqual(completions, [
     { jobId: "job_current", messageId: "msg_current", summary: "Escalated without replying." },
   ]);
+
+  const repeatedEscalation = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/escalate",
+    body: { reason: "Try to notify twice." },
+  });
+  const repeatedCompletion = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/complete",
+    body: { summary: "Try to complete twice." },
+  });
+  assert.equal(repeatedEscalation.status, 409);
+  assert.equal(repeatedCompletion.status, 409);
 });

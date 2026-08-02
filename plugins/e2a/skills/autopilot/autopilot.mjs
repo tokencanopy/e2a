@@ -24,14 +24,14 @@ import {
   createInterview,
   nextQuestion,
 } from "./interview.mjs";
-import { installAutopilot } from "./installer.mjs";
+import { installAutopilot, prepareAutopilotInstall } from "./installer.mjs";
 import {
   controlService,
   loadInstallation,
   localStatus,
   uninstallAutopilot,
 } from "./operator.mjs";
-import { planDigest, renderPlan } from "./policy.mjs";
+import { planDigest, renderPlan, validatePolicy } from "./policy.mjs";
 import { runInstalledDaemon } from "./runner.mjs";
 import { E2aSetupClient, protectionMatchesPolicy } from "./setup.mjs";
 
@@ -129,20 +129,28 @@ async function commandInterview(options) {
   const policy = buildPolicyFromInterview(state);
   writePrivateJson(policyFile, policy);
   const plan = renderPlan(policy);
-  const digest = planDigest(policy);
 
   console.log(`\n${plan}`);
-  console.log(`\nPlan confirmation digest: ${digest}`);
   console.log(`Draft policy: ${policyFile}`);
-  console.log("No changes have been applied to e2a, the server, or a service.");
+  console.log("No changes have been applied. Run `autopilot plan` to resolve the setup origin and receive an installable confirmation digest.");
 }
 
-function commandPlan(options) {
+async function commandPlan(options) {
   const policyFile = path.resolve(options.policy || path.join(defaultRoot(), "policy.json"));
   const policy = readJson(policyFile);
-  console.log(renderPlan(policy));
-  console.log(`\nPlan confirmation digest: ${planDigest(policy)}`);
-  console.log("No changes have been applied.");
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) {
+    throw new Error(`Cannot render an invalid Autopilot policy:\n- ${errors.join("\n- ")}`);
+  }
+  const setup = setupClient(options);
+  try {
+    const prepared = await prepareAutopilotInstall({ policy, setup });
+    console.log(renderPlan(policy, prepared.context));
+    console.log(`\nPlan confirmation digest: ${planDigest(policy, prepared.context)}`);
+    console.log("No changes have been applied.");
+  } finally {
+    setup.clearAccountCredential();
+  }
 }
 
 function resolveExecutable(value) {
@@ -165,9 +173,11 @@ function resolveExecutable(value) {
 }
 
 function setupClient(options) {
+  if (options["api-url"]) {
+    throw new Error("--api-url is not supported; Autopilot uses the exact origin from the authenticated e2a CLI profile.");
+  }
   return new E2aSetupClient({
     command: resolveExecutable(options.e2a),
-    apiBaseUrl: options["api-url"],
   });
 }
 
@@ -179,18 +189,25 @@ function agentOption(options) {
 async function commandInstall(options) {
   const policyFile = path.resolve(options.policy || path.join(defaultRoot(), "policy.json"));
   const policy = readJson(policyFile);
-  const plan = renderPlan(policy);
-  const digest = planDigest(policy);
-  console.log(plan);
-  console.log(`\nPlan confirmation digest: ${digest}`);
-  if (!options.confirm) {
-    throw new Error("Install is mutating. Re-run with --confirm <plan-digest> after reviewing the plan.");
+  const setup = setupClient(options);
+  let prepared;
+  try {
+    prepared = await prepareAutopilotInstall({ policy, setup });
+    console.log(renderPlan(policy, prepared.context));
+    console.log(`\nPlan confirmation digest: ${prepared.planDigest}`);
+    if (!options.confirm) {
+      throw new Error("Install is mutating. Re-run with --confirm <plan-digest> after reviewing the resolved plan.");
+    }
+    console.log("\nApplying the confirmed plan...");
+  } catch (error) {
+    setup.clearAccountCredential();
+    throw error;
   }
-  console.log("\nApplying the confirmed plan...");
   const result = await installAutopilot({
     policy,
     confirmation: options.confirm,
-    setup: setupClient(options),
+    setup,
+    prepared,
   });
   console.log(`Installed private state: ${result.paths.root}`);
   if (result.paths.servicePath) console.log(`Generated service: ${result.paths.servicePath}`);
@@ -285,8 +302,8 @@ function usage() {
   return [
     "usage:",
     "  autopilot.mjs interview [--state PATH] [--policy PATH] [--platform NAME]",
-    "  autopilot.mjs plan [--policy PATH]",
-    "  autopilot.mjs install [--policy PATH] --confirm DIGEST [--e2a PATH] [--api-url ORIGIN]",
+    "  autopilot.mjs plan [--policy PATH] [--e2a PATH]",
+    "  autopilot.mjs install [--policy PATH] --confirm DIGEST [--e2a PATH]",
     "  autopilot.mjs start --agent ADDRESS",
     "  autopilot.mjs stop --agent ADDRESS",
     "  autopilot.mjs run --agent ADDRESS",
@@ -305,7 +322,7 @@ async function main() {
       await commandInterview(options);
       break;
     case "plan":
-      commandPlan(options);
+      await commandPlan(options);
       break;
     case "install":
       await commandInstall(options);

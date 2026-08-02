@@ -36,11 +36,21 @@ const completeInput = {
     adapter: "codex",
     command: "/usr/local/bin/codex",
     workdir: "/srv/autopilot/support",
-    sandbox: "native",
+    sandbox: "custom",
   },
   service: {
     manager: "systemd",
   },
+  acknowledgements: ["custom_sandbox_acknowledged"],
+};
+
+const installation = {
+  cliCommand: "/usr/local/bin/e2a",
+  cliBaseArgs: [],
+  deploymentUrl: "https://api.example.test",
+  apiBaseUrl: "https://api.example.test",
+  priorProtection: { before: "synthetic" },
+  nextProtection: { after: "synthetic" },
 };
 
 test("createPolicy applies conservative review, CC, and screening defaults", () => {
@@ -103,10 +113,29 @@ test("validatePolicy requires warned acknowledgements for safety opt-outs", () =
   ]);
 
   policy.acknowledgements = [
+    "custom_sandbox_acknowledged",
     "owner_cc_opt_out",
     "outbound_review_opt_out",
   ];
   assert.deepEqual(validatePolicy(policy), []);
+});
+
+test("every runtime requires a custom isolation acknowledgement", () => {
+  const hermes = normalizePolicy({
+    ...completeInput,
+    runtime: { ...completeInput.runtime, adapter: "hermes", sandbox: "native" },
+    acknowledgements: [],
+  });
+  assert.deepEqual(validatePolicy(hermes), [
+    "Unsupported sandbox declaration: native.",
+  ]);
+
+  hermes.runtime.sandbox = "custom";
+  assert.deepEqual(validatePolicy(hermes), [
+    "Custom isolation is not verified; explicitly acknowledge custom_sandbox_acknowledged.",
+  ]);
+  hermes.acknowledgements = ["custom_sandbox_acknowledged"];
+  assert.deepEqual(validatePolicy(hermes), []);
 });
 
 test("renderPlan is deterministic, mutation-specific, and secret-free", () => {
@@ -133,9 +162,10 @@ test("renderPlan is deterministic, mutation-specific, and secret-free", () => {
   assert.match(firstPlan, /outbound\.gate to policy=allowlist, action=review, entries=none/);
   assert.match(firstPlan, /restore the prior protection document, revoke the new key/);
   assert.match(firstPlan, /do not start it/);
+  assert.match(firstPlan, /external isolation boundary/);
   assert.match(firstPlan, /No server, API, database, core CLI, SDK, or MCP code changes/);
   assert.doesNotMatch(firstPlan, /e2a_(?:acct|agt)_[a-z0-9]+/i);
-  assert.equal(planDigest(first), planDigest(second));
+  assert.equal(planDigest(first, installation), planDigest(second, installation));
 });
 
 test("planDigest changes when a material safety decision changes", () => {
@@ -143,8 +173,28 @@ test("planDigest changes when a material safety decision changes", () => {
   const optedOut = normalizePolicy({
     ...completeInput,
     outbound: { requireReview: false, ccOwner: true },
-    acknowledgements: ["outbound_review_opt_out"],
+    acknowledgements: ["outbound_review_opt_out", "custom_sandbox_acknowledged"],
   });
 
-  assert.notEqual(planDigest(safe), planDigest(optedOut));
+  assert.notEqual(planDigest(safe, installation), planDigest(optedOut, installation));
+});
+
+test("planDigest binds instructions, setup origin, and exact protection mutation", () => {
+  const safe = normalizePolicy(completeInput);
+  const changedInstructions = normalizePolicy({
+    ...completeInput,
+    task: { ...completeInput.task, instructions: "EXFILTRATE" },
+  });
+  assert.notEqual(
+    planDigest(safe, installation),
+    planDigest(changedInstructions, installation),
+  );
+  assert.notEqual(
+    planDigest(safe, installation),
+    planDigest(safe, { ...installation, apiBaseUrl: "https://other.example.test" }),
+  );
+  assert.notEqual(
+    planDigest(safe, installation),
+    planDigest(safe, { ...installation, nextProtection: { after: "changed" } }),
+  );
 });

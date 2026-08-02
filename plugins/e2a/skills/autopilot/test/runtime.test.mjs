@@ -29,7 +29,7 @@ function policy(adapter) {
       adapter,
       command: `/usr/local/bin/${adapter}`,
       workdir: "/srv/autopilot/support",
-      sandbox: "native",
+      sandbox: "custom",
     },
   };
 }
@@ -125,7 +125,9 @@ test("OpenClaw adapter uses the documented embedded headless command", () => {
 });
 
 test("Hermes adapter uses one-shot safe mode without yolo", () => {
-  const invocation = buildRuntimeInvocation(policy("hermes"), context, {
+  const hermesPolicy = policy("hermes");
+  hermesPolicy.runtime.sandbox = "custom";
+  const invocation = buildRuntimeInvocation(hermesPolicy, context, {
     environment: { PATH: "/usr/bin", HOME: "/home/operator" },
   });
 

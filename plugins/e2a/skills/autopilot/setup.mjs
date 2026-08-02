@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 
+const MAX_SETUP_RESPONSE_BYTES = 1024 * 1024;
+
 function copyDirection(value = {}) {
   return {
     gate: {
@@ -36,8 +38,7 @@ export function buildProtectionDocument(currentValue, policy) {
   if (policy.outbound.requireReview) {
     outbound.gate = { policy: "allowlist", allowlist: [], action: "review" };
   } else {
-    outbound.gate.action = "flag";
-    outbound.scan.sensitivity = "off";
+    if (outbound.gate.action === "review") outbound.gate.action = "flag";
   }
 
   return {
@@ -93,9 +94,12 @@ export function protectionMatchesPolicy(value, policy) {
     );
   }
   return (
-    actual.outbound.gate.action === "flag" &&
-    actual.outbound.scan.sensitivity === "off"
+    actual.outbound.gate.action !== "review"
   );
+}
+
+export function protectionsEqual(left, right) {
+  return JSON.stringify(normalizeProtection(left)) === JSON.stringify(normalizeProtection(right));
 }
 
 function parseJson(output, label) {
@@ -113,10 +117,47 @@ function origin(value, label) {
   } catch {
     throw new Error(`${label} is not a valid URL.`);
   }
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new Error(`${label} must be an HTTP(S) origin without credentials.`);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  if (
+    (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error(`${label} must use HTTPS (HTTP is allowed only for loopback development).`);
   }
   return parsed.origin;
+}
+
+async function boundedJson(response, label) {
+  const declared = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_SETUP_RESPONSE_BYTES) {
+    throw new Error(`${label} response is too large.`);
+  }
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_SETUP_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error(`${label} response is too large.`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      throw new Error(`${label} returned invalid JSON.`);
+    }
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`${label} returned invalid JSON.`);
+  }
 }
 
 export class E2aSetupClient {
@@ -126,7 +167,6 @@ export class E2aSetupClient {
     environment = process.env,
     execFileImpl = execFile,
     fetchImpl = globalThis.fetch,
-    apiBaseUrl,
     timeoutMs = 30_000,
   }) {
     this.command = command;
@@ -134,7 +174,6 @@ export class E2aSetupClient {
     this.environment = environment;
     this.execFileImpl = execFileImpl;
     this.fetchImpl = fetchImpl;
-    this.apiBaseUrlOverride = apiBaseUrl;
     this.timeoutMs = timeoutMs;
     this.accountApiKey = null;
     this.deploymentUrl = null;
@@ -168,7 +207,7 @@ export class E2aSetupClient {
     const accountApiKey = String(await this.run(["config", "get", "api_key"])).trim();
     if (!accountApiKey) throw new Error("The current e2a CLI session has no API credential.");
     this.deploymentUrl = deploymentUrl;
-    this.apiBaseUrl = origin(this.apiBaseUrlOverride || deploymentUrl, "e2a API URL");
+    this.apiBaseUrl = deploymentUrl;
     this.accountApiKey = accountApiKey;
     return {
       deploymentUrl: this.deploymentUrl,
@@ -186,34 +225,31 @@ export class E2aSetupClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      response = await this.fetchImpl(
-        `${this.apiBaseUrl}/v1/agents/${encodeURIComponent(agentEmail)}/protection`,
-        {
-          method,
-          headers: {
-            authorization: `Bearer ${this.accountApiKey}`,
-            accept: "application/json",
-            ...(body ? { "content-type": "application/json" } : {}),
+      try {
+        response = await this.fetchImpl(
+          `${this.apiBaseUrl}/v1/agents/${encodeURIComponent(agentEmail)}/protection`,
+          {
+            method,
+            headers: {
+              authorization: `Bearer ${this.accountApiKey}`,
+              accept: "application/json",
+              ...(body ? { "content-type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+            signal: controller.signal,
           },
-          ...(body ? { body: JSON.stringify(body) } : {}),
-          signal: controller.signal,
-        },
-      );
-    } catch {
-      throw new Error("e2a protection request failed before a response.");
+        );
+      } catch {
+        throw new Error("e2a protection request failed before a response.");
+      }
+      if (!response.ok) {
+        throw new Error(`e2a protection request failed with status ${response.status}.`);
+      }
+      const value = await boundedJson(response, "e2a protection request");
+      return normalizeProtection(value);
     } finally {
       clearTimeout(timer);
     }
-    if (!response.ok) {
-      throw new Error(`e2a protection request failed with status ${response.status}.`);
-    }
-    let value;
-    try {
-      value = await response.json();
-    } catch {
-      throw new Error("e2a protection request returned invalid JSON.");
-    }
-    return normalizeProtection(value);
   }
 
   getProtection(agentEmail) {

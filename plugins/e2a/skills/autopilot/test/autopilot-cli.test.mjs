@@ -19,6 +19,8 @@ test("interview writes a private policy and prints a non-mutating plan", () => {
     "Refunds and legal requests.",
     "Approved handbook.",
     "Billing, security, or uncertainty.",
+    "Reply within one business day.",
+    "", // submit replies for review
     "", // default tone
     "Example Support",
     "support@example.com",
@@ -31,7 +33,8 @@ test("interview writes a private policy and prints a non-mutating plan", () => {
     "codex",
     "/usr/local/bin/codex",
     "/srv/autopilot/support",
-    "native",
+    "custom",
+    "I understand",
     "foreground",
   ].join("\n") + "\n";
 
@@ -44,7 +47,7 @@ test("interview writes a private policy and prints a non-mutating plan", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /e2a Autopilot installation plan/);
   assert.match(result.stdout, /No changes have been applied/);
-  assert.match(result.stdout, /Plan confirmation digest: [a-f0-9]{64}/);
+  assert.match(result.stdout, /Run `autopilot plan` .* installable confirmation digest/);
   const saved = JSON.parse(readFileSync(policy, "utf8"));
   assert.equal(saved.outbound.requireReview, true);
   assert.equal(saved.outbound.ccOwner, true);

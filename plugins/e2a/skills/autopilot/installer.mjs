@@ -4,6 +4,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -18,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { normalizePolicy, planDigest, validatePolicy } from "./policy.mjs";
 import {
   buildProtectionDocument,
+  normalizeProtection,
+  protectionsEqual,
   protectionMatchesPolicy,
 } from "./setup.mjs";
 import {
@@ -32,6 +35,7 @@ const RUNTIME_FILES = [
   "daemon.mjs",
   "gateway.mjs",
   "job-tool.mjs",
+  "lock.mjs",
   "mail-client.mjs",
   "policy.mjs",
   "runner.mjs",
@@ -122,26 +126,103 @@ function defaultWriteServiceDefinition({ file, content }) {
   atomicWrite(file, content, 0o600);
 }
 
+function assertSafeParentChain(target, anchor) {
+  const root = path.resolve(anchor);
+  const parent = path.dirname(path.resolve(target));
+  const relative = path.relative(root, parent);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to write outside the installation home: ${target}.`);
+  }
+  let current = root;
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (!existsSync(current)) break;
+    const info = lstatSync(current);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(`Refusing to follow a non-directory or symlink parent: ${current}.`);
+    }
+  }
+}
+
+function findExecutable(name, environment = process.env) {
+  for (const directory of String(environment.PATH || "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(directory, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through PATH.
+    }
+  }
+  return null;
+}
+
+export function validateServiceManager(
+  manager,
+  { platform = process.platform, environment = process.env } = {},
+) {
+  if (manager === "foreground") return;
+  if (manager === "launchd") {
+    if (platform !== "darwin") throw new Error("launchd service mode requires macOS.");
+    if (!findExecutable("launchctl", environment)) throw new Error("launchctl is not available on PATH.");
+    return;
+  }
+  if (manager === "systemd") {
+    if (platform !== "linux") throw new Error("systemd service mode requires Linux.");
+    if (!findExecutable("systemctl", environment)) throw new Error("systemctl is not available on PATH.");
+    return;
+  }
+  throw new Error(`Unsupported service manager: ${manager}.`);
+}
+
+export async function prepareAutopilotInstall({ policy: policyInput, setup }) {
+  const policy = normalizePolicy(policyInput);
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) throw new Error(`Invalid Autopilot policy:\n- ${errors.join("\n- ")}`);
+  if (!setup) throw new Error("An e2a setup client is required.");
+  const preparedAt = new Date().toISOString();
+  const preflight = await setup.preflight(policy.mailbox.agentEmail);
+  const priorProtection = normalizeProtection(
+    await setup.getProtection(policy.mailbox.agentEmail),
+  );
+  const nextProtection = buildProtectionDocument(priorProtection, policy);
+  const context = {
+    ...preflight,
+    priorProtection,
+    nextProtection,
+  };
+  return {
+    policy,
+    preflight,
+    priorProtection,
+    nextProtection,
+    context,
+    preparedAt,
+    planDigest: planDigest(policy, context),
+  };
+}
+
 export async function installAutopilot({
   policy: policyInput,
   confirmation,
   setup,
+  prepared,
   home = homedir(),
   nodePath = process.execPath,
   runtimeSourceRoot = pluginDirectory,
   skipExecutableChecks = false,
   writeServiceDefinition = defaultWriteServiceDefinition,
+  platform = process.platform,
+  environment = process.env,
 }) {
   const policy = normalizePolicy(policyInput);
   const errors = validatePolicy(policy);
   if (errors.length > 0) throw new Error(`Invalid Autopilot policy:\n- ${errors.join("\n- ")}`);
-  const expectedDigest = planDigest(policy);
-  if (confirmation !== expectedDigest) {
-    throw new Error("Plan confirmation digest does not match the current policy. Run `autopilot plan` again.");
-  }
   if (!setup) throw new Error("An e2a setup client is required.");
 
   const paths = installationPaths(policy, home);
+  assertSafeParentChain(paths.root, home);
+  if (paths.servicePath) assertSafeParentChain(paths.servicePath, home);
   if (existsSync(paths.root)) throw new Error(`Autopilot is already installed at ${paths.root}.`);
   if (paths.servicePath && existsSync(paths.servicePath)) {
     throw new Error(`Autopilot service definition already exists at ${paths.servicePath}.`);
@@ -153,21 +234,41 @@ export async function installAutopilot({
       throw new Error(`Task workspace is not a directory: ${policy.runtime.workdir}.`);
     }
   }
+  validateServiceManager(policy.service.manager, { platform, environment });
 
   let priorProtection;
+  let nextProtection;
+  let preflight;
+  let expectedDigest;
   let createdKey;
-  let remoteChanged = false;
+  let remoteMutationAttempted = false;
   let localCreated = false;
   let serviceAttempted = false;
   try {
-    const preflight = await setup.preflight(policy.mailbox.agentEmail);
-    priorProtection = await setup.getProtection(policy.mailbox.agentEmail);
-    const nextProtection = buildProtectionDocument(priorProtection, policy);
+    const preparation = prepared || await prepareAutopilotInstall({ policy, setup });
+    preflight = preparation.preflight;
+    priorProtection = normalizeProtection(preparation.priorProtection);
+    nextProtection = buildProtectionDocument(priorProtection, policy);
+    const confirmedContext = {
+      ...preflight,
+      priorProtection,
+      nextProtection,
+    };
+    expectedDigest = planDigest(policy, confirmedContext);
+    if (preparation.planDigest !== expectedDigest) {
+      throw new Error("Prepared installation context does not match the current policy.");
+    }
+    if (Number.isNaN(Date.parse(preparation.preparedAt))) {
+      throw new Error("Prepared installation timestamp is invalid.");
+    }
+    if (confirmation !== expectedDigest) {
+      throw new Error("Plan confirmation digest does not match the current policy, CLI origin, or protection document. Run `autopilot plan` again.");
+    }
     createdKey = await setup.createAgentKey(policy.mailbox.agentEmail);
+    remoteMutationAttempted = true;
     await setup.replaceProtection(policy.mailbox.agentEmail, nextProtection);
-    remoteChanged = true;
     const verified = await setup.getProtection(policy.mailbox.agentEmail);
-    if (!protectionMatchesPolicy(verified, policy)) {
+    if (!protectionsEqual(verified, nextProtection) || !protectionMatchesPolicy(verified, policy)) {
       throw new Error("e2a protection verification did not match the confirmed Autopilot policy.");
     }
 
@@ -177,6 +278,10 @@ export async function installAutopilot({
     privateDirectory(path.join(paths.stateRoot, "jobs"));
     privateDirectory(path.join(paths.stateRoot, "locks"));
     privateDirectory(paths.logsRoot);
+    atomicWrite(
+      path.join(paths.stateRoot, "reconcile.json"),
+      `${JSON.stringify({ version: 1, since: preparation.preparedAt })}\n`,
+    );
     copyRuntimeBundle(runtimeSourceRoot, paths.runtimeRoot);
     atomicWrite(paths.policyPath, `${JSON.stringify(policy, null, 2)}\n`);
     atomicWrite(paths.taskPath, taskMarkdown(policy));
@@ -205,7 +310,7 @@ export async function installAutopilot({
           planDigest: expectedDigest,
           serviceManager: policy.service.manager,
           servicePath: paths.servicePath,
-          installedAt: new Date().toISOString(),
+          installedAt: preparation.preparedAt,
         },
         null,
         2,
@@ -221,7 +326,7 @@ export async function installAutopilot({
         stateRoot: paths.stateRoot,
         stdoutPath: paths.stdoutPath,
         stderrPath: paths.stderrPath,
-        pathValue: process.env.PATH,
+        pathValue: environment.PATH,
       };
       const content =
         policy.service.manager === "launchd"
@@ -248,9 +353,16 @@ export async function installAutopilot({
         rollbackErrors.push(`local cleanup failed: ${rollbackError.message}`);
       }
     }
-    if (remoteChanged && priorProtection) {
+    if (remoteMutationAttempted && priorProtection && nextProtection) {
       try {
-        await setup.replaceProtection(policy.mailbox.agentEmail, priorProtection);
+        const currentProtection = await setup.getProtection(policy.mailbox.agentEmail);
+        if (protectionsEqual(currentProtection, nextProtection)) {
+          await setup.replaceProtection(policy.mailbox.agentEmail, priorProtection);
+        } else if (!protectionsEqual(currentProtection, priorProtection)) {
+          rollbackErrors.push(
+            "protection changed concurrently; refusing to overwrite the administrator's newer document",
+          );
+        }
       } catch (rollbackError) {
         rollbackErrors.push(`protection restore failed: ${rollbackError.message}`);
       }

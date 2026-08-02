@@ -86,6 +86,24 @@ test("recoverRunning returns interrupted work to retry without losing it", () =>
   assert.equal(spool.list("pending")[0].messageId, "msg_interrupted");
 });
 
+test("reply side-effect checkpoints survive a runtime retry without storing reply text", () => {
+  const { spool } = newSpool();
+  spool.enqueue({ messageId: "msg_checkpoint", source: "listener" });
+  spool.claimNext();
+  spool.checkpointEffects("msg_checkpoint", {
+    reply: {
+      idempotencyKey: `autopilot-${"a".repeat(64)}`,
+      textDigest: "b".repeat(64),
+      status: "pending_review",
+    },
+  });
+  spool.fail("msg_checkpoint", "runtime exited 1");
+
+  const retry = spool.list("retry")[0];
+  assert.equal(retry.effects.reply.status, "pending_review");
+  assert.equal(retry.effects.reply.text, undefined);
+});
+
 test("fail applies bounded exponential retry and then dead-letters", () => {
   let current = 1_700_000_000_000;
   const { spool } = newSpool(() => current);

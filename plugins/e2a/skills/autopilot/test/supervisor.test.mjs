@@ -22,6 +22,7 @@ function basePolicy(mode = "addresses") {
       profile: "customer-support",
       objective: "Resolve routine support questions.",
       instructions: "Use the approved handbook. Escalate billing requests.",
+      replyMode: "submit-for-review",
     },
     mailbox: {
       agentEmail: "support@example.test",
@@ -235,13 +236,69 @@ test("supervisor completes a job only after the runtime calls the scoped complet
   const result = await supervisor.runNextJob();
 
   assert.equal(result.state, "done");
-  assert.equal(spool.list("done")[0].outcome.summary, "Handled safely.");
+  assert.equal(spool.list("done")[0].outcome.completed, true);
+  assert.equal(spool.list("done")[0].outcome.summary, undefined);
+});
+
+test("accepted reply is not submitted again when the runtime crashes and redrafts", async () => {
+  let current = 1_700_000_000_000;
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
+  const spool = new JobSpool(path.join(root, "jobs"), { now: () => current });
+  spool.enqueue({
+    messageId: "msg_reply_retry",
+    from: "customer@buyer.test",
+    source: "listener",
+  });
+  const replies = [];
+  let attempt = 0;
+  const supervisor = new AutopilotSupervisor({
+    policy: basePolicy(),
+    spool,
+    mail: {
+      getMessage: async (id) => ({
+        id,
+        conversation_id: "conv_current",
+        header_from: "customer@buyer.test",
+        reply_to: [],
+      }),
+      getThread: async () => [],
+      reply: async (_id, input) => {
+        replies.push(input);
+        return { message_id: "msg_reply", status: "pending_review" };
+      },
+    },
+    stateRoot: root,
+    helperPath,
+    baseDelayMs: 1,
+    runtimeExecutor: async (invocation) => {
+      attempt += 1;
+      const response = await runHelper(
+        "reply",
+        invocation,
+        attempt === 1 ? "Original answer.\n" : "Changed answer.\n",
+      );
+      if (attempt === 1) return { ...response, code: 1 };
+      assert.equal(response.code, 1);
+      assert.match(response.stderr, /already submitted/i);
+      return runHelper("complete", invocation, "Reply was already submitted.\n");
+    },
+  });
+
+  assert.equal((await supervisor.runNextJob()).state, "retry");
+  current += 1;
+  assert.equal((await supervisor.runNextJob()).state, "done");
+  assert.equal(replies.length, 1);
+  assert.equal(spool.list("done")[0].effects.reply.status, "pending_review");
 });
 
 test("a zero-exit runtime that never calls complete is retried", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
   const spool = new JobSpool(path.join(root, "jobs"));
-  spool.enqueue({ messageId: "msg_incomplete", source: "reconcile" });
+  spool.enqueue({
+    messageId: "msg_incomplete",
+    from: "customer@buyer.test",
+    source: "reconcile",
+  });
   const supervisor = new AutopilotSupervisor({
     policy: basePolicy(),
     spool,
@@ -264,7 +321,11 @@ test("a zero-exit runtime that never calls complete is retried", async () => {
 test("escalation notifies only the configured owner and records the held result", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
   const spool = new JobSpool(path.join(root, "jobs"));
-  spool.enqueue({ messageId: "msg_escalate", source: "listener" });
+  spool.enqueue({
+    messageId: "msg_escalate",
+    from: "customer@buyer.test",
+    source: "listener",
+  });
   const notices = [];
   const mail = {
     getMessage: async (id) => ({ id, conversation_id: "conv_current" }),
@@ -301,7 +362,11 @@ test("escalation notifies only the configured owner and records the held result"
 test("dead-lettering notifies the configured owner", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
   const spool = new JobSpool(path.join(root, "jobs"));
-  spool.enqueue({ messageId: "msg_dead", source: "listener" });
+  spool.enqueue({
+    messageId: "msg_dead",
+    from: "customer@buyer.test",
+    source: "listener",
+  });
   const notices = [];
   const supervisor = new AutopilotSupervisor({
     policy: basePolicy(),
