@@ -20,7 +20,8 @@ and against the user's existing e2a account after interactive confirmation.
 1. Add a versioned local policy schema containing:
    - task/profile;
    - agent and owner addresses;
-   - exact inbound address/domain entries;
+   - one inbound authorization mode per inbox (exact addresses or verified
+     domains) and its entries;
    - inbound fallback action;
    - outbound review and owner-CC booleans;
    - screening choice;

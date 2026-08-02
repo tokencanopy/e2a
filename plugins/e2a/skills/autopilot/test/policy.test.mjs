@@ -20,8 +20,9 @@ const completeInput = {
     ownerEmail: "owner@example.com",
   },
   inbound: {
+    mode: "addresses",
     addresses: ["VIP@Customer.test", "buyer@customer.test"],
-    domains: ["Example.ORG"],
+    domains: [],
     fallback: "review",
   },
   outbound: {
@@ -59,18 +60,34 @@ test("normalizePolicy canonicalizes and sorts authorization entries", () => {
     "buyer@customer.test",
     "vip@customer.test",
   ]);
-  assert.deepEqual(policy.inbound.domains, ["example.org"]);
+  assert.deepEqual(policy.inbound.domains, []);
   assert.equal(policy.mailbox.agentEmail, "support@example.com");
 });
 
 test("validatePolicy rejects a policy without explicit authorized senders", () => {
   const policy = normalizePolicy({
     ...completeInput,
-    inbound: { addresses: [], domains: [], fallback: "review" },
+    inbound: { mode: "addresses", addresses: [], domains: [], fallback: "review" },
   });
 
   assert.deepEqual(validatePolicy(policy), [
     "Add at least one authorized sender address or domain; public-any-sender mode is not supported.",
+  ]);
+});
+
+test("validatePolicy rejects mixed address and domain authorization", () => {
+  const policy = normalizePolicy({
+    ...completeInput,
+    inbound: {
+      mode: "addresses",
+      addresses: ["buyer@customer.test"],
+      domains: ["customer.test"],
+      fallback: "review",
+    },
+  });
+
+  assert.deepEqual(validatePolicy(policy), [
+    "Address authorization mode cannot include domain entries; choose one mode per inbox.",
   ]);
 });
 
@@ -98,7 +115,8 @@ test("renderPlan is deterministic, mutation-specific, and secret-free", () => {
     ...completeInput,
     inbound: {
       addresses: ["buyer@customer.test", "vip@customer.test"],
-      domains: ["example.org"],
+      domains: [],
+      mode: "addresses",
       fallback: "review",
     },
   });

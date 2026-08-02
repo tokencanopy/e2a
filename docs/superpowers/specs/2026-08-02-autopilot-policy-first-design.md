@@ -90,10 +90,12 @@ uses the e2a CLI.
 
 ### Inbound authorization
 
-The interview collects exact sender addresses and/or sender domains. The
-installer configures the agent's existing inbound protection as follows:
+The interview asks the owner to choose either exact sender addresses or sender
+domains for an inbox. The current e2a protection gate supports one of these
+policies at a time, not a mixed address-and-domain list. The installer configures
+the agent's existing inbound protection as follows:
 
-- approved address/domain entries are allowed;
+- entries in the selected address or domain mode are allowed;
 - non-matching senders use the existing `review` action;
 - e2a's current sender-authentication evidence remains authoritative; and
 - a released message is discovered by normal listener delivery or periodic
@@ -145,7 +147,9 @@ tradeoffs, and skips questions already answered in the conversation.
 2. **Profile** — customer support or custom.
 3. **Mailbox** — existing or newly created agent address.
 4. **Owner** — the human notification and default CC address.
-5. **Authorized inbound senders** — exact addresses and/or domains.
+5. **Authorized inbound senders** — choose exact-address or verified-domain
+   mode, then provide entries for that mode. Mixed mode requires separate
+   inboxes in this release.
 6. **Inbound fallback** — defaults to e2a review.
 7. **Outbound review** — defaults on; opting out requires a warning and explicit
    confirmation.

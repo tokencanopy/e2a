@@ -89,10 +89,20 @@ const QUESTIONS = [
     prompt: "Which human owner should receive notifications and be CC'd by default?",
   },
   {
+    id: "authorization_mode",
+    kind: "choice",
+    choices: ["addresses", "domains"],
+    default: "addresses",
+    prompt:
+      "Should this inbox trust exact sender addresses or entire verified domains? The existing e2a gate supports one mode per inbox. [addresses]",
+  },
+  {
     id: "authorized_senders",
     kind: "senders",
-    prompt:
-      "Who may trigger the agent? Enter comma-separated exact email addresses and/or verified domains. Everyone else will go to e2a review.",
+    prompt: (state) =>
+      state.answers.authorization_mode === "domains"
+        ? "Which verified domains may trigger the agent? Enter comma-separated domains. Everyone else will go to e2a review."
+        : "Which exact email addresses may trigger the agent? Enter comma-separated addresses. Everyone else will go to e2a review.",
   },
   {
     id: "outbound_review",
@@ -199,7 +209,10 @@ function publicQuestion(question, state) {
       : question.default;
   return {
     id: question.id,
-    prompt: question.prompt,
+    prompt:
+      typeof question.prompt === "function"
+        ? question.prompt(state)
+        : question.prompt,
     kind: question.kind,
     ...(question.choices ? { choices: [...question.choices] } : {}),
     ...(defaultValue !== undefined ? { default: defaultValue } : {}),
@@ -227,7 +240,7 @@ function parseBoolean(value, defaultValue) {
   throw new Error("Answer yes or no.");
 }
 
-function parseSenders(value) {
+function parseSenders(value, mode) {
   const entries = String(value ?? "")
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
@@ -241,11 +254,17 @@ function parseSenders(value) {
   const domains = [];
   for (const entry of entries) {
     if (entry.includes("@")) {
+      if (mode !== "addresses") {
+        throw new Error("Domain authorization mode accepts domains only.");
+      }
       if (!EMAIL_RE.test(entry)) {
         throw new Error(`${entry} is not a valid email address or domain.`);
       }
       addresses.push(entry);
     } else {
+      if (mode !== "domains") {
+        throw new Error("Address authorization mode accepts exact email addresses only.");
+      }
       if (!DOMAIN_RE.test(entry)) {
         throw new Error(`${entry} is not a valid email address or domain.`);
       }
@@ -286,7 +305,7 @@ function parseAnswer(question, value, state) {
     case "boolean":
       return parseBoolean(raw, defaultValue);
     case "senders":
-      return parseSenders(raw);
+      return parseSenders(raw, state.answers.authorization_mode);
     case "absolute-path":
       if (!raw.startsWith("/")) throw new Error("Enter an absolute path.");
       return raw;
@@ -353,6 +372,7 @@ export function buildPolicyFromInterview(state) {
       ownerEmail: answers.owner_email,
     },
     inbound: {
+      mode: answers.authorization_mode,
       addresses: answers.authorized_senders.addresses,
       domains: answers.authorized_senders.domains,
       fallback: "review",

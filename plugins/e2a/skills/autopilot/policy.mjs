@@ -12,6 +12,7 @@ const SUPPORTED_RUNTIMES = new Set([
 ]);
 const SUPPORTED_SANDBOXES = new Set(["native", "container", "custom"]);
 const SUPPORTED_SERVICES = new Set(["launchd", "systemd", "foreground"]);
+const SUPPORTED_INBOUND_MODES = new Set(["addresses", "domains"]);
 const OPT_OUTS = new Set([
   "outbound_review_opt_out",
   "owner_cc_opt_out",
@@ -48,6 +49,7 @@ export function createPolicy() {
       ownerEmail: "",
     },
     inbound: {
+      mode: "addresses",
       addresses: [],
       domains: [],
       fallback: "review",
@@ -74,6 +76,8 @@ export function createPolicy() {
 
 export function normalizePolicy(input = {}) {
   const defaults = createPolicy();
+  const inboundAddresses = uniqueSorted(input.inbound?.addresses, lowercase);
+  const inboundDomains = uniqueSorted(input.inbound?.domains, lowercase);
   const policy = {
     version: Number(input.version ?? defaults.version),
     task: {
@@ -86,8 +90,14 @@ export function normalizePolicy(input = {}) {
       ownerEmail: lowercase(input.mailbox?.ownerEmail),
     },
     inbound: {
-      addresses: uniqueSorted(input.inbound?.addresses, lowercase),
-      domains: uniqueSorted(input.inbound?.domains, lowercase),
+      mode: lowercase(
+        input.inbound?.mode ||
+          (inboundDomains.length > 0 && inboundAddresses.length === 0
+            ? "domains"
+            : defaults.inbound.mode),
+      ),
+      addresses: inboundAddresses,
+      domains: inboundDomains,
       fallback: lowercase(input.inbound?.fallback || defaults.inbound.fallback),
     },
     outbound: {
@@ -142,9 +152,20 @@ export function validatePolicy(input) {
       errors.push(`Invalid authorized sender domain: ${domain}.`);
     }
   }
+  if (!SUPPORTED_INBOUND_MODES.has(policy.inbound.mode)) {
+    errors.push(`Unsupported inbound authorization mode: ${policy.inbound.mode || "(missing)"}.`);
+  }
   if (policy.inbound.addresses.length + policy.inbound.domains.length === 0) {
     errors.push(
       "Add at least one authorized sender address or domain; public-any-sender mode is not supported.",
+    );
+  } else if (policy.inbound.mode === "addresses" && policy.inbound.domains.length > 0) {
+    errors.push(
+      "Address authorization mode cannot include domain entries; choose one mode per inbox.",
+    );
+  } else if (policy.inbound.mode === "domains" && policy.inbound.addresses.length > 0) {
+    errors.push(
+      "Domain authorization mode cannot include exact-address entries; choose one mode per inbox.",
     );
   }
   if (policy.inbound.fallback !== "review") {
@@ -234,6 +255,7 @@ export function renderPlan(input) {
     `Task outcome: ${policy.task.objective}`,
     `Agent mailbox: ${policy.mailbox.agentEmail}`,
     `Owner: ${policy.mailbox.ownerEmail}`,
+    `Inbound authorization mode: ${policy.inbound.mode}`,
     `Authorized sender addresses: ${addresses}`,
     `Authorized sender domains: ${domains}`,
     "Non-matching inbound senders: e2a human review",

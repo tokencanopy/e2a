@@ -26,10 +26,11 @@ function completeSafeSupportInterview() {
   state = answer(state, "signature", "Token Canopy Support");
   state = answer(state, "agent_email", "support@example.com");
   state = answer(state, "owner_email", "owner@example.com");
+  state = answer(state, "authorization_mode", "addresses");
   state = answer(
     state,
     "authorized_senders",
-    "vip@customer.test, Example.ORG",
+    "vip@customer.test, buyer@customer.test",
   );
   state = answer(state, "outbound_review", "");
   state = answer(state, "owner_cc", "");
@@ -76,6 +77,7 @@ test("turning off outbound review inserts a separate warned acknowledgement", ()
     ["signature", "Support"],
     ["agent_email", "support@example.com"],
     ["owner_email", "owner@example.com"],
+    ["authorization_mode", "domains"],
     ["authorized_senders", "customer.test"],
   ];
   for (const [id, value] of answers) state = answer(state, id, value);
@@ -103,10 +105,11 @@ test("authorized senders require at least one valid exact address or domain", ()
     owner_email: "owner@example.com",
   };
 
-  assert.equal(nextQuestion(state).id, "authorized_senders");
+  assert.equal(nextQuestion(state).id, "authorization_mode");
+  state = answer(state, "authorization_mode", "addresses");
   assert.throws(() => answerQuestion(state, ""), /at least one/i);
   assert.throws(
-    () => answerQuestion(state, "not an address"),
+    () => answerQuestion(state, "not-an-address@example"),
     /valid email address or domain/i,
   );
 });
@@ -117,8 +120,12 @@ test("a completed support interview produces a valid conservative policy", () =>
   assert.equal(policy.task.profile, "customer-support");
   assert.match(policy.task.instructions, /Setup, usage, and troubleshooting/);
   assert.match(policy.task.instructions, /Never handle: Refunds and legal requests/);
-  assert.deepEqual(policy.inbound.addresses, ["vip@customer.test"]);
-  assert.deepEqual(policy.inbound.domains, ["example.org"]);
+  assert.equal(policy.inbound.mode, "addresses");
+  assert.deepEqual(policy.inbound.addresses, [
+    "buyer@customer.test",
+    "vip@customer.test",
+  ]);
+  assert.deepEqual(policy.inbound.domains, []);
   assert.equal(policy.inbound.fallback, "review");
   assert.equal(policy.outbound.requireReview, true);
   assert.equal(policy.outbound.ccOwner, true);

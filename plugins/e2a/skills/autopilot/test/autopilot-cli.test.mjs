@@ -23,7 +23,8 @@ test("interview writes a private policy and prints a non-mutating plan", () => {
     "Example Support",
     "support@example.com",
     "owner@example.com",
-    "vip@customer.test, customer.test",
+    "addresses",
+    "vip@customer.test, buyer@customer.test",
     "", // review on
     "", // owner CC on
     "", // screening on
