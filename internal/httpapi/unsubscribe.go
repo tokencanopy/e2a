@@ -101,6 +101,11 @@ func (s *Server) handlePublicUnsubscribe(w http.ResponseWriter, r *http.Request)
 			log.Printf("[unsubscribe] success render failed: %v", err)
 		}
 	default:
+		// RFC 9110 §15.5.6: a 405 must carry Allow. This route is registered
+		// on the router for all methods (root.Handle), so the method set
+		// cannot be derived from the routing table — the switch above is the
+		// source of truth.
+		w.Header().Set("Allow", "GET, POST")
 		writePublicUnsubscribeError(w, http.StatusMethodNotAllowed)
 	}
 }

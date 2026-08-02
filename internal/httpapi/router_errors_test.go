@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +51,65 @@ func TestV1RouterErrorsUseCanonicalEnvelope(t *testing.T) {
 	}
 	if legacyCalls != 0 {
 		t.Fatalf("legacy handler called %d times for /v1 errors", legacyCalls)
+	}
+}
+
+// RFC 9110 §15.5.6: every 405 MUST carry an Allow header naming the methods
+// the resource does support. The header is derived by probing the live chi
+// routing table, so these expected sets are exactly the methods registered
+// for each path — if a route gains or loses a method, the assertion updates
+// with it (and this test tells you).
+func TestMethodNotAllowedCarriesAllowHeader(t *testing.T) {
+	s := New(Deps{
+		// Register the raw (non-Huma) chi WebSocket route too.
+		WSHandle: func(w http.ResponseWriter, r *http.Request, address string) {},
+	})
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		allowed []string
+	}{
+		// Huma-registered operation, single method.
+		{name: "huma single-method", method: http.MethodPost, path: "/v1/info", allowed: []string{http.MethodGet}},
+		// Huma-registered operations sharing one path, multiple methods.
+		{name: "huma multi-method", method: http.MethodPatch, path: "/v1/domains/example.com", allowed: []string{http.MethodGet, http.MethodDelete}},
+		// Raw chi route registered outside Huma.
+		{name: "raw chi route", method: http.MethodPost, path: "/v1/agents/a%40b.example/ws", allowed: []string{http.MethodGet}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, nil))
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405; body=%q", rr.Code, rr.Body.String())
+			}
+			allow := rr.Header().Get("Allow")
+			if allow == "" {
+				t.Fatalf("405 response missing Allow header (RFC 9110 §15.5.6)")
+			}
+			got := map[string]bool{}
+			for _, m := range strings.Split(allow, ",") {
+				got[strings.TrimSpace(m)] = true
+			}
+			want := map[string]bool{}
+			for _, m := range tc.allowed {
+				want[m] = true
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Allow = %q (set %v), want exactly %v", allow, got, want)
+			}
+			// The header must not disturb the canonical JSON envelope.
+			var env ErrorEnvelope
+			if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v; body=%q", err, rr.Body.String())
+			}
+			if env.Err.Code != "method_not_allowed" {
+				t.Fatalf("error.code = %q, want method_not_allowed", env.Err.Code)
+			}
+		})
 	}
 }
 

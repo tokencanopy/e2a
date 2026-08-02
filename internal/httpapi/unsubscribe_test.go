@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,6 +324,17 @@ func TestPublicUnsubscribeUnsupportedMethodHasSecurityHeaders(t *testing.T) {
 	resp, _ := doPublicUnsubscribe(t, srv.Client(), http.MethodPut, srv.URL+"/u/"+publicUnsubscribeToken, "application/x-www-form-urlencoded", "confirm=unsubscribe")
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT status = %d, want 405", resp.StatusCode)
+	}
+	// RFC 9110 §15.5.6: the 405 must name the supported methods. This raw
+	// handler serves exactly GET and POST.
+	got := map[string]bool{}
+	for _, m := range strings.Split(resp.Header.Get("Allow"), ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			got[m] = true
+		}
+	}
+	if want := map[string]bool{http.MethodGet: true, http.MethodPost: true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Allow = %q (set %v), want exactly %v", resp.Header.Get("Allow"), got, want)
 	}
 }
 

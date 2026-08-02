@@ -604,14 +604,48 @@ func (s *Server) routeNotFound(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// allowHeaderValue derives the Allow header for a 405 response (RFC 9110
+// §15.5.6: an origin server MUST generate Allow on every 405) by asking the
+// router itself which methods route this request's path. chi v5 collects the
+// matched node's method set internally but does not expose it to a custom
+// MethodNotAllowed handler, so this re-runs the match once per HTTP method —
+// nine tree lookups on a rare error path. Probing the live routing table
+// keeps the header in lockstep with reality as routes change; nothing is
+// hardcoded per route.
+func (s *Server) allowHeaderValue(r *http.Request) string {
+	// Mirror chi's own routing-path selection: it routes on RawPath when the
+	// request URI is percent-encoded (see the WS route comment above).
+	routePath := r.URL.RawPath
+	if routePath == "" {
+		routePath = r.URL.Path
+	}
+	var allowed []string
+	for _, method := range []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace,
+	} {
+		if s.Router.Match(chi.NewRouteContext(), method, routePath) {
+			allowed = append(allowed, method)
+		}
+	}
+	return strings.Join(allowed, ", ")
+}
+
 func (s *Server) routeMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	if isV1Path(r.URL.Path) {
+		if allow := s.allowHeaderValue(r); allow != "" {
+			w.Header().Set("Allow", allow)
+		}
 		WriteError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	if s.deps.Legacy != nil {
 		s.deps.Legacy.ServeHTTP(w, r)
 		return
+	}
+	if allow := s.allowHeaderValue(r); allow != "" {
+		w.Header().Set("Allow", allow)
 	}
 	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 }
