@@ -5,6 +5,7 @@ import {
   constants,
   existsSync,
   mkdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -26,6 +27,19 @@ import {
 } from "./service.mjs";
 
 const pluginDirectory = path.dirname(fileURLToPath(import.meta.url));
+const RUNTIME_FILES = [
+  "config.mjs",
+  "daemon.mjs",
+  "gateway.mjs",
+  "job-tool.mjs",
+  "mail-client.mjs",
+  "policy.mjs",
+  "runner.mjs",
+  "runtime.mjs",
+  "service.mjs",
+  "spool.mjs",
+  "supervisor.mjs",
+];
 
 function privateDirectory(directory) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -60,6 +74,13 @@ function taskMarkdown(policy) {
   ].join("\n");
 }
 
+function copyRuntimeBundle(sourceRoot, targetRoot) {
+  privateDirectory(targetRoot);
+  for (const name of RUNTIME_FILES) {
+    atomicWrite(path.join(targetRoot, name), readFileSync(path.join(sourceRoot, name), "utf8"));
+  }
+}
+
 export function installationPaths(policy, home = homedir()) {
   const identity = serviceIdentity(policy.mailbox.agentEmail);
   const root = path.join(home, ".local", "share", "e2a-autopilot", identity.slug);
@@ -76,6 +97,8 @@ export function installationPaths(policy, home = homedir()) {
     taskPath: path.join(root, "task.md"),
     secretsPath: path.join(root, "secrets.json"),
     installPath: path.join(root, "install.json"),
+    runtimeRoot: path.join(root, "runtime"),
+    runnerPath: path.join(root, "runtime", "runner.mjs"),
     stateRoot: path.join(root, "state"),
     logsRoot: path.join(root, "logs"),
     stdoutPath: path.join(root, "logs", "autopilot.log"),
@@ -105,7 +128,7 @@ export async function installAutopilot({
   setup,
   home = homedir(),
   nodePath = process.execPath,
-  runnerPath = path.join(pluginDirectory, "runner.mjs"),
+  runtimeSourceRoot = pluginDirectory,
   skipExecutableChecks = false,
   writeServiceDefinition = defaultWriteServiceDefinition,
 }) {
@@ -154,6 +177,7 @@ export async function installAutopilot({
     privateDirectory(path.join(paths.stateRoot, "jobs"));
     privateDirectory(path.join(paths.stateRoot, "locks"));
     privateDirectory(paths.logsRoot);
+    copyRuntimeBundle(runtimeSourceRoot, paths.runtimeRoot);
     atomicWrite(paths.policyPath, `${JSON.stringify(policy, null, 2)}\n`);
     atomicWrite(paths.taskPath, taskMarkdown(policy));
     atomicWrite(
@@ -191,7 +215,7 @@ export async function installAutopilot({
     if (paths.servicePath) {
       const serviceValues = {
         nodePath,
-        runnerPath,
+        runnerPath: paths.runnerPath,
         policyPath: paths.policyPath,
         secretsPath: paths.secretsPath,
         stateRoot: paths.stateRoot,
@@ -242,5 +266,7 @@ export async function installAutopilot({
       throw new Error(`${error.message}\nROLLBACK INCOMPLETE:\n- ${rollbackErrors.join("\n- ")}`);
     }
     throw error;
+  } finally {
+    setup.clearAccountCredential?.();
   }
 }

@@ -123,6 +123,8 @@ test("setup client uses the existing account CLI session without putting its key
   assert.equal(httpCalls[1].options.method, "PUT");
   assert.doesNotMatch(JSON.stringify(cliCalls), /e2a_acct_synthetic/);
   assert.match(httpCalls[1].url, /support%40example\.test\/protection$/);
+  client.clearAccountCredential();
+  await assert.rejects(client.getProtection("support@example.test"), /Run setup preflight/);
 });
 
 test("setup failures redact CLI output and credentials", async () => {

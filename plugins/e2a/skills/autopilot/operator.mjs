@@ -122,8 +122,12 @@ export async function uninstallAutopilot({
   if (existsSync(archivePath)) throw new Error(`Uninstall archive already exists at ${archivePath}.`);
 
   control(installed, "stop");
-  await setup.preflight(installed.policy.mailbox.agentEmail);
-  await setup.revokeKey(installed.secrets.keyId);
+  try {
+    await setup.preflight(installed.policy.mailbox.agentEmail);
+    await setup.revokeKey(installed.secrets.keyId);
+  } finally {
+    setup.clearAccountCredential?.();
+  }
   if (installed.paths.servicePath) rmSync(installed.paths.servicePath, { force: true });
   renameSync(installed.paths.root, archivePath);
   return {

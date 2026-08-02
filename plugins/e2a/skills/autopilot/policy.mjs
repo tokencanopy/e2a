@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import path from "node:path";
+
+import { serviceIdentity } from "./service.mjs";
 
 export const POLICY_VERSION = 1;
 
@@ -247,6 +251,21 @@ export function renderPlan(input) {
   const domains = policy.inbound.domains.length
     ? policy.inbound.domains.join(", ")
     : "none";
+  const identity = serviceIdentity(policy.mailbox.agentEmail);
+  const localRoot = path.join(
+    homedir(),
+    ".local",
+    "share",
+    "e2a-autopilot",
+    identity.slug,
+  );
+  const serviceDefinition =
+    policy.service.manager === "launchd"
+      ? path.join(homedir(), "Library", "LaunchAgents", `${identity.launchdLabel}.plist`)
+      : policy.service.manager === "systemd"
+        ? path.join(homedir(), ".config", "systemd", "user", identity.systemdUnit)
+        : "none (foreground/manual mode)";
+  const inboundGate = policy.inbound.mode === "domains" ? "domain" : "allowlist";
 
   return [
     "e2a Autopilot installation plan",
@@ -268,15 +287,30 @@ export function renderPlan(input) {
     `Isolation: ${policy.runtime.sandbox}`,
     `Workspace: ${policy.runtime.workdir}`,
     `Service: ${policy.service.manager}`,
+    `Local root: ${localRoot}`,
+    `Policy file: ${path.join(localRoot, "policy.json")}`,
+    `Task file: ${path.join(localRoot, "task.md")}`,
+    `Credential file (mode 0600): ${path.join(localRoot, "secrets.json")}`,
+    `Pinned runtime harness: ${path.join(localRoot, "runtime")}`,
+    `Durable state: ${path.join(localRoot, "state")}`,
+    `Logs: ${path.join(localRoot, "logs")}`,
+    `Service definition: ${serviceDefinition}`,
     "",
     "Planned changes:",
-    "- Create owner-only local policy, task, credential, state, and log files.",
+    "- Create the owner-only files at the exact paths above.",
     "- Create one dedicated agent-scoped e2a credential for the local supervisor.",
-    "- Configure the existing inbound sender policy with review fallback.",
+    `- Set inbound.gate to policy=${inboundGate}, action=review, entries=${
+      policy.inbound.mode === "domains" ? domains : addresses
+    }.`,
+    `- Set inbound.scan.sensitivity=${
+      policy.screening.promptInjection ? "medium" : "off (warned opt-out)"
+    }.`,
     policy.outbound.requireReview
-      ? "- Configure the existing outbound policy to require human review."
-      : "- Leave outbound human review disabled as explicitly acknowledged.",
-    `- Generate a ${policy.service.manager} service definition after verification.`,
+      ? "- Set outbound.gate to policy=allowlist, action=review, entries=none (review every outbound message)."
+      : "- Set outbound.gate.action=flag and outbound.scan.sensitivity=off as explicitly acknowledged.",
+    "- Set holds.on_expiry=reject and holds.suppress_notifications=false.",
+    `- Generate the ${policy.service.manager} service definition after remote verification; do not start it.`,
+    "- If installation fails, restore the prior protection document, revoke the new key, and remove only this attempt's files.",
     "",
     "Implementation boundary:",
     "- No server, API, database, core CLI, SDK, or MCP code changes.",

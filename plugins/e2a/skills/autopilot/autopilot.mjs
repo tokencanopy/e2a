@@ -228,11 +228,15 @@ async function commandStatus(options) {
   };
   if (options.verify) {
     const setup = setupClient(options);
-    await setup.preflight(installed.policy.mailbox.agentEmail);
-    const protection = await setup.getProtection(installed.policy.mailbox.agentEmail);
-    status.protection = protectionMatchesPolicy(protection, installed.policy)
-      ? "matches-policy"
-      : "DRIFTED";
+    try {
+      await setup.preflight(installed.policy.mailbox.agentEmail);
+      const protection = await setup.getProtection(installed.policy.mailbox.agentEmail);
+      status.protection = protectionMatchesPolicy(protection, installed.policy)
+        ? "matches-policy"
+        : "DRIFTED";
+    } finally {
+      setup.clearAccountCredential();
+    }
   } else {
     status.protection = "not-verified (use --verify with an account-scoped CLI session)";
   }

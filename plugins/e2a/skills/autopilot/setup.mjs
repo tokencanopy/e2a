@@ -127,6 +127,7 @@ export class E2aSetupClient {
     execFileImpl = execFile,
     fetchImpl = globalThis.fetch,
     apiBaseUrl,
+    timeoutMs = 30_000,
   }) {
     this.command = command;
     this.baseArgs = [...baseArgs];
@@ -134,6 +135,7 @@ export class E2aSetupClient {
     this.execFileImpl = execFileImpl;
     this.fetchImpl = fetchImpl;
     this.apiBaseUrlOverride = apiBaseUrl;
+    this.timeoutMs = timeoutMs;
     this.accountApiKey = null;
     this.deploymentUrl = null;
     this.apiBaseUrl = null;
@@ -144,7 +146,7 @@ export class E2aSetupClient {
       this.execFileImpl(
         this.command,
         [...this.baseArgs, ...args],
-        { env: this.environment, maxBuffer: 1024 * 1024 },
+        { env: this.environment, maxBuffer: 1024 * 1024, timeout: this.timeoutMs },
         (error, stdout) => {
           if (error) {
             reject(new Error(`e2a CLI command failed: ${args.slice(0, 2).join(" ")}.`));
@@ -181,6 +183,8 @@ export class E2aSetupClient {
       throw new Error("Run setup preflight before accessing protection configuration.");
     }
     let response;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       response = await this.fetchImpl(
         `${this.apiBaseUrl}/v1/agents/${encodeURIComponent(agentEmail)}/protection`,
@@ -192,10 +196,13 @@ export class E2aSetupClient {
             ...(body ? { "content-type": "application/json" } : {}),
           },
           ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: controller.signal,
         },
       );
     } catch {
       throw new Error("e2a protection request failed before a response.");
+    } finally {
+      clearTimeout(timer);
     }
     if (!response.ok) {
       throw new Error(`e2a protection request failed with status ${response.status}.`);
@@ -241,5 +248,9 @@ export class E2aSetupClient {
 
   async revokeKey(keyId) {
     await this.run(["keys", "delete", keyId]);
+  }
+
+  clearAccountCredential() {
+    this.accountApiKey = null;
   }
 }

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { installAutopilot } from "../installer.mjs";
+import { installAutopilot, installationPaths } from "../installer.mjs";
 import { planDigest } from "../policy.mjs";
 
 function fixture() {
@@ -92,10 +92,16 @@ test("confirmed install verifies remote policy then writes private local state",
   assert.equal(statSync(result.paths.root).mode & 0o777, 0o700);
   assert.equal(statSync(result.paths.policyPath).mode & 0o777, 0o600);
   assert.equal(statSync(result.paths.secretsPath).mode & 0o777, 0o600);
+  assert.equal(statSync(result.paths.runtimeRoot).mode & 0o777, 0o700);
+  assert.equal(statSync(result.paths.runnerPath).mode & 0o777, 0o600);
+  assert.ok(readdirSync(result.paths.runtimeRoot).includes("job-tool.mjs"));
+  assert.ok(!readdirSync(result.paths.runtimeRoot).includes("installer.mjs"));
   const secrets = JSON.parse(readFileSync(result.paths.secretsPath, "utf8"));
   assert.equal(secrets.apiKey, "e2a_agt_synthetic");
   assert.equal(secrets.keyId, "key_synthetic");
-  assert.doesNotMatch(readFileSync(result.paths.servicePath, "utf8"), /e2a_agt_synthetic/);
+  const service = readFileSync(result.paths.servicePath, "utf8");
+  assert.doesNotMatch(service, /e2a_agt_synthetic/);
+  assert.match(service, new RegExp(result.paths.runnerPath.replaceAll("/", "\\/")));
   assert.deepEqual(files.calls.map(([name]) => name), [
     "preflight",
     "getProtection",
@@ -129,7 +135,7 @@ test("failed local install restores protection, revokes key, and removes only ne
   const names = files.calls.map(([name]) => name);
   assert.deepEqual(names.slice(-2), ["replaceProtection", "revokeKey"]);
   assert.equal(existsSync(path.join(files.home, ".local", "share", "e2a-autopilot")), true);
-  const installRoot = path.join(files.home, ".local", "share", "e2a-autopilot", "agent-");
+  const installRoot = installationPaths(files.policy, files.home).root;
   assert.equal(
     existsSync(installRoot),
     false,

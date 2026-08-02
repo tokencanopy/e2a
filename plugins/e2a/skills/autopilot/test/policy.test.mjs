@@ -128,8 +128,13 @@ test("renderPlan is deterministic, mutation-specific, and secret-free", () => {
   assert.match(firstPlan, /Non-matching inbound senders: e2a human review/);
   assert.match(firstPlan, /Outbound human review: enabled \(recommended default\)/);
   assert.match(firstPlan, /Owner CC: owner@example\.com on every reply/);
+  assert.match(firstPlan, /Credential file \(mode 0600\): .*secrets\.json/);
+  assert.match(firstPlan, /inbound\.gate to policy=allowlist, action=review/);
+  assert.match(firstPlan, /outbound\.gate to policy=allowlist, action=review, entries=none/);
+  assert.match(firstPlan, /restore the prior protection document, revoke the new key/);
+  assert.match(firstPlan, /do not start it/);
   assert.match(firstPlan, /No server, API, database, core CLI, SDK, or MCP code changes/);
-  assert.doesNotMatch(firstPlan, /api[_ -]?key|forward[_ -]?token|secret/i);
+  assert.doesNotMatch(firstPlan, /e2a_(?:acct|agt)_[a-z0-9]+/i);
   assert.equal(planDigest(first), planDigest(second));
 });
 
