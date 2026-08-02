@@ -14,7 +14,7 @@ fi
 # same first-unsafe release. Comparing only one caller-supplied snapshot is not
 # enough: a tag/manual publish could omit that ref after an earlier commit had
 # already reset the file. Resolve a trusted ancestor, then scan the file's full
-# reachable history for the first cumulative non-none value.
+# reachable HEAD history chronologically, including every commit in a PR.
 base_ref=${ROLLBACK_BASE_REF:-${1:-}}
 require_base=${REQUIRE_ROLLBACK_BASE:-false}
 
@@ -56,14 +56,13 @@ while IFS= read -r commit; do
     echo "historical ROLLBACK_UNSAFE_BEFORE at ${commit} is invalid: ${value}" >&2
     exit 1
   fi
-  [ "$value" != none ] || continue
   if [ -z "$historical_boundary" ]; then
-    historical_boundary="$value"
+    [ "$value" = none ] || historical_boundary="$value"
   elif [ "$value" != "$historical_boundary" ]; then
-    echo "ROLLBACK_UNSAFE_BEFORE changed historically: ${historical_boundary} vs ${value}" >&2
+    echo "ROLLBACK_UNSAFE_BEFORE changed historically after ${historical_boundary}: ${value} at ${commit}" >&2
     exit 1
   fi
-done < <(git log --format=%H "$base_ref" -- ROLLBACK_UNSAFE_BEFORE)
+done < <(git log --reverse --format=%H HEAD -- ROLLBACK_UNSAFE_BEFORE)
 
 if [ -n "$historical_boundary" ] && [ "$boundary" != "$historical_boundary" ]; then
   echo "ROLLBACK_UNSAFE_BEFORE is cumulative: ${historical_boundary} cannot change to ${boundary}" >&2

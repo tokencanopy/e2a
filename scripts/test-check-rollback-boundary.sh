@@ -36,11 +36,22 @@ if REQUIRE_ROLLBACK_BASE=true "$tmp/scripts/check-rollback-boundary.sh" >/dev/nu
   exit 1
 fi
 
+printf '%s\n' 2.0.0 > "$tmp/ROLLBACK_UNSAFE_BEFORE"
+if REQUIRE_ROLLBACK_BASE=true "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
+  echo "a transient committed reset hidden by a later restore unexpectedly passed" >&2
+  exit 1
+fi
+
 if ROLLBACK_BASE_REF=not-a-commit REQUIRE_ROLLBACK_BASE=true \
    "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
   echo "an unresolvable required base unexpectedly passed" >&2
   exit 1
 fi
+
+# Return to the clean boundary commit. The committed reset remains proven above
+# but must not contaminate the unchanged-boundary success case below.
+git -C "$tmp" restore ROLLBACK_UNSAFE_BEFORE
+git -C "$tmp" checkout -q "$boundary_sha"
 
 printf '%s\n' 2.1.0 > "$tmp/ROLLBACK_UNSAFE_BEFORE"
 if ROLLBACK_BASE_REF="$boundary_sha" "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
