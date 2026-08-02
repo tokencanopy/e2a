@@ -295,7 +295,9 @@ pending migrations against a `schema_migrations` tracker table.
    still run safely after every embedded migration applies. Hosted S1 enforces
    that claim by booting those exact image digests against its migrated prod
    clone. If a migration crosses that boundary, set the first affected release
-   semver and carry it forward unchanged; CI rejects any later reset or move.
+   semver and carry it forward unchanged; CI scans the reachable file history
+   and rejects any later reset or move. Tag and manual image publishing are
+   also restricted to commits already contained in `main`.
 
 Add or update tests in any Go package that writes raw SQL against the
 touched table. Higher-level e2e coverage doesn't catch query drift

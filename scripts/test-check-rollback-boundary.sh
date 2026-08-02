@@ -27,6 +27,21 @@ if ROLLBACK_BASE_REF="$boundary_sha" "$tmp/scripts/check-rollback-boundary.sh" >
   exit 1
 fi
 
+# Publishing entry points such as tag push and workflow_dispatch may not have a
+# useful event.before. Commit the reset and prove the checker derives HEAD^ and
+# still finds the earlier cumulative value in history.
+git -C "$tmp" commit -qam reset
+if REQUIRE_ROLLBACK_BASE=true "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
+  echo "history-aware reset with an omitted base unexpectedly passed" >&2
+  exit 1
+fi
+
+if ROLLBACK_BASE_REF=not-a-commit REQUIRE_ROLLBACK_BASE=true \
+   "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
+  echo "an unresolvable required base unexpectedly passed" >&2
+  exit 1
+fi
+
 printf '%s\n' 2.1.0 > "$tmp/ROLLBACK_UNSAFE_BEFORE"
 if ROLLBACK_BASE_REF="$boundary_sha" "$tmp/scripts/check-rollback-boundary.sh" >/dev/null 2>&1; then
   echo "moving a cumulative rollback boundary unexpectedly passed" >&2

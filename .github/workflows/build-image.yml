@@ -83,6 +83,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Tags and workflow_dispatch can otherwise publish from an arbitrary
+      # branch. Release images must come from a commit already contained in
+      # main so the cumulative rollback-boundary history cannot be forked.
+      - name: Require publish source on main
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main \
+            || { echo "::error::Image publishing is allowed only for commits contained in main"; exit 1; }
+
       # QEMU registers binfmt_misc handlers so this amd64 runner can
       # cross-build arm64 layers under emulation. Without this step the
       # arm64 build fails with "exec format error" — buildx alone does
@@ -99,6 +111,7 @@ jobs:
         shell: bash
         env:
           ROLLBACK_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          REQUIRE_ROLLBACK_BASE: true
         run: |
           set -euo pipefail
           value=$(scripts/check-rollback-boundary.sh)
