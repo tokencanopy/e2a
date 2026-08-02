@@ -24,6 +24,37 @@
 #   ws_read          — read and assert one WebSocket notification
 #   verify_and_retry — verify a domain in the store, then replay an HTTP request
 #
+# Raw-bytes escape hatches (request steps only). YAML is UTF-8 by definition
+# and its \xNN escape denotes a CODEPOINT, so a scenario cannot express a
+# request whose bytes are not well-formed UTF-8 using `body:` or an ordinary
+# header value. These two keys carry base64 instead, and every runner decodes
+# them and puts the bytes on the wire VERBATIM — no JSON encoder, no charset
+# transcoding, no placeholder substitution:
+#   raw_body_base64  — request body bytes, sent as application/json.
+#                      Mutually exclusive with `body:`.
+#   headers_base64   — {Header-Name: base64} request header values.
+#                      Combinable with `body:` or `raw_body_base64`.
+# Use them only when the bytes genuinely cannot be written as text; every
+# other scenario stays readable with `body:`.
+# Both values must be exactly-canonical base64 (standard alphabet, canonical
+# padding, no whitespace) and non-empty; every runner validates the string
+# before decoding, because the three stdlib decoders are permissive in three
+# DIFFERENT places and a typo'd fixture would otherwise put different bytes on
+# the wire in one language while erroring in the others.
+#
+# Response assertions on a `request` step (all optional):
+#   body_contains      — top-level keys that must be present
+#   body_excludes      — top-level keys that must be ABSENT (a property-name
+#                        check, not a text search)
+#   response_excludes  — substrings that must appear NOWHERE in the raw
+#                        response text. Use this — not body_excludes — to prove
+#                        the server does not echo caller input back, since a
+#                        leak lives at a nested path where body_excludes is
+#                        vacuously satisfied.
+#   body_match         — {json.path: value}; an ABSENT path fails, so an
+#                        expected `null` means present-and-null
+#   body_array_contains — {json.path: {field: value}} over an array
+#
 # Optional cleanup blocks contain request steps. Every runner executes them in
 # declaration order after setup/steps, including after failures. Cleanup is
 # best-effort: every request runs, the primary failure wins, and otherwise a
@@ -1742,3 +1773,136 @@ scenarios:
         path: /v1/contacts/cursor-b@bind.vc?confirm=DELETE
         expect:
           status: 200
+
+  - name: invalid_utf8_rejected
+    description: >
+      Well-formed-text rule: no client-supplied string may carry an invalid
+      UTF-8 byte sequence, whichever seam it arrives through — raw request
+      body, path param, query param or header. Every arm answers 400
+      invalid_request located at the offending field: never a 5xx, and never a
+      silent U+FFFD substitution (JSON decoders launder invalid bytes into the
+      replacement character before any field-level check can see them, which
+      is why the body arm is enforced on the RAW bytes before decoding).
+
+      The body and header arms cannot be written as YAML scalars: YAML is
+      UTF-8 by definition and its \xFF escape denotes codepoint U+00FF, which
+      encodes to the perfectly VALID two-byte sequence C3 BF. They therefore
+      use raw_body_base64 / headers_base64, which every runner decodes to
+      bytes and transmits verbatim. The path and query arms need no escape
+      hatch — %FF is pure ASCII on the wire.
+
+      Self-cleaning by construction: every request is a rejection, so nothing
+      is ever created and there is nothing to delete. The two probe steps
+      assert exactly that, including for the LAUNDERED address (a + U+FFFD +
+      b) that the pre-fix server persisted with a 201.
+    steps:
+      - id: path_param_rotate_secret_rejected
+        # Was a 500 "failed to rotate webhook secret": the raw byte reached
+        # the store's UPDATE and Postgres refused it (SQLSTATE 22021).
+        action: request
+        method: POST
+        path: /v1/webhooks/%FF/rotate-secret
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": path.id
+            "error.details.fields[0].message": must be valid UTF-8
+          # Whole-response check: the envelope must not echo the offending
+          # input back at ANY depth. Since the envelope is JSON and JSON is
+          # UTF-8, an echo can only arrive laundered, so the absence of the
+          # replacement character is the general form of "nothing leaked".
+          response_excludes: ["\uFFFD"]
+
+      - id: path_param_get_webhook_rejected
+        # The read path masked the same defect as a 404; the blanket rule
+        # makes it the same actionable 400.
+        action: request
+        method: GET
+        path: /v1/webhooks/%FF
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": path.id
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: query_param_rejected
+        action: request
+        method: GET
+        path: /v1/contacts?import_batch_id=%FF
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": query.import_batch_id
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: body_rejected
+        # Decodes to {"address":"a\xFFb@example.com","display_name":"invalid
+        # utf8 body"} with a raw 0xFF byte inside the address. Pre-fix this
+        # answered 201 and stored the address with U+FFFD in place of the
+        # byte — the corruption nothing downstream can ever see.
+        action: request
+        method: POST
+        path: /v1/contacts
+        raw_body_base64: eyJhZGRyZXNzIjoiYf9iQGV4YW1wbGUuY29tIiwiZGlzcGxheV9uYW1lIjoiaW52YWxpZCB1dGY4IGJvZHkifQ==
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": body
+            "error.details.fields[0].message": request body must be valid UTF-8
+          # The envelope must not echo the offending body back. This has to be
+          # the WHOLE-response form: huma's ErrorDetail carries the raw value
+          # at error.details.fields[].value, so a leak would sit nested and a
+          # top-level `body_excludes: [address]` would pass vacuously on an
+          # error envelope that has no top-level `address` key either way.
+          # Named substrings first, then the general laundered-echo check.
+          response_excludes:
+            - "example.com"
+            - "invalid utf8 body"
+            - "\uFFFD"
+
+      - id: laundered_body_address_was_not_created
+        # a + U+FFFD + b @example.com, percent-encoded. This is the address
+        # the pre-fix 201 actually persisted, so a 404 here is the proof that
+        # the rejection left no row.
+        action: request
+        method: GET
+        path: /v1/contacts/a%EF%BF%BDb@example.com
+        expect:
+          status: 404
+          body_match:
+            "error.code": contact_not_found
+
+      - id: header_rejected
+        # Idempotency-Key: k\xFFz (base64 "a/96"). Pre-fix the raw byte
+        # reached the idempotency store and came back as a 500 "idempotency
+        # store error". The BODY here is deliberately valid, so the header is
+        # the only thing that can be rejected.
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: hdr-utf8-{scenario_token}@example.com
+        headers_base64:
+          Idempotency-Key: a/96
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": header.Idempotency-Key
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: header_rejected_contact_was_not_created
+        action: request
+        method: GET
+        path: /v1/contacts/hdr-utf8-{scenario_token}@example.com
+        expect:
+          status: 404
+          body_match:
+            "error.code": contact_not_found

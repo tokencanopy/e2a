@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestUpdateAgentInboundPolicyInvalid verifies the policy is validated before
@@ -59,6 +60,39 @@ func TestNormalizeEmailIdempotent(t *testing.T) {
 		twice := NormalizeEmail(once)
 		if once != twice {
 			t.Errorf("not idempotent for %q: once=%q twice=%q", in, once, twice)
+		}
+	}
+}
+
+// TestNormalizeEmailOutputIsAlwaysValidUTF8 is load-bearing for the two raw
+// chi `/v1` routes that sit outside BOTH request-content seams in
+// internal/httpapi (the WebSocket handshake `/v1/agents/{email}/ws` and the
+// attachment download `/v1/agents/{email}/messages/{id}/attachments/{index}/download`).
+// Neither is a Huma operation, so neither the raw-body format guard nor the
+// registerOp walk covers its `{email}` path param — a percent-encoded raw byte
+// reaches the handler intact. What keeps that byte out of Postgres (where it
+// would be SQLSTATE 22021) is this function: strings.ToLower routes non-ASCII
+// input through strings.Map, which decodes ill-formed bytes as U+FFFD and
+// re-encodes them, so the lookup key is always well-formed and simply misses.
+//
+// That makes both routes safe WITHOUT their own guard — but only for as long
+// as this holds. A plausible "optimization" (a byte-wise ASCII lowercase fast
+// path) would pass those bytes straight through and silently reopen the class
+// on two routes with no other line of defense, so the property is pinned here
+// rather than left as a comment.
+func TestNormalizeEmailOutputIsAlwaysValidUTF8(t *testing.T) {
+	for _, in := range []string{
+		"a\xffb@x.dev",
+		"A\xffB@X.dev",
+		"\xff",
+		"\xc3\x28@x.dev", // truncated two-byte sequence
+		"\xed\xa0\x80",   // encoded surrogate half
+		"ok@x.dev",
+		"日本語@x.dev",
+	} {
+		out := NormalizeEmail(in)
+		if !utf8.ValidString(out) {
+			t.Errorf("NormalizeEmail(%q) = %q, which is not valid UTF-8 — the raw chi /v1 routes rely on this", in, out)
 		}
 	}
 }

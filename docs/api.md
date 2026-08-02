@@ -165,18 +165,58 @@ GA unless its heading or prose says `(beta)`.
     idempotency-store degradation or a mid-request crash the protection
     degrades to at-least-once — a keyed retry may re-execute the operation
     rather than replay the cached response.
-- **No NUL bytes on `/v1`.** No client-supplied string in a `/v1` request may
-  contain `U+0000` — anywhere in the JSON body (at any depth, including object
-  *keys*), or in a path, query, or header parameter. Violations are `400
-  invalid_request` with the offending field in `error.details.fields[].location`.
-  The rule is blanket rather than per-field on purpose: a `NUL` cannot be stored
-  in a text column at all, and a caller cannot tell from the outside which
-  strings are persisted and which are only composed, so the answer is the same
-  everywhere. In JSON, a `NUL` can only arrive as the `\u0000` escape.
-  (The guard is enforced on the `/v1` operations, which is the whole documented
-  client API. Non-`/v1` entry points — the dashboard's session-authenticated
+- **No NUL bytes and no invalid UTF-8 on `/v1`.** No client-supplied string in
+  a `/v1` request may contain `U+0000`, and every client-supplied byte sequence
+  must be well-formed UTF-8 — anywhere in the JSON body (at any depth,
+  including object *keys*), or in a path, query, or header parameter.
+  Violations are `400 invalid_request` with the offending field in
+  `error.details.fields[].location`; a body whose raw bytes are not valid
+  UTF-8 is rejected before parsing, located at `body`. The rules are blanket
+  rather than per-field on purpose: neither a `NUL` nor a broken byte sequence
+  can be stored in a text column at all, and a caller cannot tell from the
+  outside which strings are persisted and which are only composed, so the
+  answer is the same everywhere. In JSON, a `NUL` can only arrive as the
+  `\u0000` escape; invalid UTF-8 can only arrive as raw bytes, which RFC 8259
+  §8.1 forbids in JSON anyway. Valid multi-byte UTF-8 — CJK, emoji, even a
+  properly encoded `U+FFFD` — is always accepted; only malformed byte
+  sequences are refused, and the offending bytes are never echoed back in the
+  error.
+
+  Three consequences are worth calling out because they change answers a client
+  may already branch on:
+
+  - **A malformed path param is now `400`, not `404`.** Reading a resource whose
+    id carries an invalid byte — `GET /v1/agents/%FF`, `GET /v1/webhooks/%FF` —
+    used to look up a name that could not exist and answer `404 not_found`.
+    Every such read now answers `400 invalid_request` located at the path
+    param, matching what the write on the same id always should have done. A
+    well-formed id that simply does not exist is still `404`.
+  - **A malformed `cursor` changes `error.code`.** `?cursor=<invalid bytes>` was
+    `400 invalid_cursor`; it is now `400 invalid_request` located at
+    `query.cursor`, because the content rule runs before the cursor is decoded.
+    The status is unchanged, but a client branching on `error.code` sees the
+    new value. A cursor that is well-formed text yet not a valid cursor is
+    still `400 invalid_cursor`.
+  - **The rules run before authentication.** An unauthenticated request that
+    also carries an invalid byte gets `400 invalid_request`, not `401
+    unauthorized`. Nothing about the credential is disclosed — the answer
+    depends only on bytes the caller sent — but a client that treats "`401` ⇒
+    refresh the token" must not read this `400` as a credential problem. A
+    clean unauthenticated request is still `401`.
+
+  (The rules are enforced structurally on the `/v1` **operations** — every
+  operation is registered through one seam that walks its bound params, and
+  every request body is checked as raw bytes before decoding — so a new
+  operation inherits them by construction. Four `/v1` paths are not operations
+  and are guarded individually instead: the HITL magic-link pages `/v1/approve`
+  and `/v1/reject`, where `reason` — the only caller-authored text on either —
+  is checked in the handler; and the read-only WebSocket handshake
+  `/v1/agents/{email}/ws` plus the attachment download
+  `/v1/agents/{email}/messages/{id}/attachments/{index}/download`, which
+  normalize or capability-check every caller string before it can reach
+  storage. Non-`/v1` entry points — the dashboard's session-authenticated
   `/api/*` routes, the public unsubscribe handler, and inbound SMTP — are
-  outside it and validate independently.)
+  outside the rules and validate independently.)
 - **Conditional writes (`ETag` / `If-Match`).** Single-resource `GET`s return an
   `ETag`; pass it back as `If-Match` on the write to reject a lost update with
   `412 precondition_failed`. Three rules are worth stating because they are easy
@@ -203,8 +243,13 @@ GA unless its heading or prose says `(beta)`.
   over-long `display_name`, metadata outside the per-contact bounds — each of
   which fails only its own row (`status: "failed"` with `invalid_recipient` or
   `invalid_request`). Problems with the *request* still reject the whole thing:
-  malformed JSON, an unknown field, a missing `address` key, a `NUL` anywhere in
-  the body, more than 1000 rows, or a body over 20 MiB.
+  malformed JSON, an unknown field, a missing `address` key, a violation of the
+  well-formed-text rules above (a `NUL` anywhere in the body, or a body whose
+  raw bytes are not valid UTF-8), more than 1000 rows, or a body over 20 MiB.
+  Both text rules are request-level for the same reason: neither is row
+  *content* — they are bytes the request document may not contain at all, the
+  same class as malformed JSON — so they reject the upload rather than failing
+  the row that happens to carry them.
 - **Errors.** Non-2xx responses use a single `ErrorEnvelope` shape; branch on
   `error.code` (see [Error codes](#error-codes) below for the full vocabulary).
 - **Capacity limits — the permanent `402` / `429` split.** Two different limits

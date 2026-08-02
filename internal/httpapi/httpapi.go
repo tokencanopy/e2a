@@ -470,6 +470,15 @@ func New(deps Deps) *Server {
 	root.Use(withRawRequest)
 
 	config := huma.DefaultConfig("e2a API", APIVersion)
+	// Reject bodies that are not valid UTF-8 BEFORE JSON decoding. This must
+	// happen on the raw bytes: encoding/json silently launders invalid UTF-8
+	// into U+FFFD, so a post-decode check can never see it (request_content.go
+	// has the full rule). DefaultConfig registers the JSON format under both
+	// its media type and its content-negotiation suffix; wrap every entry so a
+	// format added later fails loudly here rather than bypassing the guard.
+	for name, format := range config.Formats {
+		config.Formats[name] = requireUTF8Body(format)
+	}
 	// Serve the spec and human docs under the versioned prefix so they sit
 	// beside the operations (api-v1-redesign §1: everything lives under the
 	// api host; here, under /v1).
