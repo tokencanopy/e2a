@@ -41,6 +41,7 @@ function fixture() {
   const secrets = {
     version: 1,
     apiKey: "e2a_agt_synthetic",
+    keyId: "key_synthetic",
     forwardToken: "synthetic_forward_capability",
     cliCommand: "/usr/local/bin/node",
     cliBaseArgs: ["/opt/e2a/dist/bin/e2a.js"],

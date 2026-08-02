@@ -6,6 +6,7 @@ import { normalizePolicy, validatePolicy } from "./policy.mjs";
 const SECRET_FIELDS = new Set([
   "version",
   "apiKey",
+  "keyId",
   "forwardToken",
   "cliCommand",
   "cliBaseArgs",
@@ -80,6 +81,7 @@ export function loadInstalledConfig({ policyPath, secretsPath, stateRoot }) {
   const secrets = {
     version: 1,
     apiKey: requiredText(rawSecrets.apiKey, "Agent-scoped e2a credential"),
+    keyId: requiredText(rawSecrets.keyId, "Agent-scoped e2a credential ID"),
     forwardToken: requiredText(rawSecrets.forwardToken, "Forward capability"),
     cliCommand,
     cliBaseArgs: [...rawSecrets.cliBaseArgs],
