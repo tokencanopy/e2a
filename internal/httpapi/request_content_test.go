@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,20 +15,27 @@ import (
 	"testing"
 )
 
-// Regression suite for the NUL (U+0000) rule.
+// Regression suite for the request-content rules: NUL (U+0000) and invalid
+// UTF-8.
 //
-// Every case below returned HTTP 500 on the live staging build sha-32ce45dc:
-// Postgres cannot store a NUL in a text column, so a caller string carrying one
-// reached the driver and came back as internal_error. A permanent client error
-// dressed as a 5xx is the worst possible answer — it is exactly what SDK retry
-// logic hammers — so the rule is now enforced at the edge for every operation.
+// Every NUL case below returned HTTP 500 on the live staging build
+// sha-32ce45dc: Postgres cannot store a NUL in a text column, so a caller
+// string carrying one reached the driver and came back as internal_error. A
+// permanent client error dressed as a 5xx is the worst possible answer — it is
+// exactly what SDK retry logic hammers — so the rule is now enforced at the
+// edge for every operation. The invalid-UTF-8 cases (further down) are the
+// same bug class, found by Schemathesis against staging: 22021 500s on the
+// header and path-param routes, and — worse — silent U+FFFD corruption on the
+// body route, because encoding/json launders invalid bytes instead of
+// erroring.
 //
-// The rule: no client-supplied string anywhere in a request (body at any depth,
-// including object KEYS, plus path, query, and header params) may contain
-// U+0000. Violations are 400 invalid_request with the offending location.
+// The rules: no client-supplied string anywhere in a request (body at any
+// depth, including object KEYS, plus path, query, and header params) may
+// contain U+0000, and every client-supplied byte sequence must be well-formed
+// UTF-8. Violations are 400 invalid_request with the offending location.
 
-// nulLocation pulls the single field location out of a validation envelope.
-func nulLocation(t *testing.T, body map[string]any) string {
+// violationLocation pulls the single field location out of a validation envelope.
+func violationLocation(t *testing.T, body map[string]any) string {
 	t.Helper()
 	envelope, ok := body["error"].(map[string]any)
 	if !ok {
@@ -46,15 +54,15 @@ func nulLocation(t *testing.T, body map[string]any) string {
 	return location
 }
 
-func assertNULRejected(t *testing.T, code int, body map[string]any, wantLocation string) {
+func assertContentRejected(t *testing.T, code int, body map[string]any, wantLocation string) {
 	t.Helper()
 	if code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (a NUL is a permanent client error, never a 5xx); body=%v", code, body)
+		t.Fatalf("status = %d, want 400 (a NUL or invalid UTF-8 is a permanent client error, never a 5xx); body=%v", code, body)
 	}
 	if errCode(body) != "invalid_request" {
 		t.Fatalf("error code = %q, want invalid_request; body=%v", errCode(body), body)
 	}
-	if got := nulLocation(t, body); got != wantLocation {
+	if got := violationLocation(t, body); got != wantLocation {
 		t.Errorf("location = %q, want %q", got, wantLocation)
 	}
 }
@@ -92,7 +100,7 @@ func TestNULInContactStringsIsRejectedNotStored(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newContactsServer(t, nil)
 			code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/contacts", "account", tc.body)
-			assertNULRejected(t, code, body, tc.location)
+			assertContentRejected(t, code, body, tc.location)
 
 			// The rejection happens before the store is touched, so the
 			// address must not exist afterwards. (The staging sweep confirmed
@@ -113,7 +121,7 @@ func TestNULInEngagementStageIsRejected(t *testing.T) {
 	srv := newEngagementsServer(t, nil)
 	code, body := sendJSON(t, http.MethodPut, srv.URL+raisePath+"/partner%40fund.vc", "account",
 		map[string]any{"stage": "a\x00b"})
-	assertNULRejected(t, code, body, "body.stage")
+	assertContentRejected(t, code, body, "body.stage")
 
 	code, _ = sendJSON(t, http.MethodGet, srv.URL+raisePath+"/partner%40fund.vc", "account", nil)
 	if code != http.StatusNotFound {
@@ -165,7 +173,7 @@ func TestNULInOutboundStringsIsRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := testServer(t)
 			code, body := postJSON(t, srv.URL+sendURL, "good", tc.body)
-			assertNULRejected(t, code, body, tc.location)
+			assertContentRejected(t, code, body, tc.location)
 		})
 	}
 }
@@ -178,19 +186,19 @@ func TestNULInNonBodyParamsIsRejected(t *testing.T) {
 
 	code, body := sendJSON(t, http.MethodGet,
 		srv.URL+"/v1/contacts?import_batch_id=%00imp", "account", nil)
-	assertNULRejected(t, code, body, "query.import_batch_id")
+	assertContentRejected(t, code, body, "query.import_batch_id")
 
 	// Headers are covered by the same walk. Go's own HTTP client refuses to
 	// transmit a header value containing a NUL, so this arm is asserted against
 	// the bound input directly rather than over the wire — a hand-rolled client
 	// or a raw socket can still send one.
 	in := createContactInput{IdempotencyKey: "a\x00b"}
-	bad := scanInputForNUL(reflect.ValueOf(&in))
+	bad := scanInput(reflect.ValueOf(&in))
 	if bad == nil || bad.Location != "header.Idempotency-Key" {
 		t.Fatalf("header violation = %+v; want header.Idempotency-Key", bad)
 	}
 	clean := createContactInput{IdempotencyKey: "idem-1"}
-	if bad := scanInputForNUL(reflect.ValueOf(&clean)); bad != nil {
+	if bad := scanInput(reflect.ValueOf(&clean)); bad != nil {
 		t.Fatalf("clean header flagged at %s", bad.Location)
 	}
 }
@@ -209,7 +217,7 @@ func TestLongMapKeyInErrorLocationIsTruncated(t *testing.T) {
 		"address":  "long-key@example.com",
 		"metadata": map[string]any{longKey: "a\x00b"},
 	})
-	assertNULRejected(t, code, body, "body.metadata."+strings.Repeat("k", 32)+"…")
+	assertContentRejected(t, code, body, "body.metadata."+strings.Repeat("k", 32)+"…")
 
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -248,7 +256,7 @@ func TestImportRejectsNULAtRequestLevel(t *testing.T) {
 		map[string]any{"address": "good@imp.vc"},
 		map[string]any{"address": "bad@imp.vc", "display_name": "a\x00b"},
 	}})
-	assertNULRejected(t, code, body, "body.contacts[1].display_name")
+	assertContentRejected(t, code, body, "body.contacts[1].display_name")
 }
 
 // TestScanValueForNULWalksEveryShape exercises the walker directly on shapes
@@ -285,7 +293,7 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			scanner := nulScanner{path: []locSegment{{name: "body"}}}
+			scanner := contentScanner{path: []locSegment{{name: "body"}}}
 			got := scanner.scanValue(reflect.ValueOf(tc.in))
 			switch {
 			case tc.want == "" && got != nil:
@@ -300,10 +308,190 @@ func TestScanValueForNULWalksEveryShape(t *testing.T) {
 
 	// A NUL in a map KEY reports the map, not the key, so raw bad input never
 	// lands in the response.
-	keyScanner := nulScanner{path: []locSegment{{name: "body"}}}
+	keyScanner := contentScanner{path: []locSegment{{name: "body"}}}
 	got := keyScanner.scanValue(reflect.ValueOf(body{Items: []nested{{Attrs: map[string]string{dirty: "v"}}}}))
 	if got == nil || got.Location != "body.items[0].attrs" || !strings.Contains(got.Message, "keys") {
 		t.Fatalf("map-key violation = %+v; want the map location with a key-specific message", got)
+	}
+}
+
+// sendRawBody posts raw, unmarshaled bytes. The invalid-UTF-8 body cases need
+// it: json.Marshal would launder the invalid bytes into U+FFFD on the way OUT
+// exactly the way json.Unmarshal does on the way IN, so a map-based helper can
+// never put a broken byte sequence on the wire.
+func sendRawBody(t *testing.T, method, url, bearer string, raw []byte) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(method, url, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+// TestInvalidUTF8InBodyIsRejectedNotLaundered is the silent-corruption
+// reproduction (Schemathesis vs staging): POST /v1/contacts with a raw 0xFF
+// byte inside the address returned 201 and stored the address with U+FFFD in
+// place of the byte — json.Unmarshal replaces invalid UTF-8 instead of
+// erroring, so the post-bind walk alone can never see it. The raw-bytes format
+// guard (requireUTF8Body) must reject it before decoding.
+func TestInvalidUTF8InBodyIsRejectedNotLaundered(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body := sendRawBody(t, http.MethodPost, srv.URL+"/v1/contacts", "account",
+		[]byte("{\"address\":\"a\xffb@example.com\"}"))
+	assertContentRejected(t, code, body, "body")
+
+	// The response must not echo the offending body back (huma's ErrorDetail
+	// carries a Value field with the raw body; the envelope must drop it).
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "example.com") {
+		t.Errorf("error response echoes the request body: %s", raw)
+	}
+
+	// Nothing may be stored — neither the raw address nor its U+FFFD-laundered
+	// double, which is what the pre-fix 201 persisted.
+	code, _ = sendJSON(t, http.MethodGet, srv.URL+"/v1/contacts/"+urlEsc("a�b@example.com"), "account", nil)
+	if code != http.StatusNotFound {
+		t.Errorf("GET of the laundered address = %d, want 404 — a refused create must leave no row", code)
+	}
+}
+
+// TestInvalidUTF8InHeaderIsRejected is the header reproduction: POST
+// /v1/contacts with `Idempotency-Key: k\xffz` returned 500 "idempotency store
+// error" — Postgres rejects the invalid byte sequence in the key column
+// (SQLSTATE 22021). Unlike a NUL, Go's HTTP client transmits 0xFF in a header
+// value (it is legal obs-text), so this arm runs over the wire.
+func TestInvalidUTF8InHeaderIsRejected(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body, _ := sendJSONFull(t, http.MethodPost, srv.URL+"/v1/contacts", "account",
+		map[string]any{"address": "hdr@example.com"},
+		map[string]string{"Idempotency-Key": "k\xffz"})
+	assertContentRejected(t, code, body, "header.Idempotency-Key")
+
+	code, _ = sendJSON(t, http.MethodGet, srv.URL+"/v1/contacts/"+urlEsc("hdr@example.com"), "account", nil)
+	if code != http.StatusNotFound {
+		t.Errorf("GET after rejected create = %d, want 404 — a refused request must leave no row", code)
+	}
+}
+
+// TestInvalidUTF8InPathParamIsRejected is the path-param reproduction: POST
+// /v1/webhooks/%FF/rotate-secret returned 500 "failed to rotate webhook
+// secret" (the raw byte reached the store's UPDATE), while the read path
+// happened to answer 404. Both now answer 400 at the edge, uniformly.
+func TestInvalidUTF8InPathParamIsRejected(t *testing.T) {
+	srv := testServer(t)
+	code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/webhooks/%FF/rotate-secret", "good", nil)
+	assertContentRejected(t, code, body, "path.id")
+
+	// The read path previously masked the same defect as a 404; the blanket
+	// rule makes it the same 400 a client can actually act on.
+	code, body = sendJSON(t, http.MethodGet, srv.URL+"/v1/webhooks/%FF", "good", nil)
+	assertContentRejected(t, code, body, "path.id")
+}
+
+// TestInvalidUTF8InQueryParamIsRejected pins that query params share the rule:
+// the same raw byte in a query filter reaches the same text comparison in
+// Postgres that the header and path params did.
+func TestInvalidUTF8InQueryParamIsRejected(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body := sendJSON(t, http.MethodGet,
+		srv.URL+"/v1/contacts?import_batch_id=%FF", "account", nil)
+	assertContentRejected(t, code, body, "query.import_batch_id")
+}
+
+// TestImportRejectsInvalidUTF8AtRequestLevel mirrors the NUL seam test: like a
+// NUL, a broken byte sequence is not row CONTENT — the request document may
+// not contain it at all (RFC 8259 §8.1) — so it rejects the whole import
+// rather than failing one row.
+func TestImportRejectsInvalidUTF8AtRequestLevel(t *testing.T) {
+	srv := newContactsServer(t, nil)
+	code, body := sendRawBody(t, http.MethodPost, srv.URL+"/v1/contacts/import", "account",
+		[]byte("{\"contacts\":[{\"address\":\"good@imp.vc\"},{\"address\":\"b\xffd@imp.vc\"}]}"))
+	assertContentRejected(t, code, body, "body")
+}
+
+// TestValidMultiByteUTF8IsAccepted is the negative control the rule lives or
+// dies by: rejecting invalid byte SEQUENCES must not reject a single byte of
+// legitimate international text. Multi-byte CJK, a symbol, an emoji (a
+// surrogate-pair character in JSON's \u escape world), and a properly ENCODED
+// U+FFFD — a client is allowed to send the replacement character itself; only
+// raw invalid bytes are refused.
+func TestValidMultiByteUTF8IsAccepted(t *testing.T) {
+	cases := []struct {
+		name        string
+		displayName string
+	}{
+		{"cjk + symbol + emoji", "日本語 ✉ 😀"},
+		{"encoded U+FFFD is legal", "a�b"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newContactsServer(t, nil)
+			address := fmt.Sprintf("intl%d@example.com", i)
+			code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/contacts", "account",
+				map[string]any{"address": address, "display_name": tc.displayName})
+			if code != http.StatusCreated {
+				t.Fatalf("create with %s = %d %v; want 201", tc.name, code, body)
+			}
+			// Round-trip intact: stored and returned byte-for-byte.
+			code, got := sendJSON(t, http.MethodGet, srv.URL+"/v1/contacts/"+urlEsc(address), "account", nil)
+			if code != http.StatusOK || got["display_name"] != tc.displayName {
+				t.Fatalf("round-trip = %d %v; want 200 with display_name %q", code, got, tc.displayName)
+			}
+		})
+	}
+
+	// Header arm of the control: a valid multi-byte header value passes the
+	// walk (asserted on the bound input — sending non-ASCII header bytes over
+	// the wire is legal but exotic, and the walk is where the decision lives).
+	in := createContactInput{IdempotencyKey: "clé-日本語-🔑"}
+	if bad := scanInput(reflect.ValueOf(&in)); bad != nil {
+		t.Fatalf("valid multi-byte header flagged at %s", bad.Location)
+	}
+}
+
+// TestScanValueRejectsInvalidUTF8Shapes exercises the walker's UTF-8 arm
+// directly on the shapes HTTP cannot reach (JSON decoding launders body
+// strings, so only non-body params hit this arm in production — but the walk
+// is shape-generic and must stay that way).
+func TestScanValueRejectsInvalidUTF8Shapes(t *testing.T) {
+	type body struct {
+		Name  string            `json:"name"`
+		Raw   []byte            `json:"raw"`
+		Attrs map[string]string `json:"attrs"`
+	}
+	dirty := "bad\xff"
+
+	scanner := contentScanner{path: []locSegment{{name: "body"}}}
+	if got := scanner.scanValue(reflect.ValueOf(body{Name: dirty})); got == nil ||
+		got.Location != "body.name" || got.Message != utf8ValueMessage {
+		t.Fatalf("invalid UTF-8 string = %+v; want body.name %q", got, utf8ValueMessage)
+	}
+
+	// A byte slice stays opaque: raw payload bytes are not caller strings.
+	scanner = contentScanner{path: []locSegment{{name: "body"}}}
+	if got := scanner.scanValue(reflect.ValueOf(body{Raw: []byte{0xff}})); got != nil {
+		t.Fatalf("opaque byte slice flagged at %s", got.Location)
+	}
+
+	// An invalid map KEY reports the map, never echoing the key.
+	scanner = contentScanner{path: []locSegment{{name: "body"}}}
+	got := scanner.scanValue(reflect.ValueOf(body{Attrs: map[string]string{dirty: "v"}}))
+	if got == nil || got.Location != "body.attrs" || got.Message != utf8KeyMessage {
+		t.Fatalf("map-key violation = %+v; want body.attrs %q", got, utf8KeyMessage)
 	}
 }
 
@@ -427,7 +615,7 @@ func TestHumaRegistrationPatternCatchesBothCallForms(t *testing.T) {
 // BenchmarkScanCleanImportBody measures the guard on the shape it must never
 // slow down: a clean 1000-row contact import, the largest body the API accepts
 // by row count. Every location string the walk could build is thrown away on a
-// clean request, which is why nulScanner defers rendering.
+// clean request, which is why contentScanner defers rendering.
 func BenchmarkScanCleanImportBody(b *testing.B) {
 	rows := make([]ContactImportRow, 1000)
 	for i := range rows {
@@ -446,7 +634,7 @@ func BenchmarkScanCleanImportBody(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if bad := scanInputForNUL(value); bad != nil {
+		if bad := scanInput(value); bad != nil {
 			b.Fatalf("clean body flagged at %s", bad.Location)
 		}
 	}

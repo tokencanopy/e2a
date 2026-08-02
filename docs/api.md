@@ -165,14 +165,22 @@ GA unless its heading or prose says `(beta)`.
     idempotency-store degradation or a mid-request crash the protection
     degrades to at-least-once — a keyed retry may re-execute the operation
     rather than replay the cached response.
-- **No NUL bytes on `/v1`.** No client-supplied string in a `/v1` request may
-  contain `U+0000` — anywhere in the JSON body (at any depth, including object
-  *keys*), or in a path, query, or header parameter. Violations are `400
-  invalid_request` with the offending field in `error.details.fields[].location`.
-  The rule is blanket rather than per-field on purpose: a `NUL` cannot be stored
-  in a text column at all, and a caller cannot tell from the outside which
-  strings are persisted and which are only composed, so the answer is the same
-  everywhere. In JSON, a `NUL` can only arrive as the `\u0000` escape.
+- **No NUL bytes and no invalid UTF-8 on `/v1`.** No client-supplied string in
+  a `/v1` request may contain `U+0000`, and every client-supplied byte sequence
+  must be well-formed UTF-8 — anywhere in the JSON body (at any depth,
+  including object *keys*), or in a path, query, or header parameter.
+  Violations are `400 invalid_request` with the offending field in
+  `error.details.fields[].location`; a body whose raw bytes are not valid
+  UTF-8 is rejected before parsing, located at `body`. The rules are blanket
+  rather than per-field on purpose: neither a `NUL` nor a broken byte sequence
+  can be stored in a text column at all, and a caller cannot tell from the
+  outside which strings are persisted and which are only composed, so the
+  answer is the same everywhere. In JSON, a `NUL` can only arrive as the
+  `\u0000` escape; invalid UTF-8 can only arrive as raw bytes, which RFC 8259
+  §8.1 forbids in JSON anyway. Valid multi-byte UTF-8 — CJK, emoji, even a
+  properly encoded `U+FFFD` — is always accepted; only malformed byte
+  sequences are refused, and the offending bytes are never echoed back in the
+  error.
   (The guard is enforced on the `/v1` operations, which is the whole documented
   client API. Non-`/v1` entry points — the dashboard's session-authenticated
   `/api/*` routes, the public unsubscribe handler, and inbound SMTP — are

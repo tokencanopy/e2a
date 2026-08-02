@@ -2,42 +2,84 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 )
 
 // Request-content guards that apply to EVERY v1 operation.
 //
-// The rule enforced here is deliberately global rather than per-field: no
-// client-supplied string anywhere in a request may contain U+0000 (NUL).
+// Two rules are enforced here, deliberately global rather than per-field:
+// no client-supplied string anywhere in a request may contain U+0000 (NUL),
+// and every client-supplied string must be well-formed UTF-8.
 //
-// Why a blanket rule. Postgres text columns cannot store a NUL byte at all —
-// the driver hands the value to the server and the server rejects it — so any
-// caller string that reaches a text column turns a client mistake into an
-// HTTP 500. Guarding the five columns that happened to be reachable today
-// leaves the sixth one to be found by the next caller, and a "reject only what
-// is persisted" rule is unknowable from the outside: a caller cannot tell
-// which of subject/text/html/filename lands in a column and which is only
-// composed. One rule, stated once, is the only version of this a client can
-// reason about — and it costs nothing, because U+0000 is not meaningful in an
-// email address, a display name, a subject line, or a MIME header.
+// Why blanket rules. Postgres text columns can store neither a NUL byte nor
+// an invalid UTF-8 byte sequence — the driver hands the value to the server
+// and the server rejects it (SQLSTATE 22021) — so any caller string that
+// reaches a text column turns a client mistake into an HTTP 500. Guarding the
+// five columns that happened to be reachable today leaves the sixth one to be
+// found by the next caller, and a "reject only what is persisted" rule is
+// unknowable from the outside: a caller cannot tell which of
+// subject/text/html/filename lands in a column and which is only composed.
+// One rule, stated once, is the only version of this a client can reason
+// about — and it costs nothing, because neither U+0000 nor a broken byte
+// sequence is meaningful in an email address, a display name, a subject line,
+// or a MIME header.
 //
-// It is enforced at registration time (see registerOp) rather than in each
-// handler so a new operation inherits it by construction; there is no
+// The two rules need two different enforcement points:
+//
+//   - Path, query, header and cookie params reach the bound input struct with
+//     their raw bytes intact, so the post-bind walk below (scanInput) catches
+//     both NUL and invalid UTF-8 there.
+//   - JSON body fields DO NOT: encoding/json silently replaces invalid UTF-8
+//     bytes with U+FFFD while decoding into a string, so by the time the walk
+//     sees a body field the corruption is already laundered into valid UTF-8
+//     and silently persisted as mojibake. Raw body bytes are therefore
+//     checked BEFORE decoding, in requireUTF8Body (wired into the huma
+//     Formats table by New). RFC 8259 §8.1 requires JSON to be UTF-8, so this
+//     rejects nothing legal. A NUL survives decoding only as the \u0000
+//     escape, which the walk still sees - so the walk keeps the NUL rule for
+//     bodies, and the format guard owns the UTF-8 rule for bodies.
+//
+// The walk is enforced at registration time (see registerOp) rather than in
+// each handler so a new operation inherits it by construction; there is no
 // per-endpoint guard to forget.
 const (
-	nulValueMessage = "must not contain a NUL (U+0000) character"
-	nulKeyMessage   = "object keys must not contain a NUL (U+0000) character"
+	nulValueMessage  = "must not contain a NUL (U+0000) character"
+	nulKeyMessage    = "object keys must not contain a NUL (U+0000) character"
+	utf8ValueMessage = "must be valid UTF-8"
+	utf8KeyMessage   = "object keys must be valid UTF-8"
 )
 
-// nulViolation is the located reason a request was refused.
-type nulViolation struct {
+// errBodyNotUTF8 is returned by requireUTF8Body before JSON decoding. Huma
+// folds it into a 400 validation error located at "body"; the envelope
+// constructor (humaErrorConstructor) deliberately drops the raw offending
+// bytes, so the invalid sequence is never echoed back.
+var errBodyNotUTF8 = errors.New("request body must be valid UTF-8")
+
+// requireUTF8Body wraps a body format so the RAW request bytes must be valid
+// UTF-8 before they are decoded. This is the only place the body's invalid
+// bytes still exist — see the package rule comment above.
+func requireUTF8Body(format huma.Format) huma.Format {
+	unmarshal := format.Unmarshal
+	format.Unmarshal = func(data []byte, v any) error {
+		if !utf8.Valid(data) {
+			return errBodyNotUTF8
+		}
+		return unmarshal(data, v)
+	}
+	return format
+}
+
+// contentViolation is the located reason a request was refused.
+type contentViolation struct {
 	Location string
 	Message  string
 }
@@ -48,7 +90,7 @@ type nulViolation struct {
 // directly would silently opt an endpoint out of the guards.
 func registerOp[I, O any](api huma.API, op huma.Operation, handler func(context.Context, *I) (*O, error)) {
 	huma.Register(api, op, func(ctx context.Context, in *I) (*O, error) {
-		if bad := scanInputForNUL(reflect.ValueOf(in)); bad != nil {
+		if bad := scanInput(reflect.ValueOf(in)); bad != nil {
 			return nil, NewError(http.StatusBadRequest, "invalid_request",
 				fmt.Sprintf("%s %s", bad.Location, bad.Message)).
 				WithDetails(ValidationErrorDetails{Fields: []FieldError{{
@@ -60,7 +102,7 @@ func registerOp[I, O any](api huma.API, op huma.Operation, handler func(context.
 	})
 }
 
-// nulScanner carries the walk's current field path. The overwhelmingly common
+// contentScanner carries the walk's current field path. The overwhelmingly common
 // case is a clean request, where every location string the walk could produce
 // is thrown away — and building them eagerly is not free: a 1000-row contact
 // import formatted ~14.7k throwaway strings (~350 KB) to describe fields that
@@ -78,7 +120,7 @@ func registerOp[I, O any](api huma.API, op huma.Operation, handler func(context.
 // effectively free — the same body without metadata objects costs 438 B and 12
 // allocs — and the remainder is reflect's own map-iteration cost over the 1000
 // metadata maps, which is inherent to walking them at all.
-type nulScanner struct {
+type contentScanner struct {
 	path []locSegment
 }
 
@@ -98,7 +140,7 @@ type locSegment struct {
 
 // location materializes the current path, e.g. body.contacts[417].display_name.
 // Called at most once per request, on the failure path.
-func (s *nulScanner) location() string {
+func (s *contentScanner) location() string {
 	var b strings.Builder
 	for i, seg := range s.path {
 		if seg.indexed {
@@ -119,16 +161,19 @@ func (s *nulScanner) location() string {
 	return b.String()
 }
 
-func (s *nulScanner) violation(message string) *nulViolation {
-	return &nulViolation{Location: s.location(), Message: message}
+func (s *contentScanner) violation(message string) *contentViolation {
+	return &contentViolation{Location: s.location(), Message: message}
 }
 
-// scanInputForNUL walks a bound Huma input struct — body, path, query, header
-// and cookie fields alike — and reports the first string carrying a NUL.
-// Locations use Huma's own convention (body.contacts[3].display_name,
-// query.source, header.Idempotency-Key) so a client can point at the offending
-// field without guessing.
-func scanInputForNUL(v reflect.Value) *nulViolation {
+// scanInput walks a bound Huma input struct — body, path, query, header
+// and cookie fields alike — and reports the first string carrying a NUL or an
+// invalid UTF-8 byte sequence. (For JSON body fields the UTF-8 arm is
+// vacuously true — the decoder has already replaced invalid bytes, which is
+// why requireUTF8Body checks the raw bytes — but non-body params arrive
+// unlaundered and are caught here.) Locations use Huma's own convention
+// (body.contacts[3].display_name, query.source, header.Idempotency-Key) so a
+// client can point at the offending field without guessing.
+func scanInput(v reflect.Value) *contentViolation {
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return nil
@@ -140,7 +185,7 @@ func scanInputForNUL(v reflect.Value) *nulViolation {
 	}
 	t := v.Type()
 	// One scanner, and therefore one path buffer, for the whole input.
-	var scanner nulScanner
+	var scanner contentScanner
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		if !field.IsExported() {
@@ -161,7 +206,7 @@ func scanInputForNUL(v reflect.Value) *nulViolation {
 		case field.Anonymous:
 			// Embedded parameter groups (PageParams, DeleteConfirm) carry their
 			// own binding tags one level down.
-			if bad := scanInputForNUL(v.Field(i)); bad != nil {
+			if bad := scanInput(v.Field(i)); bad != nil {
 				return bad
 			}
 			continue
@@ -183,11 +228,15 @@ var timeType = reflect.TypeOf(time.Time{})
 // they are opaque payload bytes (RawBody, json.RawMessage), not caller-authored
 // strings, and the JSON decoder could not have produced a string field from
 // them.
-func (s *nulScanner) scanValue(v reflect.Value) *nulViolation {
+func (s *contentScanner) scanValue(v reflect.Value) *contentViolation {
 	switch v.Kind() {
 	case reflect.String:
-		if strings.IndexByte(v.String(), 0) >= 0 {
+		str := v.String()
+		if strings.IndexByte(str, 0) >= 0 {
 			return s.violation(nulValueMessage)
+		}
+		if !utf8.ValidString(str) {
+			return s.violation(utf8ValueMessage)
 		}
 	case reflect.Pointer, reflect.Interface:
 		if v.IsNil() {
@@ -220,6 +269,9 @@ func (s *nulScanner) scanValue(v reflect.Value) *nulViolation {
 					// the location, since that would put raw bad input in the
 					// response the way FieldError deliberately avoids.
 					return s.violation(nulKeyMessage)
+				}
+				if !utf8.ValidString(key.String()) {
+					return s.violation(utf8KeyMessage)
 				}
 				s.path = append(s.path, locSegment{name: key.String(), untrusted: true})
 				pushed = true
