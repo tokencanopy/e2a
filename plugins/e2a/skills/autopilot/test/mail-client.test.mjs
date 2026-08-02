@@ -101,6 +101,38 @@ test("reply uses the existing reply endpoint with gateway-selected CC and idempo
   });
 });
 
+test("notifyOwner uses the existing send endpoint with one fixed recipient", async () => {
+  const calls = [];
+  const client = new E2aMailClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "e2a_agt_synthetic",
+    agentEmail: "support@example.test",
+    fetchImpl: async (url, init) => {
+      calls.push([url, init]);
+      return jsonResponse(202, { message_id: "msg_notice", status: "pending_review" });
+    },
+  });
+
+  const result = await client.notifyOwner({
+    ownerEmail: "owner@example.test",
+    subject: "Autopilot needs attention",
+    text: "A billing decision is required.",
+    idempotencyKey: "autopilot-notice-example",
+  });
+
+  assert.equal(result.status, "pending_review");
+  assert.equal(
+    calls[0][0],
+    "https://api.example.test/v1/agents/support%40example.test/messages",
+  );
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    to: ["owner@example.test"],
+    subject: "Autopilot needs attention",
+    text: "A billing decision is required.",
+  });
+  assert.equal(calls[0][1].headers["idempotency-key"], "autopilot-notice-example");
+});
+
 test("API failures do not expose the credential or response body", async () => {
   const client = new E2aMailClient({
     baseUrl: "https://api.example.test",

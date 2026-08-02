@@ -174,4 +174,17 @@ export class E2aMailClient {
       idempotencyKey: requiredText(idempotencyKey, "reply idempotency key"),
     });
   }
+
+  async notifyOwner({ ownerEmail, subject, text, idempotencyKey }) {
+    const recipient = requiredText(ownerEmail, "owner email");
+    return this.request(this.agentResource("/messages"), {
+      method: "POST",
+      body: {
+        to: [recipient],
+        subject: requiredText(subject, "notification subject"),
+        text: requiredText(text, "notification text"),
+      },
+      idempotencyKey: requiredText(idempotencyKey, "notification idempotency key"),
+    });
+  }
 }
