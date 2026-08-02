@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestV1RouterErrorsUseCanonicalEnvelope(t *testing.T) {
@@ -110,6 +112,64 @@ func TestMethodNotAllowedCarriesAllowHeader(t *testing.T) {
 				t.Fatalf("error.code = %q, want method_not_allowed", env.Err.Code)
 			}
 		})
+	}
+}
+
+// A method chi does not know at all never reaches the routing tree: routeHTTP
+// fails the methodMap lookup and dispatches MethodNotAllowedHandler with an
+// empty allowed-method set, so every probe misses and the derived value is "".
+// RFC 9110 §10.2.1 makes an empty Allow field value meaningful ("no methods are
+// supported"), and §15.5.6 does not permit omitting the header — so the header
+// must be present and empty, never absent.
+func TestMethodNotAllowedAlwaysCarriesAllowHeader(t *testing.T) {
+	s := New(Deps{})
+
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest("BREW", "/v1/not-a-route", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%q", rr.Code, rr.Body.String())
+	}
+	values, present := rr.Header()["Allow"]
+	if !present {
+		t.Fatalf("405 omitted the Allow header (RFC 9110 §15.5.6); headers=%v", rr.Header())
+	}
+	if len(values) != 1 || values[0] != "" {
+		t.Fatalf("Allow = %q, want exactly one empty value", values)
+	}
+	var env ErrorEnvelope
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v; body=%q", err, rr.Body.String())
+	}
+	if env.Err.Code != "method_not_allowed" {
+		t.Fatalf("error.code = %q, want method_not_allowed", env.Err.Code)
+	}
+}
+
+// probedMethods mirrors chi's unexported method table. Discover the real one at
+// runtime — Router.Handle registers a pattern under every method chi knows, and
+// Routes() reports those back by name — and fail if the mirror has drifted (chi
+// adding a method, or this repo calling the package-global chi.RegisterMethod,
+// whose custom methods the probe cannot otherwise learn about).
+func TestProbedMethodsMatchChiMethodTable(t *testing.T) {
+	r := chi.NewRouter()
+	r.Handle("/probe", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	routes := r.Routes()
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	chiMethods := map[string]bool{}
+	for m := range routes[0].Handlers {
+		if m == "*" { // chi's catch-all marker, not an HTTP method
+			continue
+		}
+		chiMethods[m] = true
+	}
+	probed := map[string]bool{}
+	for _, m := range probedMethods {
+		probed[m] = true
+	}
+	if !reflect.DeepEqual(chiMethods, probed) {
+		t.Fatalf("probedMethods = %v, but chi routes %v — update probedMethods", probed, chiMethods)
 	}
 }
 

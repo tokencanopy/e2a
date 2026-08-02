@@ -9,10 +9,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 )
 
@@ -21,6 +24,29 @@ const (
 	publicUnsubscribeCSP     = "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 	rfc8058OneClickBody      = "List-Unsubscribe=One-Click"
 )
+
+// publicUnsubscribeHandlers is the single source of truth for the methods
+// /u/{token} serves. It drives both the dispatch in handlePublicUnsubscribe
+// and the Allow header on that route's 405, so the two cannot drift apart.
+// The /v1 405s derive Allow by probing the routing table instead; that cannot
+// work here because this route is registered for every method (root.Handle),
+// so the router would answer "all of them".
+var publicUnsubscribeHandlers = map[string]func(*Server, http.ResponseWriter, *http.Request, *identity.UnsubscribeScope){
+	http.MethodGet:  (*Server).servePublicUnsubscribeForm,
+	http.MethodPost: (*Server).servePublicUnsubscribeSubmit,
+}
+
+// publicUnsubscribeAllow is the RFC 9110 §15.5.6 Allow value for this route,
+// derived from publicUnsubscribeHandlers. Sorted so the value is stable (map
+// iteration order is not); RFC 9110 §10.2.1 gives the order no meaning.
+var publicUnsubscribeAllow = func() string {
+	methods := make([]string, 0, len(publicUnsubscribeHandlers))
+	for m := range publicUnsubscribeHandlers {
+		methods = append(methods, m)
+	}
+	sort.Strings(methods)
+	return strings.Join(methods, ", ")
+}()
 
 var (
 	unsubscribeConfirmPage = template.Must(template.New("unsubscribe-confirm").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribe</title></head><body><main><h1>Unsubscribe</h1><p>Stop emails sent by {{.}}?</p><form method="post"><button type="submit" name="confirm" value="unsubscribe">Unsubscribe</button></form></main></body></html>`))
@@ -69,44 +95,47 @@ func (s *Server) handlePublicUnsubscribe(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		if err := unsubscribeConfirmPage.Execute(w, scope.AgentID); err != nil {
-			log.Printf("[unsubscribe] confirmation render failed: %v", err)
-		}
-	case http.MethodPost:
-		rfc, ok := parsePublicUnsubscribePOST(w, r)
-		if !ok {
-			writePublicUnsubscribeError(w, http.StatusBadRequest)
-			return
-		}
-		if s.deps.AddAgentSuppressionFromTokenScope == nil {
-			writePublicUnsubscribeError(w, http.StatusInternalServerError)
-			return
-		}
-		if _, _, err := s.deps.AddAgentSuppressionFromTokenScope(r.Context(), *scope, s.deps.AgentSuppressionAddedHook); err != nil {
-			log.Printf("[unsubscribe] suppression insert failed")
-			writePublicUnsubscribeError(w, http.StatusInternalServerError)
-			return
-		}
-		if rfc {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		if err := unsubscribeSuccessPage.Execute(w, nil); err != nil {
-			log.Printf("[unsubscribe] success render failed: %v", err)
-		}
-	default:
-		// RFC 9110 §15.5.6: a 405 must carry Allow. This route is registered
-		// on the router for all methods (root.Handle), so the method set
-		// cannot be derived from the routing table — the switch above is the
-		// source of truth.
-		w.Header().Set("Allow", "GET, POST")
+	handle, ok := publicUnsubscribeHandlers[r.Method]
+	if !ok {
+		// RFC 9110 §15.5.6: a 405 must carry Allow.
+		w.Header().Set("Allow", publicUnsubscribeAllow)
 		writePublicUnsubscribeError(w, http.StatusMethodNotAllowed)
+		return
+	}
+	handle(s, w, r, scope)
+}
+
+func (s *Server) servePublicUnsubscribeForm(w http.ResponseWriter, r *http.Request, scope *identity.UnsubscribeScope) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := unsubscribeConfirmPage.Execute(w, scope.AgentID); err != nil {
+		log.Printf("[unsubscribe] confirmation render failed: %v", err)
+	}
+}
+
+func (s *Server) servePublicUnsubscribeSubmit(w http.ResponseWriter, r *http.Request, scope *identity.UnsubscribeScope) {
+	rfc, ok := parsePublicUnsubscribePOST(w, r)
+	if !ok {
+		writePublicUnsubscribeError(w, http.StatusBadRequest)
+		return
+	}
+	if s.deps.AddAgentSuppressionFromTokenScope == nil {
+		writePublicUnsubscribeError(w, http.StatusInternalServerError)
+		return
+	}
+	if _, _, err := s.deps.AddAgentSuppressionFromTokenScope(r.Context(), *scope, s.deps.AgentSuppressionAddedHook); err != nil {
+		log.Printf("[unsubscribe] suppression insert failed")
+		writePublicUnsubscribeError(w, http.StatusInternalServerError)
+		return
+	}
+	if rfc {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := unsubscribeSuccessPage.Execute(w, nil); err != nil {
+		log.Printf("[unsubscribe] success render failed: %v", err)
 	}
 }
 

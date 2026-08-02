@@ -604,27 +604,53 @@ func (s *Server) routeNotFound(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// probedMethods is the set of methods allowHeaderValue asks the router about.
+// It is exactly chi v5.3.1's built-in method table (tree.go `methodMap`),
+// including the QUERY method (RFC 10008) that chi routes via Router.Query —
+// no route registers QUERY today, so it is probed for future routes, not for
+// current ones. chi does not export that table, so this list is a mirror
+// rather than a derivation: TestProbedMethodsMatchChiMethodTable discovers
+// chi's real set at runtime and fails if the two ever diverge. Custom methods
+// added via the package-global chi.RegisterMethod are the one thing this
+// cannot track — chi exposes no way to enumerate them from here, so a caller
+// that registers one must extend this list by hand (that test will say so).
+var probedMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodConnect,
+	http.MethodOptions, http.MethodTrace, "QUERY",
+}
+
 // allowHeaderValue derives the Allow header for a 405 response (RFC 9110
-// §15.5.6: an origin server MUST generate Allow on every 405) by asking the
-// router itself which methods route this request's path. chi v5 collects the
-// matched node's method set internally but does not expose it to a custom
-// MethodNotAllowed handler, so this re-runs the match once per HTTP method —
-// nine tree lookups on a rare error path. Probing the live routing table
-// keeps the header in lockstep with reality as routes change; nothing is
-// hardcoded per route.
+// §15.5.6: an origin server MUST generate Allow on a 405) by asking the router
+// itself which methods route this request's path. chi v5 collects the matched
+// node's method set internally but does not expose it to a custom
+// MethodNotAllowed handler, so this re-runs the match once per method in
+// probedMethods — ten tree lookups on a rare error path. Probing the live
+// routing table keeps the header in lockstep with the routes chi knows about;
+// nothing is hardcoded per route.
+//
+// An empty result is meaningful, not a failure: chi dispatches
+// MethodNotAllowedHandler with no allowed methods when the request method is
+// absent from its table (mux.go routeHTTP), so an unknown method against a
+// nonexistent path lands here with every probe missing. RFC 9110 §10.2.1
+// permits an empty Allow field value to mean "no methods are supported", which
+// is the honest answer there — callers must still set the header.
 func (s *Server) allowHeaderValue(r *http.Request) string {
 	// Mirror chi's own routing-path selection: it routes on RawPath when the
 	// request URI is percent-encoded (see the WS route comment above).
+	//
+	// chi actually consults rctx.RoutePath first and only falls back to
+	// RawPath/Path; RoutePath is populated for requests routed into a
+	// subrouter via Router.Mount. This repo mounts no subrouters, so RoutePath
+	// is always empty here and this mirror is exact — but if a Mount is ever
+	// added, this probe must consult chi.RouteContext(r.Context()).RoutePath
+	// too or it will probe the outer path and derive the wrong method set.
 	routePath := r.URL.RawPath
 	if routePath == "" {
 		routePath = r.URL.Path
 	}
 	var allowed []string
-	for _, method := range []string{
-		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-		http.MethodPatch, http.MethodDelete, http.MethodConnect,
-		http.MethodOptions, http.MethodTrace,
-	} {
+	for _, method := range probedMethods {
 		if s.Router.Match(chi.NewRouteContext(), method, routePath) {
 			allowed = append(allowed, method)
 		}
@@ -634,19 +660,21 @@ func (s *Server) allowHeaderValue(r *http.Request) string {
 
 func (s *Server) routeMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	if isV1Path(r.URL.Path) {
-		if allow := s.allowHeaderValue(r); allow != "" {
-			w.Header().Set("Allow", allow)
-		}
+		// Set unconditionally: an empty value is a valid Allow (RFC 9110
+		// §10.2.1) and omitting the header violates §15.5.6.
+		w.Header().Set("Allow", s.allowHeaderValue(r))
 		WriteError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	// Non-/v1 paths belong to the legacy gorilla/mux surface, which emits its
+	// own 405 without an Allow header (gorilla does not hand the allowed-method
+	// set to a MethodNotAllowedHandler). Allow coverage here therefore stops at
+	// the /v1 surface plus /u/{token}; the legacy 405s are a separate fix.
 	if s.deps.Legacy != nil {
 		s.deps.Legacy.ServeHTTP(w, r)
 		return
 	}
-	if allow := s.allowHeaderValue(r); allow != "" {
-		w.Header().Set("Allow", allow)
-	}
+	w.Header().Set("Allow", s.allowHeaderValue(r))
 	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 }
 
