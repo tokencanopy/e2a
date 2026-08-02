@@ -114,8 +114,9 @@ or put the agent key + inbox in `~/.e2a-tether.env` and leave the CLI config alo
 > `pending_review` means the message was held for approval; a terminal `failed`
 > means the server persisted a delivery failure. `tether.sh` detects both on
 > every send: an affected intro makes `start` **refuse to arm**, and an affected
-> `update`/`ask` exits non-zero (**2** = held, **5** = terminal failure) so the
-> session never mistakes either for a delivered message. A terminal failure is
+> `update`/`ask` exits non-zero — held is **2** for `update`, **4** for `ask`;
+> terminal failure is **5** for both — so the session never mistakes either for
+> a delivered message. A terminal failure is
 > **not** retryable — the server already recorded an outcome for that message
 > id, so re-sending risks a duplicate. Inspect it with `e2a messages get <id>`.
 
