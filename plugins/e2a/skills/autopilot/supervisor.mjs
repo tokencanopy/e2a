@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { JobGateway } from "./gateway.mjs";
@@ -138,6 +139,14 @@ function shortJobKey(messageId) {
   return createHash("sha256").update(messageId, "utf8").digest("hex").slice(0, 16);
 }
 
+export function jobSocketRoot(stateRoot, temporaryRoot = tmpdir()) {
+  const digest = createHash("sha256")
+    .update(path.resolve(stateRoot), "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return path.join(temporaryRoot, `e2a-autopilot-${digest}`);
+}
+
 function noticeKey(kind, messageId, text) {
   const digest = createHash("sha256")
     .update(JSON.stringify({ kind, messageId, text }), "utf8")
@@ -165,8 +174,12 @@ export class AutopilotSupervisor {
     this.runtimeExecutor = runtimeExecutor;
     this.maxAttempts = maxAttempts;
     this.baseDelayMs = baseDelayMs;
-    this.socketRoot = path.join(stateRoot, "s");
+    this.socketRoot = jobSocketRoot(stateRoot);
     mkdirSync(this.socketRoot, { recursive: true, mode: 0o700 });
+    const socketRootInfo = lstatSync(this.socketRoot);
+    if (!socketRootInfo.isDirectory() || socketRootInfo.isSymbolicLink()) {
+      throw new Error("Supervisor socket root must be a real directory.");
+    }
     chmodSync(this.socketRoot, 0o700);
   }
 

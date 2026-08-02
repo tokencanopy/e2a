@@ -11,6 +11,7 @@ import {
   AutopilotSupervisor,
   createForwardReceiver,
   isAuthorizedMessage,
+  jobSocketRoot,
 } from "../supervisor.mjs";
 
 const helperPath = path.resolve(import.meta.dirname, "..", "job-tool.mjs");
@@ -90,6 +91,14 @@ function runHelper(command, invocation, input = "") {
     child.stdin.end(input);
   });
 }
+
+test("job socket root stays short even when installed state paths are deep", () => {
+  const deepState = `/Users/synthetic-operator/${"nested/".repeat(30)}state`;
+  const socketRoot = jobSocketRoot(deepState, "/tmp");
+
+  assert.match(socketRoot, /^\/tmp\/e2a-autopilot-[a-f0-9]{16}$/);
+  assert.ok(Buffer.byteLength(path.join(socketRoot, `${"f".repeat(16)}.sock`)) < 100);
+});
 
 test("address authorization requires exact From plus aligned verified domain", () => {
   const policy = basePolicy("addresses");
