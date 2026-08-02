@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,14 @@ type publicUnsubscribeFixture struct {
 }
 
 func newPublicUnsubscribeServer(t *testing.T, mutate func(*Deps, *publicUnsubscribeFixture)) (*httptest.Server, *publicUnsubscribeFixture) {
+	t.Helper()
+	handler, fixture := newPublicUnsubscribeHandler(t, mutate)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv, fixture
+}
+
+func newPublicUnsubscribeHandler(t *testing.T, mutate func(*Deps, *publicUnsubscribeFixture)) (http.Handler, *publicUnsubscribeFixture) {
 	t.Helper()
 	fixture := &publicUnsubscribeFixture{
 		rows:  make(map[string]identity.AgentSuppression),
@@ -75,9 +84,7 @@ func newPublicUnsubscribeServer(t *testing.T, mutate func(*Deps, *publicUnsubscr
 	if mutate != nil {
 		mutate(&deps, fixture)
 	}
-	srv := httptest.NewServer(New(deps))
-	t.Cleanup(srv.Close)
-	return srv, fixture
+	return New(deps), fixture
 }
 
 func assertPublicUnsubscribeSecurityHeaders(t *testing.T, resp *http.Response) {
@@ -323,6 +330,49 @@ func TestPublicUnsubscribeUnsupportedMethodHasSecurityHeaders(t *testing.T) {
 	resp, _ := doPublicUnsubscribe(t, srv.Client(), http.MethodPut, srv.URL+"/u/"+publicUnsubscribeToken, "application/x-www-form-urlencoded", "confirm=unsubscribe")
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT status = %d, want 405", resp.StatusCode)
+	}
+	// RFC 9110 §15.5.6: the 405 must name the supported methods. This raw
+	// handler serves exactly GET and POST.
+	got := map[string]bool{}
+	for _, m := range strings.Split(resp.Header.Get("Allow"), ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			got[m] = true
+		}
+	}
+	if want := map[string]bool{http.MethodGet: true, http.MethodPost: true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Allow = %q (set %v), want exactly %v", resp.Header.Get("Allow"), got, want)
+	}
+}
+
+// TestPublicUnsubscribeMethodCoverage sweeps every method chi can route against
+// /u/{token}. Unlike the /v1 405s, this route's Allow cannot be derived from
+// the routing table (it is registered for all methods), so it is driven by
+// publicUnsubscribeHandlers instead — this asserts, method by method, that the
+// dispatch table and the advertised Allow actually agree.
+func TestPublicUnsubscribeMethodCoverage(t *testing.T) {
+	handler, _ := newPublicUnsubscribeHandler(t, nil)
+	for _, method := range probedMethods {
+		t.Run(method, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(method, "/u/"+publicUnsubscribeToken, nil))
+			if _, served := publicUnsubscribeHandlers[method]; served {
+				// Served methods must never 405 (POST here has no body and so
+				// gets a 400 — the point is only that it reached the handler).
+				if rr.Code == http.StatusMethodNotAllowed {
+					t.Fatalf("%s is in publicUnsubscribeHandlers but got 405", method)
+				}
+				if allow := rr.Header().Get("Allow"); allow != "" {
+					t.Fatalf("%s: non-405 response carries Allow = %q", method, allow)
+				}
+				return
+			}
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("%s status = %d, want 405; body=%q", method, rr.Code, rr.Body.String())
+			}
+			if allow := rr.Header().Get("Allow"); allow != "GET, POST" {
+				t.Fatalf("%s: Allow = %q, want %q", method, allow, "GET, POST")
+			}
+		})
 	}
 }
 
