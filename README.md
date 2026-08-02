@@ -17,6 +17,9 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 [![npm @e2a/sdk](https://img.shields.io/npm/v/%40e2a%2Fsdk?label=%40e2a%2Fsdk)](https://www.npmjs.com/package/@e2a/sdk)
 [![PyPI e2a](https://img.shields.io/pypi/v/e2a)](https://pypi.org/project/e2a/)
 [![MCP Toplist](https://img.shields.io/badge/MCP%20Toplist-Top%201%25-4F46FF)](https://mcptoplist.com/server/dev.e2a%2Fmcp-server)
+[![Release](https://img.shields.io/github/v/release/tokencanopy/e2a?label=release&color=2ea44f)](https://github.com/tokencanopy/e2a/releases/latest)
+
+**`/v1` is now generally available** — shipped in [**v1.5.0**](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0).
 
 [Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
@@ -27,7 +30,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 ---
 
 > [!IMPORTANT]
-> **The core `/v1` API and SDKs are stable and generally available (GA): no breaking changes within `/v1`.** A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
+> **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
 e2a is an **authenticated email gateway for AI agents**. It receives inbound mail, evaluates SPF, every DKIM signature, and DMARC, and delivers structured authentication evidence over whichever channel fits your runtime. Outbound goes back out through an HTTP API, with an optional human-in-the-loop approval gate.
 
