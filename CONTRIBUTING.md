@@ -291,10 +291,11 @@ pending migrations against a `schema_migrations` tracker table.
    undo something, write a new migration that does it.
 5. **Declare binary rollback compatibility** — `ROLLBACK_UNSAFE_BEFORE` is
    embedded as `org.e2a.rollback-unsafe-before` in release images. Leave it at
-   `none` only while the previous released binary can still run safely after
-   every embedded migration applies. If a migration crosses that boundary,
-   set the first affected release semver and carry it forward cumulatively;
-   never reset it to `none` in a later release.
+   `none` only while every rollback-eligible retained production binary can
+   still run safely after every embedded migration applies. Hosted S1 enforces
+   that claim by booting those exact image digests against its migrated prod
+   clone. If a migration crosses that boundary, set the first affected release
+   semver and carry it forward unchanged; CI rejects any later reset or move.
 
 Add or update tests in any Go package that writes raw SQL against the
 touched table. Higher-level e2e coverage doesn't catch query drift

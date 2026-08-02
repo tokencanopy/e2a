@@ -11,6 +11,8 @@ on:
     paths:
       - "Dockerfile"
       - "ROLLBACK_UNSAFE_BEFORE"
+      - "scripts/check-rollback-boundary.sh"
+      - "scripts/test-check-rollback-boundary.sh"
       - "go.mod"
       - "go.sum"
       - "cmd/**"
@@ -78,6 +80,8 @@ jobs:
             dockerfile: tests/sdk-monitor/Dockerfile
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # QEMU registers binfmt_misc handlers so this amd64 runner can
       # cross-build arm64 layers under emulation. Without this step the
@@ -93,13 +97,11 @@ jobs:
       - name: Validate rollback compatibility boundary
         id: rollback-boundary
         shell: bash
+        env:
+          ROLLBACK_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
         run: |
           set -euo pipefail
-          value=$(tr -d '[:space:]' < ROLLBACK_UNSAFE_BEFORE)
-          if ! [[ "$value" =~ ^(none|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$ ]]; then
-            echo "ROLLBACK_UNSAFE_BEFORE must be 'none' or an exact semver" >&2
-            exit 1
-          fi
+          value=$(scripts/check-rollback-boundary.sh)
           echo "value=$value" >> "$GITHUB_OUTPUT"
 
       # Skip login on PR builds: we don't push from a PR, and PRs from

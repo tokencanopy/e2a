@@ -21,11 +21,7 @@ node -e '
 node scripts/sync-agent-docs.mjs --check
 node scripts/check-sdk-example-contracts.mjs
 
-rollback_boundary="$(tr -d '[:space:]' < ROLLBACK_UNSAFE_BEFORE)"
-if ! [[ "$rollback_boundary" =~ ^(none|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$ ]]; then
-  echo "ROLLBACK_UNSAFE_BEFORE must be 'none' or an exact semver" >&2
-  exit 1
-fi
+scripts/check-rollback-boundary.sh >/dev/null
 if ! grep -Fq 'org.e2a.rollback-unsafe-before=${{ steps.rollback-boundary.outputs.value }}' \
      .github/workflows/build-image.yml; then
   echo "server image build must publish the rollback compatibility boundary" >&2
