@@ -1,0 +1,269 @@
+import { createHash } from "node:crypto";
+
+export const POLICY_VERSION = 1;
+
+const SUPPORTED_PROFILES = new Set(["customer-support", "custom"]);
+const SUPPORTED_RUNTIMES = new Set([
+  "claude",
+  "codex",
+  "openclaw",
+  "hermes",
+  "custom",
+]);
+const SUPPORTED_SANDBOXES = new Set(["native", "container", "custom"]);
+const SUPPORTED_SERVICES = new Set(["launchd", "systemd", "foreground"]);
+const OPT_OUTS = new Set([
+  "outbound_review_opt_out",
+  "owner_cc_opt_out",
+  "screening_opt_out",
+  "custom_sandbox_acknowledged",
+]);
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function text(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function lowercase(value) {
+  return text(value).toLowerCase();
+}
+
+function uniqueSorted(values, transform = text) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.map(transform).filter(Boolean))].sort();
+}
+
+export function createPolicy() {
+  return {
+    version: POLICY_VERSION,
+    task: {
+      profile: "customer-support",
+      objective: "",
+      instructions: "",
+    },
+    mailbox: {
+      agentEmail: "",
+      ownerEmail: "",
+    },
+    inbound: {
+      addresses: [],
+      domains: [],
+      fallback: "review",
+    },
+    outbound: {
+      requireReview: true,
+      ccOwner: true,
+    },
+    screening: {
+      promptInjection: true,
+    },
+    runtime: {
+      adapter: "claude",
+      command: "",
+      workdir: "",
+      sandbox: "native",
+    },
+    service: {
+      manager: process.platform === "darwin" ? "launchd" : "systemd",
+    },
+    acknowledgements: [],
+  };
+}
+
+export function normalizePolicy(input = {}) {
+  const defaults = createPolicy();
+  const policy = {
+    version: Number(input.version ?? defaults.version),
+    task: {
+      profile: lowercase(input.task?.profile || defaults.task.profile),
+      objective: text(input.task?.objective),
+      instructions: text(input.task?.instructions),
+    },
+    mailbox: {
+      agentEmail: lowercase(input.mailbox?.agentEmail),
+      ownerEmail: lowercase(input.mailbox?.ownerEmail),
+    },
+    inbound: {
+      addresses: uniqueSorted(input.inbound?.addresses, lowercase),
+      domains: uniqueSorted(input.inbound?.domains, lowercase),
+      fallback: lowercase(input.inbound?.fallback || defaults.inbound.fallback),
+    },
+    outbound: {
+      requireReview:
+        input.outbound?.requireReview ?? defaults.outbound.requireReview,
+      ccOwner: input.outbound?.ccOwner ?? defaults.outbound.ccOwner,
+    },
+    screening: {
+      promptInjection:
+        input.screening?.promptInjection ?? defaults.screening.promptInjection,
+    },
+    runtime: {
+      adapter: lowercase(input.runtime?.adapter || defaults.runtime.adapter),
+      command: text(input.runtime?.command),
+      workdir: text(input.runtime?.workdir),
+      sandbox: lowercase(input.runtime?.sandbox || defaults.runtime.sandbox),
+    },
+    service: {
+      manager: lowercase(input.service?.manager || defaults.service.manager),
+    },
+    acknowledgements: uniqueSorted(input.acknowledgements, lowercase),
+  };
+  return policy;
+}
+
+export function validatePolicy(input) {
+  const policy = normalizePolicy(input);
+  const errors = [];
+
+  if (policy.version !== POLICY_VERSION) {
+    errors.push(`Unsupported policy version ${policy.version}; expected ${POLICY_VERSION}.`);
+  }
+  if (!SUPPORTED_PROFILES.has(policy.task.profile)) {
+    errors.push(`Unsupported task profile: ${policy.task.profile || "(missing)"}.`);
+  }
+  if (!policy.task.objective) {
+    errors.push("Describe the task outcome the agent should produce.");
+  }
+  if (!EMAIL_RE.test(policy.mailbox.agentEmail)) {
+    errors.push("Provide a valid e2a agent mailbox address.");
+  }
+  if (!EMAIL_RE.test(policy.mailbox.ownerEmail)) {
+    errors.push("Provide a valid owner email address.");
+  }
+  for (const address of policy.inbound.addresses) {
+    if (!EMAIL_RE.test(address)) {
+      errors.push(`Invalid authorized sender address: ${address}.`);
+    }
+  }
+  for (const domain of policy.inbound.domains) {
+    if (!DOMAIN_RE.test(domain)) {
+      errors.push(`Invalid authorized sender domain: ${domain}.`);
+    }
+  }
+  if (policy.inbound.addresses.length + policy.inbound.domains.length === 0) {
+    errors.push(
+      "Add at least one authorized sender address or domain; public-any-sender mode is not supported.",
+    );
+  }
+  if (policy.inbound.fallback !== "review") {
+    errors.push("Inbound fallback must be e2a human review in this release.");
+  }
+  if (typeof policy.outbound.requireReview !== "boolean") {
+    errors.push("Outbound review must be enabled or explicitly disabled.");
+  }
+  if (typeof policy.outbound.ccOwner !== "boolean") {
+    errors.push("Owner CC must be enabled or explicitly disabled.");
+  }
+  if (typeof policy.screening.promptInjection !== "boolean") {
+    errors.push("Prompt-injection screening must be enabled or explicitly disabled.");
+  }
+  const acknowledgements = new Set(policy.acknowledgements);
+  if (!policy.outbound.requireReview && !acknowledgements.has("outbound_review_opt_out")) {
+    errors.push(
+      "Outbound review is disabled; explicitly acknowledge outbound_review_opt_out.",
+    );
+  }
+  if (!policy.outbound.ccOwner && !acknowledgements.has("owner_cc_opt_out")) {
+    errors.push("Owner CC is disabled; explicitly acknowledge owner_cc_opt_out.");
+  }
+  if (!policy.screening.promptInjection && !acknowledgements.has("screening_opt_out")) {
+    errors.push(
+      "Prompt-injection screening is disabled; explicitly acknowledge screening_opt_out.",
+    );
+  }
+  if (!SUPPORTED_RUNTIMES.has(policy.runtime.adapter)) {
+    errors.push(`Unsupported runtime adapter: ${policy.runtime.adapter || "(missing)"}.`);
+  }
+  if (!policy.runtime.command) {
+    errors.push("Provide the absolute runtime command path.");
+  } else if (!policy.runtime.command.startsWith("/")) {
+    errors.push("Runtime command must be an absolute path.");
+  }
+  if (!policy.runtime.workdir) {
+    errors.push("Provide the absolute task workspace path.");
+  } else if (!policy.runtime.workdir.startsWith("/")) {
+    errors.push("Task workspace must be an absolute path.");
+  }
+  if (!SUPPORTED_SANDBOXES.has(policy.runtime.sandbox)) {
+    errors.push(`Unsupported sandbox declaration: ${policy.runtime.sandbox || "(missing)"}.`);
+  }
+  if (
+    policy.runtime.sandbox === "custom" &&
+    !acknowledgements.has("custom_sandbox_acknowledged")
+  ) {
+    errors.push(
+      "Custom isolation is not verified; explicitly acknowledge custom_sandbox_acknowledged.",
+    );
+  }
+  if (!SUPPORTED_SERVICES.has(policy.service.manager)) {
+    errors.push(`Unsupported service manager: ${policy.service.manager || "(missing)"}.`);
+  }
+  for (const acknowledgement of acknowledgements) {
+    if (!OPT_OUTS.has(acknowledgement)) {
+      errors.push(`Unknown acknowledgement: ${acknowledgement}.`);
+    }
+  }
+
+  return errors;
+}
+
+function enabled(value) {
+  return value ? "enabled (recommended default)" : "DISABLED by warned opt-out";
+}
+
+export function renderPlan(input) {
+  const policy = normalizePolicy(input);
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) {
+    throw new Error(`Cannot render an invalid Autopilot policy:\n- ${errors.join("\n- ")}`);
+  }
+
+  const addresses = policy.inbound.addresses.length
+    ? policy.inbound.addresses.join(", ")
+    : "none";
+  const domains = policy.inbound.domains.length
+    ? policy.inbound.domains.join(", ")
+    : "none";
+
+  return [
+    "e2a Autopilot installation plan",
+    "",
+    `Task profile: ${policy.task.profile}`,
+    `Task outcome: ${policy.task.objective}`,
+    `Agent mailbox: ${policy.mailbox.agentEmail}`,
+    `Owner: ${policy.mailbox.ownerEmail}`,
+    `Authorized sender addresses: ${addresses}`,
+    `Authorized sender domains: ${domains}`,
+    "Non-matching inbound senders: e2a human review",
+    `Outbound human review: ${enabled(policy.outbound.requireReview)}`,
+    policy.outbound.ccOwner
+      ? `Owner CC: ${policy.mailbox.ownerEmail} on every reply`
+      : "Owner CC: DISABLED by warned opt-out",
+    `Prompt-injection screening: ${enabled(policy.screening.promptInjection)}`,
+    `Runtime: ${policy.runtime.adapter} (${policy.runtime.command})`,
+    `Isolation: ${policy.runtime.sandbox}`,
+    `Workspace: ${policy.runtime.workdir}`,
+    `Service: ${policy.service.manager}`,
+    "",
+    "Planned changes:",
+    "- Create owner-only local policy, task, credential, state, and log files.",
+    "- Create one dedicated agent-scoped e2a credential for the local supervisor.",
+    "- Configure the existing inbound sender policy with review fallback.",
+    policy.outbound.requireReview
+      ? "- Configure the existing outbound policy to require human review."
+      : "- Leave outbound human review disabled as explicitly acknowledged.",
+    `- Generate a ${policy.service.manager} service definition after verification.`,
+    "",
+    "Implementation boundary:",
+    "- No server, API, database, core CLI, SDK, or MCP code changes.",
+    "- The task runtime receives no e2a credential and cannot list, search, or delete mail.",
+    "- Owner CC is enforced by the local gateway, not the e2a server.",
+    "- Later account-level protection changes cannot be detected continuously.",
+  ].join("\n");
+}
+
+export function planDigest(input) {
+  return createHash("sha256").update(renderPlan(input), "utf8").digest("hex");
+}
