@@ -62,7 +62,7 @@ while IFS= read -r commit; do
     echo "ROLLBACK_UNSAFE_BEFORE changed historically after ${historical_boundary}: ${value} at ${commit}" >&2
     exit 1
   fi
-done < <(git log --reverse --format=%H HEAD -- ROLLBACK_UNSAFE_BEFORE)
+done < <(git log --full-history --topo-order --reverse --format=%H HEAD -- ROLLBACK_UNSAFE_BEFORE)
 
 if [ -n "$historical_boundary" ] && [ "$boundary" != "$historical_boundary" ]; then
   echo "ROLLBACK_UNSAFE_BEFORE is cumulative: ${historical_boundary} cannot change to ${boundary}" >&2
