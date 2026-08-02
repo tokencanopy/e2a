@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -72,17 +73,25 @@ type messageSetup struct {
 }
 
 type step struct {
-	ID           string                 `yaml:"id"`
-	Action       string                 `yaml:"action"`
-	Method       string                 `yaml:"method,omitempty"`
-	Path         string                 `yaml:"path,omitempty"`
-	Body         map[string]interface{} `yaml:"body,omitempty"`
-	AuthOverride *string                `yaml:"auth_override,omitempty"`
-	AgentEmail   string                 `yaml:"agent_email,omitempty"`
-	From         string                 `yaml:"from,omitempty"`
-	Subject      string                 `yaml:"subject,omitempty"`
-	VerifyDomain string                 `yaml:"verify_domain,omitempty"`
-	Expect       *expectation           `yaml:"expect,omitempty"`
+	ID     string                 `yaml:"id"`
+	Action string                 `yaml:"action"`
+	Method string                 `yaml:"method,omitempty"`
+	Path   string                 `yaml:"path,omitempty"`
+	Body   map[string]interface{} `yaml:"body,omitempty"`
+	// RawBodyBase64 and HeadersBase64 are the raw-bytes escape hatches (see
+	// the scenarios.yaml header). YAML scalars are UTF-8 by definition, so a
+	// scenario that must put NON-UTF-8 bytes on the wire — the whole point of
+	// the invalid_utf8_rejected scenario — cannot express them as text. The
+	// runner base64-decodes these and transmits the bytes verbatim; they must
+	// never round-trip through a JSON encoder or a charset conversion.
+	RawBodyBase64 string            `yaml:"raw_body_base64,omitempty"`
+	HeadersBase64 map[string]string `yaml:"headers_base64,omitempty"`
+	AuthOverride  *string           `yaml:"auth_override,omitempty"`
+	AgentEmail    string            `yaml:"agent_email,omitempty"`
+	From          string            `yaml:"from,omitempty"`
+	Subject       string            `yaml:"subject,omitempty"`
+	VerifyDomain  string            `yaml:"verify_domain,omitempty"`
+	Expect        *expectation      `yaml:"expect,omitempty"`
 	// Capture extracts values from the response and stores them as
 	// placeholders for later steps. Keys are the placeholder names
 	// (without curly braces); values are dotted JSON paths into the
@@ -484,11 +493,38 @@ func (r *runner) execRequest(t *testing.T, s *step) {
 	}
 }
 
+// stepRawBody decodes raw_body_base64, enforcing that a step declares at most
+// one body source. Returns (nil, nil) when the step has no raw body.
+func stepRawBody(s *step) ([]byte, error) {
+	if s.RawBodyBase64 == "" {
+		return nil, nil
+	}
+	if s.Body != nil {
+		return nil, fmt.Errorf("step %s: body and raw_body_base64 are mutually exclusive", s.ID)
+	}
+	raw, err := base64.StdEncoding.DecodeString(s.RawBodyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("step %s: raw_body_base64: %w", s.ID, err)
+	}
+	return raw, nil
+}
+
 func (r *runner) execRequestError(s *step) error {
 	path := r.resolve(s.Path)
 
+	rawBodyBytes, err := stepRawBody(s)
+	if err != nil {
+		return err
+	}
+
 	var bodyReader io.Reader
-	if s.Body != nil {
+	hasBody := s.Body != nil || rawBodyBytes != nil
+	switch {
+	case rawBodyBytes != nil:
+		// Verbatim: no JSON encoder, no re-encoding. Anything else would
+		// launder the very bytes the scenario exists to transmit.
+		bodyReader = bytes.NewReader(rawBodyBytes)
+	case s.Body != nil:
 		data, _ := json.Marshal(r.resolveValue(s.Body))
 		bodyReader = bytes.NewReader(data)
 	}
@@ -499,8 +535,17 @@ func (r *runner) execRequestError(s *step) error {
 	if auth, ok := r.authHeader(s); ok {
 		req.Header.Set("Authorization", auth)
 	}
-	if s.Body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// Go's http.Header is byte-transparent for obs-text (anything >= 0x80), so
+	// a decoded byte string reaches the wire unchanged.
+	for name, encoded := range s.HeadersBase64 {
+		value, decodeErr := base64.StdEncoding.DecodeString(encoded)
+		if decodeErr != nil {
+			return fmt.Errorf("step %s: headers_base64[%s]: %w", s.ID, name, decodeErr)
+		}
+		req.Header.Set(name, string(value))
 	}
 
 	resp, err := http.DefaultClient.Do(req)

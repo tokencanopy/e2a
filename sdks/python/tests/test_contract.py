@@ -16,6 +16,7 @@ setup) cause the scenario to be skipped with a clear reason.
 
 from __future__ import annotations
 
+import base64
 import json as json_mod
 import os
 import re
@@ -79,6 +80,38 @@ def json_path_get(obj: Any, path: str, default: Any = None) -> Any:
     return current
 
 
+def step_raw_body(step: dict[str, Any]) -> bytes | None:
+    """Decode a step's raw_body_base64, enforcing one body source per step.
+
+    The raw-bytes escape hatches exist because YAML is UTF-8 by definition and
+    its \\xNN escape denotes a CODEPOINT (\\xFF is U+00FF, which encodes to the
+    perfectly VALID two-byte C3 BF), so no scenario scalar can carry the
+    ill-formed bytes invalid_utf8_rejected has to put on the wire.
+    """
+    encoded = step.get("raw_body_base64")
+    if encoded is None:
+        return None
+    if "body" in step:
+        raise ValueError(
+            f"step {step['id']}: body and raw_body_base64 are mutually exclusive"
+        )
+    return base64.b64decode(encoded, validate=True)
+
+
+def step_raw_headers(step: dict[str, Any]) -> dict[str, bytes]:
+    """Decode headers_base64 into RAW BYTES.
+
+    httpx encodes a ``str`` header value as ASCII and raises
+    UnicodeEncodeError on anything above U+007F, so a non-ASCII value can only
+    be sent as ``bytes`` — which httpx passes through verbatim (verified
+    against a raw socket: ``Idempotency-Key: k\\xffz``).
+    """
+    return {
+        name: base64.b64decode(encoded, validate=True)
+        for name, encoded in (step.get("headers_base64") or {}).items()
+    }
+
+
 def values_equal(json_val: Any, yaml_val: Any) -> bool:
     """Cross-type comparison (JSON number vs YAML int, bool, string)."""
     if isinstance(yaml_val, bool):
@@ -126,11 +159,30 @@ class Runner:
     def close(self):
         self._http.close()
 
-    def _raw(self, method: str, path: str, body: Any = None) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        return self._http.request(method, path, headers=headers, json=body)
+    def _raw(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        *,
+        content: bytes | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Issue one request.
+
+        `headers`, when given, REPLACES the default bearer auth (that is how
+        auth-override steps send their own credential, or none at all).
+        `content` sends bytes verbatim — no JSON encoder, no transcoding — and
+        is mutually exclusive with `body`.
+        """
+        hdrs: dict[str, Any] = (
+            dict(headers) if headers is not None else {"Authorization": f"Bearer {self.api_key}"}
+        )
+        if body is not None or content is not None:
+            hdrs.setdefault("Content-Type", "application/json")
+        if content is not None:
+            return self._http.request(method, path, headers=hdrs, content=content)
+        return self._http.request(method, path, headers=hdrs, json=body)
 
     def resolve(self, s: str) -> str:
         s = s.replace("{base_url}", self.base_url)
@@ -210,31 +262,24 @@ class Runner:
     def _exec_request(self, step: dict[str, Any]):
         path = self.resolve(step["path"])
         body = self.resolve_value(step["body"]) if "body" in step else None
+        content = step_raw_body(step)
+        raw_headers = step_raw_headers(step)
         ex = step.get("expect") or {}
 
+        headers: dict[str, Any] | None = None
         if self.has_auth_override(step):
-            # Auth-override scenarios bypass SDK auth by design
+            # Auth-override scenarios bypass SDK auth by design.
             override = self.auth_override(step)
-            headers: dict[str, str] = {}
-            if override != "none":
-                headers["Authorization"] = self.resolve(override)
-            if body is not None:
-                headers["Content-Type"] = "application/json"
+            headers = {} if override == "none" else {"Authorization": self.resolve(override)}
+        if raw_headers:
+            if headers is None:
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+            headers.update(raw_headers)
 
-            resp = self._http.request(
-                step["method"], path,
-                headers=headers,
-                json=body if body is not None else None,
-            )
-            status = resp.status_code
-            data = None
-            raw_body = resp.text
-        else:
-            # Default auth — raw bearer request.
-            resp = self._raw(step["method"], path, body)
-            status = resp.status_code
-            raw_body = resp.text
-            data = None
+        resp = self._raw(step["method"], path, body, content=content, headers=headers)
+        status = resp.status_code
+        raw_body = resp.text
+        data = None
 
         if "status" in ex:
             assert status == ex["status"], f"step {step['id']}: expected {ex['status']}, got {status}"
@@ -412,8 +457,8 @@ def test_runner_captures_response_values_for_later_paths(monkeypatch):
     )
     runner = Runner("https://contract.test", "key", scenario)
 
-    def fake_raw(method: str, path: str, body: Any = None) -> httpx.Response:
-        del method, body
+    def fake_raw(method: str, path: str, body: Any = None, **kwargs: Any) -> httpx.Response:
+        del method, body, kwargs
         paths.append(path)
         return next(responses)
 
@@ -511,8 +556,8 @@ def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeyp
     )
     runner = Runner("https://contract.test", "key", scenario)
 
-    def fake_raw(method: str, path: str, body: Any = None) -> httpx.Response:
-        del method, body
+    def fake_raw(method: str, path: str, body: Any = None, **kwargs: Any) -> httpx.Response:
+        del method, body, kwargs
         paths.append(path)
         return next(responses)
 
@@ -545,13 +590,140 @@ def test_runner_surfaces_cleanup_failure_without_primary_failure(monkeypatch):
     monkeypatch.setattr(
         runner,
         "_raw",
-        lambda method, path, body=None: httpx.Response(500, text="cleanup"),
+        lambda method, path, body=None, **kwargs: httpx.Response(500, text="cleanup"),
     )
     try:
         with pytest.raises(AssertionError, match="contract scenario cleanup failed"):
             run_runner(runner)
     finally:
         runner.close()
+
+
+# ── Raw-bytes escape hatches (raw_body_base64 / headers_base64) ───
+#
+# Runner-level regressions, mirrored in tests/contract/runner_rawbytes_test.go
+# and sdks/typescript/test/v1/contract.test.ts.
+
+RAW_INVALID_BODY = b'{"address":"a\xffb@example.com"}'
+RAW_INVALID_HEADER = b"k\xffz"
+
+
+def _is_valid_utf8(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def test_runner_sends_raw_bytes_to_the_wire_verbatim():
+    """A real socket, not a stub: the question is whether httpx preserves bytes
+    >= 0x80, which only the wire can answer. It does — for HEADERS only when
+    the value is ``bytes``; a ``str`` raises UnicodeEncodeError('ascii')."""
+    import socketserver
+    import threading
+    from http.server import BaseHTTPRequestHandler
+
+    captured: dict[str, Any] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+            length = int(self.headers.get("Content-Length", "0"))
+            captured["body"] = self.rfile.read(length)
+            # http.client parses header values as latin1, so encoding back
+            # recovers the exact received bytes.
+            captured["header"] = self.headers.get("Idempotency-Key", "").encode("latin-1")
+            captured["content_type"] = self.headers.get("Content-Type", "")
+            payload = b'{"error":{"code":"invalid_request"}}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # silence the default stderr logging
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        scenario = {
+            "name": "raw_bytes",
+            "description": "raw bytes reach the wire unmodified",
+            "steps": [
+                {
+                    "id": "raw",
+                    "action": "request",
+                    "method": "POST",
+                    "path": "/v1/contacts",
+                    "raw_body_base64": base64.b64encode(RAW_INVALID_BODY).decode(),
+                    "headers_base64": {
+                        "Idempotency-Key": base64.b64encode(RAW_INVALID_HEADER).decode()
+                    },
+                    "expect": {
+                        "status": 400,
+                        "body_match": {"error.code": "invalid_request"},
+                    },
+                }
+            ],
+        }
+        host, port = server.server_address[0], server.server_address[1]
+        runner = Runner(f"http://{host}:{port}", "key", scenario)
+        try:
+            run_runner(runner)
+        finally:
+            runner.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert captured["body"] == RAW_INVALID_BODY
+    assert captured["header"] == RAW_INVALID_HEADER
+    assert captured["content_type"] == "application/json"
+    # Non-vacuity: if the transport silently "fixed" the bytes, the test would
+    # prove nothing about the rule it exists to cover.
+    assert not _is_valid_utf8(captured["body"])
+    assert not _is_valid_utf8(captured["header"])
+
+
+def test_runner_rejects_step_with_both_body_and_raw_body_base64():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        step_raw_body(
+            {
+                "id": "both",
+                "body": {"address": "a@example.com"},
+                "raw_body_base64": base64.b64encode(b"{}").decode(),
+            }
+        )
+
+
+def test_httpx_refuses_non_ascii_str_header_so_raw_bytes_are_required():
+    """Pins the reason headers_base64 decodes to BYTES rather than a str: httpx
+    ASCII-encodes str header values, so the str form cannot express this at
+    all. If httpx ever relaxes that, this test tells us the constraint moved."""
+    with pytest.raises(UnicodeEncodeError):
+        httpx.Headers({"Idempotency-Key": RAW_INVALID_HEADER.decode("latin-1")})
+    assert httpx.Headers({"Idempotency-Key": RAW_INVALID_HEADER}).raw[0][1] == RAW_INVALID_HEADER
+
+
+def test_invalid_utf8_scenario_carries_genuinely_ill_formed_bytes():
+    scenario = _scenario_by_name("invalid_utf8_rejected")
+    steps = {step["id"]: step for step in scenario["steps"]}
+
+    body = step_raw_body(steps["body_rejected"])
+    assert body, "body_rejected must declare raw_body_base64"
+    assert not _is_valid_utf8(body), "body_rejected payload must be ill-formed UTF-8"
+
+    header = step_raw_headers(steps["header_rejected"])["Idempotency-Key"]
+    assert not _is_valid_utf8(header), "header_rejected value must be ill-formed UTF-8"
+
+    # Self-cleaning by construction: every step is a rejection (400) or a
+    # not-created probe (404), so nothing exists to delete.
+    assert "cleanup" not in scenario
+    assert {step["expect"]["status"] for step in scenario["steps"]} == {400, 404}
 
 
 def test_managed_unsubscribe_scenario_is_self_cleaning_and_lifecycle_observable():
