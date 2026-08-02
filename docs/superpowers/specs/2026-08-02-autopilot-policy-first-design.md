@@ -1,6 +1,6 @@
 # Policy-First Autopilot Design
 
-**Status:** Approved design
+**Status:** Pending written-spec review
 
 **Date:** 2026-08-02
 
@@ -28,6 +28,7 @@ Customer Support is the first polished task profile. Coding/Repository and Custo
 5. **Human-visible by default.** The owner is CC’d by default, every outbound message is reviewed by default, and held items expire rejected.
 6. **Fail closed.** Missing authentication, unverifiable sandboxing, invalid service configuration, ambiguous runtime outcomes, and policy drift stop autonomous execution.
 7. **Profiles grant capabilities.** Natural-language task instructions never grant filesystem, tool, network, account, or review privileges.
+8. **Job-scoped mail access.** Spawned runtimes never receive an e2a API key. They use a local capability gateway that exposes only the current job's approved mail operations.
 
 ## Architecture
 
@@ -45,13 +46,13 @@ Setup temporarily uses account-scoped authorization to:
 - apply the selected inbound and outbound controls;
 - enable durable owner notifications for holds;
 - configure required owner CC when enabled; and
-- mint a dedicated agent-scoped runtime credential.
+- mint a dedicated agent-scoped daemon credential.
 
-The account-scoped credential is not written to autopilot configuration and is never passed to the daemon or a spawned runtime. The installed runtime cannot read or change its own protection configuration, approve its own holds, administer agents, or access another inbox.
+The account-scoped credential is not written to autopilot configuration and is never passed to the daemon or a spawned runtime. The dedicated agent-scoped credential is available only to the daemon. A spawned runtime receives a short-lived, single-job token for the local capability gateway and cannot list the inbox, read unrelated messages, trash mail, change protection, approve holds, administer agents, or access another inbox.
 
 ### 3. Autopilot daemon
 
-The daemon owns transport, durable job state, serial execution, retry timing, bounded logs, health reporting, and graceful shutdown. It does not reimplement the e2a sender gate. The e2a server holds inbound messages that do not satisfy the configured policy; the daemon receives only released messages.
+The daemon owns transport, durable job state, serial execution, the job-scoped e2a capability gateway, retry timing, bounded logs, health reporting, and graceful shutdown. It does not reimplement the e2a sender gate. The e2a server holds inbound messages that do not satisfy the configured policy; the daemon receives only released messages.
 
 The daemon uses a metadata-only listener path so receipt does not mark a message read. It fetches a body only after a job is durably claimed for execution.
 
@@ -73,7 +74,7 @@ Autopilot supports macOS `launchd` and Linux `systemd`. Service definitions are 
 
 ## e2a protection extensions
 
-Two server-enforced additions are required because the desired guarantees cannot be implemented safely in a prompt or local wrapper.
+Three server additions are required because the desired guarantees cannot be implemented safely in a prompt or an unverified local convention.
 
 ### Composable authenticated-inbound requirement
 
@@ -83,6 +84,8 @@ Add `require_authenticated` to the inbound gate. It composes with the existing `
 - `allowlist` and `domain` continue to require DMARC before matching. Setting `require_authenticated` does not weaken their existing behavior.
 - Providerless or identity-unresolvable mail cannot satisfy the requirement unless it is released by a human reviewer.
 
+An exact-address rule compares the normalized claimed RFC 5322 From address only after its domain passes aligned DMARC. This proves authenticated use of the domain for that message; it does not cryptographically prove the identity of the individual human who controls that mailbox. Onboarding states this limitation before treating an address as an operator rule.
+
 The default remains `false` outside autopilot so existing agents do not change posture merely because the field is introduced.
 
 ### Required outbound CC
@@ -90,6 +93,12 @@ The default remains `false` outside autopilot so existing agents do not change p
 Add `required_cc` to the outbound protection posture as an account-controlled list of normalized recipient addresses. Autopilot initially configures either the confirmed owner address or an empty list after a warned opt-out.
 
 The server merges and deduplicates `required_cc` into sends, replies, and forwards before recipient validation, gate evaluation, hold creation, provider submission, and reviewer override validation. Neither an agent-scoped caller nor a reviewer override can remove a required address. This guarantees owner visibility without depending on runtime instructions or CLI feature parity.
+
+### Agent-visible protection revision
+
+Every successful inbound or outbound protection mutation advances an opaque revision for that agent. Account-scoped setup reads the final revision after applying the complete posture and records it as `expected_revision` in the non-secret autopilot policy.
+
+An agent-scoped credential for that same inbox may read only the opaque current revision, not the protection configuration. The daemon compares it at startup and before claiming each job. A missing, unreachable, or mismatched revision stops new work until account-scoped onboarding shows the difference and the owner explicitly reapplies or accepts the posture. This makes fail-closed drift detection possible without giving the daemon policy administration rights.
 
 ## Conversational onboarding
 
@@ -113,9 +122,9 @@ The profile supplies safe starting values but cannot silently widen permissions.
 
 ### Inbound authorization
 
-For Coding/Repository and Custom profiles, ask whether trusted operators are exact addresses or verified domains, then collect the corresponding values. Nonmatches default to `review`.
+For Coding/Repository and Custom profiles, ask whether trusted operator sender rules are exact addresses or verified domains, then collect the corresponding values. The interview explains that an exact address means an exact From match after aligned DMARC, while a domain rule trusts every DMARC-aligned sender at that domain. Nonmatches default to `review`.
 
-For Customer Support, default to any authenticated customer entering the restricted support lane. Ask separately for exact-address or verified-domain operator identities that may request the broader actions already granted to the profile. Unauthenticated mail is held for human review.
+For Customer Support, default to any authenticated customer entering the restricted support lane. Ask separately for exact-address or verified-domain operator sender rules that may request the broader actions already granted to the profile. Unauthenticated mail is held for human review.
 
 Every held inbound message remains retained in the account review queue. With notifications enabled, the e2a platform emails the owner a preview and approve/reject links. Approval releases the message to the inbox and emits the delivery notification that wakes autopilot. The daemon does not generate this notification.
 
@@ -164,6 +173,9 @@ The policy is non-secret JSON and the single source of truth for onboarding, pre
     "owner_email": "owner@example.test",
     "profile": "customer_support"
   },
+  "server_protection": {
+    "expected_revision": "prv_example"
+  },
   "inbound": {
     "require_authenticated": true,
     "customer_mode": "authenticated",
@@ -187,7 +199,13 @@ The policy is non-secret JSON and the single source of truth for onboarding, pre
     "sandbox_backend": "container",
     "read_only_mounts": ["/srv/support-kb"],
     "write_mode": "ephemeral_job_directory",
-    "network_allowlist": ["e2a.dev", "api.e2a.dev"],
+    "network_allowlist": ["api.anthropic.com"],
+    "local_capabilities": [
+      "e2a.current_message",
+      "e2a.current_thread",
+      "e2a.reply",
+      "e2a.escalate"
+    ],
     "timeout_seconds": 1800,
     "max_queue_depth": 100,
     "max_attempts": 3
@@ -212,19 +230,19 @@ The policy is non-secret JSON and the single source of truth for onboarding, pre
 
 Schema validation rejects unknown keys, unsupported combinations, relative paths, unsafe mount relationships, invalid addresses/domains, nonpositive bounds, and a runtime marked supported without a passing adapter preflight.
 
-Secrets live outside this file. Secret storage is owner-readable only and platform-appropriate; systemd credentials are used where available. Secrets never appear in service definitions, argv, logs, status output, or the policy summary.
+Secrets live outside this file. The portable baseline is an owner-only secret file outside the sandbox; systemd credentials are used where available, while launchd receives only the path to the owner-only file. Secrets never appear in service definitions, argv, logs, status output, or the policy summary.
 
 ## Customer Support profile
 
 Customer Support is the default polished profile and the initial launch-video journey. Onboarding collects approved knowledge-base mounts, product context, response tone, supported categories, escalation categories, allowed external actions, service hours, and response expectations.
 
-Authenticated customers receive the restricted support capability set:
+Authenticated customers receive the restricted support capability set through the job-scoped gateway:
 
 - read the current message and thread;
 - read the approved knowledge base;
 - classify and draft a threaded response;
 - submit that response to the configured outbound review gate; and
-- escalate when policy requires it.
+- escalate to the confirmed owner without contacting the customer when policy requires it.
 
 The profile has no source-code, general host filesystem, browser-profile, cloud-account, account-administration, review-approval, payment, refund, or customer-account mutation capability by default. Refunds, legal/security matters, account changes, private-data requests, and uncertain answers always escalate.
 
@@ -240,11 +258,19 @@ Custom onboarding begins with no data, tool, network, or write grants. The user 
 
 ## Data and execution isolation
 
-Supported mode is allowlist-based isolation. Each job runs in a fresh sandbox containing only its approved read-only mounts, isolated writable job directory or worktree, runtime executable, minimal runtime configuration, and agent-scoped e2a credential.
+Supported mode is allowlist-based isolation. Each job runs in a fresh sandbox containing only its approved read-only mounts, isolated writable job directory or worktree, runtime executable, minimal runtime configuration, and short-lived token for its loopback capability gateway. The daemon's agent-scoped e2a credential stays outside the sandbox.
 
-The sandbox does not expose the host home directory, shell startup files, SSH keys, cloud CLI state, GitHub credentials, browser profiles, personal documents, unrelated repositories, other agents’ configuration/state, service secrets, or the autopilot forwarding token.
+The sandbox does not expose the host home directory, shell startup files, SSH keys, cloud CLI state, GitHub credentials, browser profiles, personal documents, unrelated repositories, other agents’ configuration/state, the daemon's e2a credential, service-manager secrets, or the autopilot forwarding token.
 
-The runtime receives a minimal environment assembled by its adapter. The daemon’s full environment is never inherited. Network access is denied except for policy entries. Symlink and path traversal cannot escape a mount. A job may delete only inside its disposable writable area; deletion of host or primary-workspace data is structurally impossible rather than prompt-prohibited.
+The runtime receives a minimal environment assembled by its adapter. The daemon’s full environment is never inherited. Only adapter-specific model/runtime authentication required for the selected runtime is brokered or mounted read-only; unrelated cloud, browser, and CLI credentials remain absent. Network access is denied except for policy entries and the authenticated loopback gateway. Symlink and path traversal cannot escape a mount. A job may delete only inside its disposable writable area; deletion of host or primary-workspace data is structurally impossible rather than prompt-prohibited.
+
+### Job-scoped e2a capability gateway
+
+For each claimed job, the daemon binds an authenticated loopback-only gateway with a random token that expires when the job finishes. The gateway exposes only the capabilities declared by the selected profile. Customer Support initially permits reading the claimed message and its thread, submitting one correlated reply through the configured outbound gate, or escalating the job. It does not expose inbox listing, arbitrary message reads, trash/delete, protection, credential, hold approval, agent administration, or unrestricted send/forward operations.
+
+An escalation creates a fixed-shape alert addressed only to the confirmed owner. It contains the source message ID, category, and a bounded runtime summary but no copied message body. The runtime cannot alter its recipients. The alert passes through the configured outbound gate: it is `pending_review` under the default review-all posture and is sent directly only after the owner has chosen an auto-send posture. Escalation does not create a customer reply.
+
+For a reply or escalation, the gateway injects a stable job-and-action-derived idempotency key and writes the server-returned outbound message ID and disposition into a daemon-owned result record. The sandbox cannot edit that record. The daemon uses the exact outbound ID to verify the allowed recipient/thread shape and the accepted, scheduled, sent, or `pending_review` disposition. This avoids treating a silent exit or an unrelated message as success.
 
 Preflight creates canary files inside and outside the allowed boundary and proves:
 
@@ -270,7 +296,7 @@ received -> queued -> running -> succeeded
 
 The daemon persists `received` before acknowledging the local listener handoff. A single worker claims jobs serially. On startup, interrupted `running` jobs return to `retry_wait` with their attempt metadata preserved. Job identifiers are stable e2a message IDs; completed records provide deduplication across WebSocket delivery, reconciliation, and restarts.
 
-Nonzero runtime exit, spawn failure, missing expected reply/draft, timeout, and unverifiable result are failures. Retries use capped exponential backoff and stop at the configured attempt limit. A dead-letter record retains metadata and diagnostics but not the email body. Operational notification uses the configured owner-review path when e2a is reachable and always remains visible through status and owner-only logs.
+Nonzero runtime exit, spawn failure, missing terminal gateway result, timeout, and unverifiable result are failures. Retries use capped exponential backoff and stop at the configured attempt limit. A dead-letter record retains metadata and diagnostics but not the email body. Dead letters are always visible through status and owner-only logs. This release does not synthesize an email about a local daemon failure, avoiding a notification loop through the same unhealthy system; external service-manager alert integrations remain out of scope.
 
 Queue size, per-job output, log files, completed-state retention, and retry history are bounded. When intake cannot be durably recorded because the queue is full or storage fails, the local receiver returns failure. Because metadata forwarding does not mark the message read, reconciliation can recover it later.
 
@@ -286,10 +312,11 @@ A WebSocket “replaced” outcome is terminal. The daemon exits cleanly rather 
 
 An adapter starts a fresh process group for one job. It caps captured stdout/stderr while preserving bounded diagnostics. Timeout first requests graceful termination, then kills the complete process group after a fixed grace period. Service stop either drains the active job within a bounded window or terminates it and returns the job to recoverable state.
 
-A job succeeds only when both conditions hold:
+A job succeeds only when all conditions hold:
 
 1. the runtime returns its adapter-defined successful outcome; and
-2. e2a shows an in-thread outbound reply or a review-held outbound draft correlated to the source message.
+2. the daemon-owned gateway result identifies the exact outbound message created for the stable job-and-action idempotency key; and
+3. e2a confirms that exact message has an accepted, scheduled, sent, or `pending_review` disposition and is either a reply to the source message in the same thread or a fixed-shape escalation addressed only to the confirmed owner.
 
 `pending_review` therefore counts as successful handoff. A silent exit zero does not. Retrying a failed job uses the same stable job identity and instructs the runtime to inspect the thread and existing job artifacts before acting, reducing duplicate work.
 
@@ -299,7 +326,7 @@ Service names include a stable hash of the agent address. Policy, spool, logs, r
 
 `autopilot status` reports:
 
-- policy schema and server-policy drift;
+- policy schema, expected/current opaque protection revisions, and server-policy drift without revealing the server posture;
 - service and daemon process state;
 - listener connectivity;
 - queued, retrying, running, and dead-letter counts;
@@ -321,7 +348,7 @@ Logs are structured, redacted, rotated, size-bounded, and owner-readable only. M
 - Runtime unavailable or unsupported: do not dequeue work.
 - Runtime failure or timeout: retry durably, then dead-letter.
 - e2a unavailable: keep jobs durable, back off, and avoid duplicate sends.
-- Policy drift after installation: stop dequeuing new jobs until the owner reviews and reapplies policy.
+- Protection revision unavailable or changed after installation: stop dequeuing new jobs until account-scoped onboarding shows the current posture and the owner explicitly reapplies or accepts it.
 
 ## Verification strategy
 
@@ -331,8 +358,10 @@ Logs are structured, redacted, rotated, size-bounded, and owner-readable only. M
 - Warned opt-outs remain explicit and visible in summaries.
 - `require_authenticated` composes correctly with open, address, and domain policies.
 - `required_cc` is merged and cannot be removed by agent input or reviewer overrides.
+- Protection mutations advance an opaque revision; agent scope can read only that revision; mismatch and unavailability stop dequeue.
 - Metadata-only forwarding does not fetch or mark the message read.
 - Spool transitions, restart recovery, deduplication, retry caps, and dead-letter behavior.
+- The job gateway limits reads to the claimed message/thread, denies list/trash/admin operations, injects a stable idempotency key, and records an immutable outbound result.
 - Runtime argv construction, minimal environment, bounded output, timeout escalation, and process-group shutdown.
 - launchd/systemd escaping, permissions, idempotency, multiple-agent isolation, and secret absence.
 - Configuration/path injection, malicious sender headers, symlink traversal, oversized output, queue floods, and invalid policy combinations.
@@ -347,6 +376,9 @@ Run against a real local e2a service and captured SMTP transport:
 - owner approval releases the message and wakes autopilot;
 - reply includes required owner CC;
 - outbound reply becomes pending review under the default posture;
+- a mandatory-escalation category creates only an owner alert, held under the default posture, and no customer reply;
+- the runtime cannot use its job token to list the inbox, read an unrelated message, trash mail, approve a hold, or change protection;
+- changing the server protection revision stops new jobs until owner reconciliation;
 - restart during execution recovers the job exactly once;
 - replacement WebSocket stops without a connection fight;
 - missing listener and runtime produce bounded unhealthy states;
@@ -365,4 +397,4 @@ Run service-install smoke tests on macOS launchd and Linux systemd: install, sta
 
 The design is complete when a new user can invoke `/autopilot`, choose Customer Support, answer the policy interview, accept secure defaults, pass preflight, explicitly confirm installation, and demonstrate the complete authenticated-customer -> restricted sandbox -> owner-CC’d pending-review reply path.
 
-No email can wake broader capabilities without satisfying the configured server gate or receiving human approval. No spawned runtime can read, modify, or delete data outside its explicit mounts. A crash, restart, timeout, missing binary, or WebSocket replacement cannot silently lose work, duplicate a completed job, or create a restart fight. Status and logs make failures actionable without revealing message content or secrets.
+No email can wake broader capabilities without satisfying the configured server gate or receiving human approval. No spawned runtime can list or mutate the inbox beyond its job-scoped gateway, or read, modify, or delete data outside its explicit mounts. A crash, restart, timeout, missing binary, or WebSocket replacement cannot silently lose work, duplicate a completed job, or create a restart fight. Status and logs make failures actionable without revealing message content or secrets.
