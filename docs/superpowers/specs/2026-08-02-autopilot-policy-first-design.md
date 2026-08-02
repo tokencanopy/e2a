@@ -66,7 +66,7 @@ Initial status:
 - Codex: supported after workspace, MCP, and network validation.
 - Kimi: experimental.
 - OpenClaw: experimental and requires an explicitly isolated execution backend.
-- Hermes: experimental and requires an isolated terminal/container backend plus credential filtering.
+- Hermes: experimental and requires the native layered sandbox plus credential filtering.
 
 ### 5. Service adapters
 
@@ -93,6 +93,8 @@ The default remains `false` outside autopilot so existing agents do not change p
 Add `required_cc` to the outbound protection posture as an account-controlled list of normalized recipient addresses. Autopilot initially configures either the confirmed owner address or an empty list after a warned opt-out.
 
 The server merges and deduplicates `required_cc` into sends, replies, and forwards before recipient validation, gate evaluation, hold creation, provider submission, and reviewer override validation. Neither an agent-scoped caller nor a reviewer override can remove a required address. This guarantees owner visibility without depending on runtime instructions or CLI feature parity.
+
+When onboarding configures an outbound recipient allowlist, it automatically includes every required-CC address in the allowlist. Otherwise the server-inserted owner recipient would intentionally trip the same recipient gate and hold every message.
 
 ### Agent-visible protection revision
 
@@ -126,7 +128,7 @@ For Coding/Repository and Custom profiles, ask whether trusted operator sender r
 
 For Customer Support, default to any authenticated customer entering the restricted support lane. Ask separately for exact-address or verified-domain operator sender rules that may request the broader actions already granted to the profile. Unauthenticated mail is held for human review.
 
-Every held inbound message remains retained in the account review queue. With notifications enabled, the e2a platform emails the owner a preview and approve/reject links. Approval releases the message to the inbox and emits the delivery notification that wakes autopilot. The daemon does not generate this notification.
+Every held inbound message remains retained in the account review queue. With notifications enabled, the e2a platform emails the owner a preview and approve/reject links. Approval releases the message to the inbox, records an agent-visible inbound release marker, and emits the `email.review_approved` WebSocket notification that wakes autopilot. The daemon does not generate this notification.
 
 ### Outbound authorization
 
@@ -196,7 +198,7 @@ The policy is non-secret JSON and the single source of truth for onboarding, pre
   "execution": {
     "runtime": "claude",
     "runtime_status": "supported",
-    "sandbox_backend": "container",
+    "sandbox_backend": "native_layered",
     "read_only_mounts": ["/srv/support-kb"],
     "write_mode": "ephemeral_job_directory",
     "network_allowlist": ["api.anthropic.com"],
@@ -258,15 +260,17 @@ Custom onboarding begins with no data, tool, network, or write grants. The user 
 
 ## Data and execution isolation
 
-Supported mode is allowlist-based isolation. Each job runs in a fresh sandbox containing only its approved read-only mounts, isolated writable job directory or worktree, runtime executable, minimal runtime configuration, and short-lived token for its loopback capability gateway. The daemon's agent-scoped e2a credential stays outside the sandbox.
+Supported mode is allowlist-based isolation. Each job runs in a fresh sandbox containing only its approved read-only mounts, isolated writable job directory or worktree, runtime executable, minimal runtime configuration, and short-lived token for its local-only capability gateway. The daemon's agent-scoped e2a credential stays outside the sandbox.
+
+The initial `native_layered` backend combines an operating-system filesystem/process boundary (macOS Seatbelt or Linux bubblewrap) with the selected runtime's own tool and network sandbox. A container backend may be added after it passes the same runtime-authentication, network-egress, capability-socket, and escape-probe suite; the policy schema does not advertise unimplemented backends.
 
 The sandbox does not expose the host home directory, shell startup files, SSH keys, cloud CLI state, GitHub credentials, browser profiles, personal documents, unrelated repositories, other agents’ configuration/state, the daemon's e2a credential, service-manager secrets, or the autopilot forwarding token.
 
-The runtime receives a minimal environment assembled by its adapter. The daemon’s full environment is never inherited. Only adapter-specific model/runtime authentication required for the selected runtime is brokered or mounted read-only; unrelated cloud, browser, and CLI credentials remain absent. Network access is denied except for policy entries and the authenticated loopback gateway. Symlink and path traversal cannot escape a mount. A job may delete only inside its disposable writable area; deletion of host or primary-workspace data is structurally impossible rather than prompt-prohibited.
+The runtime receives a minimal environment assembled by its adapter. The daemon’s full environment is never inherited. Only adapter-specific model/runtime authentication required for the selected runtime is brokered or mounted read-only; unrelated cloud, browser, and CLI credentials remain absent. Network access is denied except for policy entries, and mail capabilities travel over the authenticated Unix-domain socket. Symlink and path traversal cannot escape a mount. A job may delete only inside its disposable writable area; deletion of host or primary-workspace data is structurally impossible rather than prompt-prohibited.
 
 ### Job-scoped e2a capability gateway
 
-For each claimed job, the daemon binds an authenticated loopback-only gateway with a random token that expires when the job finishes. The gateway exposes only the capabilities declared by the selected profile. Customer Support initially permits reading the claimed message and its thread, submitting one correlated reply through the configured outbound gate, or escalating the job. It does not expose inbox listing, arbitrary message reads, trash/delete, protection, credential, hold approval, agent administration, or unrestricted send/forward operations.
+For each claimed job, the daemon binds an authenticated local-only Unix-domain socket gateway with a random token that expires when the job finishes. The gateway exposes only the capabilities declared by the selected profile. Customer Support initially permits reading the claimed message and its thread, submitting one correlated reply through the configured outbound gate, or escalating the job. It does not expose inbox listing, arbitrary message reads, trash/delete, protection, credential, hold approval, agent administration, or unrestricted send/forward operations.
 
 An escalation creates a fixed-shape alert addressed only to the confirmed owner. It contains the source message ID, category, and a bounded runtime summary but no copied message body. The runtime cannot alter its recipients. The alert passes through the configured outbound gate: it is `pending_review` under the default review-all posture and is sent directly only after the owner has chosen an auto-send posture. Escalation does not create a customer reply.
 
@@ -302,9 +306,9 @@ Queue size, per-job output, log files, completed-state retention, and retry hist
 
 ## Listener and reconciliation
 
-Extend `e2a listen` with a metadata-only forwarding mode that sends the authenticated event envelope without fetching the full message. Generic full-message forwarding retains its existing behavior for existing consumers.
+Extend `e2a listen` with a metadata-only forwarding mode that sends the authenticated event envelope without fetching the full message. It forwards ordinary `email.received` and inbound `email.review_approved` wake events. Generic full-message forwarding retains its existing behavior for existing consumers.
 
-The daemon binds an ephemeral loopback port, generates a forwarding token in memory for that process lifetime, and passes it only to the listener child. It persists an event before returning success. The independent reconciliation path lists unread inbound messages and feeds the same spool.
+The daemon binds an ephemeral loopback port, generates a forwarding token for that listener lifetime, writes it to an owner-only file, and passes only the file path to the listener child. The token never appears in argv. The receiver persists an event before returning success. The independent reconciliation path lists unread inbound messages and feeds the same spool.
 
 A WebSocket “replaced” outcome is terminal. The daemon exits cleanly rather than reconnecting and stealing the socket back. Other transient exits use capped exponential backoff that resets only after a stable connection interval. Scheduled reconnect and reconciliation remain independent liveness mechanisms until the SDK exposes a reliable idle-health signal.
 
