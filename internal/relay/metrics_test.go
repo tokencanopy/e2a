@@ -463,19 +463,24 @@ func TestSMTPInboundMetric_RejectedLineTooLong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DATA: %v", err)
 	}
-	// A single 160KiB line — over the 128KiB cap, small enough that the
-	// unread remainder after the server aborts fits in loopback socket
-	// buffers (the server reads ~128KiB before erroring).
+	// A single 160KiB line — over the 128KiB cap. The server aborts the
+	// connection mid-transfer, so depending on socket buffering the client
+	// may see the reset during Write, or only at Close, or (if the reset
+	// races the last flush) not as the 554 text at all. None of that is
+	// what's under test: a mid-write reset is itself evidence the server
+	// aborted, and the authoritative assertion is the
+	// rejected_line_too_long metric below, which runs on every path.
 	body := "From: sender@ext.test\r\nTo: " + agentEmail + "\r\nSubject: too long\r\n\r\n" +
 		strings.Repeat("y", 160*1024)
-	if _, err := w.Write([]byte(body)); err != nil {
-		t.Fatalf("write body: %v", err)
-	}
+	_, werr := w.Write([]byte(body))
 	cerr := w.Close()
-	if cerr == nil {
+	if werr == nil && cerr == nil {
 		t.Fatal("DATA with a 160KiB line succeeded; want 554 too-long-line rejection")
 	}
-	if !strings.Contains(cerr.Error(), "554") || !strings.Contains(cerr.Error(), "too long a line") {
+	// Only when the write went through cleanly is Close guaranteed to carry
+	// the SMTP-level rejection; after a mid-write reset it may return a bare
+	// connection error instead.
+	if werr == nil && (!strings.Contains(cerr.Error(), "554") || !strings.Contains(cerr.Error(), "too long a line")) {
 		t.Fatalf("DATA close error = %v, want 554 too-long-line", cerr)
 	}
 
