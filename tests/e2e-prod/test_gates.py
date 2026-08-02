@@ -1,4 +1,4 @@
-"""Unit tests for the three coverage gates, run as SUBPROCESSES against
+"""Unit tests for the coverage gates, run as SUBPROCESSES against
 synthetic shard directories in a temp dir.
 
 Nothing is imported from the gates themselves: each test drives the real CLI
@@ -174,6 +174,79 @@ class EventCoverageGateTest(unittest.TestCase):
         write_shard(self.reports, "1.json", sorted(self.required))
         proc = run_gate("event_coverage_gate.py", *self.args)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
+def _has_jsonschema() -> bool:
+    try:
+        import jsonschema  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_jsonschema(), "response_schema_gate needs jsonschema (pip install jsonschema)")
+class ResponseSchemaGateTest(unittest.TestCase):
+    """Drives response_schema_gate.py with synthetic samples against the real
+    spec. The violating cases exist to prove the gate can actually FAIL — a
+    validator that never rejects is worse than none."""
+
+    # getAccount has no documented 401, so a 401 sample validates against the
+    # op's `default` → ErrorEnvelope (error.code/message/request_id required).
+    VALID_ERROR = {"error": {"code": "unauthorized", "message": "no", "request_id": "req_1"}}
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.reports = Path(self._tmp.name) / "response-samples"
+        self.args = ("--openapi", str(OPENAPI), "--reports", str(self.reports))
+
+    def sample(self, status: int, body: object, kind: str = "json") -> dict:
+        s = {"method": "GET", "path": "/v1/account", "status": status, "contentType": "application/json", "kind": kind}
+        if kind == "json":
+            s["body"] = body
+        return s
+
+    def test_conformant_samples_pass(self) -> None:
+        write_shard(self.reports, "1.json", [self.sample(401, self.VALID_ERROR)])
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("GATE: PASS", proc.stdout)
+
+    def test_missing_required_field_fails_closed(self) -> None:
+        # error.request_id is required by ErrorBody — dropping it must fail.
+        body = {"error": {"code": "unauthorized", "message": "no"}}
+        write_shard(self.reports, "1.json", [self.sample(401, body)])
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("getAccount", proc.stdout)
+        self.assertIn("request_id", proc.stdout)
+
+    def test_wrong_type_fails_closed(self) -> None:
+        body = {"error": {"code": 401, "message": "no", "request_id": "req_1"}}  # code must be a string
+        write_shard(self.reports, "1.json", [self.sample(401, body)])
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("getAccount", proc.stdout)
+
+    def test_extra_fields_are_not_violations(self) -> None:
+        # Responses are deliberately open (additionalProperties: true).
+        body = {"error": {**self.VALID_ERROR["error"], "hint": "extra"}, "extra_top": 1}
+        write_shard(self.reports, "1.json", [self.sample(401, body)])
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_non_json_body_fails_closed(self) -> None:
+        s = self.sample(401, None, kind="nonjson")
+        s["rawPrefix"] = "<html>upstream error page</html>"
+        write_shard(self.reports, "1.json", [s])
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("non-JSON", proc.stdout)
+
+    def test_no_shards_is_not_a_pass(self) -> None:
+        proc = run_gate("response_schema_gate.py", *self.args)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
 
 
 class McpCoverageGateTest(unittest.TestCase):
