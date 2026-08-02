@@ -69,18 +69,33 @@ Expected: FAIL because the new fields, normalization, and revision do not exist.
 
 - [ ] **Step 3: Add the migration and identity fields**
 
-Use database defaults and a bounded array check:
+Use idempotent database defaults and bounded constraints:
 
 ```sql
 ALTER TABLE agent_identities
-  ADD COLUMN inbound_require_authenticated BOOLEAN NOT NULL DEFAULT FALSE,
-  ADD COLUMN outbound_required_cc TEXT[] NOT NULL DEFAULT '{}',
-  ADD COLUMN protection_revision TEXT NOT NULL
-    DEFAULT ('prv_' || encode(gen_random_bytes(16), 'hex')),
-  ADD CONSTRAINT agent_outbound_required_cc_limit
-    CHECK (cardinality(outbound_required_cc) <= 50),
-  ADD CONSTRAINT agent_protection_revision_shape
-    CHECK (protection_revision ~ '^prv_[0-9a-f]{32}$');
+  ADD COLUMN IF NOT EXISTS inbound_require_authenticated BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS outbound_required_cc TEXT[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS protection_revision TEXT NOT NULL
+    DEFAULT ('prv_' || encode(gen_random_bytes(16), 'hex'));
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'agent_outbound_required_cc_limit'
+      AND conrelid = 'agent_identities'::regclass
+  ) THEN
+    ALTER TABLE agent_identities ADD CONSTRAINT agent_outbound_required_cc_limit
+      CHECK (cardinality(outbound_required_cc) <= 50);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'agent_protection_revision_shape'
+      AND conrelid = 'agent_identities'::regclass
+  ) THEN
+    ALTER TABLE agent_identities ADD CONSTRAINT agent_protection_revision_shape
+      CHECK (protection_revision ~ '^prv_[0-9a-f]{32}$');
+  END IF;
+END $$;
 ```
 
 Add the fields to both agent projections/scanners in `store.go` and the user-data export. `NormalizeRequiredCC` parses each value with `net/mail`, rejects display names and non-mailbox syntax, lowercases the complete mailbox, and deduplicates it in first-seen order. `ValidateProtectionConfig` calls the helper for validation; `UpdateAgentProtection` writes the returned canonical slice. Because the export's agent record shape changes, bump `UserExport.SchemaVersion` from `"4"` to `"5"` and update its doc/test to state that v5 adds authenticated-inbound, required-CC, and protection-revision fields.
@@ -319,6 +334,8 @@ git commit -m "feat: wake agents when inbound review releases"
 - Modify: `internal/httpapi/protection.go`
 - Modify: `internal/httpapi/protection_test.go`
 - Modify: `internal/httpapi/stability_test.go`
+- Modify: `tests/contract/scenarios.yaml`
+- Modify if required: the Go, TypeScript, and Python shared-scenario runners
 - Regenerate: `api/openapi.yaml`
 - Regenerate: `sdks/typescript/src/generated/`
 - Regenerate: `sdks/python/src/e2a/generated/`
@@ -329,7 +346,7 @@ git commit -m "feat: wake agents when inbound review releases"
 
 - [ ] **Step 1: Write failing authorization and schema tests**
 
-Pin that account scope can GET/PUT the full protection object; the bound agent scope gets 403 from full GET/PUT but 200 from revision GET; an agent key bound to a different inbox gets 404/403 under the existing non-enumeration contract. Assert the strict PUT request schema has no revision field and rejects a client-supplied revision.
+Pin that account scope can GET/PUT the full protection object; the bound agent scope gets 403 from full GET/PUT but 200 from revision GET; an agent key bound to a different inbox gets 404/403 under the existing non-enumeration contract. Assert the strict PUT request schema has no revision field and rejects a client-supplied revision. Add a self-cleaning shared live scenario that replaces a complete synthetic protection posture, reads it back, checks `require_authenticated`, `required_cc`, and the opaque revision, exercises the bound-agent revision endpoint, and verifies that agent scope cannot read or replace the full posture. Extend all three shared-scenario runners in parity only if the existing vocabulary cannot express those operations.
 
 - [ ] **Step 2: Run HTTP tests**
 
@@ -373,10 +390,14 @@ Run: `make spec-check && make generate-sdk-check && make openapi-compat-check`
 
 Expected: PASS.
 
+Run the Go, TypeScript, and Python live contract runners against the local contract server using the repository commands documented for each runner.
+
+Expected: the new shared protection scenario passes through all three clients and cleans up its synthetic agent/account state.
+
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/httpapi api/openapi.yaml sdks/typescript/src/generated sdks/python/src/e2a/generated
+git add internal/httpapi tests/contract api/openapi.yaml sdks/typescript/src/generated sdks/python/src/e2a/generated
 git commit -m "feat: expose autopilot protection contract"
 ```
 
