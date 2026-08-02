@@ -94,10 +94,13 @@ test("clean-room install, authorized screening release, reply, restart, dedupe, 
   assert.equal(setup.current.holds.suppress_notifications, false);
 
   const spool = new JobSpool(path.join(installation.paths.stateRoot, "jobs"));
+  // A genuinely non-allowlisted sender: refused by the static policy, and only
+  // enqueued because e2a's terminal released review status authorizes it.
   const released = JSON.stringify({
     id: "msg_released_after_review",
-    header_from: "buyer@customer.test",
-    verified_domain: "customer.test",
+    header_from: "stranger@outside.test",
+    verified_domain: "outside.test",
+    review_status: "review_approved",
   }) + "\n";
   const daemon = new AutopilotDaemon({
     policy,
@@ -127,7 +130,7 @@ test("clean-room install, authorized screening release, reply, restart, dedupe, 
         return {
           id,
           conversation_id: "conv_synthetic",
-          header_from: "buyer@customer.test",
+          header_from: "stranger@outside.test",
           reply_to: [],
         };
       },

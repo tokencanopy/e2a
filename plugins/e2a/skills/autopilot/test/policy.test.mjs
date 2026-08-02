@@ -198,3 +198,54 @@ test("planDigest binds instructions, setup origin, and exact protection mutation
     planDigest(safe, { ...installation, nextProtection: { after: "changed" } }),
   );
 });
+
+test("normalizePolicy applies the documented retry, timeout, and interval defaults", () => {
+  const policy = normalizePolicy(completeInput);
+
+  assert.deepEqual(policy.limits, {
+    maxAttempts: 3,
+    retryBaseDelayMs: 1_000,
+    runtimeTimeoutMs: 300_000,
+    bounceIntervalMs: 900_000,
+    reconcileIntervalMs: 600_000,
+  });
+  assert.deepEqual(validatePolicy(policy), []);
+});
+
+test("normalizePolicy threads explicit limit overrides through validation", () => {
+  const policy = normalizePolicy({
+    ...completeInput,
+    limits: { maxAttempts: 5, retryBaseDelayMs: 250, runtimeTimeoutMs: 60_000 },
+  });
+
+  assert.equal(policy.limits.maxAttempts, 5);
+  assert.equal(policy.limits.retryBaseDelayMs, 250);
+  assert.equal(policy.limits.runtimeTimeoutMs, 60_000);
+  // Untouched fields keep their defaults.
+  assert.equal(policy.limits.bounceIntervalMs, 900_000);
+  assert.deepEqual(validatePolicy(policy), []);
+});
+
+test("validatePolicy rejects out-of-range limit settings", () => {
+  const policy = normalizePolicy({
+    ...completeInput,
+    limits: { maxAttempts: 0, runtimeTimeoutMs: 500, reconcileIntervalMs: 5_000 },
+  });
+
+  assert.deepEqual(validatePolicy(policy), [
+    "limits.maxAttempts must be an integer between 1 and 10.",
+    "limits.runtimeTimeoutMs must be an integer between 10000 and 3600000.",
+    "limits.reconcileIntervalMs must be an integer between 60000 and 86400000.",
+  ]);
+});
+
+test("validatePolicy marks the OpenClaw adapter unavailable with an operator-facing reason", () => {
+  const policy = normalizePolicy({
+    ...completeInput,
+    runtime: { ...completeInput.runtime, adapter: "openclaw", command: "/usr/local/bin/openclaw" },
+  });
+
+  assert.deepEqual(validatePolicy(policy), [
+    "The OpenClaw adapter is unavailable in this release: its invocation flags are unverified. Choose claude, codex, hermes, or a custom runtime.",
+  ]);
+});

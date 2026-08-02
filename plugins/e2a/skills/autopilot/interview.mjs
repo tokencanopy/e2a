@@ -163,9 +163,10 @@ const QUESTIONS = [
   {
     id: "runtime",
     kind: "choice",
-    choices: ["claude", "codex", "openclaw", "hermes", "custom"],
+    choices: ["claude", "codex", "hermes", "custom"],
     default: "claude",
-    prompt: "Which runtime should handle each job? claude, codex, openclaw, hermes, or custom [claude]",
+    prompt:
+      "Which runtime should handle each job? claude, codex, hermes, or custom [claude] (OpenClaw is unavailable in this release: its invocation flags are unverified)",
   },
   {
     id: "runtime_command",

@@ -136,6 +136,13 @@ export function reconcileSummaries({ policy, spool, messages }) {
   return result;
 }
 
+function logSafe(value) {
+  // JSON encoding keeps sender-controlled text (a message ID can contain
+  // newlines or control characters) on one log line instead of injecting
+  // phantom log entries.
+  return JSON.stringify(String(value));
+}
+
 export class AutopilotDaemon {
   constructor({
     policy,
@@ -148,10 +155,11 @@ export class AutopilotDaemon {
     execFileImpl = execFile,
     log = () => {},
     receiverPort = 0,
-    bounceIntervalMs = 15 * 60 * 1_000,
-    reconcileIntervalMs = 10 * 60 * 1_000,
+    bounceIntervalMs = policy?.limits?.bounceIntervalMs ?? 15 * 60 * 1_000,
+    reconcileIntervalMs = policy?.limits?.reconcileIntervalMs ?? 10 * 60 * 1_000,
     reconcileStatePath,
     now = Date.now,
+    stopDrainTimeoutMs = 30_000,
   }) {
     this.policy = policy;
     this.secrets = secrets;
@@ -167,6 +175,7 @@ export class AutopilotDaemon {
     this.reconcileIntervalMs = reconcileIntervalMs;
     this.reconcileStatePath = reconcileStatePath;
     this.now = now;
+    this.stopDrainTimeoutMs = stopDrainTimeoutMs;
     this.receiver = null;
     this.listener = null;
     this.bounceTimer = null;
@@ -179,6 +188,7 @@ export class AutopilotDaemon {
     this.bounceRequested = false;
     this.stopping = false;
     this.draining = false;
+    this.drainPromise = null;
   }
 
   cliEnvironment() {
@@ -302,7 +312,7 @@ export class AutopilotDaemon {
   requestDrain() {
     if (this.draining || this.stopping) return;
     this.draining = true;
-    void (async () => {
+    this.drainPromise = (async () => {
       try {
         while (!this.stopping) {
           const result = await this.supervisor.runNextJob();
@@ -310,10 +320,14 @@ export class AutopilotDaemon {
           if (result.state === "retry" && Number.isFinite(result.job?.availableAt)) {
             this.scheduleRetry(result.job.availableAt);
           }
-          this.log(`job ${result.job?.messageId || "unknown"} state=${result.state}`);
+          this.log(`job ${logSafe(result.job?.messageId || "unknown")} state=${result.state}`);
         }
       } finally {
         this.draining = false;
+        // A drain pass that ends on idle/done must not strand future-dated
+        // retry jobs: re-arm the earliest persisted retry after every pass
+        // (a no-op when none are pending).
+        this.schedulePersistedRetry();
       }
     })();
   }
@@ -327,7 +341,7 @@ export class AutopilotDaemon {
       this.retryTimer = null;
       this.retryAt = null;
       this.requestDrain();
-    }, Math.max(0, availableAt - Date.now()));
+    }, Math.max(0, availableAt - this.now()));
   }
 
   schedulePersistedRetry() {
@@ -345,6 +359,23 @@ export class AutopilotDaemon {
       this.listenerStableTimer,
     ]) {
       if (timer) clearTimeout(timer);
+    }
+    // Await the active drain so a job in flight finishes its gateway socket
+    // session before the process exits. The wait is bounded: if the runtime
+    // outlasts it, the job stays in `running` and the next start's
+    // recoverRunning re-queues it.
+    if (this.drainPromise) {
+      let waitTimer;
+      const expired = await Promise.race([
+        this.drainPromise.then(() => false),
+        new Promise((resolve) => {
+          waitTimer = setTimeout(() => resolve(true), this.stopDrainTimeoutMs);
+        }),
+      ]);
+      clearTimeout(waitTimer);
+      if (expired) {
+        this.log("stop did not wait for the active job; it recovers as a retry on next start");
+      }
     }
     if (this.listener) {
       this.listener.kill("SIGTERM");

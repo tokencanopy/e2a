@@ -157,3 +157,22 @@ test("API failures do not expose the credential or response body", async () => {
     },
   );
 });
+
+test("mail client refuses cleartext non-loopback base URLs", () => {
+  assert.throws(
+    () =>
+      new E2aMailClient({
+        baseUrl: "http://api.e2a.example.test",
+        apiKey: "e2a_agt_synthetic",
+        agentEmail: "support@example.test",
+      }),
+    /must use HTTPS/,
+  );
+
+  const loopback = new E2aMailClient({
+    baseUrl: "http://127.0.0.1:8787",
+    apiKey: "e2a_agt_synthetic",
+    agentEmail: "support@example.test",
+  });
+  assert.equal(loopback.baseUrl, "http://127.0.0.1:8787");
+});

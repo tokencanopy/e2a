@@ -36,8 +36,13 @@ function requiredText(value, label) {
 
 function httpOrigin(value, label) {
   const parsed = new URL(requiredText(value, label));
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new Error(`${label} must be an HTTP(S) origin without embedded credentials.`);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  if (
+    (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error(`${label} must use HTTPS (HTTP is allowed only for loopback development).`);
   }
   return parsed.origin;
 }

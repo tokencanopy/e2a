@@ -130,3 +130,47 @@ test("loadInstalledConfig rejects unknown credential fields", () => {
     /Unknown credential field: accountApiKey/,
   );
 });
+
+test("loadInstalledConfig refuses cleartext non-loopback e2a URLs", () => {
+  const files = fixture();
+  files.secrets.apiBaseUrl = "http://api.e2a.example.test";
+  writeFileSync(files.secretsPath, JSON.stringify(files.secrets), { mode: 0o600 });
+
+  assert.throws(
+    () =>
+      loadInstalledConfig({
+        policyPath: files.policyPath,
+        secretsPath: files.secretsPath,
+        stateRoot: path.join(files.root, "state"),
+      }),
+    /must use HTTPS/,
+  );
+
+  files.secrets.apiBaseUrl = "https://api.e2a.example.test";
+  files.secrets.deploymentUrl = "http://e2a.example.test";
+  writeFileSync(files.secretsPath, JSON.stringify(files.secrets), { mode: 0o600 });
+  assert.throws(
+    () =>
+      loadInstalledConfig({
+        policyPath: files.policyPath,
+        secretsPath: files.secretsPath,
+        stateRoot: path.join(files.root, "state"),
+      }),
+    /must use HTTPS/,
+  );
+});
+
+test("loadInstalledConfig permits cleartext loopback URLs for local development", () => {
+  const files = fixture();
+  files.secrets.apiBaseUrl = "http://127.0.0.1:8787";
+  files.secrets.deploymentUrl = "http://localhost:8787";
+  writeFileSync(files.secretsPath, JSON.stringify(files.secrets), { mode: 0o600 });
+
+  const loaded = loadInstalledConfig({
+    policyPath: files.policyPath,
+    secretsPath: files.secretsPath,
+    stateRoot: path.join(files.root, "state"),
+  });
+  assert.equal(loaded.secrets.apiBaseUrl, "http://127.0.0.1:8787");
+  assert.equal(loaded.secrets.deploymentUrl, "http://localhost:8787");
+});

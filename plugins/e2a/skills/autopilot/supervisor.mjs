@@ -5,9 +5,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { JobGateway } from "./gateway.mjs";
-import { buildRuntimeInvocation, runRuntimeInvocation } from "./runtime.mjs";
+import {
+  buildRuntimeInvocation,
+  resolveOsSandbox,
+  runRuntimeInvocation,
+  wrapRuntimeInvocation,
+} from "./runtime.mjs";
 
 const MAX_FORWARD_BYTES = 2 * 1024 * 1024;
+
+// e2a's terminal released/approved inbound review statuses. A message carrying
+// one was held by the e2a review gate and then released by a human reviewer
+// (review_approved) or the configured review TTL (review_expired_approved) —
+// the release is the authorization decision, so the harness treats it as
+// locally authorized. pending_review and every other value stay refused
+// (fail-closed).
+const RELEASED_REVIEW_STATUSES = new Set(["review_approved", "review_expired_approved"]);
 
 function safeEqual(actual, expected) {
   const left = Buffer.from(actual || "", "utf8");
@@ -36,12 +49,20 @@ export function isAuthorizedMessage(policy, message) {
   if (addressDomain !== verifiedDomain) return false;
 
   if (policy?.inbound?.mode === "addresses") {
-    return policy.inbound.addresses.includes(address);
+    if (policy.inbound.addresses.includes(address)) return true;
+  } else if (policy?.inbound?.mode === "domains") {
+    if (policy.inbound.domains.includes(verifiedDomain)) return true;
+  } else {
+    return false;
   }
-  if (policy?.inbound?.mode === "domains") {
-    return policy.inbound.domains.includes(verifiedDomain);
-  }
-  return false;
+
+  // The static policy did not match, but the From/verified-domain alignment
+  // check above held: a terminal released review status means an e2a reviewer
+  // already authorized this exact message, on both intake paths.
+  const reviewStatus = String(message?.reviewStatus ?? message?.review_status ?? "")
+    .trim()
+    .toLowerCase();
+  return RELEASED_REVIEW_STATUSES.has(reviewStatus);
 }
 
 function respond(response, status, value) {
@@ -162,8 +183,13 @@ export class AutopilotSupervisor {
     stateRoot,
     helperPath,
     runtimeExecutor = runRuntimeInvocation,
-    maxAttempts = 3,
-    baseDelayMs = 1_000,
+    maxAttempts = policy?.limits?.maxAttempts ?? 3,
+    baseDelayMs = policy?.limits?.retryBaseDelayMs ?? 1_000,
+    installRoot = null,
+    secretsPath = null,
+    policyPath = null,
+    sandboxPlatform = process.platform,
+    environment = process.env,
   }) {
     if (!path.isAbsolute(stateRoot)) throw new Error("Supervisor state root must be absolute.");
     this.policy = policy;
@@ -174,6 +200,11 @@ export class AutopilotSupervisor {
     this.runtimeExecutor = runtimeExecutor;
     this.maxAttempts = maxAttempts;
     this.baseDelayMs = baseDelayMs;
+    this.installRoot = installRoot;
+    this.secretsPath = secretsPath;
+    this.policyPath = policyPath;
+    this.sandboxPlatform = sandboxPlatform;
+    this.environment = environment;
     this.socketRoot = jobSocketRoot(stateRoot);
     mkdirSync(this.socketRoot, { recursive: true, mode: 0o700 });
     const socketRootInfo = lstatSync(this.socketRoot);
@@ -181,6 +212,31 @@ export class AutopilotSupervisor {
       throw new Error("Supervisor socket root must be a real directory.");
     }
     chmodSync(this.socketRoot, 0o700);
+  }
+
+  // The runtime must never read the supervisor's own install root: it holds
+  // the e2a credential, policy, spool, and logs. The runtime bundle directory
+  // (the job helper) stays readable, and the denies are granular rather than
+  // a whole-root subpath deny for exactly that reason. Returns null when no
+  // OS sandbox tool exists; the acknowledged external-isolation model remains
+  // the documented mitigation there.
+  planJobSandbox(messageId) {
+    if (!this.installRoot) return null;
+    const denyPaths = [
+      { path: this.stateRoot, subpath: true },
+      { path: path.join(this.installRoot, "logs"), subpath: true },
+      { path: path.join(this.installRoot, "install.json"), subpath: false },
+    ];
+    if (this.secretsPath) denyPaths.push({ path: this.secretsPath, subpath: false });
+    if (this.policyPath) denyPaths.push({ path: this.policyPath, subpath: false });
+    return resolveOsSandbox({
+      denyPaths,
+      maskPath: this.installRoot,
+      allowPaths: [path.dirname(this.helperPath)],
+      profilePath: path.join(this.socketRoot, `sandbox-${shortJobKey(messageId)}.sb`),
+      platform: this.sandboxPlatform,
+      environment: this.environment,
+    });
   }
 
   async runNextJob() {
@@ -208,18 +264,26 @@ export class AutopilotSupervisor {
         this.spool.checkpointEffects(job.messageId, { reply: value });
       },
       onEscalate: async (value) => {
-        const notification = await this.mail.notifyOwner({
-          ownerEmail: this.policy.mailbox.ownerEmail,
-          subject: "Autopilot needs attention",
-          text: `Autopilot escalated message ${job.messageId}.\n\nReason: ${value.reason}`,
-          idempotencyKey: noticeKey("escalation", job.messageId),
-        });
+        let notification;
+        try {
+          notification = await this.mail.notifyOwner({
+            ownerEmail: this.policy.mailbox.ownerEmail,
+            subject: "Autopilot needs attention",
+            text: `Autopilot escalated message ${job.messageId}.\n\nReason: ${value.reason}`,
+            idempotencyKey: noticeKey("escalation", job.messageId),
+          });
+        } catch {
+          // The escalation itself must not be lost with its notification: the
+          // durable checkpoint keeps the job visible in `autopilot status`
+          // with notificationStatus "failed" instead of a silent retry loop.
+          notification = { status: "failed" };
+        }
         escalation = {
           ...value,
           notificationStatus: notification.status,
         };
         this.spool.checkpointEffects(job.messageId, {
-          escalation: { notificationStatus: notification.status },
+          escalation: { reason: value.reason, notificationStatus: notification.status },
         });
       },
       onComplete: async (value) => {
@@ -235,9 +299,11 @@ export class AutopilotSupervisor {
         socketPath: connection.socketPath,
         token: connection.token,
         helperPath: this.helperPath,
-        timeoutMs: 5 * 60 * 1_000,
+        timeoutMs: this.policy?.limits?.runtimeTimeoutMs ?? 5 * 60 * 1_000,
       });
-      const result = await this.runtimeExecutor(invocation);
+      const result = await this.runtimeExecutor(
+        wrapRuntimeInvocation(invocation, this.planJobSandbox(job.messageId)),
+      );
       if (result.timedOut) {
         return this.failJob(job.messageId, "runtime timed out");
       }
@@ -247,8 +313,12 @@ export class AutopilotSupervisor {
       if (!completion) {
         return this.failJob(job.messageId, "runtime exited without completing the job");
       }
+      // A completion after a failed escalation notification is not a clean
+      // done: the job stays visible in status with the failed notification
+      // outcome instead of looking fully handled.
+      const escalationFailed = escalation?.notificationStatus === "failed";
       const done = this.spool.complete(job.messageId, {
-        completed: true,
+        completed: !escalationFailed,
         escalated: Boolean(escalation),
         ...(escalation
           ? { notificationStatus: escalation.notificationStatus }

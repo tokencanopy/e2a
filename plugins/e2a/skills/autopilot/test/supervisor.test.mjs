@@ -393,3 +393,177 @@ test("dead-lettering notifies the configured owner", async () => {
   assert.equal(notices[0].ownerEmail, "owner@example.test");
   assert.match(notices[0].subject, /stopped after repeated failures/);
 });
+
+test("released-from-review mail is authorized only with From/domain alignment intact", () => {
+  const policy = basePolicy("addresses");
+
+  // Human release (snake_case and camelCase projections) and TTL auto-release.
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      header_from: "stranger@outside.test",
+      verified_domain: "outside.test",
+      review_status: "review_approved",
+    }),
+    true,
+  );
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      headerFrom: "stranger@outside.test",
+      verifiedDomain: "outside.test",
+      reviewStatus: "review_expired_approved",
+    }),
+    true,
+  );
+  // A held-but-not-released message stays refused (fail-closed).
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      headerFrom: "stranger@outside.test",
+      verifiedDomain: "outside.test",
+      reviewStatus: "pending_review",
+    }),
+    false,
+  );
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      headerFrom: "stranger@outside.test",
+      verifiedDomain: "outside.test",
+    }),
+    false,
+  );
+  // A forged release marker cannot fix a spoofed or unauthenticated sender.
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      headerFrom: "stranger@outside.test",
+      verifiedDomain: "spoof.test",
+      reviewStatus: "review_approved",
+    }),
+    false,
+  );
+  assert.equal(
+    isAuthorizedMessage(policy, {
+      headerFrom: "stranger@outside.test",
+      reviewStatus: "review_approved",
+    }),
+    false,
+  );
+});
+
+test("non-allowlisted sender is refused at intake, then released mail is accepted exactly once", async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-release-"));
+  const spool = new JobSpool(path.join(root, "jobs"));
+  const receiver = await createForwardReceiver({
+    port: 0,
+    token: "synthetic_forward_token",
+    policy: basePolicy(),
+    spool,
+  });
+  t.after(() => receiver.close());
+
+  const held = await post(receiver.port, "synthetic_forward_token", {
+    id: "msg_held",
+    headerFrom: "stranger@outside.test",
+    verifiedDomain: "outside.test",
+    reviewStatus: "pending_review",
+  });
+  assert.equal(held.status, 202);
+  assert.equal(spool.list("pending").length, 0);
+
+  const released = await post(receiver.port, "synthetic_forward_token", {
+    id: "msg_held",
+    headerFrom: "stranger@outside.test",
+    verifiedDomain: "outside.test",
+    reviewStatus: "review_approved",
+  });
+  assert.equal(released.status, 200);
+  assert.deepEqual(JSON.parse(released.body), { accepted: true, deduplicated: false });
+  assert.equal(spool.list("pending").length, 1);
+
+  const redelivered = await post(receiver.port, "synthetic_forward_token", {
+    id: "msg_held",
+    headerFrom: "stranger@outside.test",
+    verifiedDomain: "outside.test",
+    reviewStatus: "review_approved",
+  });
+  assert.deepEqual(JSON.parse(redelivered.body), { accepted: true, deduplicated: true });
+  assert.equal(spool.list("pending").length, 1);
+});
+
+test("completion after a failed escalation notification is not a clean done", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
+  const spool = new JobSpool(path.join(root, "jobs"));
+  spool.enqueue({
+    messageId: "msg_escalation_notice_failed",
+    from: "customer@buyer.test",
+    source: "listener",
+  });
+  const supervisor = new AutopilotSupervisor({
+    policy: basePolicy(),
+    spool,
+    mail: {
+      getMessage: async (id) => ({ id, conversation_id: "conv_current" }),
+      getThread: async () => [],
+      reply: async () => ({ status: "pending_review" }),
+      notifyOwner: async () => {
+        throw new Error("synthetic notify failure");
+      },
+    },
+    stateRoot: root,
+    helperPath,
+    runtimeExecutor: async (invocation) => {
+      const escalated = await runHelper("escalate", invocation, "Billing decision.\n");
+      assert.equal(escalated.code, 0, escalated.stderr);
+      return runHelper("complete", invocation, "Escalated to owner.\n");
+    },
+  });
+
+  const result = await supervisor.runNextJob();
+
+  assert.equal(result.state, "done");
+  const done = spool.list("done")[0];
+  assert.equal(done.outcome.completed, false);
+  assert.equal(done.outcome.escalated, true);
+  assert.equal(done.outcome.notificationStatus, "failed");
+  assert.equal(done.effects.escalation.notificationStatus, "failed");
+  assert.equal(done.effects.escalation.reason, "Billing decision.");
+});
+
+test("policy limits drive retry attempts and the runtime timeout", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-supervisor-"));
+  const spool = new JobSpool(path.join(root, "jobs"));
+  spool.enqueue({
+    messageId: "msg_policy_limits",
+    from: "customer@buyer.test",
+    source: "listener",
+  });
+  const limited = basePolicy();
+  limited.limits = {
+    maxAttempts: 1,
+    retryBaseDelayMs: 250,
+    runtimeTimeoutMs: 60_000,
+    bounceIntervalMs: 900_000,
+    reconcileIntervalMs: 600_000,
+  };
+  let observedTimeout;
+  const supervisor = new AutopilotSupervisor({
+    policy: limited,
+    spool,
+    mail: {
+      getMessage: async (id) => ({ id, conversation_id: "conv_current" }),
+      getThread: async () => [],
+      reply: async () => ({ status: "pending_review" }),
+      notifyOwner: async () => ({ status: "pending_review" }),
+    },
+    stateRoot: root,
+    helperPath,
+    runtimeExecutor: async (invocation) => {
+      observedTimeout = invocation.timeoutMs;
+      return { code: 1, timedOut: false, stdout: "", stderr: "" };
+    },
+  });
+
+  const result = await supervisor.runNextJob();
+
+  // maxAttempts 1 from policy: the first failure dead-letters instead of retrying.
+  assert.equal(result.state, "dead");
+  assert.equal(observedTimeout, 60_000);
+});

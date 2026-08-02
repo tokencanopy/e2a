@@ -1,5 +1,6 @@
-import path from "node:path";
 import { spawn } from "node:child_process";
+import { accessSync, chmodSync, constants, existsSync, realpathSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 const SAFE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -37,6 +38,106 @@ function helperCommand(context, command) {
   return `${JSON.stringify(process.execPath)} ${JSON.stringify(
     required(context.helperPath, "job helper path"),
   )} ${command}`;
+}
+
+// Named adapters ship only after their invocation flags are verified against a
+// local installation. OpenClaw is not installed on the verification machine,
+// so its flags cannot be confirmed and the adapter stays unavailable; flip
+// this to true after verifying the argument list below against a real install.
+const OPENCLAW_FLAGS_VERIFIED = false;
+
+function defaultFindExecutable(name, environment = process.env) {
+  for (const directory of String(environment.PATH || "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(directory, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through PATH.
+    }
+  }
+  return null;
+}
+
+function canonicalPath(value) {
+  try {
+    return realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
+function sbplString(value) {
+  return JSON.stringify(value);
+}
+
+export function buildMacosSandboxProfile({ denyPaths = [] } = {}) {
+  const lines = ["(version 1)", "(allow default)"];
+  for (const entry of denyPaths) {
+    const pattern = entry.subpath
+      ? `(subpath ${sbplString(entry.path)})`
+      : `(literal ${sbplString(entry.path)})`;
+    lines.push(`(deny file-read* ${pattern})`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+// resolveOsSandbox plans a per-job OS sandbox for the runtime process. The
+// sandbox denies reads of the Autopilot install root's sensitive files
+// (credentials, policy, state, logs) while leaving the confirmed workspace and
+// the network usable — coding agents need their own LLM APIs. Returns null
+// when no supported sandbox tool exists; the caller then runs unwrapped and
+// the acknowledged external-isolation model remains the mitigation.
+//
+// - macOS: sandbox-exec with an allow-default profile plus canonicalized
+//   file-read* denies (sandbox paths must be realpaths — /tmp is a symlink).
+// - Linux: bwrap bind-mounts the host tree, masks the install root with a
+//   tmpfs, then re-binds allowPaths (the pinned runtime bundle) read-only.
+export function resolveOsSandbox(
+  {
+    denyPaths = [],
+    maskPath = null,
+    allowPaths = [],
+    profilePath = null,
+    platform = process.platform,
+    environment = process.env,
+    findExecutable = defaultFindExecutable,
+  } = {},
+) {
+  if (platform === "darwin") {
+    const tool = findExecutable("sandbox-exec", environment);
+    if (!tool || !profilePath) return null;
+    const profile = buildMacosSandboxProfile({
+      denyPaths: denyPaths.map((entry) => ({ ...entry, path: canonicalPath(entry.path) })),
+    });
+    writeFileSync(profilePath, profile, { encoding: "utf8", mode: 0o600 });
+    chmodSync(profilePath, 0o600);
+    return { tool: "sandbox-exec", command: tool, args: ["-f", profilePath] };
+  }
+  if (platform === "linux") {
+    const tool = findExecutable("bwrap", environment);
+    if (!tool || !maskPath) return null;
+    const args = ["--dev-bind", "/", "/", "--tmpfs", maskPath];
+    for (const allow of allowPaths) {
+      if (existsSync(allow)) args.push("--ro-bind", allow, allow);
+    }
+    args.push("--");
+    return { tool: "bwrap", command: tool, args };
+  }
+  return null;
+}
+
+// wrapRuntimeInvocation prepends a resolved OS sandbox to a built invocation,
+// transparent to the adapter: the adapter's command and args become the
+// sandbox's inner command line.
+export function wrapRuntimeInvocation(invocation, sandbox) {
+  if (!sandbox) return invocation;
+  return {
+    ...invocation,
+    command: sandbox.command,
+    args: [...sandbox.args, invocation.command, ...invocation.args],
+    sandboxTool: sandbox.tool,
+  };
 }
 
 export function buildRuntimePrompt(policy, context) {
@@ -116,6 +217,11 @@ export function buildRuntimeInvocation(
       stdin = prompt;
       break;
     case "openclaw":
+      if (!OPENCLAW_FLAGS_VERIFIED) {
+        throw new Error(
+          "The OpenClaw adapter is unavailable: its invocation flags are unverified (no local installation to verify against). Choose claude, codex, hermes, or a custom runtime.",
+        );
+      }
       args = [
         "agent",
         "exec",

@@ -298,3 +298,56 @@ test("gateway exposes escalation and completion but no mailbox list or delete ro
   assert.equal(repeatedEscalation.status, 409);
   assert.equal(repeatedCompletion.status, 409);
 });
+
+test("a failed escalation side effect stays retryable instead of latching", async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-gateway-"));
+  let failures = 1;
+  const escalations = [];
+  const gateway = new JobGateway({
+    socketPath: path.join(root, "job.sock"),
+    job: {
+      messageId: "msg_current",
+      jobId: "job_current",
+      authorizedFrom: "customer@example.test",
+    },
+    ownerEmail: "owner@example.com",
+    ccOwner: true,
+    mail: {
+      getMessage: async (messageId) => ({ id: messageId }),
+      getThread: async () => [],
+      reply: async () => ({ status: "pending_review" }),
+    },
+    onEscalate: async (value) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error("synthetic notification failure");
+      }
+      escalations.push(value);
+    },
+  });
+  const connection = await gateway.start();
+  t.after(() => gateway.close());
+
+  const failed = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/escalate",
+    body: { reason: "Billing decision required." },
+  });
+  assert.equal(failed.status, 500);
+  assert.equal(escalations.length, 0);
+
+  const retried = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/escalate",
+    body: { reason: "Billing decision required." },
+  });
+  assert.equal(retried.status, 200);
+  assert.equal(escalations.length, 1);
+
+  const repeated = await request(connection.socketPath, connection.token, {
+    method: "POST",
+    route: "/v1/escalate",
+    body: { reason: "Billing decision required." },
+  });
+  assert.equal(repeated.status, 409);
+});

@@ -289,3 +289,159 @@ test("listener replacement exit is terminal instead of entering a restart fight"
   assert.equal(spawns, 1);
   assert.equal(daemon.restartTimer, null);
 });
+
+test("future-dated retries are re-armed after every drain pass", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-retry-starve-"));
+  const realStart = Date.now();
+  const epoch = 1_700_000_000_000;
+  // A fake clock pinned to real elapsed time so spool and daemon agree while
+  // setTimeout delays stay real and short.
+  const now = () => epoch + (Date.now() - realStart);
+  const spool = new JobSpool(path.join(root, "jobs"), { now });
+  // Stagger: the second job becomes available well after the first drain ends
+  // (attempts=1, so fail's backoff equals baseDelayMs).
+  for (const [messageId, baseDelayMs] of [["msg_retry_a", 30], ["msg_retry_b", 90]]) {
+    spool.enqueue({ messageId, from: "customer@buyer.test", source: "reconcile" });
+    spool.claimNext();
+    spool.fail(messageId, "synthetic failure", { maxAttempts: 3, baseDelayMs });
+  }
+
+  const completed = [];
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool,
+    supervisor: {
+      async runNextJob() {
+        spool.promoteReadyRetries();
+        const job = spool.claimNext();
+        if (!job) return { state: "idle" };
+        completed.push(job.messageId);
+        return { state: "done", job: spool.complete(job.messageId) };
+      },
+    },
+    cli: { command: "/usr/bin/false", baseArgs: [] },
+    now,
+  });
+
+  // One arm at startup; no further events arrive. The drain finally-hook must
+  // re-arm the remaining retry after each pass or msg_retry_b starves.
+  daemon.schedulePersistedRetry();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await daemon.stop();
+
+  assert.deepEqual(completed.sort(), ["msg_retry_a", "msg_retry_b"]);
+});
+
+test("stop waits for an in-flight drain to finish its job", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-stop-drain-"));
+  const spool = new JobSpool(path.join(root, "jobs"));
+  spool.enqueue({ messageId: "msg_in_flight", from: "customer@buyer.test", source: "listener" });
+
+  let releaseJob;
+  const jobGate = new Promise((resolve) => { releaseJob = resolve; });
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool,
+    supervisor: {
+      async runNextJob() {
+        const job = spool.claimNext();
+        if (!job) return { state: "idle" };
+        await jobGate;
+        return { state: "done", job: spool.complete(job.messageId) };
+      },
+    },
+    cli: { command: "/usr/bin/false", baseArgs: [] },
+    stopDrainTimeoutMs: 5_000,
+  });
+
+  daemon.requestDrain();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(spool.list("running").length, 1);
+
+  let stopped = false;
+  const stopping = daemon.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(stopped, false, "stop must wait for the active job");
+
+  releaseJob();
+  await stopping;
+  assert.equal(stopped, true);
+  assert.equal(spool.list("done").length, 1);
+});
+
+test("a stop that outlasts the drain bound leaves the job recoverable", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-stop-bound-"));
+  const spool = new JobSpool(path.join(root, "jobs"));
+  spool.enqueue({ messageId: "msg_stuck", from: "customer@buyer.test", source: "listener" });
+
+  const logs = [];
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool,
+    supervisor: {
+      async runNextJob() {
+        const job = spool.claimNext();
+        if (!job) return { state: "idle" };
+        await new Promise(() => {}); // never finishes
+        return { state: "done", job };
+      },
+    },
+    cli: { command: "/usr/bin/false", baseArgs: [] },
+    log: (line) => logs.push(line),
+    stopDrainTimeoutMs: 20,
+  });
+
+  daemon.requestDrain();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await daemon.stop();
+
+  assert.equal(spool.list("running").length, 1);
+  assert.equal(spool.recoverRunning(), 1);
+  assert.equal(spool.list("retry").length, 1);
+  assert.ok(logs.some((line) => /recovers as a retry on next start/.test(line)));
+});
+
+test("job logs JSON-encode sender-controlled message IDs", async () => {
+  const logs = [];
+  const daemon = new AutopilotDaemon({
+    policy,
+    secrets: {
+      apiKey: "e2a_agt_synthetic",
+      forwardToken: "synthetic",
+      deploymentUrl: "https://e2a.example.test",
+    },
+    spool: { recoverRunning() {}, promoteReadyRetries() {} },
+    supervisor: {
+      calls: 0,
+      async runNextJob() {
+        this.calls += 1;
+        if (this.calls > 1) return { state: "idle" };
+        return { state: "done", job: { messageId: "msg_evil\nforged log line" } };
+      },
+    },
+    cli: { command: "/usr/bin/false", baseArgs: [] },
+    log: (line) => logs.push(line),
+  });
+
+  daemon.requestDrain();
+  await daemon.drainPromise;
+
+  assert.equal(logs.length, 1);
+  assert.ok(!logs[0].includes("\n"), "log line must not contain a raw newline");
+  assert.match(logs[0], /msg_evil\\nforged log line/);
+});

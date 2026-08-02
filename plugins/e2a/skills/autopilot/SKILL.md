@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: Conversationally configure and operate a policy-first, always-on local e2a email agent. Use when someone wants an agent to monitor an inbox, handle support or another bounded task, review unauthorized senders, require human approval for outbound mail, CC an owner, or run Claude Code, Codex, OpenClaw, Hermes Agent, or a custom runtime unattended.
+description: Conversationally configure and operate a policy-first, always-on local e2a email agent. Use when someone wants an agent to monitor an inbox, handle support or another bounded task, review unauthorized senders, require human approval for outbound mail, CC an owner, or run Claude Code, Codex, Hermes Agent, or a custom runtime unattended.
 version: 2
 ---
 
@@ -38,8 +38,9 @@ The interview must establish:
    acknowledgement.
 8. Prompt-injection screening, recommended and default **on**. Turning it off
    requires a warned acknowledgement.
-9. Claude Code, Codex, OpenClaw, Hermes Agent, or a custom executable; its
-   absolute path, workspace, and isolation mode. OpenClaw, Hermes, and custom
+9. Claude Code, Codex, Hermes Agent, or a custom executable; its
+   absolute path, workspace, and isolation mode. (OpenClaw is unavailable in
+   this release: its invocation flags are unverified.) Hermes and custom
    executables require an acknowledged external isolation boundary because
    Autopilot cannot verify one for them. A built-in container runner is not
    implemented in this release; use an explicitly reviewed custom wrapper.
@@ -122,14 +123,23 @@ and independent unread reconciliation cover silent WebSocket gaps.
 ## Runtime isolation
 
 Adapters are one-shot and receive a sanitized environment plus the job gateway.
-Claude Code and Codex use non-persistent, restricted native invocations.
-OpenClaw uses its documented embedded headless command and Hermes uses one-shot
-safe mode, but neither is treated as an isolation boundary: both require the
-same explicit custom-isolation acknowledgement as a custom executable.
+Claude Code and Codex run with their session-persistence, MCP inheritance, and
+user config disabled; Hermes uses one-shot safe mode. None of these adapter
+flags is treated as an isolation boundary by itself.
 
-The OS account is still a trust boundary. A hostile process running as the same
-user may inspect owner-readable files or process state. A prompt that says “do not
-read secrets” is not a sandbox; do not describe it as one.
+For every job the harness also wraps the runtime process in a per-job OS
+sandbox when one is available: `sandbox-exec` on macOS (an allow-default
+profile with `file-read*` denies) or `bwrap` on Linux (tmpfs mask over the
+install root). The sandbox denies reads of the Autopilot install root's
+credential, policy, state, and log files while leaving the confirmed workspace
+and the network usable — coding agents need their own LLM APIs. When neither
+tool exists the runtime runs unwrapped, and the acknowledged
+external-isolation model below remains the mitigation.
+
+The OS account is still a trust boundary. A hostile process running as the
+same user may inspect owner-readable files outside the denied set or process
+state. A prompt that says “do not read secrets” is not a sandbox; do not
+describe it as one.
 
 ## Operations
 

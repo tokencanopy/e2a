@@ -28,6 +28,20 @@ const OPT_OUTS = new Set([
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+// The OpenClaw adapter ships disabled until its invocation flags are verified
+// against a local installation (see runtime.mjs OPENCLAW_FLAGS_VERIFIED).
+const UNAVAILABLE_RUNTIMES = new Map([
+  ["openclaw", "The OpenClaw adapter is unavailable in this release: its invocation flags are unverified. Choose claude, codex, hermes, or a custom runtime."],
+]);
+
+const DEFAULT_LIMITS = {
+  maxAttempts: 3,
+  retryBaseDelayMs: 1_000,
+  runtimeTimeoutMs: 5 * 60 * 1_000,
+  bounceIntervalMs: 15 * 60 * 1_000,
+  reconcileIntervalMs: 10 * 60 * 1_000,
+};
+
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -39,6 +53,22 @@ function lowercase(value) {
 function uniqueSorted(values, transform = text) {
   if (!Array.isArray(values)) return [];
   return [...new Set(values.map(transform).filter(Boolean))].sort();
+}
+
+function normalizeLimit(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : Number.NaN;
+}
+
+function normalizeLimits(input = {}) {
+  return {
+    maxAttempts: normalizeLimit(input.maxAttempts, DEFAULT_LIMITS.maxAttempts),
+    retryBaseDelayMs: normalizeLimit(input.retryBaseDelayMs, DEFAULT_LIMITS.retryBaseDelayMs),
+    runtimeTimeoutMs: normalizeLimit(input.runtimeTimeoutMs, DEFAULT_LIMITS.runtimeTimeoutMs),
+    bounceIntervalMs: normalizeLimit(input.bounceIntervalMs, DEFAULT_LIMITS.bounceIntervalMs),
+    reconcileIntervalMs: normalizeLimit(input.reconcileIntervalMs, DEFAULT_LIMITS.reconcileIntervalMs),
+  };
 }
 
 export function createPolicy() {
@@ -73,6 +103,7 @@ export function createPolicy() {
       workdir: "",
       sandbox: "custom",
     },
+    limits: { ...DEFAULT_LIMITS },
     service: {
       manager: process.platform === "darwin" ? "launchd" : "systemd",
     },
@@ -122,6 +153,7 @@ export function normalizePolicy(input = {}) {
       workdir: text(input.runtime?.workdir),
       sandbox: lowercase(input.runtime?.sandbox || defaults.runtime.sandbox),
     },
+    limits: normalizeLimits(input.limits),
     service: {
       manager: lowercase(input.service?.manager || defaults.service.manager),
     },
@@ -206,6 +238,21 @@ export function validatePolicy(input) {
   }
   if (!SUPPORTED_RUNTIMES.has(policy.runtime.adapter)) {
     errors.push(`Unsupported runtime adapter: ${policy.runtime.adapter || "(missing)"}.`);
+  } else if (UNAVAILABLE_RUNTIMES.has(policy.runtime.adapter)) {
+    errors.push(UNAVAILABLE_RUNTIMES.get(policy.runtime.adapter));
+  }
+  const limitBounds = {
+    maxAttempts: [1, 10],
+    retryBaseDelayMs: [1, 86_400_000],
+    runtimeTimeoutMs: [10_000, 3_600_000],
+    bounceIntervalMs: [60_000, 86_400_000],
+    reconcileIntervalMs: [60_000, 86_400_000],
+  };
+  for (const [field, [minimum, maximum]] of Object.entries(limitBounds)) {
+    const value = policy.limits[field];
+    if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+      errors.push(`limits.${field} must be an integer between ${minimum} and ${maximum}.`);
+    }
   }
   if (!policy.runtime.command) {
     errors.push("Provide the absolute runtime command path.");

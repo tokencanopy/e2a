@@ -262,12 +262,15 @@ export class JobGateway {
           throw new RequestError(400, "Escalation accepts a reason only.");
         }
         const reason = boundedText(body.reason, "reason", 4_000);
-        this.escalated = true;
+        // Only latch the escalated flag after the escalation side effect
+        // resolves: if it fails the runtime gets a retryable 500 and may
+        // escalate again, instead of a permanent 409 with nothing recorded.
         await this.onEscalate({
           jobId: this.job.jobId,
           messageId: this.job.messageId,
           reason,
         });
+        this.escalated = true;
         sendJson(response, 200, { escalated: true });
         return;
       }

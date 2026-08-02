@@ -30,6 +30,10 @@ export function createInstalledDaemon({ environment = process.env, log } = {}) {
     mail,
     stateRoot: installed.stateRoot,
     helperPath: path.join(directory, "job-tool.mjs"),
+    installRoot: path.dirname(installed.stateRoot),
+    secretsPath: installed.secretsPath,
+    policyPath: installed.policyPath,
+    environment,
   });
   return new AutopilotDaemon({
     policy: installed.policy,

@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  buildMacosSandboxProfile,
   buildRuntimeInvocation,
   buildRuntimePrompt,
+  resolveOsSandbox,
   runRuntimeInvocation,
   sanitizeRuntimeEnvironment,
+  wrapRuntimeInvocation,
 } from "../runtime.mjs";
 
 const context = {
@@ -104,24 +109,14 @@ test("Codex adapter uses an ephemeral workspace sandbox and ignores user config"
   assert.equal(invocation.stdin, invocation.prompt);
 });
 
-test("OpenClaw adapter uses the documented embedded headless command", () => {
-  const invocation = buildRuntimeInvocation(policy("openclaw"), context, {
-    environment: { PATH: "/usr/bin", HOME: "/home/operator" },
-  });
-
-  assert.deepEqual(invocation.args, [
-    "agent",
-    "exec",
-    "--message-file",
-    "-",
-    "--cwd",
-    "/srv/autopilot/support",
-    "--no-auth-env-only",
-    "--timeout",
-    "120",
-    "--json",
-  ]);
-  assert.equal(invocation.stdin, invocation.prompt);
+test("OpenClaw adapter is unavailable until its invocation flags are verified", () => {
+  assert.throws(
+    () =>
+      buildRuntimeInvocation(policy("openclaw"), context, {
+        environment: { PATH: "/usr/bin", HOME: "/home/operator" },
+      }),
+    /OpenClaw adapter is unavailable: its invocation flags are unverified/,
+  );
 });
 
 test("Hermes adapter uses one-shot safe mode without yolo", () => {
@@ -214,3 +209,120 @@ test("runRuntimeInvocation terminates a timed-out process group", async () => {
   assert.equal(result.timedOut, true);
   assert.notEqual(result.code, 0);
 });
+
+test("macOS sandbox profile denies reads with canonicalized subpaths", () => {
+  const profile = buildMacosSandboxProfile({
+    denyPaths: [
+      { path: "/opt/e2a-autopilot/state", subpath: true },
+      { path: "/opt/e2a-autopilot/secrets.json", subpath: false },
+    ],
+  });
+
+  assert.match(profile, /^\(version 1\)\n\(allow default\)\n/);
+  assert.match(profile, /\(deny file-read\* \(subpath "\/opt\/e2a-autopilot\/state"\)\)/);
+  assert.match(profile, /\(deny file-read\* \(literal "\/opt\/e2a-autopilot\/secrets\.json"\)\)/);
+});
+
+test("resolveOsSandbox falls back to unwrapped when no sandbox tool exists", () => {
+  const sandbox = resolveOsSandbox({
+    denyPaths: [{ path: "/synthetic/state", subpath: true }],
+    maskPath: "/synthetic",
+    profilePath: "/synthetic-profile.sb",
+    platform: "darwin",
+    findExecutable: () => null,
+  });
+
+  assert.equal(sandbox, null);
+  const invocation = {
+    command: "/usr/local/bin/claude",
+    args: ["-p", "prompt"],
+    cwd: "/srv/autopilot/support",
+    env: {},
+    stdin: null,
+    timeoutMs: 1_000,
+  };
+  assert.equal(wrapRuntimeInvocation(invocation, sandbox), invocation);
+});
+
+test("Linux sandbox masks the install root and re-binds the runtime bundle read-only", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-bwrap-"));
+  const installRoot = path.join(root, "install");
+  const bundle = path.join(installRoot, "runtime");
+  mkdirSync(bundle, { recursive: true });
+
+  const sandbox = resolveOsSandbox({
+    denyPaths: [],
+    maskPath: installRoot,
+    allowPaths: [bundle, path.join(root, "nonexistent-bundle")],
+    platform: "linux",
+    findExecutable: (name) => (name === "bwrap" ? "/usr/bin/bwrap" : null),
+  });
+
+  assert.equal(sandbox.tool, "bwrap");
+  assert.deepEqual(sandbox.args.slice(0, 4), ["--dev-bind", "/", "/", "--tmpfs"]);
+  assert.equal(sandbox.args[4], installRoot);
+  const joined = sandbox.args.join(" ");
+  assert.match(joined, new RegExp(`--ro-bind ${bundle} ${bundle}`.replaceAll("/", "\\/")));
+  assert.doesNotMatch(joined, /nonexistent-bundle/);
+  assert.equal(sandbox.args.at(-1), "--");
+
+  const wrapped = wrapRuntimeInvocation(
+    { command: "/usr/local/bin/codex", args: ["exec", "-"], cwd: "/srv", env: {}, stdin: null, timeoutMs: 1_000 },
+    sandbox,
+  );
+  assert.equal(wrapped.command, "/usr/bin/bwrap");
+  assert.deepEqual(wrapped.args.slice(-3), ["/usr/local/bin/codex", "exec", "-"]);
+});
+
+test("runtime child cannot read files outside the workspace", async (t) => {
+  if (process.platform !== "darwin" || !findSandboxExec()) {
+    t.skip("sandbox-exec is not available on this machine");
+    return;
+  }
+
+  const root = mkdtempSync(path.join(tmpdir(), "autopilot-sandbox-"));
+  const installRoot = path.join(root, "install");
+  const workdir = path.join(root, "workspace");
+  mkdirSync(installRoot, { recursive: true });
+  mkdirSync(workdir, { recursive: true });
+  const credential = path.join(installRoot, "secrets.json");
+  writeFileSync(credential, '{"apiKey":"synthetic-credential"}\n', { mode: 0o600 });
+  chmodSync(credential, 0o600);
+  writeFileSync(path.join(workdir, "notes.txt"), "workspace file\n");
+
+  const profilePath = path.join(root, "job.sb");
+  const sandbox = resolveOsSandbox({
+    denyPaths: [
+      { path: installRoot, subpath: true },
+      { path: credential, subpath: false },
+    ],
+    profilePath,
+    platform: "darwin",
+  });
+  assert.equal(sandbox?.tool, "sandbox-exec");
+  assert.equal(statSync(profilePath).mode & 0o777, 0o600);
+
+  const wrap = (command, args) =>
+    wrapRuntimeInvocation(
+      { command, args, cwd: workdir, env: { PATH: process.env.PATH }, stdin: null, timeoutMs: 5_000 },
+      sandbox,
+    );
+
+  const denied = await runRuntimeInvocation(wrap("/bin/cat", [credential]));
+  assert.notEqual(denied.code, 0, "sandboxed child must not read the credential file");
+  assert.doesNotMatch(denied.stdout, /synthetic-credential/);
+  assert.match(denied.stderr, /Operation not permitted/i);
+
+  const allowed = await runRuntimeInvocation(wrap("/bin/cat", [path.join(workdir, "notes.txt")]));
+  assert.equal(allowed.code, 0, allowed.stderr);
+  assert.match(allowed.stdout, /workspace file/);
+});
+
+function findSandboxExec() {
+  try {
+    accessSync("/usr/bin/sandbox-exec", constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}

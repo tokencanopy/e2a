@@ -93,7 +93,14 @@ export function acquireSupervisorLock(
           `Autopilot supervisor is already running${current.pid ? ` as PID ${current.pid}` : ""}.`,
         );
       }
-      unlinkSync(file);
+      try {
+        unlinkSync(file);
+      } catch (unlinkError) {
+        // A concurrent acquirer may have reclaimed the stale lock between our
+        // inspect and unlink; tolerate the miss and re-loop so the loser of
+        // that race gets a clean "already running" from the next attempt.
+        if (unlinkError?.code !== "ENOENT") throw unlinkError;
+      }
     }
   }
   throw new Error("Could not acquire the Autopilot supervisor lock.");
