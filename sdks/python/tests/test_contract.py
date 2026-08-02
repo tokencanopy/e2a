@@ -17,6 +17,7 @@ setup) cause the scenario to be skipped with a clear reason.
 from __future__ import annotations
 
 import base64
+import binascii
 import json as json_mod
 import os
 import re
@@ -94,6 +95,10 @@ def step_raw_body(step: dict[str, Any]) -> bytes | None:
     if "body" in step:
         raise ValueError(
             f"step {step['id']}: body and raw_body_base64 are mutually exclusive"
+        )
+    if encoded == "":
+        raise ValueError(
+            f"step {step['id']}: raw_body_base64 is empty; omit the key to send no body"
         )
     return base64.b64decode(encoded, validate=True)
 
@@ -284,6 +289,18 @@ class Runner:
         if "status" in ex:
             assert status == ex["status"], f"step {step['id']}: expected {ex['status']}, got {status}"
 
+        # Raw-text assertion. Runs on the undecoded response and BEFORE the
+        # JSON assertions, so it also applies to steps making no other body
+        # claim. body_excludes is a top-level KEY check and cannot see a nested
+        # leak (e.g. error.details.fields[0].value); this one is deliberately
+        # not JSON-aware.
+        for needle in ex.get("response_excludes", []):
+            resolved = self.resolve(needle)
+            assert resolved not in raw_body, (
+                f"step {step['id']}: response contains {resolved!r} anywhere in "
+                f"its body, which it must not: {raw_body}"
+            )
+
         has_capture = bool(step.get("capture"))
         if not any(
             k in ex for k in ("body_contains", "body_excludes", "body_match", "body_array_contains")
@@ -304,7 +321,17 @@ class Runner:
         if "body_match" in ex:
             for json_path, expected in ex["body_match"].items():
                 resolved_path = self.resolve(json_path)
-                actual = json_path_get(data, resolved_path)
+                # _MISSING, not None: json_path_get's default is returned for an
+                # ABSENT path, so defaulting to None made an expected YAML
+                # `null` pass on a field that simply was not there — while the
+                # Go runner (jsonPathGet's `found` flag) and the TypeScript one
+                # (undefined vs null) both failed it. A sentinel that equals
+                # nothing keeps "absent" and "present and null" distinct, and
+                # keeps all three runners answering the same way.
+                actual = json_path_get(data, resolved_path, _MISSING)
+                assert actual is not _MISSING, (
+                    f"step {step['id']}: body_match {resolved_path} not found in response: {raw_body}"
+                )
                 resolved_expected = self.resolve_value(expected)
                 assert values_equal(actual, resolved_expected), (
                     f"step {step['id']}: body_match {resolved_path} = {actual!r}, want {resolved_expected!r}"
@@ -700,6 +727,160 @@ def test_runner_rejects_step_with_both_body_and_raw_body_base64():
         )
 
 
+@pytest.mark.parametrize(
+    "label,value",
+    [
+        ("non-alphabet characters", "not base64!!"),
+        ("missing padding", "eyJhIjoxfQ"),
+        ("embedded whitespace", "eyJhIjox\nfQ=="),
+        ("present but empty", ""),
+    ],
+)
+def test_runner_rejects_bad_raw_body_base64(label, value):
+    """Parity contract with the Go and TypeScript runners.
+
+    A fixture that is not exactly-canonical base64, or is present but empty,
+    must fail LOUDLY in all three languages. The failure this guards against is
+    worse than a wrong test: Node's ``Buffer.from(x, "base64")`` drops
+    non-alphabet characters instead of erroring, so a typo'd fixture used to
+    send DIFFERENT BYTES in the TypeScript runner while these two reported a
+    clean error — one scenario quietly testing something else.
+    """
+    with pytest.raises((ValueError, binascii.Error)):
+        step_raw_body({"id": "bad", "raw_body_base64": value})
+
+
+def test_runner_treats_absent_raw_body_base64_as_no_body():
+    assert step_raw_body({"id": "none"}) is None
+
+
+def test_runner_rejects_bad_headers_base64():
+    with pytest.raises((ValueError, binascii.Error)):
+        step_raw_headers({"id": "bad", "headers_base64": {"Idempotency-Key": "not base64!!"}})
+
+
+# ── response_excludes ─────────────────────────────────────────────
+#
+# A RAW-TEXT check over the whole response, not the top-level key check
+# body_excludes performs. The distinction is the entire reason the key exists:
+# the leak it must catch — a server echoing the offending input back inside an
+# error envelope — sits at a nested path where body_excludes is vacuously
+# satisfied.
+
+_ECHO_LEAK = json_mod.dumps(
+    {
+        "error": {
+            "code": "invalid_request",
+            "details": {"fields": [{"location": "body", "value": "a\ufffdb@example.com"}]},
+        }
+    }
+)
+
+
+def _run_echo_step(monkeypatch, expect: dict[str, Any]) -> None:
+    scenario = {
+        "name": "leak",
+        "description": "echo check",
+        "steps": [
+            {
+                "id": "leak",
+                "action": "request",
+                "method": "GET",
+                "path": "/v1/contacts",
+                "expect": expect,
+            }
+        ],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    monkeypatch.setattr(
+        runner,
+        "_raw",
+        lambda method, path, body=None, **kwargs: httpx.Response(400, text=_ECHO_LEAK),
+    )
+    try:
+        run_runner(runner)
+    finally:
+        runner.close()
+
+
+def test_body_excludes_passes_on_a_nested_leak(monkeypatch):
+    """The weakness being fixed: body_excludes is satisfied by any error
+    envelope, because an envelope has no top-level `address` key either way."""
+    _run_echo_step(monkeypatch, {"status": 400, "body_excludes": ["address"]})
+
+
+def test_response_excludes_catches_a_nested_leak(monkeypatch):
+    with pytest.raises(AssertionError, match="anywhere in"):
+        _run_echo_step(monkeypatch, {"status": 400, "response_excludes": ["example.com"]})
+
+
+def test_response_excludes_passes_when_absent_with_no_other_body_claim(monkeypatch):
+    _run_echo_step(monkeypatch, {"status": 400, "response_excludes": ["not-in-the-response"]})
+
+
+# ── body_match: absent vs present-and-null ────────────────────────
+
+
+def test_body_match_null_does_not_pass_on_an_absent_field(monkeypatch):
+    """Regression for a Python-only vacuity: json_path_get's default was None,
+    so an expected YAML `null` was satisfied by a field that simply was not
+    there. Go (jsonPathGet's `found` flag) and TypeScript (undefined vs null)
+    both failed that case, so a scenario asserting `null` was a real assertion
+    in two runners and a no-op in the third."""
+    scenario = {
+        "name": "null_match",
+        "description": "absent is not null",
+        "steps": [
+            {
+                "id": "probe",
+                "action": "request",
+                "method": "GET",
+                "path": "/v1/contacts",
+                "expect": {"status": 200, "body_match": {"missing_field": None}},
+            }
+        ],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    monkeypatch.setattr(
+        runner,
+        "_raw",
+        lambda method, path, body=None, **kwargs: httpx.Response(200, text='{"present":1}'),
+    )
+    try:
+        with pytest.raises(AssertionError, match="not found in response"):
+            run_runner(runner)
+    finally:
+        runner.close()
+
+
+def test_body_match_null_still_passes_on_a_present_null(monkeypatch):
+    """Control for the test above: the sentinel must separate ABSENT from
+    present-and-null, not reject null outright."""
+    scenario = {
+        "name": "null_match_ok",
+        "description": "present null matches null",
+        "steps": [
+            {
+                "id": "probe",
+                "action": "request",
+                "method": "GET",
+                "path": "/v1/contacts",
+                "expect": {"status": 200, "body_match": {"nullable": None}},
+            }
+        ],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    monkeypatch.setattr(
+        runner,
+        "_raw",
+        lambda method, path, body=None, **kwargs: httpx.Response(200, text='{"nullable":null}'),
+    )
+    try:
+        run_runner(runner)
+    finally:
+        runner.close()
+
+
 def test_httpx_refuses_non_ascii_str_header_so_raw_bytes_are_required():
     """Pins the reason headers_base64 decodes to BYTES rather than a str: httpx
     ASCII-encodes str header values, so the str form cannot express this at
@@ -716,6 +897,11 @@ def test_invalid_utf8_scenario_carries_genuinely_ill_formed_bytes():
     body = step_raw_body(steps["body_rejected"])
     assert body, "body_rejected must declare raw_body_base64"
     assert not _is_valid_utf8(body), "body_rejected payload must be ill-formed UTF-8"
+    # The offending-bytes echo check must be the whole-response form; a
+    # top-level body_excludes would be vacuous on an error envelope.
+    assert steps["body_rejected"]["expect"].get("response_excludes"), (
+        "body_rejected must declare response_excludes"
+    )
 
     header = step_raw_headers(steps["header_rejected"])["Idempotency-Key"]
     assert not _is_valid_utf8(header), "header_rejected value must be ill-formed UTF-8"

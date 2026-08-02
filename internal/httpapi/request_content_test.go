@@ -639,3 +639,71 @@ func BenchmarkScanCleanImportBody(b *testing.B) {
 		}
 	}
 }
+
+// TestInvalidUTF8BehaviorChangesArePinned locks the three answer changes the
+// well-formed-text rule causes beyond the ones the rule itself is about. Each
+// was measured against the pre-rule tree (83749ca6) and each is documented in
+// docs/api.md, because a client can already be branching on it:
+//
+//	GET /v1/agents/%FF        404 not_found    -> 400 invalid_request
+//	GET /v1/agents?cursor=%FF 400 invalid_cursor -> 400 invalid_request
+//	unauthenticated + bad byte  401 unauthorized -> 400 invalid_request
+//
+// The controls in the same test are the point: none of these may bleed into
+// requests that are merely wrong rather than ill-formed. A cursor that is
+// well-formed text but undecodable is still invalid_cursor, a well-formed id
+// that does not exist is still 404, and a clean unauthenticated request is
+// still 401.
+func TestInvalidUTF8BehaviorChangesArePinned(t *testing.T) {
+	t.Run("path param 404 becomes 400", func(t *testing.T) {
+		srv := testServer(t)
+		code, body := sendJSON(t, http.MethodGet, srv.URL+"/v1/agents/%FF", "good", nil)
+		assertContentRejected(t, code, body, "path.email")
+
+		// Control: a well-formed address that does not exist stays 404.
+		if code, body := sendJSON(t, http.MethodGet, srv.URL+"/v1/agents/nope%40acme.com", "good", nil); code != http.StatusNotFound {
+			t.Errorf("unknown well-formed address = %d %v; want 404 — only ill-formed ids become 400", code, body)
+		}
+	})
+
+	t.Run("cursor error code changes", func(t *testing.T) {
+		srv := testServer(t)
+		code, body := sendJSON(t, http.MethodGet, srv.URL+"/v1/agents?cursor=%FF", "good", nil)
+		assertContentRejected(t, code, body, "query.cursor")
+
+		// Control: an undecodable but well-formed cursor keeps invalid_cursor.
+		// Clients branch on error.code, so this split is the contract.
+		code, body = sendJSON(t, http.MethodGet, srv.URL+"/v1/agents?cursor=zzzz", "good", nil)
+		if code != http.StatusBadRequest || errCode(body) != "invalid_cursor" {
+			t.Errorf("well-formed bad cursor = %d %s; want 400 invalid_cursor", code, errCode(body))
+		}
+	})
+
+	t.Run("rules run before authentication", func(t *testing.T) {
+		srv := testServer(t)
+		cs := newContactsServer(t, nil)
+
+		// Every seam, unauthenticated: path, query, raw body, header.
+		code, body := sendJSON(t, http.MethodGet, srv.URL+"/v1/agents/%FF", "", nil)
+		assertContentRejected(t, code, body, "path.email")
+
+		code, body = sendJSON(t, http.MethodGet, srv.URL+"/v1/agents?cursor=%FF", "", nil)
+		assertContentRejected(t, code, body, "query.cursor")
+
+		code, body = sendRawBody(t, http.MethodPost, cs.URL+"/v1/contacts", "",
+			[]byte("{\"address\":\"a\xffb@example.com\"}"))
+		assertContentRejected(t, code, body, "body")
+
+		code, body, _ = sendJSONFull(t, http.MethodPost, cs.URL+"/v1/contacts", "",
+			map[string]any{"address": "unauth@example.com"},
+			map[string]string{"Idempotency-Key": "k\xffz"})
+		assertContentRejected(t, code, body, "header.Idempotency-Key")
+
+		// Control: a clean unauthenticated request is still 401. The 400 above
+		// is decided purely by bytes the caller sent, so it discloses nothing
+		// about the credential.
+		if code, body := sendJSON(t, http.MethodGet, srv.URL+"/v1/agents/support%40acme.com", "", nil); code != http.StatusUnauthorized {
+			t.Errorf("clean unauthenticated request = %d %v; want 401", code, body)
+		}
+	})
+}

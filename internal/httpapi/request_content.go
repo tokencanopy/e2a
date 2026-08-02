@@ -51,6 +51,31 @@ import (
 // The walk is enforced at registration time (see registerOp) rather than in
 // each handler so a new operation inherits it by construction; there is no
 // per-endpoint guard to forget.
+//
+// SCOPE — read this before claiming the rules cover "all of /v1". Both seams
+// are properties of a Huma OPERATION: the walk fires in registerOp, and the
+// format guard fires in Huma's body decode. Four /v1 paths are raw chi routes
+// registered directly on the root in New() and go through NEITHER:
+//
+//   - /v1/approve and /v1/reject — the HITL magic-link pages (internal/agent).
+//     `reason` on the reject form is caller-authored free text persisted to
+//     messages.rejection_reason, so it is checked in the handler itself
+//     (isWellFormedText in internal/agent/hitl_magic_api.go). It carried a live
+//     22021 500 before that check existed.
+//   - /v1/agents/{email}/ws — the WebSocket handshake (internal/ws).
+//   - /v1/agents/{email}/messages/{id}/attachments/{index}/download.
+//
+// The last two are read-only and reach no write, and every caller string on
+// them is either normalized (identity.NormalizeEmail routes ill-formed bytes
+// through strings.Map, which re-encodes them as U+FFFD — pinned by
+// TestNormalizeEmailOutputIsAlwaysValidUTF8) or capability-checked in memory
+// before any query, so an invalid byte can only produce an ordinary 403/404.
+// They need no guard today; a new caller string on either — especially a
+// stored one — would.
+//
+// A blanket middleware is deliberately NOT the answer: it would re-scan every
+// Huma request the two seams already cover, and it cannot read a form value
+// without calling ParseForm and consuming the body out from under the handler.
 const (
 	nulValueMessage  = "must not contain a NUL (U+0000) character"
 	nulKeyMessage    = "object keys must not contain a NUL (U+0000) character"

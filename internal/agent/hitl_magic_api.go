@@ -152,6 +152,30 @@ func (a *API) handleRejectMagicLinkPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	reason := strings.TrimSpace(r.FormValue("reason"))
+	// `reason` is the ONLY caller-authored free text on either magic-link
+	// route, and it is persisted verbatim to messages.rejection_reason. Both
+	// /v1 request-content rules therefore apply to it (docs/api.md
+	// "No NUL bytes and no invalid UTF-8 on /v1"), and they have to be
+	// enforced HERE: /v1/approve and /v1/reject are registered on the chi root
+	// outside Huma (internal/httpapi.New), so neither the raw-body format
+	// guard nor the registerOp walk in internal/httpapi/request_content.go
+	// covers them. Without this check a raw 0xFF byte reached the UPDATE, and
+	// Postgres refused it (SQLSTATE 22021) — the reviewer got a 500 and the
+	// review hold never resolved.
+	//
+	// Refusing beats laundering. clampRunes below would silently convert the
+	// invalid bytes to U+FFFD ([]rune substitutes the replacement character),
+	// which is exactly the silent-corruption failure the /v1 rule exists to
+	// end; the ill-formed input would then be stored as mojibake under a 200.
+	// The cost of refusing is nil in practice: a browser form submits UTF-8,
+	// so no real reviewer can produce this — only a hand-crafted request can —
+	// and a 400 keeps a single, exception-free rule across all of /v1.
+	if !isWellFormedText(reason) {
+		writeMagicMessage(w, http.StatusBadRequest, "Cannot reject",
+			"The rejection reason contains invalid text. Remove it, or reject "+
+				"this message from the dashboard.")
+		return
+	}
 	if reason == "" {
 		reason = "magic-link rejection"
 	}
@@ -162,6 +186,23 @@ func (a *API) handleRejectMagicLinkPost(w http.ResponseWriter, r *http.Request) 
 	// identity.MaxRejectReasonLen.
 	reason = clampRunes(reason, identity.MaxRejectReasonLen)
 	a.magicReject(w, r, claims.MessageID, userID, reason)
+}
+
+// isWellFormedText reports whether s satisfies both /v1 request-content rules:
+// no U+0000 and valid UTF-8. Neither can be stored in a Postgres text column,
+// so a string failing either turns a client mistake into a 500 the moment it
+// reaches a write.
+//
+// This is deliberately a local check at the one handler that needs it, not a
+// middleware and not a cross-package helper. A middleware would double-scan
+// every Huma operation (already covered by the two seams) and, worse, cannot
+// read a form value without calling ParseForm and consuming the body out from
+// under the handler. A shared helper would share only this one-line predicate
+// while each raw route still needs its own error rendering — these pages
+// answer in HTML, the WebSocket handshake and the attachment download answer
+// in the JSON envelope — so it would buy an import edge and nothing else.
+func isWellFormedText(s string) bool {
+	return !strings.ContainsRune(s, 0) && utf8.ValidString(s)
 }
 
 // clampRunes truncates s to at most n Unicode code points (runes, matching

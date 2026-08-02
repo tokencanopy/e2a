@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,7 +85,12 @@ type step struct {
 	// the invalid_utf8_rejected scenario — cannot express them as text. The
 	// runner base64-decodes these and transmits the bytes verbatim; they must
 	// never round-trip through a JSON encoder or a charset conversion.
-	RawBodyBase64 string            `yaml:"raw_body_base64,omitempty"`
+	//
+	// RawBodyBase64 is a POINTER so that absent and `raw_body_base64: ""` are
+	// distinguishable: an empty value declares a body source and supplies
+	// nothing, which is a scenario-authoring mistake all three runners refuse
+	// identically rather than one of them silently sending a zero-byte body.
+	RawBodyBase64 *string           `yaml:"raw_body_base64,omitempty"`
 	HeadersBase64 map[string]string `yaml:"headers_base64,omitempty"`
 	AuthOverride  *string           `yaml:"auth_override,omitempty"`
 	AgentEmail    string            `yaml:"agent_email,omitempty"`
@@ -106,6 +112,13 @@ type expectation struct {
 	BodyMatch         map[string]interface{}            `yaml:"body_match,omitempty"`
 	BodyArrayContains map[string]map[string]interface{} `yaml:"body_array_contains,omitempty"`
 	BodyExcludes      []string                          `yaml:"body_excludes,omitempty"`
+	// ResponseExcludes asserts a substring appears NOWHERE in the raw response
+	// text. body_excludes is a top-level PROPERTY-NAME check, which is the
+	// wrong tool for "the server must not echo the offending input back": a
+	// leak nested at error.details.fields[0].value would satisfy it. This one
+	// is deliberately not JSON-aware — it runs on the bytes, so an echo
+	// escapes nothing by hiding at a depth nobody thought to assert on.
+	ResponseExcludes []string `yaml:"response_excludes,omitempty"`
 	// WS-specific
 	FieldsPresent []string               `yaml:"fields_present,omitempty"`
 	FieldsAbsent  []string               `yaml:"fields_absent,omitempty"`
@@ -496,15 +509,48 @@ func (r *runner) execRequest(t *testing.T, s *step) {
 // stepRawBody decodes raw_body_base64, enforcing that a step declares at most
 // one body source. Returns (nil, nil) when the step has no raw body.
 func stepRawBody(s *step) ([]byte, error) {
-	if s.RawBodyBase64 == "" {
+	if s.RawBodyBase64 == nil {
 		return nil, nil
 	}
 	if s.Body != nil {
 		return nil, fmt.Errorf("step %s: body and raw_body_base64 are mutually exclusive", s.ID)
 	}
-	raw, err := base64.StdEncoding.DecodeString(s.RawBodyBase64)
+	if *s.RawBodyBase64 == "" {
+		return nil, fmt.Errorf("step %s: raw_body_base64 is empty; omit the key to send no body", s.ID)
+	}
+	return decodeStrictBase64(*s.RawBodyBase64, fmt.Sprintf("step %s: raw_body_base64", s.ID))
+}
+
+// strictBase64 is canonical standard base64: the standard alphabet with
+// canonical padding, nothing else. It is the shared definition all three
+// runners validate against.
+var strictBase64 = regexp.MustCompile(`^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+
+// decodeStrictBase64 refuses anything that is not exactly-canonical base64.
+//
+// The explicit format check is NOT redundant with the decoders: all three
+// stdlib decoders are permissive in different places, so a typo'd or truncated
+// fixture used to fail in one language and silently put DIFFERENT BYTES on the
+// wire in another — one shared scenario quietly testing something else.
+// Measured on the same four inputs:
+//
+//	                      Go DecodeString   Python validate=True   Node Buffer.from
+//	"not base64!!"        error             error                  6 bytes
+//	"eyJhIjoxfQ" (unpad)  error             error                  decodes
+//	"eyJhIjox\nfQ=="      DECODES (\n skip) error                  decodes
+//
+// Validating the string first makes all three answer identically. Like every
+// stdlib decoder here it does not police non-canonical trailing bits, so
+// nothing diverges on that axis either. Parity tests:
+// TestRunnerRejectsBadRawBodyBase64 here, "rejects raw_body_base64 with %s" in
+// the TypeScript runner, test_runner_rejects_bad_raw_body_base64 in Python.
+func decodeStrictBase64(value, what string) ([]byte, error) {
+	if !strictBase64.MatchString(value) {
+		return nil, fmt.Errorf("%s: not valid base64: %q", what, value)
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
 	if err != nil {
-		return nil, fmt.Errorf("step %s: raw_body_base64: %w", s.ID, err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
 	return raw, nil
 }
@@ -541,9 +587,9 @@ func (r *runner) execRequestError(s *step) error {
 	// Go's http.Header is byte-transparent for obs-text (anything >= 0x80), so
 	// a decoded byte string reaches the wire unchanged.
 	for name, encoded := range s.HeadersBase64 {
-		value, decodeErr := base64.StdEncoding.DecodeString(encoded)
+		value, decodeErr := decodeStrictBase64(encoded, fmt.Sprintf("step %s: headers_base64[%s]", s.ID, name))
 		if decodeErr != nil {
-			return fmt.Errorf("step %s: headers_base64[%s]: %w", s.ID, name, decodeErr)
+			return decodeErr
 		}
 		req.Header.Set(name, string(value))
 	}
@@ -563,6 +609,16 @@ func (r *runner) execRequestError(s *step) error {
 	// Status assertion
 	if s.Expect.Status != 0 && resp.StatusCode != s.Expect.Status {
 		return fmt.Errorf("step %s: status = %d, want %d; body: %s", s.ID, resp.StatusCode, s.Expect.Status, rawBody)
+	}
+
+	// Raw-text assertion. Runs on the undecoded bytes and BEFORE the JSON
+	// assertions so it also applies to steps that make no other body claim.
+	for _, needle := range s.Expect.ResponseExcludes {
+		resolved := r.resolve(needle)
+		if strings.Contains(string(rawBody), resolved) {
+			return fmt.Errorf("step %s: response contains %q anywhere in its body, which it must not: %s",
+				s.ID, resolved, rawBody)
+		}
 	}
 
 	// JSON body assertions

@@ -326,6 +326,107 @@ it("rejects a step declaring both body and raw_body_base64", () => {
   ).toThrow(/mutually exclusive/);
 });
 
+// Parity contract with tests/contract/runner_rawbytes_test.go
+// (TestRunnerRejectsBadRawBodyBase64) and
+// sdks/python/tests/test_contract.py (test_runner_rejects_bad_raw_body_base64).
+//
+// This is the arm that used to be broken, and it mattered more than a wrong
+// test: Node's `Buffer.from(x, "base64")` DISCARDS characters outside the
+// alphabet rather than erroring, so a typo'd or truncated fixture failed
+// loudly in Go and Python while this runner silently sent different bytes —
+// one scenario, three languages, two of them testing something else.
+it.each([
+  ["non-alphabet characters", "not base64!!"],
+  ["missing padding", "eyJhIjoxfQ"],
+  ["embedded whitespace", "eyJhIjox\nfQ=="],
+  ["present but empty", ""],
+])("rejects raw_body_base64 with %s", (_label, value) => {
+  expect(() => stepRawBody({ id: "bad", action: "request", raw_body_base64: value })).toThrow();
+});
+
+it("treats an absent raw_body_base64 as no body", () => {
+  expect(stepRawBody({ id: "none", action: "request" })).toBeUndefined();
+});
+
+it("demonstrates that Buffer.from(_, 'base64') alone would NOT reject a typo", () => {
+  // The reason strictBase64 exists, pinned so nobody "simplifies" it away:
+  // the permissive decoder accepts the exact fixture the other two runners
+  // refuse, and hands back bytes.
+  expect(Buffer.from("not base64!!", "base64").byteLength).toBeGreaterThan(0);
+});
+
+it("rejects headers_base64 that is not strict base64", async () => {
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response("{}", { status: 400 }));
+  const scenario = {
+    name: "bad_header_b64",
+    description: "malformed headers_base64 is refused",
+    steps: [
+      {
+        id: "bad-header",
+        action: "request",
+        method: "GET",
+        path: "/v1/contacts",
+        headers_base64: { "Idempotency-Key": "not base64!!" },
+      },
+    ],
+  } satisfies Scenario;
+  try {
+    await expect(executeRunner(new Runner("https://contract.test", "key", scenario))).rejects.toThrow(
+      /headers_base64/,
+    );
+  } finally {
+    fetchMock.mockRestore();
+  }
+});
+
+// response_excludes is a RAW-TEXT check over the whole response, not the
+// top-level property-name check body_excludes performs. The distinction is the
+// entire reason the key exists: the leak it must catch — a server echoing the
+// offending input back inside an error envelope — sits at a nested path where
+// body_excludes is vacuously satisfied.
+describe("response_excludes", () => {
+  const LEAK = JSON.stringify({
+    error: {
+      code: "invalid_request",
+      details: { fields: [{ location: "body", value: "a\uFFFDb@example.com" }] },
+    },
+  });
+
+  const runWith = async (ex: Expectation) => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(LEAK, { status: 400 }));
+    const scenario = {
+      name: "leak",
+      description: "echo check",
+      steps: [{ id: "leak", action: "request", method: "GET", path: "/v1/contacts", expect: ex }],
+    } satisfies Scenario;
+    try {
+      await executeRunner(new Runner("https://contract.test", "key", scenario));
+    } finally {
+      fetchMock.mockRestore();
+    }
+  };
+
+  it("body_excludes passes on a nested leak (the weakness)", async () => {
+    await expect(runWith({ status: 400, body_excludes: ["address"] })).resolves.toBeUndefined();
+  });
+
+  it("catches a nested leak", async () => {
+    await expect(runWith({ status: 400, response_excludes: ["example.com"] })).rejects.toThrow(
+      /anywhere in its body/,
+    );
+  });
+
+  it("passes when the substring really is absent, with no other body claim", async () => {
+    await expect(
+      runWith({ status: 400, response_excludes: ["not-in-the-response"] }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 it("asserts error-response bodies instead of skipping them on a 4xx", async () => {
   // Regression for the fork this runner used to have: non-2xx responses threw
   // out of RawApi.raw, so only the status was ever checked and every
@@ -367,6 +468,12 @@ it("keeps the invalid-UTF-8 scenario carrying genuinely ill-formed bytes", () =>
   expect(isValidUtf8(new Uint8Array(body!)), "body_rejected payload must be ill-formed UTF-8").toBe(
     false,
   );
+  // The offending-bytes echo check must be the whole-response form; a
+  // top-level body_excludes would be vacuous on an error envelope.
+  expect(
+    steps.get("body_rejected")!.expect?.response_excludes?.length,
+    "body_rejected must declare response_excludes",
+  ).toBeGreaterThan(0);
 
   const headerB64 = steps.get("header_rejected")!.headers_base64?.["Idempotency-Key"];
   expect(headerB64, "header_rejected must declare headers_base64").toBeDefined();
@@ -465,6 +572,11 @@ interface Expectation {
   status?: number;
   body_contains?: string[];
   body_excludes?: string[];
+  /** Substrings that must appear NOWHERE in the raw response text.
+   *  `body_excludes` is a top-level property-name check, which cannot catch a
+   *  nested leak (e.g. error.details.fields[0].value); this one is deliberately
+   *  not JSON-aware and runs on the response bytes. */
+  response_excludes?: string[];
   body_match?: Record<string, unknown>;
   body_array_contains?: Record<string, Record<string, unknown>>;
   fields_present?: string[];
@@ -528,10 +640,36 @@ function stepRawBody(step: Step): ArrayBuffer | undefined {
   if (step.body !== undefined) {
     throw new Error(`step ${step.id}: body and raw_body_base64 are mutually exclusive`);
   }
-  const decoded = Buffer.from(step.raw_body_base64, "base64");
+  if (step.raw_body_base64 === "") {
+    throw new Error(`step ${step.id}: raw_body_base64 is empty; omit the key to send no body`);
+  }
+  const decoded = strictBase64(step.raw_body_base64, `step ${step.id}: raw_body_base64`);
   const out = new ArrayBuffer(decoded.byteLength);
   new Uint8Array(out).set(decoded);
   return out;
+}
+
+/**
+ * Strict base64 decode, matching Go's `base64.StdEncoding.DecodeString` and
+ * Python's `base64.b64decode(..., validate=True)`.
+ *
+ * Node's `Buffer.from(value, "base64")` is PERMISSIVE: it silently discards
+ * characters outside the alphabet and tolerates missing padding, so `"not
+ * base64!!"` decodes to some bytes instead of throwing. Left as-is, a typo'd
+ * or truncated fixture fails loudly in the Go and Python runners while this
+ * one quietly puts DIFFERENT BYTES on the wire — the same scenario testing
+ * something else in one of three languages, which is the failure mode the
+ * three-runner design exists to prevent. The regexp is the standard alphabet
+ * with canonical padding; like both other decoders it does not police
+ * non-canonical trailing bits, so all three accept exactly the same inputs.
+ */
+const BASE64_STRICT = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function strictBase64(value: string, what: string): Buffer {
+  if (!BASE64_STRICT.test(value)) {
+    throw new Error(`${what}: not valid base64: ${JSON.stringify(value)}`);
+  }
+  return Buffer.from(value, "base64");
 }
 
 /**
@@ -543,8 +681,8 @@ function stepRawBody(step: Step): ArrayBuffer | undefined {
  * U+FFFD (or a two-byte C3 BF), which is exactly the laundering these
  * scenarios exist to catch.
  */
-function decodeHeaderBytes(base64Value: string): string {
-  return Buffer.from(base64Value, "base64").toString("latin1");
+function decodeHeaderBytes(stepId: string, name: string, base64Value: string): string {
+  return strictBase64(base64Value, `step ${stepId}: headers_base64[${name}]`).toString("latin1");
 }
 
 /** Extract agent email from a WS path like /v1/agents/bot@ws.test.dev/ws */
@@ -768,7 +906,7 @@ class Runner {
       headers["Content-Type"] = "application/json";
     }
     for (const [name, encoded] of Object.entries(step.headers_base64 ?? {})) {
-      headers[name] = decodeHeaderBytes(encoded);
+      headers[name] = decodeHeaderBytes(step.id, name, encoded);
     }
 
     const resp = await fetch(`${this.baseUrl}${path}`, {
@@ -782,6 +920,16 @@ class Runner {
 
     if (ex?.status) {
       expect(status, `step ${step.id}: status`).toBe(ex.status);
+    }
+
+    // Raw-text assertion. Runs on the undecoded response and BEFORE the JSON
+    // assertions, so it also applies to steps that make no other body claim.
+    for (const needle of ex?.response_excludes ?? []) {
+      const resolved = this.resolve(needle);
+      expect(
+        rawBody.includes(resolved),
+        `step ${step.id}: response contains ${JSON.stringify(resolved)} anywhere in its body, which it must not: ${rawBody}`,
+      ).toBe(false);
     }
 
     const hasBodyChecks = Boolean(
