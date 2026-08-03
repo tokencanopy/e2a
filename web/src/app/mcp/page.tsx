@@ -326,7 +326,7 @@ export default function McpPage() {
           style={{
             border: "1px solid var(--border)",
             borderRadius: "var(--r-lg)",
-            background: "var(--surface, transparent)",
+            background: "var(--bg-elev)",
           }}
         >
           <h2 className="text-[17px] font-semibold mb-1.5">Give your agent an inbox</h2>
@@ -450,8 +450,8 @@ function Code({ children }: { children: React.ReactNode }) {
     <code
       className="font-mono text-[13.5px] px-1.5 py-0.5"
       style={{
-        background: "var(--border)",
-        borderRadius: "4px",
+        background: "var(--bg-sunken)",
+        borderRadius: "var(--r-sm)",
         color: "var(--fg)",
       }}
     >
