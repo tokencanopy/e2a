@@ -1225,6 +1225,59 @@ func TestListDomainsByUser_ReturnsEnrichmentColumns(t *testing.T) {
 	}
 }
 
+// TestLookupDomain_AgentCountMatchesList pins #632: GET /v1/domains/{domain}
+// (LookupDomain) must report the same agent_count as GET /v1/domains
+// (ListDomainsByUser) for the same domain, not the Go zero value. Also
+// checks the trashed-agent exclusion carries over, mirroring
+// TestListDomains_AgentCountExcludesTrashedAgents in
+// domain_trashed_agents_test.go.
+func TestLookupDomain_AgentCountMatchesList(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+
+	user, err := store.CreateOrGetUser(ctx, "lookup-count@example.com", "Owner", "google-lookup-count")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "lookupcount.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if _, err := store.CreateAgent(ctx, "keep@"+domain, domain, "Keep", "", "", user.ID); err != nil {
+		t.Fatalf("CreateAgent keep: %v", err)
+	}
+	trash, err := store.CreateAgent(ctx, "trash@"+domain, domain, "Trash", "", "", user.ID)
+	if err != nil {
+		t.Fatalf("CreateAgent trash: %v", err)
+	}
+	if err := store.SoftDeleteAgent(ctx, trash.ID, user.ID); err != nil {
+		t.Fatalf("SoftDeleteAgent: %v", err)
+	}
+
+	d, err := store.LookupDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("LookupDomain: %v", err)
+	}
+	if d.AgentCount != 1 {
+		t.Errorf("LookupDomain AgentCount = %d, want 1 (one live agent, trashed one excluded)", d.AgentCount)
+	}
+
+	domains, err := store.ListDomainsByUser(ctx, user.ID, 50, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("ListDomainsByUser: %v", err)
+	}
+	for _, ld := range domains {
+		if ld.Domain == domain {
+			if ld.AgentCount != d.AgentCount {
+				t.Errorf("ListDomainsByUser AgentCount = %d, LookupDomain AgentCount = %d, want equal", ld.AgentCount, d.AgentCount)
+			}
+			return
+		}
+	}
+	t.Fatalf("domain %s not found in ListDomainsByUser", domain)
+}
+
 // TestTouchDomainLastChecked_PersistsTimestamp: ensures the column
 // actually moves when called. This is the only path that writes
 // last_checked_at; without the touch, the column stays NULL even after

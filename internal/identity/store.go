@@ -52,11 +52,9 @@ type Domain struct {
 	// "probed and failed" which is captured by `verified=false` + a
 	// non-null LastCheckedAt.
 	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
-	// AgentCount is computed at read time by ListDomainsByUser and is
-	// not a persisted column. Single-domain LookupDomain leaves it at
-	// the zero value — callers that need the count call the list path
-	// (this column-versus-aggregate split avoids changing every store
-	// signature to thread an agent-counter through).
+	// AgentCount is computed at read time by ListDomainsByUser and
+	// LookupDomain, via the same correlated subquery, and is not a
+	// persisted column.
 	AgentCount int `json:"agent_count"`
 	// DKIM keypair fields. The selector + public key
 	// are user-facing — the dashboard shows them so users can copy the
@@ -1095,13 +1093,19 @@ func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 }
 
 // LookupDomain returns a domain if it exists and is owned by the given user.
+// AgentCount is populated with the same correlated subquery ListDomainsByUser
+// uses (trashed agents excluded), so the single-resource and list responses
+// agree instead of this path leaving it at the Go zero value.
 func (s *Store) LookupDomain(ctx context.Context, domain, userID string) (*Domain, error) {
 	d := &Domain{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, '')
+		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, ''),
+		        (SELECT count(*) FROM agent_identities a
+		           WHERE a.registered_domain = domains.domain AND a.user_id = domains.user_id
+		             AND a.deleted_at IS NULL) AS agent_count
 		 FROM domains WHERE domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
-	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus)
+	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if err != nil {
 		return nil, fmt.Errorf("domain not found")
 	}

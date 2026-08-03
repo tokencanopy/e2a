@@ -223,6 +223,107 @@ scenarios:
             deleted: true
             domain: domain-crud.test.dev
 
+  - name: domain_agent_count
+    description: >
+      agent_count agrees between GET /v1/domains/{domain} and GET /v1/domains
+      for the same domain (#632). The single-resource path used to omit the
+      count from its SELECT, so it served Go's zero value as an authoritative
+      `0` — indistinguishable from a domain that really has no agents, on the
+      endpoint get_domain documents as the poll target after verify_domain.
+      Deliberately NOT folded into domain_crud: that scenario asserts
+      account-global collection state, so the TS runner skips it and the pin
+      would not hold across all three runners. Every precondition here is
+      established through public requests and the assertions are
+      resource-scoped (single GET plus a containment check on the list), so
+      this runs everywhere and does not care what else the account holds.
+    steps:
+      - id: register_domain
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: agentcount.test.dev
+        expect:
+          status: 201
+
+      - id: verify_domain
+        action: request
+        method: POST
+        path: /v1/domains/agentcount.test.dev/verify
+        expect:
+          status: 200
+          body_match:
+            verified: true
+
+      # Zero BEFORE any agent exists: pins that a passing agent_count is a real
+      # count and not a constant, so the post-agent assertion below cannot be
+      # satisfied by hardcoding either value.
+      - id: get_empty_domain
+        action: request
+        method: GET
+        path: /v1/domains/agentcount.test.dev
+        expect:
+          status: 200
+          body_match:
+            agent_count: 0
+
+      - id: register_agent
+        action: request
+        method: POST
+        path: /v1/agents
+        body:
+          email: bot@agentcount.test.dev
+        expect:
+          status: 201
+          body_match:
+            email: bot@agentcount.test.dev
+
+      # The #632 regression pin.
+      - id: get_domain_counts_agent
+        action: request
+        method: GET
+        path: /v1/domains/agentcount.test.dev
+        expect:
+          status: 200
+          body_match:
+            agent_count: 1
+
+      # ...and the list path reports the same number for the same domain.
+      # Containment, not index or length: the account may hold other domains.
+      - id: list_agrees_with_get
+        action: request
+        method: GET
+        path: /v1/domains
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              domain: agentcount.test.dev
+              agent_count: 1
+
+    cleanup:
+      # permanent=true is required, not tidiness: a trashed agent still holds
+      # its address and still blocks the domain delete with domain_has_agents.
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@agentcount.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@agentcount.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/agentcount.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: agentcount.test.dev
+
   - name: read_state_transition
     description: GET /messages/{id} marks unread messages as read
     setup:
