@@ -225,9 +225,10 @@ scenarios:
 
   - name: domain_agent_count
     description: >
-      agent_count agrees between GET /v1/domains/{domain} and GET /v1/domains
-      for the same domain (#632). The single-resource path used to omit the
-      count from its SELECT, so it served Go's zero value as an authoritative
+      agent_count agrees between GET /v1/domains/{domain}, GET /v1/domains,
+      and an idempotent re-register via POST /v1/domains for the same domain
+      (#632, #811). The single-resource and claim paths used to omit the count
+      from their SELECTs, so they served Go's zero value as an authoritative
       `0` — indistinguishable from a domain that really has no agents, on the
       endpoint get_domain documents as the poll target after verify_domain.
       Deliberately NOT folded into domain_crud: that scenario asserts
@@ -285,6 +286,21 @@ scenarios:
         path: /v1/domains/agentcount.test.dev
         expect:
           status: 200
+          body_match:
+            agent_count: 1
+
+      # The #811 regression pin: re-registering an owned domain is idempotent
+      # (201, existing row returned), and that row must carry the real count —
+      # the claim path used to leave the field at the Go zero value, serving
+      # the same false 0 that #632 fixed on the GET path.
+      - id: reregister_counts_agent
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: agentcount.test.dev
+        expect:
+          status: 201
           body_match:
             agent_count: 1
 
