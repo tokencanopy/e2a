@@ -6,6 +6,8 @@ import { afterEach, test } from "node:test";
 
 import {
   AGENT_DOC_MIRRORS,
+  LLMS_FULL_SOURCES,
+  LLMS_FULL_TARGET,
   parseArgs,
   syncAgentDocs,
 } from "./sync-agent-docs.mjs";
@@ -85,6 +87,34 @@ test("sync fails clearly when a canonical source is missing", async () => {
     syncAgentDocs({ repoRoot, check: false, log: () => {} }),
     /missing canonical agent doc: plugins\/e2a\/docs\/setup\.md/,
   );
+});
+
+test("sync inlines every corpus source into llms-full.txt", async () => {
+  const repoRoot = await fixture();
+
+  await syncAgentDocs({ repoRoot, check: false, log: () => {} });
+
+  const full = await readFile(join(repoRoot, LLMS_FULL_TARGET), "utf8");
+  for (const [source, url] of LLMS_FULL_SOURCES) {
+    const body = await readFile(join(repoRoot, source), "utf8");
+    assert.ok(full.includes(`<!-- source: ${url} -->`), `missing marker for ${url}`);
+    assert.ok(full.includes(body.trim()), `missing body of ${source}`);
+  }
+  await assert.doesNotReject(
+    syncAgentDocs({ repoRoot, check: true, log: () => {} }),
+  );
+});
+
+test("check reports a stale llms-full.txt without rewriting it", async () => {
+  const repoRoot = await fixture();
+  await syncAgentDocs({ repoRoot, check: false, log: () => {} });
+  await writeFile(join(repoRoot, LLMS_FULL_TARGET), "stale\n");
+
+  await assert.rejects(
+    syncAgentDocs({ repoRoot, check: true, log: () => {} }),
+    /stale generated corpus: web\/public\/llms-full\.txt/,
+  );
+  assert.equal(await readFile(join(repoRoot, LLMS_FULL_TARGET), "utf8"), "stale\n");
 });
 
 test("parseArgs accepts check mode and rejects unknown options", () => {

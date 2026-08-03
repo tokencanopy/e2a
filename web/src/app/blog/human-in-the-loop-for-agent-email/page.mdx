@@ -1,4 +1,5 @@
 import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
 
 export const post = getPost("human-in-the-loop-for-agent-email");
 
@@ -19,6 +20,8 @@ export const metadata = {
     description: post.description,
   },
 };
+
+<PostSchema post={post} />
 
 <div style={{ fontSize: 11, color: "#A89A8A", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>
   {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read

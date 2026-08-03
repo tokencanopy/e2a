@@ -8,6 +8,7 @@
 ## Start here
 
 - [setup.md](https://e2a.dev/setup.md): What e2a is, how an agent connects (one MCP command), and what it can do. Read this first.
+- [llms-full.txt](https://e2a.dev/llms-full.txt): Every document below, inlined into one file. Fetch this instead if you would rather read the whole corpus in a single request.
 
 ## Connecting & auth
 
@@ -22,6 +23,7 @@
 ## MCP & plugin
 
 - [Agent plugin + skills](https://github.com/tokencanopy/e2a/tree/main/plugins/e2a): The `e2a` plugin bundles the hosted MCP server config and agent guidance for Claude Code, Codex, and Cursor.
+- [MCP overview](https://e2a.dev/mcp): Per-client connection instructions (Claude Code, Codex, Cursor/Windsurf/Claude Desktop, VS Code + Copilot), what the agent can do once connected, and how an agent-owned inbox differs from a mailbox integration.
 - MCP endpoint: `https://api.e2a.dev/mcp` (Streamable HTTP, OAuth 2.1). Add with `claude mcp add --transport http --scope user e2a https://api.e2a.dev/mcp`, then run `/mcp` to authorize (`--scope user` installs it globally; drop it for current-directory only). Per-client config (Cursor, VS Code, Codex, …) is in [setup.md](https://e2a.dev/setup.md).
 
 ## Source

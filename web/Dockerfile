@@ -49,6 +49,10 @@ ARG NEXT_PUBLIC_SITE_NAME=
 ARG NEXT_PUBLIC_AGENTS_DOMAIN=
 ARG NEXT_PUBLIC_FEEDBACK_EMAIL=
 ARG NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=
+# Empty means this deployment has no pricing page, so the sitemap omits it.
+# The hosted deployment serves /pricing from the ops repo through Caddy and
+# sets this to /pricing; staging and self-hosts leave it unset.
+ARG NEXT_PUBLIC_PRICING_PATH=
 # Empty disables the dashboard's Upgrade / Manage Billing affordances —
 # self-host deployments without a paid tier leave this unset. The
 # hosted deployment sets it to the dashboard's own origin (e.g.
@@ -67,6 +71,7 @@ ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_AGENTS_DOMAIN=$NEXT_PUBLIC_AGENTS_DOMAIN \
     NEXT_PUBLIC_FEEDBACK_EMAIL=$NEXT_PUBLIC_FEEDBACK_EMAIL \
     NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=$NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION \
+    NEXT_PUBLIC_PRICING_PATH=$NEXT_PUBLIC_PRICING_PATH \
     NEXT_PUBLIC_BILLING_API=$NEXT_PUBLIC_BILLING_API \
     NEXT_PUBLIC_E2A_SIGN_IN_URL=$NEXT_PUBLIC_E2A_SIGN_IN_URL
 

@@ -33,6 +33,16 @@ export const FEEDBACK_EMAIL = process.env.NEXT_PUBLIC_FEEDBACK_EMAIL || "";
 export const GOOGLE_SITE_VERIFICATION =
   process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
 
+// Site-relative path of the pricing page, when the deployment has one.
+//
+// Pricing is NOT part of this app. The hosted deployment serves it from the
+// private ops repo via a Caddy route, because tier numbers and dollar amounts
+// are hosted-service concerns the OSS repo doesn't own. Staging has no such
+// route and neither does a self-host. So the sitemap must only advertise
+// /pricing where it actually resolves — an unset value means "no pricing page",
+// and listing a 404 in a sitemap is a crawl-quality problem, not a no-op.
+export const PRICING_PATH = process.env.NEXT_PUBLIC_PRICING_PATH || "";
+
 // Sign-in entry point for the dashboard's "Sign in" links. Defaults to the
 // legacy Google OAuth door, which every self-host deployment has. The hosted
 // deployment bakes in NEXT_PUBLIC_E2A_SIGN_IN_URL=/api/auth/oidc/login at

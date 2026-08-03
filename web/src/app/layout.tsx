@@ -6,7 +6,9 @@ import "@e2a/ui/styles.css";
 import "./globals.css";
 import { AuthProvider } from "./components/AuthProvider";
 import { ThemeProvider } from "./components/ThemeProvider";
+import { JsonLd } from "./components/JsonLd";
 import { SITE_URL, SITE_NAME, GOOGLE_SITE_VERIFICATION } from "../lib/site";
+import { organization, softwareApplication, website } from "../lib/jsonld";
 
 const inter = Inter({
   variable: "--f-ui",
@@ -92,20 +94,13 @@ export const metadata: Metadata = {
   },
 };
 
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: SITE_NAME,
-  description: ROOT_DESC,
-  url: SITE_URL,
-  applicationCategory: "DeveloperApplication",
-  operatingSystem: "Any",
-  offers: {
-    "@type": "Offer",
-    price: "0",
-    priceCurrency: "USD",
-  },
-};
+// Site-wide structured data. The Organization node carries an @id that every
+// other page's schema references, so publisher identity is stated once.
+const rootJsonLd = [
+  organization(),
+  website(),
+  softwareApplication(ROOT_DESC),
+];
 
 export default function RootLayout({
   children,
@@ -119,10 +114,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-screen flex flex-col">
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
-        />
+        <JsonLd data={rootJsonLd} />
         <AuthProvider>
           <ThemeProvider>
             {children}
