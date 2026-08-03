@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import useSWR from "swr";
+import { billingPolling } from "../../../lib/livePolling";
+import { limitsKey } from "../../../lib/swrKeys";
 import { PageShell } from "../../components/loft/PageShell";
 
 // LimitsInfo matches the LimitsView shape returned by GET /v1/account.
@@ -116,6 +118,24 @@ const QUOTA_DIMS: { label: string; format: (p: PlanEntry) => string }[] = [
   { label: "Messages / mo", format: (p) => formatNumber(p.max_messages_month) },
   { label: "Storage", format: (p) => formatBytes(p.max_storage_bytes) },
 ];
+
+// Stripe Checkout returns the user to CHECKOUT_SUCCESS_URL
+// (/billing?status=success) as a full page load. That load races the
+// asynchronous checkout.session.completed webhook that provisions the new
+// limits, and the redirect normally wins — so the first read still reports
+// the old plan. Re-read on a short interval until the sidecar says the
+// subscription is active, then stop.
+//
+// "active" is a sound completion signal here because Checkout is only
+// reachable from a non-subscribed state; existing subscribers change plans
+// through the Stripe portal, which returns to /billing with no marker.
+const RECONCILE_INTERVAL_MS = 2000;
+const RECONCILE_TIMEOUT_MS = 20000;
+
+// idle    — ordinary visit, background polling only.
+// pending — just came back from Checkout, waiting on the webhook.
+// timeout — waited RECONCILE_TIMEOUT_MS and it still hasn't landed.
+type ReconcileState = "idle" | "pending" | "timeout";
 
 // pctTone picks the bar color based on how close to the cap the user
 // is. <70% neutral, 70-90% warning, >=90% danger. Tones reuse existing
@@ -235,9 +255,14 @@ function PlanCard({
 }
 
 export default function BillingPage() {
+  // Both reads poll: usage counters move as the account sends and
+  // receives, and the plan changes out-of-band when Stripe's webhook
+  // provisions an upgrade. Focus revalidation alone left the page frozen
+  // for anyone who simply kept it open.
   const { data, error, isLoading, mutate } = useSWR<LimitsInfo>(
-    "limits",
+    limitsKey,
     fetchLimits,
+    billingPolling,
   );
 
   // The plan catalog comes from the sidecar's source of truth. Gated on
@@ -250,6 +275,7 @@ export default function BillingPage() {
   } = useSWR<PlanInfo>(
     BILLING_API ? `${BILLING_API}/api/billing/plan` : null,
     fetchPlan,
+    billingPolling,
   );
 
   // Track which specific button is in flight so it can show "Opening…"
@@ -311,6 +337,59 @@ export default function BillingPage() {
     window.addEventListener("pageshow", onShow);
     return () => window.removeEventListener("pageshow", onShow);
   }, [mutate, mutatePlan]);
+
+  const [reconcile, setReconcile] = useState<ReconcileState>("idle");
+
+  // Consume the ?status marker Stripe redirected us back with. Read from
+  // window.location rather than useSearchParams() because this route is
+  // part of a static export — useSearchParams() would force the whole
+  // page under a Suspense boundary to prerender. The marker is stripped
+  // immediately: it has been used, and leaving it in the URL would
+  // restart the reconcile loop on every remount or Back navigation.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("status");
+    if (!status) return;
+    params.delete("status");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${qs ? `?${qs}` : ""}`,
+    );
+    // `cancel` needs no reconcile — nothing was provisioned. Clearing the
+    // marker above is the whole handling.
+    //
+    // The BILLING_API guard matters because reconciliation resolves on the
+    // sidecar's plan read: with no sidecar that read never happens, so a
+    // stray marker would park the page on a notice that can never clear.
+    if (status === "success" && BILLING_API) setReconcile("pending");
+  }, []);
+
+  // Poll both reads until the webhook lands or the window elapses. This
+  // is deliberately separate from the background `billingPolling`
+  // cadence: 30s is fine for idle drift, far too slow for someone
+  // staring at the page they just paid on.
+  useEffect(() => {
+    if (reconcile !== "pending") return;
+    const deadline = Date.now() + RECONCILE_TIMEOUT_MS;
+    const id = setInterval(() => {
+      if (Date.now() >= deadline) {
+        setReconcile("timeout");
+        return;
+      }
+      void mutate();
+      void mutatePlan();
+    }, RECONCILE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [reconcile, mutate, mutatePlan]);
+
+  // Webhook landed — stop polling and let the page render normally.
+  useEffect(() => {
+    if (reconcile === "pending" && planData?.current.status === "active") {
+      setReconcile("idle");
+    }
+  }, [reconcile, planData]);
 
   // Compute usage percentages once data is loaded. Guard zero limits
   // (treat as 0% rather than NaN/Infinity) so a misconfigured row with
@@ -394,6 +473,40 @@ export default function BillingPage() {
           }}
         >
           Couldn&apos;t load your limits. {String(error.message ?? error)}
+        </div>
+      )}
+
+      {/* Post-checkout reconciliation. Rendered outside the `data` gate so
+          it shows even if the usage read is slow or failing — the user
+          just paid, and silence is the worst response. A late webhook
+          that lands after we gave up still clears the notice, because the
+          background poll keeps running. */}
+      {reconcile === "pending" && (
+        <div
+          className="rounded-lg border px-4 py-3 text-sm mb-6"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--bg-elev)",
+            color: "var(--fg-muted)",
+          }}
+          role="status"
+        >
+          Finalizing your upgrade… your new plan will appear here in a moment.
+        </div>
+      )}
+      {reconcile === "timeout" && planData?.current.status !== "active" && (
+        <div
+          className="rounded-lg border px-4 py-3 text-sm mb-6"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--bg-elev)",
+            color: "var(--fg-muted)",
+          }}
+          role="status"
+        >
+          Your payment went through, but the new plan hasn&apos;t appeared yet.
+          It usually lands within a minute — this page keeps checking, or use
+          Refresh below.
         </div>
       )}
 
@@ -533,7 +646,14 @@ export default function BillingPage() {
 
             <div className="pt-2">
               <button
-                onClick={() => mutate()}
+                onClick={() => {
+                  // Both reads, not just usage. The plan label, the
+                  // "Current" badge and every tier CTA come from the
+                  // sidecar catalog — refreshing usage alone made the
+                  // button look broken to anyone who had just upgraded.
+                  void mutate();
+                  void mutatePlan();
+                }}
                 className="text-xs text-muted hover:text-foreground transition"
               >
                 Refresh
