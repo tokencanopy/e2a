@@ -1229,7 +1229,8 @@ func TestListDomainsByUser_ReturnsEnrichmentColumns(t *testing.T) {
 // (LookupDomain) must report the same agent_count as GET /v1/domains
 // (ListDomainsByUser) for the same domain, not the Go zero value. Also
 // checks the trashed-agent exclusion carries over, mirroring
-// TestListDomains_AgentCountExcludesTrashedAgents above.
+// TestListDomains_AgentCountExcludesTrashedAgents in
+// domain_trashed_agents_test.go.
 func TestLookupDomain_AgentCountMatchesList(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
