@@ -19,9 +19,14 @@ import useSWR from "swr";
 import {
   accountUnreadKey,
   agentUnreadKey,
+  agentsKey,
+  domainsKey,
   invalidateAgentUnread,
+  invalidateAgents,
+  invalidateDomains,
   invalidateMessageDetail,
   invalidateMessageLifecycle,
+  limitsKey,
   messageDetailKey,
   messageLifecycleKey,
 } from "./swrKeys";
@@ -56,6 +61,58 @@ describe("invalidateAgentUnread", () => {
       expect(accountFetcher).toHaveBeenCalledTimes(2);
     });
     expect(otherFetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Inbox count and domain count are two of the four usage dimensions the
+// Billing page meters, so an agent/domain mutation makes the billing
+// usage bars stale. Folding the limits invalidation into the agent and
+// domain helpers (rather than asking every call site to remember a
+// second call) is what keeps that from silently rotting: /billing read a
+// key nothing in the app ever invalidated.
+describe("limitsKey", () => {
+  it("uses the cache key the Billing page reads account limits under", () => {
+    expect(limitsKey).toBe("limits");
+  });
+});
+
+// Both helpers are exercised against a SINGLE limits subscriber in one
+// test rather than split in two: limitsKey is a fixed string, and SWR's
+// request-dedup window is global and outlives the per-test cache reset in
+// jest.setup.ts — so a second test mounting the same key would have its
+// mount fetch silently suppressed and assert nothing.
+describe("limits invalidation", () => {
+  it("revalidates account limits from both agent and domain mutations", async () => {
+    const agentsFetcher = jest.fn().mockResolvedValue([]);
+    const domainsFetcher = jest.fn().mockResolvedValue([]);
+    const limitsFetcher = jest.fn().mockResolvedValue({ plan_code: "free" });
+    renderHook(() => useSWR(agentsKey, agentsFetcher));
+    renderHook(() => useSWR(domainsKey, domainsFetcher));
+    renderHook(() => useSWR(limitsKey, limitsFetcher));
+    await waitFor(() => {
+      expect(agentsFetcher).toHaveBeenCalledTimes(1);
+      expect(domainsFetcher).toHaveBeenCalledTimes(1);
+      expect(limitsFetcher).toHaveBeenCalledTimes(1);
+    });
+
+    // Creating or trashing an inbox changes usage.agents, so an open
+    // Billing tab must not keep rendering the pre-mutation count.
+    await act(async () => {
+      await invalidateAgents();
+    });
+    await waitFor(() => {
+      expect(agentsFetcher).toHaveBeenCalledTimes(2);
+      expect(limitsFetcher).toHaveBeenCalledTimes(2);
+    });
+
+    // Same for usage.domains after a domain is registered or removed.
+    await act(async () => {
+      await invalidateDomains();
+    });
+    await waitFor(() => {
+      expect(domainsFetcher).toHaveBeenCalledTimes(2);
+      expect(limitsFetcher).toHaveBeenCalledTimes(3);
+    });
   });
 });
 
