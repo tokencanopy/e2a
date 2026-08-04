@@ -222,7 +222,7 @@ func NewProm(build string) *Prom {
 		}, []string{"outcome"}),
 		outTerminalLat: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "e2a_outbound_terminal_latency_seconds",
-			Help:    "Outbound acceptance→terminal latency per message (terminal occurred_at - messages.created_at), observed exactly once per message.",
+			Help:    "Outbound eligibility→terminal latency per message (terminal occurred_at - the submission anchor: the latest of messages.created_at, scheduled_at and reviewed_at), observed exactly once per message.",
 			Buckets: longBuckets,
 		}),
 		outAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{

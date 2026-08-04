@@ -20,10 +20,11 @@ type Metrics interface {
 	// outcome ∈ {sent, failed_suppressed, failed_provider,
 	// failed_local_retries, failed_cancelled}.
 	OutboundTerminal(outcome string)
-	// OutboundTerminalLatency records acceptance→terminal latency for one
-	// outbound message (the terminal write's occurred_at −
-	// messages.created_at). Observed exactly once per message, co-located
-	// with OutboundTerminal so the two share their exactly-once contract.
+	// OutboundTerminalLatency records eligibility→terminal latency for one
+	// outbound message (the terminal write's occurred_at − submissionAnchor).
+	// Observed at most once per message, co-located with OutboundTerminal so
+	// the two share their exactly-once contract; a terminal whose occurred_at
+	// precedes its anchor records the count with no latency sample.
 	OutboundTerminalLatency(seconds float64)
 	// OutboundAttempt records one submission attempt to the upstream relay.
 	// outcome ∈ {success, temporary_failure, permanent_failure}.
@@ -66,6 +67,15 @@ func (noopMetrics) OutboundRateDeferred()           {}
 // submission anchor (see submissionAnchor — messages.created_at for an
 // ordinary send). A zero timestamp or non-positive delta records the
 // count but no latency sample (same discipline as the queue-wait guard).
+//
+// A gated row can reach that guard for real, where an ordinary send never
+// could: a scheduled send cancelled BEFORE its fire time settles ahead of its
+// own anchor, and an approve submitted within the app/DB clock skew can too
+// (anchorAt comes from Postgres now(), occurredAt from this process). Dropping
+// those is deliberate — the message never became eligible, and the drop is
+// pessimistic for the SLI because it removes a fast sample from both sides of
+// the ratio. It does mean the histogram's _count can trail
+// e2a_outbound_terminal_total slightly wherever holds or schedules are used.
 func emitTerminal(m Metrics, outcome string, anchorAt, occurredAt time.Time) {
 	m.OutboundTerminal(outcome)
 	if anchorAt.IsZero() || occurredAt.IsZero() {
