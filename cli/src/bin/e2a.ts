@@ -112,7 +112,7 @@ Usage:
         --html-file <f>            HTML body; text fallback derived if no --body
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
         --conversation-id <id>     Application conversation/grouping id (alias: --conversation)
-        --reply-to <email>         Reply-To header (where replies go; default: the agent)
+        --reply-to <email>         Reply-To header (where replies go; default: the agent). Repeatable to direct replies to several addresses (max 5)
         --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
                                    status=scheduled, sent "not before" then. Direct self-send is unsupported;
                                    trash prevents submission; restore before send time re-arms, at/after leaves it canceled
@@ -649,7 +649,7 @@ async function main() {
         // trip each other's spelling. Precedence (and conflicting-value
         // rejection) is shared via getConversationId — see FIX 3.
         conversationId: getConversationId(args),
-        replyTo: getFlagChecked(args, "--reply-to"),
+        replyTo: getFlagsChecked(args, "--reply-to"),
         sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
@@ -665,7 +665,7 @@ async function main() {
         body: getFlagChecked(args, "--body"),
         bodyFile: getFlagChecked(args, "--body-file"),
         htmlFile: getFlagChecked(args, "--html-file"),
-        replyTo: getFlagChecked(args, "--reply-to"),
+        replyTo: getFlagsChecked(args, "--reply-to"),
         sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),

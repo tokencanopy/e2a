@@ -65,6 +65,7 @@ import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
 import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';

@@ -1355,6 +1355,79 @@ scenarios:
             deleted: true
             email: "{agent_email}"
 
+  - name: reply_to_address_list
+    description: >
+      reply_to accepts EITHER a single RFC 5322 address (the historical form)
+      OR an array of addresses (RFC 5322 Reply-To is an address-list). Both
+      shapes are accepted end-to-end; a bad member in the list is rejected at
+      the edge with 400 invalid_request. Proves the send/reply/forward request
+      contract widened compatibly (see the oneOf on reply_to in openapi.yaml).
+    setup:
+      - register_domain: replyto-list.test.dev
+      - verify_domain: replyto-list.test.dev
+      - register_agent:
+          email: bot@replyto-list.test.dev
+    steps:
+      - id: send_reply_to_array
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: reply_to as an address-list
+          text: replies fan out to several destinations
+          reply_to:
+            - "Support <support@example.com>"
+            - owner@example.com
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+      - id: send_reply_to_single_string
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: reply_to as a single string still works
+          text: backward-compatible single address
+          reply_to: "Support <support@example.com>"
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+      - id: send_reply_to_bad_member_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: one bad reply_to member rejects the whole request
+          text: should 400
+          reply_to:
+            - ok@example.com
+            - not an address
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+    cleanup:
+      - id: delete_reply_to_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
   - name: info_unauthenticated_shape
     description: >
       GET /v1/info is the deployment-discovery endpoint — works

@@ -32,6 +32,48 @@ function mockSdk() {
   };
 }
 
+describe("McpClient outbound reply_to delegation", () => {
+  function mockSendSdk() {
+    return {
+      messages: {
+        send: vi.fn(async () => ({ messageId: "msg_s", status: "sent" })),
+      },
+    };
+  }
+
+  it("send forwards a multi-address reply_to array to the SDK", async () => {
+    const sdk = mockSendSdk();
+    const c = new McpClient(sdk as never, "bot@test.dev", "agent");
+    await c.send({
+      to: ["you@example.com"],
+      subject: "hi",
+      text: "hello",
+      replyTo: ["a@x.test", "b@y.test"],
+    });
+    expect(sdk.messages.send).toHaveBeenCalledWith(
+      "bot@test.dev",
+      expect.objectContaining({ replyTo: ["a@x.test", "b@y.test"] }),
+      {},
+    );
+  });
+
+  it("send still forwards a single-string reply_to unchanged", async () => {
+    const sdk = mockSendSdk();
+    const c = new McpClient(sdk as never, "bot@test.dev", "agent");
+    await c.send({
+      to: ["you@example.com"],
+      subject: "hi",
+      text: "hello",
+      replyTo: "Support <s@x.test>",
+    });
+    expect(sdk.messages.send).toHaveBeenCalledWith(
+      "bot@test.dev",
+      expect.objectContaining({ replyTo: "Support <s@x.test>" }),
+      {},
+    );
+  });
+});
+
 describe("McpClient trash/restore delegation", () => {
   function mockTrashSdk() {
     const agentsPage = vi.fn(async () => ({ items: [{ email: "trashed@test.dev" }], next_cursor: "agents_next" }));

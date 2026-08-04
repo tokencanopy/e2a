@@ -363,6 +363,33 @@ describe("E2AClient", () => {
     expect(result.scheduledAt).toEqual(sendAt);
   });
 
+  it("messages.send serializes a single-address replyTo as a scalar string", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Hi",
+      text: "Hello",
+      replyTo: "Support <support@acme.com>",
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toBe("Support <support@acme.com>");
+  });
+
+  it("messages.send serializes an array replyTo as a JSON address-list", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    // The array form also exercises the type: replyTo accepts string | string[]
+    // via the generated oneOf union, so this would fail tsc if it didn't.
+    await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Hi",
+      text: "Hello",
+      replyTo: ["support@acme.com", "owner@acme.com"],
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toEqual([
+      "support@acme.com",
+      "owner@acme.com",
+    ]);
+  });
+
   it("messages.reply serializes sendAt and parses the scheduled result", async () => {
     const sendAt = new Date("2026-08-01T16:00:00.000Z");
     globalThis.fetch = mockFetch(202, {

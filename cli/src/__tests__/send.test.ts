@@ -50,6 +50,37 @@ describe("send/reply commands", () => {
     expect(mockExit).not.toHaveBeenCalled();
   });
 
+  it("sends a single --reply-to as a scalar string, not an array", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_rt1", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    await send({
+      to: ["you@example.com"],
+      subject: "hi",
+      body: "hello",
+      replyTo: ["support@acme.com"],
+    });
+    expect(mockSend.mock.calls[0][1].replyTo).toBe("support@acme.com");
+  });
+
+  it("passes repeated --reply-to through as an address-list array", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_rt", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    await send({
+      to: ["you@example.com"],
+      subject: "hi",
+      body: "hello",
+      replyTo: ["support@acme.com", "owner@acme.com"],
+    });
+    expect(mockSend.mock.calls[0][1].replyTo).toEqual(["support@acme.com", "owner@acme.com"]);
+  });
+
+  it("omits reply_to when the --reply-to list is empty", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_none", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    await send({ to: ["you@example.com"], subject: "hi", body: "hello", replyTo: [] });
+    expect(mockSend.mock.calls[0][1].replyTo).toBeUndefined();
+  });
+
   it("threads --idempotency-key through to the SDK request options", async () => {
     mockSend.mockResolvedValue({ messageId: "msg_i", status: "sent" });
     const { send } = await import("../commands/send.js");

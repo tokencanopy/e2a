@@ -150,10 +150,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
             "Optional stable conversation grouping ID. When bridging email to an agent runtime, pass that runtime's non-sensitive thread/session ID (or an opaque alias) and reuse it on later sends and replies so e2a grouping follows the agent's internal conversation. Maximum 200 characters; no CR/LF. Server generates one if omitted.",
           ),
         reply_to: z
-          .string()
+          .union([z.string(), z.array(z.string()).max(5)])
           .optional()
           .describe(
-            "Sets the Reply-To header — where replies to this message are directed. A single address, optionally with a display name (e.g. \"Support <support@acme.com>\"). Defaults to the sending agent's own address.",
+            "Sets the Reply-To header — where replies to this message are directed. Either a single address (optionally with a display name, e.g. \"Support <support@acme.com>\") or an array of up to 5 addresses to direct replies to several destinations. Defaults to the sending agent's own address.",
           ),
         idempotency_key: z
           .string()
@@ -225,10 +225,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
             "Optional conversation grouping override. On the first reply to received mail, set this to the agent runtime's stable, non-sensitive thread/session ID (or an opaque alias), then reuse it on later replies. This aligns e2a grouping with internal memory; message_id still preserves the recipient's email-client thread. Maximum 200 characters; no CR/LF.",
           ),
         reply_to: z
-          .string()
+          .union([z.string(), z.array(z.string()).max(5)])
           .optional()
           .describe(
-            "Sets the Reply-To header — where replies to this message are directed. A single address, optionally with a display name. Defaults to the sending agent's own address.",
+            "Sets the Reply-To header — where replies to this message are directed. Either a single address (optionally with a display name) or an array of up to 5 addresses to direct replies to several destinations. Defaults to the sending agent's own address.",
           ),
         idempotency_key: z
           .string()
@@ -296,10 +296,10 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
             "Optional application conversation/grouping ID. A forward always starts a new email thread; setting this value only groups it with related application activity. Maximum 200 characters; no CR/LF.",
           ),
         reply_to: z
-          .string()
+          .union([z.string(), z.array(z.string()).max(5)])
           .optional()
           .describe(
-            "Sets the Reply-To header — where replies to the forward are directed. A single address, optionally with a display name. Defaults to the sending agent's own address.",
+            "Sets the Reply-To header — where replies to the forward are directed. Either a single address (optionally with a display name) or an array of up to 5 addresses to direct replies to several destinations. Defaults to the sending agent's own address.",
           ),
         idempotency_key: z
           .string()

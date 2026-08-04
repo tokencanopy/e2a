@@ -210,6 +210,12 @@ const (
 // from becoming a blast. Over the cap is a 400 too_many_recipients.
 const maxRecipients = 50
 
+// maxReplyToAddresses caps how many addresses a single reply_to may name.
+// Reply-To is a routing hint (RFC 5322 allows an address-list), not a delivery
+// fan-out mechanism — to/cc/bcc are — so a small cap is deliberate. Over the
+// cap is a 400 invalid_request.
+const maxReplyToAddresses = 5
+
 // recipientCountError returns a too_many_recipients envelope when the combined
 // to+cc+bcc count exceeds maxRecipients, else nil.
 func recipientCountError(groups ...[]string) *ErrorEnvelope {
@@ -274,7 +280,7 @@ type SendEmailRequest struct {
 	TemplateAlias  string                `json:"template_alias,omitempty" doc:"Send using a stored template resolved by its per-user alias. Mutually exclusive with template_id and with literal subject/text/html. Beta: templates are unstable — their shape may change before they are declared stable."`
 	TemplateData   TemplateData          `json:"template_data,omitempty" doc:"Variables for the referenced template ({{name}}, dot paths into nested objects). Missing variables render as empty strings. Beta: templates are unstable — their shape may change before they are declared stable."`
 	ConversationID string                `json:"conversation_id,omitempty" maxLength:"200" doc:"Caller-assigned application conversation/grouping id. This value is independent of email thread topology. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF."`
-	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address."`
+	ReplyTo        ReplyToField          `json:"reply_to,omitempty"`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
 	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
@@ -429,7 +435,7 @@ type ReplyRequest struct {
 	CC             []string              `json:"cc,omitempty" nullable:"false" maxLength:"320" doc:"Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this."`
 	BCC            []string              `json:"bcc,omitempty" nullable:"false" maxLength:"320" doc:"Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this."`
 	ConversationID string                `json:"conversation_id,omitempty" maxLength:"200" doc:"Caller-assigned application conversation/grouping id override. This value is independent of email thread topology, which is derived from the referenced message. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF."`
-	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address."`
+	ReplyTo        ReplyToField          `json:"reply_to,omitempty"`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"File attachments (base64 in each item's data). Limits: at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
 	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
@@ -541,7 +547,8 @@ func (s *Server) handleReply(ctx context.Context, in *replyInput) (*sendOutput, 
 	if e := validateConversationID(b.ConversationID); e != nil {
 		return nil, NewError(http.StatusBadRequest, "invalid_request", e.Error())
 	}
-	if env := validateReplyTo(b.ReplyTo); env != nil {
+	normReplyTo, env := validateReplyTo(b.ReplyTo)
+	if env != nil {
 		return nil, env
 	}
 	// Build the reply request via the same outbound helpers the legacy
@@ -574,7 +581,7 @@ func (s *Server) handleReply(ctx context.Context, in *replyInput) (*sendOutput, 
 		// conversation_id resolution (caller id > inherit-from-referenced > mint)
 		// is centralized in DeliverOutbound, which receives this message as the
 		// referenced message — so the reply inherits its thread there (#328).
-		ConversationID: b.ConversationID, ReplyTo: b.ReplyTo, Attachments: b.Attachments,
+		ConversationID: b.ConversationID, ReplyTo: normReplyTo, Attachments: b.Attachments,
 		Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
 	}
 	req.CC = agent.StripAgentSelfAliases(req.CC, ag.EmailAddress())
@@ -632,7 +639,7 @@ type ForwardRequest struct {
 	Body           string                `json:"text" maxLength:"1048576"` // required (MSG-3); subject derived as "Fwd:"
 	HTMLBody       string                `json:"html,omitempty" maxLength:"1048576"`
 	ConversationID string                `json:"conversation_id,omitempty" maxLength:"200" doc:"Caller-assigned application conversation/grouping id override. This value is independent of email thread topology; a forward starts a new email thread. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF."`
-	ReplyTo        string                `json:"reply_to,omitempty" maxLength:"320" doc:"Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address."`
+	ReplyTo        ReplyToField          `json:"reply_to,omitempty"`
 	Attachments    []outbound.Attachment `json:"attachments,omitempty" nullable:"false" doc:"Additional attachments to include alongside the forwarded message's original attachments, which are carried over automatically. Limits apply to the combined set (originals + these): at most 10 attachments, each ≤ 10 MiB decoded, and ≤ 25 MiB decoded combined. Exceeding the count → 400 invalid_request; exceeding a size → 413 payload_too_large."`
 	Unsubscribe    UnsubscribeOptions    `json:"unsubscribe,omitempty" doc:"Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable."`
 	SendAt         *time.Time            `json:"send_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the forward sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."`
@@ -665,7 +672,8 @@ func (s *Server) handleForward(ctx context.Context, in *forwardInput) (*sendOutp
 	if e := validateConversationID(b.ConversationID); e != nil {
 		return nil, NewError(http.StatusBadRequest, "invalid_request", e.Error())
 	}
-	if env := validateReplyTo(b.ReplyTo); env != nil {
+	normReplyTo, env := validateReplyTo(b.ReplyTo)
+	if env != nil {
 		return nil, env
 	}
 	subject := outbound.BuildForwardSubject(msg.Subject)
@@ -683,7 +691,7 @@ func (s *Server) handleForward(ctx context.Context, in *forwardInput) (*sendOutp
 	attachments = append(attachments, b.Attachments...)
 	req := outbound.SendRequest{
 		To: b.To, CC: b.CC, BCC: b.BCC, Subject: subject, Body: composedBody, HTMLBody: composedHTML,
-		ConversationID: b.ConversationID, ReplyTo: b.ReplyTo, Attachments: attachments,
+		ConversationID: b.ConversationID, ReplyTo: normReplyTo, Attachments: attachments,
 		Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
 	}
 	req.CC = agent.StripAgentSelfAliases(req.CC, ag.EmailAddress())
@@ -744,38 +752,118 @@ func composedMessageSizeError(subject, text, html string, atts []outbound.Attach
 	return nil
 }
 
-// validateReplyTo checks a caller-supplied Reply-To override. Empty is valid
-// (the compose layer defaults it to the agent's own address). A non-empty value
-// must be exactly one RFC 5322 address, optionally with a display name; multiple
-// addresses and unparseable input are rejected at the edge so a bad Reply-To
-// never reaches the composer (where sanitizeHeaderValue would silently mangle
-// it) or the SMTP relay (a generic 500).
-func validateReplyTo(replyTo string) *ErrorEnvelope {
-	if replyTo == "" {
+// ReplyToField is the send/reply/forward reply_to input. Reply-To is an
+// address-list in RFC 5322, so the field accepts EITHER a single address string
+// (the historical form) OR a JSON array of up to maxReplyToAddresses address
+// strings. Both decode into values; validateReplyTo checks each entry and
+// flattens them to one canonical address-list string, so the rest of the
+// outbound pipeline (compose, storage, recompose-on-approval) still sees a
+// single string and is untouched.
+type ReplyToField struct {
+	// values holds the caller-supplied address strings VERBATIM: a one-element
+	// slice for the string form, or each array element. Nil when omitted.
+	// Preserving the caller's exact bytes keeps the single-address form
+	// byte-identical to the pre-list behavior (no display-name re-quoting).
+	values []string
+}
+
+// UnmarshalJSON accepts a JSON string or a JSON array of strings. Structural
+// validation (types, per-entry length, array bound) is the schema's job (see
+// Schema); this only decodes.
+func (f *ReplyToField) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		f.values = nil
 		return nil
 	}
-	// Length bound BEFORE parsing (runes, matching the schema maxLength
-	// semantics) so an oversized string is rejected on a cheap count, never
-	// handed to the address parser. The schema tag rejects this at the edge
-	// for /v1 bodies; this is the shared runtime backstop.
-	if n := utf8.RuneCountInString(replyTo); n > maxEmailAddressLen {
-		return NewError(http.StatusBadRequest, "invalid_request",
-			fmt.Sprintf("reply_to too long — %d characters, max %d (display name + address combined)", n, maxEmailAddressLen))
+	if trimmed[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(trimmed, &arr); err != nil {
+			return err
+		}
+		f.values = arr
+		return nil
 	}
-	addrs, err := mail.ParseAddressList(replyTo)
-	if err != nil {
-		return NewError(http.StatusBadRequest, "invalid_request",
-			fmt.Sprintf("reply_to is not a valid email address: %v", err))
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err != nil {
+		return err
 	}
-	if len(addrs) != 1 {
-		return NewError(http.StatusBadRequest, "invalid_request",
-			"reply_to must be a single email address")
+	if s == "" {
+		// An explicit empty string means "not set" — the historical scalar
+		// reply_to behavior (the compose layer then defaults Reply-To to the
+		// agent's own address). Preserve it so a caller that sends "" instead of
+		// omitting the field keeps working. An empty element INSIDE an array is
+		// a different case: it stays a malformed address and validateReplyTo
+		// rejects it.
+		f.values = nil
+		return nil
 	}
-	if err := outbound.ValidateMailboxAddress(addrs[0].Address); err != nil {
-		return NewError(http.StatusBadRequest, "invalid_request",
-			fmt.Sprintf("reply_to is not a valid SMTP mailbox: %v", err))
-	}
+	f.values = []string{s}
 	return nil
+}
+
+// Schema makes Huma emit — and validate against — a string-OR-bounded-array
+// union for reply_to, keeping the historical single-string form working while
+// exposing the address-list the header itself permits. Semantic address checks
+// (parseability, mailbox octet limits) stay in validateReplyTo.
+func (ReplyToField) Schema(huma.Registry) *huma.Schema {
+	maxLen := maxEmailAddressLen
+	maxItems := maxReplyToAddresses
+	return &huma.Schema{
+		OneOf: []*huma.Schema{
+			{Type: huma.TypeString, MaxLength: &maxLen},
+			{
+				Type:     huma.TypeArray,
+				Items:    &huma.Schema{Type: huma.TypeString, MaxLength: &maxLen},
+				MaxItems: &maxItems,
+			},
+		},
+		Description: "Sets the Reply-To header — where replies to this message are directed. Either a single RFC 5322 address (optionally with a display name, e.g. \"Support <support@acme.com>\") or an array of up to 5 such addresses to direct replies to several destinations. Each address string is at most 320 characters (display name + address combined), and each address must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.",
+	}
+}
+
+// validateReplyTo checks a caller-supplied Reply-To override and returns the
+// canonical value for the header. Empty (field omitted) → ("", nil): the
+// compose layer then defaults Reply-To to the agent's own address. A non-empty
+// value must be 1..maxReplyToAddresses entries, each exactly one RFC 5322
+// address (optionally display-named) within the length + mailbox octet limits;
+// a bare comma-separated string is rejected — the array form is how you name
+// several. Entries are preserved verbatim and joined with ", " into one RFC
+// 5322 address-list, so the single-address form is byte-identical to before and
+// a multi-address send emits a well-formed list. Validating here keeps a bad
+// Reply-To from reaching the composer (where sanitizeHeaderValue would silently
+// mangle it) or the SMTP relay (a generic 500).
+func validateReplyTo(f ReplyToField) (string, *ErrorEnvelope) {
+	if len(f.values) == 0 {
+		return "", nil
+	}
+	if len(f.values) > maxReplyToAddresses {
+		return "", NewError(http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("reply_to accepts at most %d addresses, got %d", maxReplyToAddresses, len(f.values)))
+	}
+	for _, entry := range f.values {
+		// Length bound BEFORE parsing (runes, matching the schema maxLength
+		// semantics) so an oversized entry is rejected on a cheap count, never
+		// handed to the address parser. The schema rejects this at the edge for
+		// /v1 bodies; this is the shared runtime backstop.
+		if n := utf8.RuneCountInString(entry); n > maxEmailAddressLen {
+			return "", NewError(http.StatusBadRequest, "invalid_request",
+				fmt.Sprintf("reply_to entry too long — %d characters, max %d (display name + address combined)", n, maxEmailAddressLen))
+		}
+		// ParseAddress (not ParseAddressList) rejects a comma-bearing multi-
+		// address string, so the string form stays a single address; several
+		// addresses must come as the array form.
+		addr, err := mail.ParseAddress(entry)
+		if err != nil {
+			return "", NewError(http.StatusBadRequest, "invalid_request",
+				fmt.Sprintf("reply_to is not a valid email address: %v", err))
+		}
+		if err := outbound.ValidateMailboxAddress(addr.Address); err != nil {
+			return "", NewError(http.StatusBadRequest, "invalid_request",
+				fmt.Sprintf("reply_to is not a valid SMTP mailbox: %v", err))
+		}
+	}
+	return strings.Join(f.values, ", "), nil
 }
 
 // validateAttachments enforces the attachment contract on every outbound path
@@ -1095,7 +1183,8 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 		if env := s.validateOutboundBody(b.Subject, b.Body, b.To, b.CC, b.BCC, b.ConversationID); env != nil {
 			return outbound.SendRequest{}, env
 		}
-		if env := validateReplyTo(b.ReplyTo); env != nil {
+		normReplyTo, env := validateReplyTo(b.ReplyTo)
+		if env != nil {
 			return outbound.SendRequest{}, env
 		}
 		sched, senv := scheduledInstant(b.SendAt, time.Now())
@@ -1108,7 +1197,7 @@ func (s *Server) handleCreateMessage(ctx context.Context, in *createMessageInput
 		return outbound.SendRequest{
 			From: ag.EmailAddress(), To: b.To, CC: b.CC, BCC: b.BCC, Subject: b.Subject,
 			Body: b.Body, HTMLBody: b.HTMLBody, ConversationID: b.ConversationID,
-			ReplyTo: b.ReplyTo, Attachments: b.Attachments,
+			ReplyTo: normReplyTo, Attachments: b.Attachments,
 			Unsubscribe: outboundUnsubscribe(b.Unsubscribe),
 			ScheduledAt: sched,
 		}, nil

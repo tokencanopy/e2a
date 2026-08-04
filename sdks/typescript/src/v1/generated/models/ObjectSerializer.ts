@@ -63,6 +63,7 @@ export * from '../models/EventEnvelope.js';
 export * from '../models/EventView.js';
 export * from '../models/FieldError.js';
 export * from '../models/ForwardRequest.js';
+export * from '../models/ForwardRequestReplyTo.js';
 export * from '../models/HoldReasonView.js';
 export * from '../models/ImportContactsRequest.js';
 export * from '../models/LimitExceededDetails.js';
