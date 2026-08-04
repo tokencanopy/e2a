@@ -185,10 +185,20 @@ function PlanCard({
     <div
       className="rounded-lg border p-4 flex flex-col gap-3"
       style={{
-        // The current tier gets the accent border + a tinted surface so
-        // it reads as "you are here" at a glance.
+        // The current tier is marked by the accent border and the "Current"
+        // badge. It deliberately shares --bg-elev with the other tiers: the
+        // surface scale has no step above --bg-elev that keeps its direction
+        // in both themes (--bg-panel is lighter than --bg-elev in light mode
+        // but darker in dark mode), so a background distinction here would
+        // read as "raised" on one theme and "recessed" on the other.
+        //
+        // This previously read `isCurrent ? "var(--surface)" : "var(--bg-elev)"`.
+        // --surface is defined nowhere, so with no fallback the declaration was
+        // invalid at computed-value time and background-color fell back to its
+        // initial value, transparent — the current tier was the ONLY card with
+        // no surface at all, inverting the hierarchy it was meant to signal.
         borderColor: isCurrent ? "var(--accent)" : "var(--border)",
-        background: isCurrent ? "var(--surface)" : "var(--bg-elev)",
+        background: "var(--bg-elev)",
       }}
       aria-current={isCurrent ? "true" : undefined}
     >
@@ -408,7 +418,7 @@ export default function BillingPage() {
             className="rounded-xl border p-5"
             style={{
               borderColor: "var(--border)",
-              background: "var(--surface)",
+              background: "var(--bg-panel)",
             }}
           >
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -447,7 +457,7 @@ export default function BillingPage() {
           {BILLING_API && (
             <section
               className="rounded-xl border p-5 space-y-4"
-              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}
             >
               <div>
                 <div className="text-xs uppercase tracking-wide text-muted">
@@ -494,7 +504,7 @@ export default function BillingPage() {
             className="rounded-xl border p-5 space-y-5"
             style={{
               borderColor: "var(--border)",
-              background: "var(--surface)",
+              background: "var(--bg-panel)",
             }}
           >
             <div>
