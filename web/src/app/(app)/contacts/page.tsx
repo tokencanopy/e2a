@@ -6,7 +6,12 @@ import { Button } from "../../components/loft/Button";
 import { Chip } from "../../components/loft/Chip";
 import { PageShell } from "../../components/loft/PageShell";
 import { useAgents } from "../../components/hooks/useAgents";
-import { mapCsvRows, parseCsv, type ImportPreviewRow } from "./_lib/csv";
+import {
+  getCsvMetadataColumns,
+  mapCsvRows,
+  parseCsv,
+  type ImportPreviewRow,
+} from "./_lib/csv";
 import { ViewTabs } from "./_lib/ViewTabs";
 
 type Contact = {
@@ -51,6 +56,63 @@ const fieldStyle = {
   borderColor: "var(--border)",
   color: "var(--fg)",
 };
+
+const metadataInlineLimit = 3;
+const metadataInlineValueLimit = 80;
+
+function formatMetadataValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null) return "null";
+  if (["number", "boolean", "bigint", "undefined"].includes(typeof value)) {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return "Unable to display value";
+  }
+}
+
+function truncateMetadataValue(value: string): string {
+  if (value.length <= metadataInlineValueLimit) return value;
+  return `${value.slice(0, metadataInlineValueLimit - 1)}…`;
+}
+
+function MetadataFields({ metadata }: { metadata: Record<string, unknown> }) {
+  const entries = Object.entries(metadata);
+  if (entries.length === 0) return null;
+  const previewEntries = entries.slice(0, metadataInlineLimit);
+
+  return (
+    <div className="mt-3 max-w-[420px] text-[11px]" style={{ color: "var(--fg-muted)" }}>
+      <p className="font-semibold" style={{ color: "var(--fg)" }}>Metadata</p>
+      <dl className="mt-1 space-y-1">
+        {previewEntries.map(([key, value]) => (
+          <div key={key} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-2">
+            <dt className="break-words font-medium">{key}</dt>
+            <dd className="break-all">{truncateMetadataValue(formatMetadataValue(value))}</dd>
+          </div>
+        ))}
+      </dl>
+      <details className="mt-2">
+        <summary className="cursor-pointer font-medium" style={{ color: "var(--accent-strong)" }}>
+          {entries.length > metadataInlineLimit
+            ? `View all ${entries.length} metadata fields (${entries.length - metadataInlineLimit} more)`
+            : `View full metadata (${entries.length} field${entries.length === 1 ? "" : "s"})`}
+        </summary>
+        <dl className="mt-2 max-h-64 space-y-2 overflow-auto rounded-[var(--r-md)] border p-3"
+          style={{ borderColor: "var(--border)", background: "var(--bg)" }}>
+          {entries.map(([key, value]) => (
+            <div key={key}>
+              <dt className="break-words font-medium" style={{ color: "var(--fg)" }}>{key}</dt>
+              <dd className="mt-0.5 whitespace-pre-wrap break-all">{formatMetadataValue(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      </details>
+    </div>
+  );
+}
 
 async function responseError(response: Response): Promise<string> {
   try {
@@ -267,6 +329,7 @@ export default function ContactsPage() {
                 <p className="mt-3 text-[11px]" style={{ color: "var(--fg-muted)" }}>
                   Added {new Date(contact.created_at).toLocaleDateString()}
                 </p>
+                <MetadataFields metadata={contact.metadata} />
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <Button variant="ghost" aria-label={`Edit contact ${contact.address}`}
                     onClick={() => setEditing(contact)}>Edit</Button>
@@ -303,6 +366,7 @@ export default function ContactsPage() {
                         {contact.display_name || contact.address}
                       </div>
                       {contact.display_name && <div className="mt-0.5 font-mono text-[11px]" style={{ color: "var(--fg-muted)" }}>{contact.address}</div>}
+                      <MetadataFields metadata={contact.metadata} />
                     </td>
                     <td className="px-4 py-3"><Chip>{contact.source}</Chip></td>
                     <td className="px-4 py-3" style={{ color: "var(--fg-muted)" }}>
@@ -395,6 +459,7 @@ function EditContactPanel({
   onSaved: () => Promise<void>;
 }) {
   const [name, setName] = useState(contact.display_name);
+  const [metadata, setMetadata] = useState(contact.metadata);
   const [etag, setETag] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -403,6 +468,7 @@ function EditContactPanel({
   useEffect(() => {
     const controller = new AbortController();
     setName(contact.display_name);
+    setMetadata(contact.metadata);
     setETag("");
     setLoading(true);
     setError("");
@@ -419,6 +485,7 @@ function EditContactPanel({
         }
         const current: Contact = await response.json();
         setName(current.display_name);
+        setMetadata(current.metadata ?? {});
         setETag(freshETag);
       } catch (err) {
         if (!controller.signal.aborted) {
@@ -429,7 +496,7 @@ function EditContactPanel({
       }
     })();
     return () => controller.abort();
-  }, [contact.address, contact.display_name]);
+  }, [contact.address, contact.display_name, contact.metadata]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -482,6 +549,14 @@ function EditContactPanel({
           </Button>
         </div>
       </form>
+      {Object.keys(metadata).length > 0 && (
+        <div className="mt-4 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+          <p className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
+            Metadata is read-only here. Manage it through CSV import or the API.
+          </p>
+          <MetadataFields metadata={metadata} />
+        </div>
+      )}
       {error && <p role="alert" className="mt-3 text-[12px]" style={{ color: "var(--danger-strong)" }}>{error}</p>}
     </Panel>
   );
@@ -501,7 +576,15 @@ function ImportPanel({ agents, onImported }: {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
-  const headers = table[0] ?? [];
+  const headers = (table[0] ?? []).map((header) => header.trim());
+  const metadataColumns = useMemo(() => {
+    if (!emailColumn || table.length < 2) return [];
+    try {
+      return getCsvMetadataColumns(table, emailColumn, nameColumn || undefined);
+    } catch {
+      return [];
+    }
+  }, [emailColumn, nameColumn, table]);
   const invalidateKey = () => setIdempotencyKey(crypto.randomUUID());
 
   const preview = (nextEmail = emailColumn, nextName = nameColumn) => {
@@ -532,9 +615,10 @@ function ImportPanel({ agents, onImported }: {
                 const parsed = parseCsv(await file.text());
                 setTable(parsed);
                 setFileName(file.name);
-                const normalized = parsed[0]?.map((header) => header.toLowerCase()) ?? [];
-                const email = parsed[0]?.[normalized.findIndex((header) => ["email", "address"].includes(header))] ?? parsed[0]?.[0] ?? "";
-                const name = parsed[0]?.[normalized.findIndex((header) => ["name", "display name", "full name"].includes(header))] ?? "";
+                const trimmedHeaders = parsed[0]?.map((header) => header.trim()) ?? [];
+                const normalized = trimmedHeaders.map((header) => header.toLowerCase());
+                const email = trimmedHeaders[normalized.findIndex((header) => ["email", "address"].includes(header))] ?? trimmedHeaders[0] ?? "";
+                const name = trimmedHeaders[normalized.findIndex((header) => ["name", "display name", "full name"].includes(header))] ?? "";
                 setEmailColumn(email);
                 setNameColumn(name);
                 setRows(mapCsvRows(parsed, email, name || undefined));
@@ -574,6 +658,34 @@ function ImportPanel({ agents, onImported }: {
       {fileName && <p className="mt-3 text-[12px]" style={{ color: "var(--fg-muted)" }}>
         {fileName}: {rows.length} row{rows.length === 1 ? "" : "s"} ready. Preview: {rows.slice(0, 3).map((row) => row.address || "(blank)").join(", ")}
       </p>}
+      {fileName && (
+        <section aria-label="CSV metadata mapping" className="mt-3 rounded-[var(--r-lg)] border p-3"
+          style={{ borderColor: "var(--border)", background: "var(--bg)" }}>
+          <h3 className="text-[12px] font-semibold" style={{ color: "var(--fg)" }}>Metadata mapping</h3>
+          {metadataColumns.length === 0 ? (
+            <p className="mt-1 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+              No columns will be stored as metadata.
+            </p>
+          ) : (
+            <>
+              <p className="mt-1 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                These columns will be stored as metadata. Sample values are from the first row.
+              </p>
+              <dl className="mt-2 grid gap-2 sm:grid-cols-2">
+                {metadataColumns.map((column) => (
+                  <div key={column.name} className="min-w-0 rounded-[var(--r-md)] border px-3 py-2"
+                    style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}>
+                    <dt className="break-words text-[11px] font-semibold" style={{ color: "var(--fg)" }}>{column.name}</dt>
+                    <dd className="mt-0.5 truncate text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                      {column.sampleValue || "(empty)"}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+        </section>
+      )}
       {error && <p role="alert" className="mt-3 text-[12px]" style={{ color: "var(--danger-strong)" }}>{error}</p>}
       <div className="mt-4"><Button disabled={saving || rows.length === 0} onClick={async () => {
         setSaving(true);
