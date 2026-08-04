@@ -45,25 +45,50 @@ export type ImportPreviewRow = {
   metadata?: Record<string, string>;
 };
 
-export function mapCsvRows(
-  table: string[][],
-  emailColumn: string,
-  nameColumn?: string,
-): ImportPreviewRow[] {
+export type CsvMetadataColumn = {
+  name: string;
+  sampleValue: string;
+};
+
+function resolveColumns(table: string[][], emailColumn: string, nameColumn?: string) {
   if (table.length < 2) throw new Error("CSV must include a header and at least one row");
   const headers = table[0].map((header) => header.trim());
   const emailIndex = headers.indexOf(emailColumn);
   if (emailIndex < 0) throw new Error(`No “${emailColumn}” column found`);
   const nameIndex = nameColumn ? headers.indexOf(nameColumn) : -1;
   if (nameColumn && nameIndex < 0) throw new Error(`No “${nameColumn}” column found`);
+  const metadataIndexes = headers
+    .map((header, index) => ({ header, index }))
+    .filter(({ header, index }) => header && index !== emailIndex && index !== nameIndex);
+  return { emailIndex, nameIndex, metadataIndexes };
+}
+
+export function getCsvMetadataColumns(
+  table: string[][],
+  emailColumn: string,
+  nameColumn?: string,
+): CsvMetadataColumn[] {
+  const { metadataIndexes } = resolveColumns(table, emailColumn, nameColumn);
+  const sampleRow = table[1];
+  const columns: Record<string, CsvMetadataColumn> = {};
+  metadataIndexes.forEach(({ header, index }) => {
+    columns[header] = { name: header, sampleValue: sampleRow[index] ?? "" };
+  });
+  return Object.values(columns);
+}
+
+export function mapCsvRows(
+  table: string[][],
+  emailColumn: string,
+  nameColumn?: string,
+): ImportPreviewRow[] {
+  const { emailIndex, nameIndex, metadataIndexes } = resolveColumns(table, emailColumn, nameColumn);
   const rows = table.slice(1).map((values) => {
     const row: ImportPreviewRow = { address: (values[emailIndex] ?? "").trim() };
     if (nameIndex >= 0) row.display_name = values[nameIndex] ?? "";
     const metadata: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      if (header && index !== emailIndex && index !== nameIndex) {
-        metadata[header] = values[index] ?? "";
-      }
+    metadataIndexes.forEach(({ header, index }) => {
+      metadata[header] = values[index] ?? "";
     });
     if (Object.keys(metadata).length > 0) row.metadata = metadata;
     return row;
