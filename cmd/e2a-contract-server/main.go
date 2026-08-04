@@ -29,7 +29,14 @@ func main() {
 		log.Fatalf("contract server health check failed: %v", err)
 	}
 
-	envContent := fmt.Sprintf("E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\n", srv.BaseURL, srv.APIKey)
+	// E2A_TEST_CAPPED_API_KEY authenticates the secondary account seeded with
+	// testutil.CappedLimits. Scenarios that assert quota enforcement run as
+	// that account; CI sources this file with `set -a`, so the runners pick it
+	// up with no workflow change.
+	envContent := fmt.Sprintf(
+		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\n",
+		srv.BaseURL, srv.APIKey, srv.CappedAPIKey,
+	)
 	if envFile != "" {
 		if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {
 			log.Fatalf("write env file: %v", err)

@@ -4,6 +4,10 @@
  * Runs against a live test server. Requires env vars:
  *   E2A_TEST_BASE_URL  — test server URL (e.g. http://localhost:8080)
  *   E2A_TEST_API_KEY   — valid API key for the test user
+ *   E2A_TEST_CAPPED_API_KEY — optional; key for the contract server's
+ *     secondary account, seeded with tiny plan caps. Scenarios that assert
+ *     quota enforcement run as that account and skip without it (a deployed
+ *     staging target has no capped account to offer).
  *
  * The runner drives the server over raw HTTP (a thin scenario interpreter,
  * not the ergonomic client) plus {@link WSListener} for WebSocket steps.
@@ -29,6 +33,28 @@ import type { PageMessageLifecycleTransition } from "../../src/v1/index.js";
 // When the isolated CF zone + SMTP port are configured, store-dependent scenarios
 // are SEEDED over the API (verified domains + real inbound) instead of skipped.
 const SEED = seedEnabled();
+
+// The contract server's capped-account key (see the header). Absent when the
+// runner is pointed at a deployed server, which has no such account.
+const CAPPED_API_KEY = process.env.E2A_TEST_CAPPED_API_KEY;
+
+/**
+ * True when the scenario authenticates as the capped account anywhere.
+ *
+ * Inspects auth_override VALUES specifically. Stringifying the whole scenario
+ * looks equivalent and is not: the scenario's own description mentions
+ * {capped_api_key} in prose, so a blob match stays true even if every
+ * auth_override is switched back to the primary account — exactly the
+ * regression this is meant to detect.
+ */
+function scenarioNeedsCappedAccount(sc: Scenario): boolean {
+  const overrides = [
+    sc.auth_override,
+    ...(sc.steps ?? []).map((s) => s.auth_override),
+    ...(sc.cleanup ?? []).map((s) => s.auth_override),
+  ];
+  return overrides.some((o) => typeof o === "string" && o.includes("{capped_api_key}"));
+}
 
 it("parses the generated message lifecycle page contract", () => {
   const page = ObjectSerializer.deserialize(
@@ -102,6 +128,60 @@ it("keeps the managed-unsubscribe scenario self-cleaning and lifecycle-observabl
   expect(scenario!.steps.map((step) => step.id)).not.toContain("delete_agent_permanently");
   expect(scenario!.cleanup?.map((step) => step.id)).toEqual([
     "delete_agent_permanently",
+    "delete_domain",
+  ]);
+});
+
+// Always-on: the live quota run skips without a capped key (deployed targets
+// have no capped account), so this shape test is what keeps that skip from
+// decaying into zero coverage. It fails if the scenario is deleted, stops using
+// the capped account, or loses either direction of enforcement.
+it("keeps the account-limits scenario pinned to both directions of enforcement", () => {
+  const scenario = loadScenarios().find((c) => c.name === "account_limits_enforced");
+  expect(scenario).toBeDefined();
+  expect(scenarioNeedsCappedAccount(scenario!)).toBe(true);
+
+  const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
+
+  // Refused AT the cap, with the machine-readable envelope an SDK needs to say
+  // WHICH quota stopped the caller — including the upgrade affordance, which is
+  // omitempty and so vanishes silently if the server stops sending it.
+  expect(steps.get("second_domain_hits_the_cap")?.expect).toMatchObject({
+    status: 402,
+    body_match: {
+      "error.code": "limit_exceeded",
+      "error.details.resource": "domains",
+      "error.details.limit": 1,
+      "error.details.current": 1,
+      "error.details.plan_code": "contract_capped",
+      "error.details.upgrade_url": "https://e2a.dev/upgrade",
+    },
+  });
+
+  // A second resource with a DIFFERENT cap: no single hardcoded number can
+  // satisfy both refusals.
+  expect(steps.get("third_agent_hits_the_cap")?.expect).toMatchObject({
+    status: 402,
+    body_match: {
+      "error.details.resource": "agents",
+      "error.details.limit": 2,
+      "error.details.current": 2,
+    },
+  });
+
+  // ...and allowed when it should be. Without these, a server that 402'd
+  // unconditionally would satisfy every assertion above.
+  expect(steps.get("reregister_owned_domain_at_cap_is_allowed")?.expect?.status).toBe(201);
+  expect(steps.get("agent_create_succeeds_again_after_freeing_a_slot")?.expect?.status).toBe(201);
+
+  // Cleanup must remove EVERY agent the scenario can create, including the one
+  // the happy path deletes mid-scenario: steps stop at the first failure, so a
+  // failure in between would otherwise strand it and put the next run at its
+  // cap on an early step.
+  expect(scenario!.cleanup?.map((step) => step.id)).toEqual([
+    "delete_agent_1",
+    "delete_agent_2",
+    "delete_agent_3",
     "delete_domain",
   ]);
 });
@@ -717,6 +797,9 @@ class Runner {
     future.setUTCMilliseconds(0);
     this.vars.future_rfc3339 = future.toISOString().replace(".000Z", "Z");
     this.vars.scenario_token = randomBytes(6).toString("hex");
+    // Only bind when present: scenarios needing it are skipped otherwise, so a
+    // silently-empty bearer token can never reach the wire as a confusing 401.
+    if (CAPPED_API_KEY) this.vars.capped_api_key = CAPPED_API_KEY;
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }
@@ -1115,7 +1198,15 @@ describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
   for (const sc of scenarios) {
     // Store-dependent scenarios run when SEED supplies their preconditions over
     // the API; otherwise they skip. Account-global scenarios skip regardless.
-    const skip = ACCOUNT_GLOBAL.has(sc.name) || (scenarioNeedsStore(sc) && !SEED);
+    // Quota scenarios need the capped account; without its key there is no way
+    // to reach a cap on a live server, so they skip. The Go runner owns the
+    // contract server in-process and always has it, and the always-on shape
+    // test below fails if the scenario is ever deleted or defanged — so a skip
+    // here can never quietly become zero coverage.
+    const skip =
+      ACCOUNT_GLOBAL.has(sc.name) ||
+      (scenarioNeedsStore(sc) && !SEED) ||
+      (scenarioNeedsCappedAccount(sc) && !CAPPED_API_KEY);
 
     (skip ? it.skip : it)(
       sc.name,

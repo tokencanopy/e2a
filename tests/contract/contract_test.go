@@ -134,6 +134,9 @@ type testEnv struct {
 	wsHub   *ws.Hub
 	apiKey  string
 	userID  string
+	// cappedAPIKey authenticates the contract server's secondary account,
+	// seeded with testutil.CappedLimits, that quota scenarios run as.
+	cappedAPIKey string
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -157,6 +160,8 @@ func setupEnv(t *testing.T) *testEnv {
 		wsHub:   cs.WSHub,
 		apiKey:  cs.APIKey,
 		userID:  cs.UserID,
+
+		cappedAPIKey: cs.CappedAPIKey,
 	}
 }
 
@@ -350,6 +355,7 @@ func TestRunnerInitializesDynamicScenarioVars(t *testing.T) {
 func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, "{base_url}", r.env.baseURL)
 	s = strings.ReplaceAll(s, "{api_key}", r.env.apiKey)
+	s = strings.ReplaceAll(s, "{capped_api_key}", r.env.cappedAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)
 	}
@@ -917,16 +923,156 @@ func loadScenarios(t *testing.T) []scenario {
 	return sf.Scenarios
 }
 
+// requireCappedKey fails a scenario that asks for the capped account when the
+// harness cannot supply it. Deliberately a failure and not a skip: a quota
+// scenario that quietly stops running is indistinguishable from one that
+// passes, which is exactly how limit coverage would rot back to zero.
+func requireCappedKey(t *testing.T, env *testEnv, sc scenario) {
+	t.Helper()
+	if env.cappedAPIKey == "" && scenarioUsesCappedKey(t, sc) {
+		t.Fatalf("scenario %s uses %s but the contract server supplied no capped API key", sc.Name, cappedKeyPlaceholder)
+	}
+}
+
+// scenarioUsesCappedKey reports whether the scenario authenticates as the
+// capped-plan account anywhere.
+//
+// It inspects auth_override VALUES specifically. Substring-matching a
+// serialized dump of the whole scenario looks equivalent and is not: the
+// scenario's own description mentions {capped_api_key} in prose, so a dump
+// match stays true even if every auth_override is switched back to the primary
+// account — which is exactly the regression this is supposed to detect.
+func scenarioUsesCappedKey(t *testing.T, sc scenario) bool {
+	t.Helper()
+	overrides := []*string{sc.AuthOverride}
+	for _, s := range sc.Steps {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, s := range sc.Cleanup {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, o := range overrides {
+		if o != nil && strings.Contains(*o, cappedKeyPlaceholder) {
+			return true
+		}
+	}
+	return false
+}
+
+const cappedKeyPlaceholder = "{capped_api_key}"
+
 func TestScenarios(t *testing.T) {
 	scenarios := loadScenarios(t)
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.Name, func(t *testing.T) {
 			env := setupEnv(t)
+			requireCappedKey(t, env, sc)
 			r := newRunner(env, sc)
 			t.Cleanup(func() { r.cleanup(t) })
 			r.executeSetup(t)
 			r.executeSteps(t)
 		})
+	}
+}
+
+// TestLimitsScenarioShape is the Go half of the always-on guard the TS and
+// Python runners also carry. The live quota run can skip in those runners when
+// no capped key is supplied (a deployed target has no capped account); this
+// pins the scenario's shape everywhere, so a deletion or a defanged assertion
+// fails the build even where the live run does not execute.
+func TestLimitsScenarioShape(t *testing.T) {
+	var sc scenario
+	for _, candidate := range loadScenarios(t) {
+		if candidate.Name == "account_limits_enforced" {
+			sc = candidate
+			break
+		}
+	}
+	if sc.Name == "" {
+		t.Fatal("scenario account_limits_enforced not found — quota enforcement would have no live coverage in any runner")
+	}
+	if !scenarioUsesCappedKey(t, sc) {
+		t.Fatalf("scenario %s no longer authenticates as the capped account, so it cannot reach a cap", sc.Name)
+	}
+
+	steps := map[string]step{}
+	for _, s := range sc.Steps {
+		steps[s.ID] = s
+	}
+	// Every lookup below is ok-checked: an indexed miss on a renamed step would
+	// otherwise nil-panic instead of reporting which pin broke.
+	matched := func(id string) map[string]interface{} {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		return s.Expect.BodyMatch
+	}
+	wantStatus := func(id string, want int) {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		if s.Expect.Status != want {
+			t.Errorf("step %s status = %d, want %d", id, s.Expect.Status, want)
+		}
+	}
+
+	// Refused AT the cap, carrying the fields an SDK needs to say WHICH quota
+	// stopped the caller — including the upgrade affordance, which is omitempty
+	// and so disappears silently if the server stops sending it.
+	wantStatus("second_domain_hits_the_cap", 402)
+	domainRefusal := matched("second_domain_hits_the_cap")
+	for path, want := range map[string]interface{}{
+		"error.code":                "limit_exceeded",
+		"error.details.resource":    "domains",
+		"error.details.limit":       1,
+		"error.details.current":     1,
+		"error.details.plan_code":   "contract_capped",
+		"error.details.upgrade_url": "https://e2a.dev/upgrade",
+	} {
+		if got := domainRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("second_domain_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+
+	// A second resource with a DIFFERENT cap, so no single hardcoded number can
+	// satisfy both refusals and one wired quota cannot stand in for all of them.
+	wantStatus("third_agent_hits_the_cap", 402)
+	agentRefusal := matched("third_agent_hits_the_cap")
+	for path, want := range map[string]interface{}{
+		"error.details.resource": "agents",
+		"error.details.limit":    2,
+		"error.details.current":  2,
+	} {
+		if got := agentRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("third_agent_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+
+	// ...and allowed when it should be. Without these a server that 402'd
+	// unconditionally would satisfy every assertion above.
+	wantStatus("reregister_owned_domain_at_cap_is_allowed", 201)
+	wantStatus("agent_create_succeeds_again_after_freeing_a_slot", 201)
+
+	// Cleanup must remove EVERY agent the scenario can create, including the one
+	// the happy path deletes mid-scenario: steps stop at the first failure, so a
+	// failure in between would otherwise strand it and put the next run at its
+	// cap on an early step.
+	var cleanupIDs []string
+	for _, c := range sc.Cleanup {
+		cleanupIDs = append(cleanupIDs, c.ID)
+	}
+	want := []string{"delete_agent_1", "delete_agent_2", "delete_agent_3", "delete_domain"}
+	if len(cleanupIDs) != len(want) {
+		t.Fatalf("cleanup = %v, want %v", cleanupIDs, want)
+	}
+	for i := range want {
+		if cleanupIDs[i] != want[i] {
+			t.Errorf("cleanup[%d] = %s, want %s", i, cleanupIDs[i], want[i])
+		}
 	}
 }

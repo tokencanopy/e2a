@@ -25,17 +25,51 @@ import (
 	"github.com/tokencanopy/e2a/internal/ws"
 )
 
+// CappedLimits are the plan caps of the secondary account described on
+// ContractServer.CappedAPIKey. Caps are small enough that a scenario can
+// consume the slots, be refused at the cap (402), free one, and succeed again
+// — proving the limit is a cap and not an unconditional refusal — and
+// deliberately DIFFERENT per resource, so no single hardcoded number can
+// satisfy every assertion about the 402 envelope.
+//
+// Only the fields limits.Store.Upsert writes are capped here. max_webhooks,
+// max_templates and max_contacts are separate columns this row does not touch,
+// so the capped account still inherits their generous schema defaults; a
+// future scenario covering those caps has to extend the row first.
+var CappedLimits = limits.Limits{
+	PlanCode:         "contract_capped",
+	MaxAgents:        2,
+	MaxDomains:       1,
+	MaxMessagesMonth: 1,
+	MaxStorageBytes:  1 << 20,
+	UpgradeURL:       "https://e2a.dev/upgrade",
+}
+
 type ContractServer struct {
-	BaseURL    string
-	APIKey     string
-	UserID     string
-	DBPool     *pgxpool.Pool
-	Store      *identity.Store
-	WSHub      *ws.Hub
-	SMTPAddr   string
-	httpServer *http.Server
-	httpLn     net.Listener
-	smtpServer *relay.Server
+	BaseURL string
+	APIKey  string
+	UserID  string
+	// CappedAPIKey authenticates a SECOND account seeded with CappedLimits,
+	// so scenarios can exercise quota enforcement without touching the
+	// primary account's generous caps.
+	//
+	// A separate account rather than a "set the caps" scenario step: caps are
+	// account-global, and the TS and Python runners silently ignore setup keys
+	// they do not recognize, so a cap lowered for one scenario and restored by
+	// a cleanup step that some runner skipped would 402 every scenario after
+	// it. Nothing here is mutable, so nothing can leak. It also means the
+	// enforcer's limits cache needs no special handling: the row is written
+	// before the server accepts its first request and never changes, so there
+	// is no staleness window for a scenario to race.
+	CappedAPIKey string
+	CappedUserID string
+	DBPool       *pgxpool.Pool
+	Store        *identity.Store
+	WSHub        *ws.Hub
+	SMTPAddr     string
+	httpServer   *http.Server
+	httpLn       net.Listener
+	smtpServer   *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -62,9 +96,12 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	sender := outbound.NewSender(smtpRelay, "test.e2a.dev")
 	noopUsage := usage.NewNoopUsageTracker()
 
-	// Limits/usage/webhook components the /v1 Deps bind to. Caps are set
-	// generously so contract scenarios exercise contract shape, not quota
-	// enforcement (the 402 limit paths have dedicated httpapi unit tests).
+	// Limits/usage/webhook components the /v1 Deps bind to. These DEFAULTS are
+	// generous on purpose: they apply to the primary contract account, whose
+	// scenarios exercise contract shape and must never trip a quota. Quota
+	// enforcement is exercised by the separate capped account seeded at the
+	// bottom of this function (CappedAPIKey) — an account_limits row overrides
+	// these defaults for that user alone.
 	usageStore := usage.NewStore(pool)
 	enforcer := limits.NewEnforcer(limits.NewStore(pool), usageStore, limits.Defaults{
 		PlanCode: "contract_test", MaxAgents: 100000, MaxDomains: 100000,
@@ -186,17 +223,49 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	// The capped account. Seeded here, before the first request is served, so
+	// its account_limits row is already in place the first time the enforcer
+	// resolves it — no cache invalidation, no warm-up, no race.
+	cappedUser, err := store.CreateOrGetUser(ctx, "capped@test.dev", "Contract Capped", "google-contract-capped")
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	if err := limits.NewStore(pool).Upsert(ctx, cappedUser.ID, CappedLimits); err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	cappedKey, err := store.CreateAPIKey(ctx, cappedUser.ID, "contract-capped-key", nil)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
 	return &ContractServer{
-		BaseURL:    "http://" + httpLn.Addr().String(),
-		APIKey:     key.PlaintextKey,
-		UserID:     user.ID,
-		DBPool:     pool,
-		Store:      store,
-		WSHub:      wsHub,
-		SMTPAddr:   smtpAddr,
-		httpServer: httpServer,
-		httpLn:     httpLn,
-		smtpServer: smtpServer,
+		BaseURL:      "http://" + httpLn.Addr().String(),
+		APIKey:       key.PlaintextKey,
+		UserID:       user.ID,
+		CappedAPIKey: cappedKey.PlaintextKey,
+		CappedUserID: cappedUser.ID,
+		DBPool:       pool,
+		Store:        store,
+		WSHub:        wsHub,
+		SMTPAddr:     smtpAddr,
+		httpServer:   httpServer,
+		httpLn:       httpLn,
+		smtpServer:   smtpServer,
 	}, nil
 }
 
