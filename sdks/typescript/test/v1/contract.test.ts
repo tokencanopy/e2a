@@ -38,9 +38,22 @@ const SEED = seedEnabled();
 // runner is pointed at a deployed server, which has no such account.
 const CAPPED_API_KEY = process.env.E2A_TEST_CAPPED_API_KEY;
 
-/** True when the scenario authenticates as the capped account anywhere. */
+/**
+ * True when the scenario authenticates as the capped account anywhere.
+ *
+ * Inspects auth_override VALUES specifically. Stringifying the whole scenario
+ * looks equivalent and is not: the scenario's own description mentions
+ * {capped_api_key} in prose, so a blob match stays true even if every
+ * auth_override is switched back to the primary account — exactly the
+ * regression this is meant to detect.
+ */
 function scenarioNeedsCappedAccount(sc: Scenario): boolean {
-  return JSON.stringify(sc).includes("{capped_api_key}");
+  const overrides = [
+    sc.auth_override,
+    ...(sc.steps ?? []).map((s) => s.auth_override),
+    ...(sc.cleanup ?? []).map((s) => s.auth_override),
+  ];
+  return overrides.some((o) => typeof o === "string" && o.includes("{capped_api_key}"));
 }
 
 it("parses the generated message lifecycle page contract", () => {
@@ -131,18 +144,29 @@ it("keeps the account-limits scenario pinned to both directions of enforcement",
   const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
 
   // Refused AT the cap, with the machine-readable envelope an SDK needs to say
-  // WHICH quota stopped the caller.
+  // WHICH quota stopped the caller — including the upgrade affordance, which is
+  // omitempty and so vanishes silently if the server stops sending it.
   expect(steps.get("second_domain_hits_the_cap")?.expect).toMatchObject({
     status: 402,
     body_match: {
       "error.code": "limit_exceeded",
       "error.details.resource": "domains",
       "error.details.limit": 1,
+      "error.details.current": 1,
+      "error.details.plan_code": "contract_capped",
+      "error.details.upgrade_url": "https://e2a.dev/upgrade",
     },
   });
-  expect(steps.get("second_agent_hits_the_cap")?.expect).toMatchObject({
+
+  // A second resource with a DIFFERENT cap: no single hardcoded number can
+  // satisfy both refusals.
+  expect(steps.get("third_agent_hits_the_cap")?.expect).toMatchObject({
     status: 402,
-    body_match: { "error.details.resource": "agents" },
+    body_match: {
+      "error.details.resource": "agents",
+      "error.details.limit": 2,
+      "error.details.current": 2,
+    },
   });
 
   // ...and allowed when it should be. Without these, a server that 402'd
@@ -150,10 +174,14 @@ it("keeps the account-limits scenario pinned to both directions of enforcement",
   expect(steps.get("reregister_owned_domain_at_cap_is_allowed")?.expect?.status).toBe(201);
   expect(steps.get("agent_create_succeeds_again_after_freeing_a_slot")?.expect?.status).toBe(201);
 
-  // The capped account holds one slot per resource, so a leak puts the NEXT
-  // run at its cap on step one.
+  // Cleanup must remove EVERY agent the scenario can create, including the one
+  // the happy path deletes mid-scenario: steps stop at the first failure, so a
+  // failure in between would otherwise strand it and put the next run at its
+  // cap on an early step.
   expect(scenario!.cleanup?.map((step) => step.id)).toEqual([
-    "delete_agent_permanently",
+    "delete_agent_1",
+    "delete_agent_2",
+    "delete_agent_3",
     "delete_domain",
   ]);
 });

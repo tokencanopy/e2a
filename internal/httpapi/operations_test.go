@@ -351,24 +351,7 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil, errors.New("not found")
 		},
-		LookupDomain: func(ctx context.Context, domain, userID string) (*identity.Domain, error) {
-			switch domain {
-			case "acme.com":
-				return &identity.Domain{Domain: domain, Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true}, nil
-			case "pending.com":
-				return &identity.Domain{Domain: domain, Verified: false}, nil
-			case "busy.com":
-				return &identity.Domain{Domain: domain, Verified: true}, nil
-			case "fresh.com":
-				// Registered, TXT published, not yet marked verified.
-				return &identity.Domain{Domain: domain, Verified: false, VerificationToken: "e2a-verify=fresh"}, nil
-			case "nomx.com":
-				// Registered, ownership TXT published, but the inbound MX is missing.
-				return &identity.Domain{Domain: domain, Verified: false, VerificationToken: "e2a-verify=nomx"}, nil
-			default:
-				return nil, errors.New("not registered")
-			}
-		},
+		LookupDomain: fakeLookupDomain,
 		ListDomains: func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error) {
 			return []identity.Domain{{Domain: "acme.com", Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true, AgentCount: 2}}, nil
 		},
@@ -893,4 +876,41 @@ func TestLegacyFallback(t *testing.T) {
 	if resp.Header.Get("X-Request-Id") == "" {
 		t.Error("legacy fallback should still carry X-Request-Id")
 	}
+}
+
+// fakeLookupDomain mirrors identity.Store.LookupDomain's USER SCOPING
+// (`WHERE domain = $1 AND user_id = $2`). Modeling ownership matters: a fake
+// that switched on the domain alone — as this one used to — cannot observe
+// WHICH user id a handler passes, so it silently passes even when a handler
+// drops the scoping entirely. That scoping is what keeps the domain-create cap
+// from being bypassable (#819), so it needs a fake that can fail.
+//
+// Every account in the harness owns the shared fixtures, preserving the old
+// behavior for tests that authenticate as either user. "other-account.com" is
+// owned by u_1 ALONE and exists so a cross-account lookup has something real to
+// miss on.
+func fakeLookupDomain(ctx context.Context, domain, userID string) (*identity.Domain, error) {
+	shared := map[string]identity.Domain{
+		"acme.com":    {Domain: domain, Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true},
+		"pending.com": {Domain: domain, Verified: false},
+		"busy.com":    {Domain: domain, Verified: true},
+		// Registered, TXT published, not yet marked verified.
+		"fresh.com": {Domain: domain, Verified: false, VerificationToken: "e2a-verify=fresh"},
+		// Registered, ownership TXT published, but the inbound MX is missing.
+		"nomx.com": {Domain: domain, Verified: false, VerificationToken: "e2a-verify=nomx"},
+	}
+	if row, ok := shared[domain]; ok {
+		return &row, nil
+	}
+	// Singly-owned fixtures. These are what let a test observe the user id:
+	// each is invisible to every account but its owner, so a handler that
+	// passes "" — or any other account's id — misses.
+	soleOwner := map[string]string{
+		"other-account.com": "u_1",
+		"capped-owned.com":  "u_overcap",
+	}
+	if owner, ok := soleOwner[domain]; ok && owner == userID {
+		return &identity.Domain{Domain: domain, Verified: true}, nil
+	}
+	return nil, errors.New("not registered")
 }

@@ -936,13 +936,27 @@ func requireCappedKey(t *testing.T, env *testEnv, sc scenario) {
 
 // scenarioUsesCappedKey reports whether the scenario authenticates as the
 // capped-plan account anywhere.
+//
+// It inspects auth_override VALUES specifically. Substring-matching a
+// serialized dump of the whole scenario looks equivalent and is not: the
+// scenario's own description mentions {capped_api_key} in prose, so a dump
+// match stays true even if every auth_override is switched back to the primary
+// account — which is exactly the regression this is supposed to detect.
 func scenarioUsesCappedKey(t *testing.T, sc scenario) bool {
 	t.Helper()
-	raw, err := yaml.Marshal(sc)
-	if err != nil {
-		t.Fatalf("marshal scenario %s: %v", sc.Name, err)
+	overrides := []*string{sc.AuthOverride}
+	for _, s := range sc.Steps {
+		overrides = append(overrides, s.AuthOverride)
 	}
-	return strings.Contains(string(raw), cappedKeyPlaceholder)
+	for _, s := range sc.Cleanup {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, o := range overrides {
+		if o != nil && strings.Contains(*o, cappedKeyPlaceholder) {
+			return true
+		}
+	}
+	return false
 }
 
 const cappedKeyPlaceholder = "{capped_api_key}"
@@ -986,41 +1000,79 @@ func TestLimitsScenarioShape(t *testing.T) {
 	for _, s := range sc.Steps {
 		steps[s.ID] = s
 	}
+	// Every lookup below is ok-checked: an indexed miss on a renamed step would
+	// otherwise nil-panic instead of reporting which pin broke.
+	matched := func(id string) map[string]interface{} {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		return s.Expect.BodyMatch
+	}
+	wantStatus := func(id string, want int) {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		if s.Expect.Status != want {
+			t.Errorf("step %s status = %d, want %d", id, s.Expect.Status, want)
+		}
+	}
 
 	// Refused AT the cap, carrying the fields an SDK needs to say WHICH quota
-	// stopped the caller.
-	refused, ok := steps["second_domain_hits_the_cap"]
-	if !ok || refused.Expect == nil || refused.Expect.Status != 402 {
-		t.Fatalf("second_domain_hits_the_cap must expect 402, got %+v", refused.Expect)
-	}
+	// stopped the caller — including the upgrade affordance, which is omitempty
+	// and so disappears silently if the server stops sending it.
+	wantStatus("second_domain_hits_the_cap", 402)
+	domainRefusal := matched("second_domain_hits_the_cap")
 	for path, want := range map[string]interface{}{
-		"error.code":             "limit_exceeded",
-		"error.details.resource": "domains",
-		"error.details.limit":    1,
+		"error.code":                "limit_exceeded",
+		"error.details.resource":    "domains",
+		"error.details.limit":       1,
+		"error.details.current":     1,
+		"error.details.plan_code":   "contract_capped",
+		"error.details.upgrade_url": "https://e2a.dev/upgrade",
 	} {
-		if got := refused.Expect.BodyMatch[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+		if got := domainRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("second_domain_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
 		}
 	}
-	if got := steps["second_agent_hits_the_cap"].Expect.BodyMatch["error.details.resource"]; fmt.Sprint(got) != "agents" {
-		t.Errorf("second_agent_hits_the_cap resource = %v, want agents (a second resource proves one wired quota is not standing in for all four)", got)
+
+	// A second resource with a DIFFERENT cap, so no single hardcoded number can
+	// satisfy both refusals and one wired quota cannot stand in for all of them.
+	wantStatus("third_agent_hits_the_cap", 402)
+	agentRefusal := matched("third_agent_hits_the_cap")
+	for path, want := range map[string]interface{}{
+		"error.details.resource": "agents",
+		"error.details.limit":    2,
+		"error.details.current":  2,
+	} {
+		if got := agentRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("third_agent_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
+		}
 	}
 
 	// ...and allowed when it should be. Without these a server that 402'd
 	// unconditionally would satisfy every assertion above.
-	for _, id := range []string{"reregister_owned_domain_at_cap_is_allowed", "agent_create_succeeds_again_after_freeing_a_slot"} {
-		if s, ok := steps[id]; !ok || s.Expect == nil || s.Expect.Status != 201 {
-			t.Errorf("%s must expect 201, got %+v", id, s.Expect)
-		}
-	}
+	wantStatus("reregister_owned_domain_at_cap_is_allowed", 201)
+	wantStatus("agent_create_succeeds_again_after_freeing_a_slot", 201)
 
-	// The capped account holds one slot per resource, so anything left behind
-	// puts the NEXT run at its cap on the very first step.
+	// Cleanup must remove EVERY agent the scenario can create, including the one
+	// the happy path deletes mid-scenario: steps stop at the first failure, so a
+	// failure in between would otherwise strand it and put the next run at its
+	// cap on an early step.
 	var cleanupIDs []string
 	for _, c := range sc.Cleanup {
 		cleanupIDs = append(cleanupIDs, c.ID)
 	}
-	if len(cleanupIDs) != 2 || cleanupIDs[0] != "delete_agent_permanently" || cleanupIDs[1] != "delete_domain" {
-		t.Errorf("cleanup = %v, want [delete_agent_permanently delete_domain]", cleanupIDs)
+	want := []string{"delete_agent_1", "delete_agent_2", "delete_agent_3", "delete_domain"}
+	if len(cleanupIDs) != len(want) {
+		t.Fatalf("cleanup = %v, want %v", cleanupIDs, want)
+	}
+	for i := range want {
+		if cleanupIDs[i] != want[i] {
+			t.Errorf("cleanup[%d] = %s, want %s", i, cleanupIDs[i], want[i])
+		}
 	}
 }

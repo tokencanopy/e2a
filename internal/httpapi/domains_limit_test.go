@@ -17,14 +17,17 @@ import (
 // not have consumed. The create limit belongs on creates.
 func TestRegisterDomainAtCapAllowsReclaimOfOwnedDomain(t *testing.T) {
 	srv := testServer(t)
-	// "acme.com" is a domain the shared LookupDomain fake reports as owned;
-	// "overcap" authenticates as u_overcap, whom EnforceDomainCreate rejects.
-	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "acme.com"})
+	// "capped-owned.com" is owned by u_overcap ALONE in the shared fake, and
+	// "overcap" authenticates as u_overcap — whom EnforceDomainCreate rejects.
+	// A singly-owned domain is deliberate: it is only found when the handler
+	// passes the authenticated caller's id, so this assertion fails if the
+	// scoping is dropped (passing "") or aimed at the wrong account.
+	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "capped-owned.com"})
 	if code != 201 {
 		t.Fatalf("re-register of an owned domain at cap = %d %v, want 201 (creates nothing, so the create cap does not apply)", code, body)
 	}
-	if body["domain"] != "acme.com" {
-		t.Errorf("domain = %v, want acme.com", body["domain"])
+	if body["domain"] != "capped-owned.com" {
+		t.Errorf("domain = %v, want capped-owned.com", body["domain"])
 	}
 }
 
@@ -32,19 +35,18 @@ func TestRegisterDomainAtCapAllowsReclaimOfOwnedDomain(t *testing.T) {
 // a way to bypass the cap: LookupDomain filters on user_id, so another
 // account's domain is not "already owned" and stays charged (and would then
 // be rejected as a conflict by the claim itself).
+//
+// This runs against the SHARED ownership-aware fake, not a local override, and
+// that is the point: "other-account.com" is owned by u_1 alone, so the request
+// below only 402s if the handler passes the AUTHENTICATED caller's id. An
+// earlier version of this test used a domain no fake matched for anyone, which
+// meant it exercised the fake's not-found branch and passed even with the
+// scoping removed — the mutation it exists to catch.
 func TestRegisterDomainAtCapStillChargesAnotherAccountsDomain(t *testing.T) {
-	srv := testServer(t, func(d *Deps) {
-		d.LookupDomain = func(ctx context.Context, domain, userID string) (*identity.Domain, error) {
-			// User-scoped exactly like the store: only the owner sees the row.
-			if domain == "someone-elses.com" && userID == "u_other" {
-				return &identity.Domain{Domain: domain, Verified: true}, nil
-			}
-			return nil, errors.New("domain not found")
-		}
-	})
-	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "someone-elses.com"})
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "other-account.com"})
 	if code != 402 || errCode(body) != "limit_exceeded" {
-		t.Fatalf("want 402 limit_exceeded for a domain the caller does not own, got %d %v", code, body)
+		t.Fatalf("want 402 limit_exceeded for a domain owned by another account, got %d %v", code, body)
 	}
 }
 
@@ -53,7 +55,7 @@ func TestRegisterDomainAtCapStillChargesAnotherAccountsDomain(t *testing.T) {
 // limit.
 func TestRegisterDomainAtCapEnforcesWhenLookupUnavailable(t *testing.T) {
 	srv := testServer(t, func(d *Deps) { d.LookupDomain = nil })
-	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "acme.com"})
+	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "capped-owned.com"})
 	if code != 402 || errCode(body) != "limit_exceeded" {
 		t.Fatalf("want 402 limit_exceeded when LookupDomain is unwired, got %d %v", code, body)
 	}
@@ -68,7 +70,7 @@ func TestRegisterDomainAtCapEnforcesWhenLookupErrors(t *testing.T) {
 			return nil, errors.New("connection refused")
 		}
 	})
-	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "acme.com"})
+	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "capped-owned.com"})
 	if code != 402 || errCode(body) != "limit_exceeded" {
 		t.Fatalf("want 402 limit_exceeded when the lookup fails, got %d %v", code, body)
 	}

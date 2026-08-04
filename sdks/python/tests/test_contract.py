@@ -143,8 +143,22 @@ def scenario_needs_capped_account(sc: dict[str, Any]) -> bool:
 
     Those scenarios need a cap they can actually reach, which only the contract
     server's seeded secondary account provides.
+
+    Inspects auth_override VALUES specifically. Dumping the whole scenario and
+    substring-matching looks equivalent and is not: the scenario's own
+    description mentions the placeholder in prose, so a blob match stays true
+    even if every auth_override is switched back to the primary account —
+    exactly the regression this is meant to detect. (It also avoids serializing
+    arbitrary YAML scalars, which JSON cannot always encode.)
     """
-    return CAPPED_KEY_PLACEHOLDER in json_mod.dumps(sc)
+    overrides = [sc.get("auth_override")]
+    for key in ("steps", "cleanup", "setup"):
+        for step in sc.get(key) or []:
+            if isinstance(step, dict):
+                overrides.append(step.get("auth_override"))
+    return any(
+        isinstance(o, str) and CAPPED_KEY_PLACEHOLDER in o for o in overrides
+    )
 
 
 def scenario_needs_store(sc: dict[str, Any]) -> bool:
@@ -1014,15 +1028,27 @@ def test_limits_scenario_shape():
     steps = {step["id"]: step for step in scenario["steps"]}
 
     # Refused AT the cap, with the machine-readable envelope an SDK needs to
-    # say WHICH quota stopped the caller.
+    # say WHICH quota stopped the caller — including the upgrade affordance,
+    # which is omitempty and so vanishes silently if the server drops it.
     refused = steps["second_domain_hits_the_cap"]["expect"]
     assert refused["status"] == 402
     assert refused["body_match"]["error.code"] == "limit_exceeded"
     assert refused["body_match"]["error.details.resource"] == "domains"
     assert refused["body_match"]["error.details.limit"] == 1
-    assert steps["second_agent_hits_the_cap"]["expect"]["body_match"][
-        "error.details.resource"
-    ] == "agents"
+    assert refused["body_match"]["error.details.current"] == 1
+    assert refused["body_match"]["error.details.plan_code"] == "contract_capped"
+    assert (
+        refused["body_match"]["error.details.upgrade_url"]
+        == "https://e2a.dev/upgrade"
+    )
+
+    # A second resource with a DIFFERENT cap: no single hardcoded number can
+    # satisfy both refusals.
+    agent_refused = steps["third_agent_hits_the_cap"]["expect"]
+    assert agent_refused["status"] == 402
+    assert agent_refused["body_match"]["error.details.resource"] == "agents"
+    assert agent_refused["body_match"]["error.details.limit"] == 2
+    assert agent_refused["body_match"]["error.details.current"] == 2
 
     # ...and allowed when it should be. Without these, a server that 402'd
     # unconditionally would satisfy every assertion above.
@@ -1032,10 +1058,14 @@ def test_limits_scenario_shape():
         == 201
     )
 
-    # The capped account holds one slot per resource, so a leak puts the NEXT
-    # run at its cap on step one.
+    # Cleanup must remove EVERY agent the scenario can create, including the
+    # one the happy path deletes mid-scenario: steps stop at the first failure,
+    # so a failure in between would otherwise strand it and put the next run at
+    # its cap on an early step.
     assert [step["id"] for step in scenario["cleanup"]] == [
-        "delete_agent_permanently",
+        "delete_agent_1",
+        "delete_agent_2",
+        "delete_agent_3",
         "delete_domain",
     ]
 

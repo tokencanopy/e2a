@@ -26,13 +26,19 @@ import (
 )
 
 // CappedLimits are the plan caps of the secondary account described on
-// ContractServer.CappedAPIKey. One slot per create-limited resource is the
-// smallest cap that can express BOTH directions of enforcement: a scenario can
-// consume the slot (success), be refused at the cap (402), free it, and
-// succeed again — proving the limit is a cap and not an unconditional refusal.
+// ContractServer.CappedAPIKey. Caps are small enough that a scenario can
+// consume the slots, be refused at the cap (402), free one, and succeed again
+// — proving the limit is a cap and not an unconditional refusal — and
+// deliberately DIFFERENT per resource, so no single hardcoded number can
+// satisfy every assertion about the 402 envelope.
+//
+// Only the fields limits.Store.Upsert writes are capped here. max_webhooks,
+// max_templates and max_contacts are separate columns this row does not touch,
+// so the capped account still inherits their generous schema defaults; a
+// future scenario covering those caps has to extend the row first.
 var CappedLimits = limits.Limits{
 	PlanCode:         "contract_capped",
-	MaxAgents:        1,
+	MaxAgents:        2,
 	MaxDomains:       1,
 	MaxMessagesMonth: 1,
 	MaxStorageBytes:  1 << 20,
@@ -57,13 +63,13 @@ type ContractServer struct {
 	// is no staleness window for a scenario to race.
 	CappedAPIKey string
 	CappedUserID string
-	DBPool     *pgxpool.Pool
-	Store      *identity.Store
-	WSHub      *ws.Hub
-	SMTPAddr   string
-	httpServer *http.Server
-	httpLn     net.Listener
-	smtpServer *relay.Server
+	DBPool       *pgxpool.Pool
+	Store        *identity.Store
+	WSHub        *ws.Hub
+	SMTPAddr     string
+	httpServer   *http.Server
+	httpLn       net.Listener
+	smtpServer   *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -253,13 +259,13 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		UserID:       user.ID,
 		CappedAPIKey: cappedKey.PlaintextKey,
 		CappedUserID: cappedUser.ID,
-		DBPool:     pool,
-		Store:      store,
-		WSHub:      wsHub,
-		SMTPAddr:   smtpAddr,
-		httpServer: httpServer,
-		httpLn:     httpLn,
-		smtpServer: smtpServer,
+		DBPool:       pool,
+		Store:        store,
+		WSHub:        wsHub,
+		SMTPAddr:     smtpAddr,
+		httpServer:   httpServer,
+		httpLn:       httpLn,
+		smtpServer:   smtpServer,
 	}, nil
 }
 
