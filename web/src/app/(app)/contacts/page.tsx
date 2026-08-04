@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentPromptCard } from "../../components/AgentPromptCard";
 import { Button } from "../../components/loft/Button";
 import { Chip } from "../../components/loft/Chip";
@@ -576,9 +576,10 @@ function ImportPanel({ agents, onImported }: {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  const fileReadSequence = useRef(0);
   const headers = (table[0] ?? []).map((header) => header.trim());
   const metadataColumns = useMemo(() => {
-    if (!emailColumn || table.length < 2) return [];
+    if (table.length < 2) return [];
     try {
       return getCsvMetadataColumns(table, emailColumn, nameColumn || undefined);
     } catch {
@@ -588,7 +589,6 @@ function ImportPanel({ agents, onImported }: {
   const invalidateKey = () => setIdempotencyKey(crypto.randomUUID());
 
   const preview = (nextEmail = emailColumn, nextName = nameColumn) => {
-    if (!nextEmail) return;
     try {
       setRows(mapCsvRows(table, nextEmail, nextName || undefined));
       setError("");
@@ -610,20 +610,30 @@ function ImportPanel({ agents, onImported }: {
             onChange={async (event) => {
               const file = event.target.files?.[0];
               if (!file) return;
+              const readSequence = ++fileReadSequence.current;
               invalidateKey();
+              setTable([]);
+              setFileName("");
+              setEmailColumn("");
+              setNameColumn("");
+              setRows([]);
+              setError("");
               try {
                 const parsed = parseCsv(await file.text());
-                setTable(parsed);
-                setFileName(file.name);
                 const trimmedHeaders = parsed[0]?.map((header) => header.trim()) ?? [];
                 const normalized = trimmedHeaders.map((header) => header.toLowerCase());
                 const email = trimmedHeaders[normalized.findIndex((header) => ["email", "address"].includes(header))] ?? trimmedHeaders[0] ?? "";
                 const name = trimmedHeaders[normalized.findIndex((header) => ["name", "display name", "full name"].includes(header))] ?? "";
+                const mappedRows = mapCsvRows(parsed, email, name || undefined);
+                if (readSequence !== fileReadSequence.current) return;
+                setTable(parsed);
+                setFileName(file.name);
                 setEmailColumn(email);
                 setNameColumn(name);
-                setRows(mapCsvRows(parsed, email, name || undefined));
+                setRows(mappedRows);
                 setError("");
               } catch (err) {
+                if (readSequence !== fileReadSequence.current) return;
                 setError(err instanceof Error ? err.message : "Could not read CSV");
               }
             }} />
@@ -632,14 +642,14 @@ function ImportPanel({ agents, onImported }: {
           <label className="text-[12px]" style={{ color: "var(--fg-muted)" }}>Email column
             <select className={`${fieldClass} mt-1`} style={fieldStyle} value={emailColumn}
               onChange={(event) => { invalidateKey(); setEmailColumn(event.target.value); preview(event.target.value, nameColumn); }}>
-              {headers.map((header) => <option key={header}>{header}</option>)}
+              {headers.map((header, index) => <option key={`${index}:${header}`} value={header}>{header}</option>)}
             </select>
           </label>
           <label className="text-[12px]" style={{ color: "var(--fg-muted)" }}>Name column
             <select className={`${fieldClass} mt-1`} style={fieldStyle} value={nameColumn}
               onChange={(event) => { invalidateKey(); setNameColumn(event.target.value); preview(emailColumn, event.target.value); }}>
               <option value="">None</option>
-              {headers.map((header) => <option key={header}>{header}</option>)}
+              {headers.map((header, index) => <option key={`${index}:${header}`} value={header}>{header}</option>)}
             </select>
           </label>
         </div>

@@ -63,4 +63,17 @@ describe("contacts CSV parsing", () => {
       metadata: { role: "GP" },
     }]);
   });
+
+  it("keeps mapping and reporting aligned when the selected email header is empty", () => {
+    const table = parseCsv(",alias,company\n1,A. Partner,Example Capital\n");
+
+    expect(getCsvMetadataColumns(table, "")).toEqual([
+      { name: "alias", sampleValue: "A. Partner" },
+      { name: "company", sampleValue: "Example Capital" },
+    ]);
+    expect(mapCsvRows(table, "")).toEqual([{
+      address: "1",
+      metadata: { alias: "A. Partner", company: "Example Capital" },
+    }]);
+  });
 });

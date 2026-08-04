@@ -309,11 +309,17 @@ it("shows metadata read-only in the editor and omits it from PATCH", async () =>
   render(<ContactsPage />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Edit partner@example.com" }));
-  expect(await screen.findByText(
+  const editHeading = await screen.findByRole("heading", { name: "Edit partner@example.com" });
+  const editPanel = editHeading.closest("section");
+  expect(editPanel).not.toBeNull();
+  expect(within(editPanel as HTMLElement).getByText(
     "Metadata is read-only here. Manage it through CSV import or the API.",
   )).toBeInTheDocument();
-  expect(screen.getAllByText("Example Capital").length).toBeGreaterThan(0);
-  expect(screen.getAllByText("42").length).toBeGreaterThan(0);
+  const editorMetadataHeading = within(editPanel as HTMLElement).getByText("Metadata");
+  const editorMetadata = editorMetadataHeading.closest("div");
+  expect(editorMetadata).not.toBeNull();
+  expect(within(editorMetadata as HTMLElement).getAllByText("Example Capital").length).toBeGreaterThan(0);
+  expect(within(editorMetadata as HTMLElement).getAllByText("42").length).toBeGreaterThan(0);
 
   const input = screen.getByRole("textbox", { name: "Display name" });
   await userEvent.clear(input);
@@ -404,4 +410,109 @@ it("states when a CSV has no metadata columns", async () => {
   await userEvent.upload(screen.getByLabelText("CSV file"), file);
 
   expect(await screen.findByText("No columns will be stored as metadata.")).toBeInTheDocument();
+});
+
+it("disarms a staged import when a replacement CSV cannot be mapped", async () => {
+  fetchMock.mockResolvedValue({
+    ok: true,
+    json: async () => ({ items: [], next_cursor: null }),
+  });
+  render(<ContactsPage />);
+
+  await screen.findAllByText("No contacts yet. Create one or import a CSV.");
+  await userEvent.click(screen.getByRole("button", { name: "Import CSV" }));
+  const importHeading = screen.getByRole("heading", { name: "Import CSV" });
+  const importPanel = importHeading.closest("section");
+  expect(importPanel).not.toBeNull();
+  const fileInput = within(importPanel as HTMLElement).getByLabelText("CSV file");
+
+  const validCsv = "email,name,company\np@x.com,A. Partner,Example Capital";
+  const validFile = new File([validCsv], "a.csv", { type: "text/csv" });
+  Object.defineProperty(validFile, "text", { value: async () => validCsv });
+  await userEvent.upload(fileInput, validFile);
+  expect(await within(importPanel as HTMLElement).findByText(/a\.csv: 1 row ready/)).toBeInTheDocument();
+  expect(within(importPanel as HTMLElement).getByRole("button", { name: "Import 1 contact" })).toBeEnabled();
+
+  const invalidCsv = "email,name\n";
+  const invalidFile = new File([invalidCsv], "b.csv", { type: "text/csv" });
+  Object.defineProperty(invalidFile, "text", { value: async () => invalidCsv });
+  await userEvent.upload(fileInput, invalidFile);
+
+  expect(await within(importPanel as HTMLElement).findByRole("alert")).toHaveTextContent(
+    "CSV must include a header and at least one row",
+  );
+  expect(within(importPanel as HTMLElement).queryByText(/a\.csv: 1 row ready/)).not.toBeInTheDocument();
+  expect(within(importPanel as HTMLElement).queryByText(/b\.csv:/)).not.toBeInTheDocument();
+  expect(within(importPanel as HTMLElement).queryByRole("region", {
+    name: "CSV metadata mapping",
+  })).not.toBeInTheDocument();
+  expect(within(importPanel as HTMLElement).getByRole("button", { name: "Import contacts" })).toBeDisabled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("previews and posts metadata when the selected email header is empty", async () => {
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [], next_cursor: null }) })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        batch_id: "cimp_empty_header",
+        created: 1,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        results: [{ index: 0, address: "1", status: "created" }],
+      }),
+    })
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [], next_cursor: null }) });
+  render(<ContactsPage />);
+
+  await screen.findAllByText("No contacts yet. Create one or import a CSV.");
+  await userEvent.click(screen.getByRole("button", { name: "Import CSV" }));
+  const csv = ",alias,company\n1,A. Partner,Example Capital";
+  const file = new File([csv], "blank-email-header.csv", { type: "text/csv" });
+  Object.defineProperty(file, "text", { value: async () => csv });
+  await userEvent.upload(screen.getByLabelText("CSV file"), file);
+
+  const mapping = await screen.findByRole("region", { name: "CSV metadata mapping" });
+  expect(within(mapping).getByText("alias")).toBeInTheDocument();
+  expect(within(mapping).getByText("A. Partner")).toBeInTheDocument();
+  expect(within(mapping).getByText("company")).toBeInTheDocument();
+  expect(within(mapping).getByText("Example Capital")).toBeInTheDocument();
+  expect(within(mapping).queryByText("No columns will be stored as metadata.")).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Import 1 contact" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  const [, importRequest] = fetchMock.mock.calls[1] as [string, RequestInit];
+  expect(JSON.parse(importRequest.body as string)).toEqual({
+    contacts: [{
+      address: "1",
+      metadata: { alias: "A. Partner", company: "Example Capital" },
+    }],
+    on_conflict: "merge",
+  });
+});
+
+it("does not emit duplicate-key warnings for headers that collide after trimming", async () => {
+  const consoleError = jest.spyOn(console, "error").mockImplementation(() => undefined);
+  try {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], next_cursor: null }),
+    });
+    render(<ContactsPage />);
+
+    await screen.findAllByText("No contacts yet. Create one or import a CSV.");
+    await userEvent.click(screen.getByRole("button", { name: "Import CSV" }));
+    const csv = "email,tag, tag\np@x.com,first,second";
+    const file = new File([csv], "duplicate-trimmed-headers.csv", { type: "text/csv" });
+    Object.defineProperty(file, "text", { value: async () => csv });
+    await userEvent.upload(screen.getByLabelText("CSV file"), file);
+    await screen.findByRole("region", { name: "CSV metadata mapping" });
+
+    const messages = consoleError.mock.calls.flat().join(" ");
+    expect(messages).not.toMatch(/same key|Encountered two children with the same key/i);
+  } finally {
+    consoleError.mockRestore();
+  }
 });
