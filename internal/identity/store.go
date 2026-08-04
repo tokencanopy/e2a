@@ -52,9 +52,9 @@ type Domain struct {
 	// "probed and failed" which is captured by `verified=false` + a
 	// non-null LastCheckedAt.
 	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
-	// AgentCount is computed at read time by ListDomainsByUser and
-	// LookupDomain, via the same correlated subquery, and is not a
-	// persisted column.
+	// AgentCount is computed at read time — ListDomainsByUser,
+	// LookupDomain, and ClaimOrCreateDomain's existing-row branch run
+	// the same correlated subquery — and is not a persisted column.
 	AgentCount int `json:"agent_count"`
 	// DKIM keypair fields. The selector + public key
 	// are user-facing — the dashboard shows them so users can copy the
@@ -864,10 +864,19 @@ func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) 
 	}
 
 	d := &Domain{}
+	// A same-owner re-claim is idempotent and returns this existing row, which
+	// POST /v1/domains serializes through the same view as GET — so AgentCount
+	// must be the real count (same correlated subquery as LookupDomain /
+	// ListDomainsByUser, trashed agents excluded), not the Go zero value
+	// (#811). The INSERT branch below deliberately omits it: a brand-new row
+	// cannot have agents, so its zero is genuinely correct.
 	err = tx.QueryRow(ctx,
-		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, '')
+		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, ''),
+		        (SELECT count(*) FROM agent_identities a
+		           WHERE a.registered_domain = domains.domain AND a.user_id = domains.user_id
+		             AND a.deleted_at IS NULL) AS agent_count
 		 FROM domains WHERE domain = $1`, domain,
-	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus)
+	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx,
 			`INSERT INTO domains (domain, user_id, verified, verification_token, dkim_selector, dkim_public_key, dkim_private_key)

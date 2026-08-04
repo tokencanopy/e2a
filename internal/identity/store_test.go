@@ -1278,6 +1278,58 @@ func TestLookupDomain_AgentCountMatchesList(t *testing.T) {
 	t.Fatalf("domain %s not found in ListDomainsByUser", domain)
 }
 
+// TestClaimOrCreateDomain_ReclaimPopulatesAgentCount pins #811: a same-owner
+// re-claim is idempotent and returns the existing row, which POST /v1/domains
+// serializes through the same view as GET /v1/domains/{domain} — so its
+// AgentCount must be the real count (trashed agents excluded, mirroring
+// TestLookupDomain_AgentCountMatchesList), not the Go zero value. The
+// first-claim assertion also pins the INSERT branch's genuine zero, so a
+// passing count is a real count and not a constant.
+func TestClaimOrCreateDomain_ReclaimPopulatesAgentCount(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+
+	user, err := store.CreateOrGetUser(ctx, "reclaim-count@example.com", "Owner", "google-reclaim-count")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "reclaimcount.example.com"
+	first, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain (create): %v", err)
+	}
+	if first.AgentCount != 0 {
+		t.Errorf("fresh claim AgentCount = %d, want 0 (brand-new row cannot have agents)", first.AgentCount)
+	}
+	if _, err := store.CreateAgent(ctx, "keep@"+domain, domain, "Keep", "", "", user.ID); err != nil {
+		t.Fatalf("CreateAgent keep: %v", err)
+	}
+	trash, err := store.CreateAgent(ctx, "trash@"+domain, domain, "Trash", "", "", user.ID)
+	if err != nil {
+		t.Fatalf("CreateAgent trash: %v", err)
+	}
+	if err := store.SoftDeleteAgent(ctx, trash.ID, user.ID); err != nil {
+		t.Fatalf("SoftDeleteAgent: %v", err)
+	}
+
+	reclaimed, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain (re-claim): %v", err)
+	}
+	if reclaimed.AgentCount != 1 {
+		t.Errorf("re-claim AgentCount = %d, want 1 (one live agent, trashed one excluded)", reclaimed.AgentCount)
+	}
+
+	looked, err := store.LookupDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("LookupDomain: %v", err)
+	}
+	if looked.AgentCount != reclaimed.AgentCount {
+		t.Errorf("LookupDomain AgentCount = %d, re-claim AgentCount = %d, want equal", looked.AgentCount, reclaimed.AgentCount)
+	}
+}
+
 // TestTouchDomainLastChecked_PersistsTimestamp: ensures the column
 // actually moves when called. This is the only path that writes
 // last_checked_at; without the touch, the column stays NULL even after
