@@ -293,6 +293,12 @@ scenarios:
       # (201, existing row returned), and that row must carry the real count —
       # the claim path used to leave the field at the Go zero value, serving
       # the same false 0 that #632 fixed on the GET path.
+      #
+      # `verified` is pinned alongside the count because idempotent means the
+      # EXISTING row, untouched: the read/insert split returns it as-is, but a
+      # future rewrite into `INSERT … ON CONFLICT DO UPDATE` would silently
+      # reset verification on every re-register and agent_count alone would
+      # still pass. The domain is verified two steps above, so this is free.
       - id: reregister_counts_agent
         action: request
         method: POST
@@ -303,6 +309,7 @@ scenarios:
           status: 201
           body_match:
             agent_count: 1
+            verified: true
 
       # ...and the list path reports the same number for the same domain.
       # Containment, not index or length: the account may hold other domains.
