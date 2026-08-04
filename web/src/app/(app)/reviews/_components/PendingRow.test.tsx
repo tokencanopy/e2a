@@ -70,6 +70,29 @@ describe("PendingRow", () => {
     expect(screen.getByText("This sender isn't allowed by the inbox policy.")).toBeInTheDocument();
   });
 
+  it("shows a scheduled-send chip when a held draft carries a future send_at (#815)", () => {
+    const scheduled = {
+      ...summary,
+      scheduled_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+    };
+    render(<PendingRow summary={scheduled} expanded={false} onToggle={() => {}} onResolved={() => {}} />);
+    expect(screen.getByText(/^Sends /)).toBeInTheDocument();
+  });
+
+  it("labels a lapsed schedule as sending on approval", () => {
+    const lapsed = {
+      ...summary,
+      scheduled_at: new Date(Date.now() - 60_000).toISOString(),
+    };
+    render(<PendingRow summary={lapsed} expanded={false} onToggle={() => {}} onResolved={() => {}} />);
+    expect(screen.getByText("Sends on approval")).toBeInTheDocument();
+  });
+
+  it("omits the scheduled chip when there is no schedule", () => {
+    render(<PendingRow summary={summary} expanded={false} onToggle={() => {}} onResolved={() => {}} />);
+    expect(screen.queryByText(/^Sends/)).not.toBeInTheDocument();
+  });
+
   it("shows scan rationale on expansion and confidence only after disclosure", async () => {
     const user = userEvent.setup();
     const scan = {

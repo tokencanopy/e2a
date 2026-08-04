@@ -663,10 +663,14 @@ declared stable.
   `send_at` instead returns `status=scheduled` immediately and does not wait
   until that time.
 - `send_at` **(beta)** on send/reply/forward must be RFC 3339 with an explicit
-  UTC offset, can be at most 90 days ahead, and does not survive a review hold
-  (approval sends immediately). A future direct loopback whose only recipient
-  is the sending agent's own address returns `400 invalid_request` because
-  loopback is immediate. Trashing a scheduled message before provider
+  UTC offset, can be at most 90 days ahead, and **survives a review hold**: a
+  held message keeps its `send_at` (surfaced as `scheduled_at` on the
+  `pending_review` message and in the review queue), and approval re-arms the
+  send — submitted at `send_at` if still in the future, or immediately if it has
+  already passed. A future `send_at` whose only recipient is the sending agent's
+  own address returns `400 invalid_request` because self-delivery is an
+  immediate loopback with no scheduled arm (even when the message would
+  otherwise be held for review). Trashing a scheduled message before provider
   submission starts prevents submission; once submission has a fresh lease,
   delete returns `409 send_in_progress` and must be retried.
   Restoring it before `scheduled_at` re-arms the existing job; restoring at or

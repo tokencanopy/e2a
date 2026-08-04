@@ -226,7 +226,7 @@ func (a *API) approveOutboundAsyncComposed(ctx context.Context, agent *identity.
 		To: comp.To, CC: comp.CC, BCC: comp.BCC, Subject: sendReq.Subject,
 		Method: comp.Method, EnvelopeFrom: comp.EnvelopeFrom, SentAs: comp.SentAs, Raw: comp.Raw,
 	}
-	sent, err := a.store.ApproveAndAccept(ctx, messageID, userID, identity.MessageStatusSent, editedByReviewer, acc, a.outboundEnq.EnqueueSendTx, idemCompleteTx)
+	sent, err := a.store.ApproveAndAccept(ctx, messageID, userID, identity.MessageStatusSent, editedByReviewer, acc, a.outboundEnq.EnqueueSendTx, a.outboundEnq.EnqueueScheduledSendTx, idemCompleteTx)
 	if err != nil {
 		return nil, false, err
 	}

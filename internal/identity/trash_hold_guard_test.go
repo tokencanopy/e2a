@@ -113,7 +113,7 @@ func TestApproveAndAcceptSkipsTrashedAgentHold(t *testing.T) {
 		To: []string{"x@example.com"}, Subject: "held subject", Method: "smtp",
 		EnvelopeFrom: "bot@trash-guard-app.example.com", SentAs: "relay", Raw: []byte("raw"),
 	}
-	_, err = store.ApproveAndAccept(ctx, msg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueue, nil)
+	_, err = store.ApproveAndAccept(ctx, msg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueue, nil, nil)
 	if !errors.Is(err, identity.ErrNotPendingApproval) {
 		t.Fatalf("ApproveAndAccept on trashed agent's hold = %v, want ErrNotPendingApproval (no-op)", err)
 	}

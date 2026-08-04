@@ -1108,11 +1108,22 @@ func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.A
 			if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
 				return err
 			}
+			// Preserve the caller's schedule across the hold (#815). The column is
+			// stamped in the same tx as the row so the held draft carries send_at
+			// through to the approval path, which re-arms it. Mirrors the direct
+			// scheduled-accept path's StampScheduledAtTx.
+			if req.ScheduledAt != nil {
+				if err := a.store.StampScheduledAtTx(ctx, tx, m.ID, *req.ScheduledAt); err != nil {
+					return err
+				}
+				m.ScheduledAt = req.ScheduledAt
+			}
 			if idemCompleteTx != nil {
 				if err := idemCompleteTx(ctx, tx, &OutboundResult{
 					Held:              true,
 					PendingMessageID:  m.ID,
 					ApprovalExpiresAt: m.ApprovalExpiresAt,
+					ScheduledAt:       m.ScheduledAt,
 				}); err != nil {
 					return err
 				}
@@ -1138,11 +1149,20 @@ func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.A
 			if err != nil {
 				return err
 			}
+			// Preserve the caller's schedule across the hold (#815) — see the
+			// notifier branch above.
+			if req.ScheduledAt != nil {
+				if err := a.store.StampScheduledAtTx(ctx, tx, m.ID, *req.ScheduledAt); err != nil {
+					return err
+				}
+				m.ScheduledAt = req.ScheduledAt
+			}
 			if idemCompleteTx != nil {
 				if err := idemCompleteTx(ctx, tx, &OutboundResult{
 					Held:              true,
 					PendingMessageID:  m.ID,
 					ApprovalExpiresAt: m.ApprovalExpiresAt,
+					ScheduledAt:       m.ScheduledAt,
 				}); err != nil {
 					return err
 				}
@@ -1178,10 +1198,12 @@ type OutboundResult struct {
 	// email.failed); "scheduled" when the send was deferred to a future instant
 	// (ScheduledAt). See async-message-pipeline.md, slice C.
 	Status string
-	// ScheduledAt is set only when Status=="scheduled": the future instant the
-	// queued send will be submitted. It must be carried on BOTH the live return
-	// and the in-transaction idempotency completion so a keyed replay renders the
-	// identical scheduled view (never a bare "accepted").
+	// ScheduledAt is the future instant a queued send will be submitted. Set when
+	// Status=="scheduled" (direct scheduled accept) AND on a Held result whose
+	// draft carried a future send_at (#815) — the hold preserves the schedule so
+	// approval can re-arm it. It must be carried on BOTH the live return and the
+	// in-transaction idempotency completion so a keyed replay renders the identical
+	// view (never a bare "accepted"/"pending_review" that has silently dropped it).
 	ScheduledAt *time.Time
 }
 
@@ -1307,6 +1329,16 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// the same value.
 	req.ConversationID = resolveOutboundConversationID(req.ConversationID, msgType, referenced)
 
+	// A future send_at can never be honored for a self-send: delivery is an
+	// immediate in-process loopback (both on the direct path and on approval of a
+	// held self-send), which has no scheduled arm. Reject up front — BEFORE the
+	// review hold — so the schedule is never silently persisted-then-dropped. This
+	// supersedes the old "hold takes precedence over the loopback check" behavior,
+	// under which a held self-send discarded send_at without a word (#815).
+	if req.ScheduledAt != nil && isSelfSend(req, agent.EmailAddress()) {
+		return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
+	}
+
 	// Outbound screening (Slice 5): the recipient gate (outbound_policy) + content
 	// scan (outbound_scan) combine into one applied action. block ⇒ refuse;
 	// review ⇒ hold; flag ⇒ send + annotate; allow ⇒ send.
@@ -1337,7 +1369,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if verdict.Annotate() {
 			a.annotateAndAudit(ctx, agent, msg.ID, req, verdict)
 		}
-		return &OutboundResult{Held: true, PendingMessageID: msg.ID, ApprovalExpiresAt: msg.ApprovalExpiresAt}, nil
+		return &OutboundResult{Held: true, PendingMessageID: msg.ID, ApprovalExpiresAt: msg.ApprovalExpiresAt, ScheduledAt: msg.ScheduledAt}, nil
 	}
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, true); uerr != nil {
 		return nil, uerr
@@ -1347,12 +1379,9 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// §7.2 / async-send-contract.md): billing must not run ahead of a durable
 	// message row, or a crash between meter and persist bills an invisible send.
 	if isSelfSend(req, agent.EmailAddress()) {
-		// Self-send is an immediate in-process loopback; the scheduling path
-		// (River ScheduledAt) never runs for it, so a future send_at would be
-		// silently dropped. Reject it rather than deliver early against intent.
-		if req.ScheduledAt != nil {
-			return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
-		}
+		// Self-send is an immediate in-process loopback; a future send_at was
+		// already rejected up front (before the review hold), so req.ScheduledAt is
+		// nil here by construction.
 		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, parentMessageID, idemCompleteTx)
 		if err != nil {
 			log.Printf("[api] self-send failed: agent=%s error=%v", agent.EmailAddress(), err)

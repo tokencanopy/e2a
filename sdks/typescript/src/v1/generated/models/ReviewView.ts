@@ -43,6 +43,10 @@ export class ReviewView {
     * Hold state of this queue item. Open set; tolerate unknown values. Currently always pending_review (the queue lists held items).
     */
     'reviewStatus': string;
+    /**
+    * Beta: scheduled sending may change before it is declared stable. Present only on an outbound hold that carried a future send_at (#815): the instant the message is queued to be submitted once approved. The schedule survives the hold — approving submits at this instant if it is still in the future, or immediately if it has already passed. Absent on inbound holds and on outbound holds without a schedule.
+    */
+    'scheduledAt'?: Date;
     'subject': string;
     'to': Array<string>;
     /**
@@ -120,6 +124,12 @@ export class ReviewView {
             "baseName": "review_status",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "subject",
