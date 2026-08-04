@@ -114,13 +114,16 @@ type Metrics interface {
 	// when it settles.
 	OutboundTerminal(outcome string)
 
-	// OutboundTerminalLatency records acceptance→terminal latency for
-	// one outbound message (the terminal write's occurred_at −
-	// messages.created_at). Observed exactly once per message,
-	// co-located with the OutboundTerminal emission so the two share
-	// their exactly-once contract (the SNS-feedback settle path stays
-	// uninstrumented for both — see the guard comment at the worker's
-	// MarkSent emit in internal/outboundsend).
+	// OutboundTerminalLatency records eligibility→terminal latency for
+	// one outbound message (the terminal write's occurred_at − the
+	// submission anchor: messages.created_at for an ordinary send, the
+	// approve or fire time for a held or scheduled one). Observed at most
+	// once per message, co-located with the OutboundTerminal emission so
+	// the two share their exactly-once contract (the SNS-feedback settle
+	// path stays uninstrumented for both — see the guard comment at the
+	// worker's MarkSent emit in internal/outboundsend). A terminal whose
+	// occurred_at precedes its anchor records the count with no latency
+	// sample, so the two can legitimately diverge for gated rows.
 	OutboundTerminalLatency(seconds float64)
 
 	// OutboundAttempt records one submission attempt to the upstream

@@ -1311,3 +1311,81 @@ func countEvents(t *testing.T, store *identity.Store, userID, eventType string) 
 	}
 	return n
 }
+
+// recordingSendMetrics captures the terminal SLI emissions of a store-backed
+// send (the outboundsend package has its own recorder for fake-store tests).
+type recordingSendMetrics struct {
+	terminals []string
+	latencies []float64
+}
+
+func (r *recordingSendMetrics) OutboundQueueWait(float64) {}
+func (r *recordingSendMetrics) OutboundTerminal(outcome string) {
+	r.terminals = append(r.terminals, outcome)
+}
+func (r *recordingSendMetrics) OutboundTerminalLatency(seconds float64) {
+	r.latencies = append(r.latencies, seconds)
+}
+func (r *recordingSendMetrics) OutboundAttempt(string, float64) {}
+func (r *recordingSendMetrics) OutboundRateDeferred()           {}
+
+// The acceptance→terminal SLI anchors a HITL hold at its approve time and a
+// scheduled send at its fire time, but the worker only ever sees those gates if
+// ClaimSend carries them out of the store payload — the messages row →
+// OutboundSendPayload → SendJob seam that lives in this package. Every
+// worker-level latency test builds SendJob by hand against a fake store, so
+// this store-backed pass is the only thing standing between a dropped field at
+// that seam and a silent return of the reviewer's dwell to e2a's error budget.
+func TestSendWorker_ClaimCarriesSubmissionGatesIntoTerminalLatency(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		label string
+		held  bool // gate the row on reviewed_at (a HITL hold) vs scheduled_at
+	}{
+		{"hitl hold anchors at approve", "gatehold", true},
+		{"scheduled send anchors at fire time", "gatesched", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, store, outbox, _, pool := setupAsyncAPIWithPool(t)
+			ctx := context.Background()
+			user, ag := selfAgent(t, store, tc.label)
+			res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+				To: []string{"gated@external.test"}, Subject: "gated", Body: "b",
+			}, "send", "", nil, nil)
+			if oerr != nil || res == nil {
+				t.Fatalf("DeliverOutbound: res=%+v err=%+v", res, oerr)
+			}
+			// Drafted two hours ago, released into the send pipeline 30 seconds
+			// ago. Anchored at the gate the sample is ~30s; anchored at
+			// created_at it is ~2h — an automatic miss against the 300s SLO.
+			if _, err := pool.Exec(ctx,
+				`UPDATE messages
+				    SET created_at   = now() - interval '2 hours',
+				        reviewed_at  = CASE WHEN $2 THEN now() - interval '30 seconds' END,
+				        scheduled_at = CASE WHEN $2 THEN NULL ELSE now() - interval '30 seconds' END
+				  WHERE id = $1`, res.MessageID, tc.held); err != nil {
+				t.Fatalf("age the row: %v", err)
+			}
+
+			adapter := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
+			deliverer := fakeAsyncDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-gated", SentAs: "relay"}}
+			rec := &recordingSendMetrics{}
+			if err := outboundsend.NewSendWorker(adapter, deliverer).WithMetrics(rec).Work(ctx, workerJob(res.MessageID, 1)); err != nil {
+				t.Fatalf("worker.Work: %v", err)
+			}
+			if len(rec.terminals) != 1 || rec.terminals[0] != "sent" {
+				t.Fatalf("terminals = %v, want [sent]", rec.terminals)
+			}
+			if len(rec.latencies) != 1 {
+				t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+			}
+			gate := "scheduled_at"
+			if tc.held {
+				gate = "reviewed_at"
+			}
+			if got := rec.latencies[0]; got > 120 {
+				t.Errorf("terminal latency = %.0fs, want ~30s: ClaimSend must carry messages.%s into SendJob, or the SLI charges the caller's own wait to e2a", got, gate)
+			}
+		})
+	}
+}

@@ -107,6 +107,12 @@ type SendJob struct {
 	// outage-tolerant tail from its fire time, instead of a horizon already blown
 	// the moment it first runs.
 	ScheduledAt time.Time
+	// ReviewedAt is messages.reviewed_at — when a HITL hold was resolved into the
+	// send pipeline (human approve or TTL auto-approve), zero for a message that
+	// was never held. Consumed ONLY by submissionAnchor for the latency SLI; the
+	// retry horizon deliberately still measures from AcceptedAt, so the F2
+	// limitation in docs/design/hitl-ttl-async-send.md is unchanged by this field.
+	ReviewedAt time.Time
 	// ProviderAccepted is set when authoritatively correlated provider-accept
 	// evidence (an SNS-verified, header- or provider-id-matched SES
 	// notification) has been recorded for this message: the provider already
@@ -132,6 +138,14 @@ func (j *SendJob) pastRetryHorizon() bool {
 		start = j.ScheduledAt
 	}
 	return !start.IsZero() && time.Since(start) > sendRetryHorizon
+}
+
+// submissionAnchor is this job's acceptance→terminal SLI baseline — see the
+// package helper. Held and scheduled sends anchor at the moment they became
+// eligible to submit, not at accept, so a reviewer's dwell time and a
+// deliberate schedule delay stay out of e2a's error budget.
+func (j *SendJob) submissionAnchor() time.Time {
+	return submissionAnchor(j.AcceptedAt, j.ScheduledAt, j.ReviewedAt)
 }
 
 // alreadyDone reports whether the message has already been submitted to the
@@ -349,7 +363,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		// earlier attempt; only the settle lands here. occurredAt is the
 		// provider-accept evidence time, so the latency measures
 		// acceptance→provider-accept, not acceptance→settle.
-		emitTerminal(w.metrics, terminalSent, j.AcceptedAt, observedAt)
+		emitTerminal(w.metrics, terminalSent, j.submissionAnchor(), observedAt)
 		if w.ramp != nil && j.rampEligible() {
 			return w.ramp.Confirm(ctx, j.MessageID)
 		}
@@ -373,13 +387,13 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		observedAt = time.Now().UTC()
 		if rerr != nil {
 			if isPermanentRampError(rerr) {
-				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "sending_ramp_invalid: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); err != nil {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, "sending_ramp_invalid: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); err != nil {
 					return err
 				}
 				return river.JobCancel(rerr)
 			}
 			if j.pastRetryHorizon() {
-				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "ramp_capacity_timeout: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, "ramp_capacity_timeout: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
 					return err
 				}
 				_ = w.ramp.Release(ctx, j.MessageID)
@@ -393,7 +407,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		}
 		if !decision.Allowed {
 			if j.pastRetryHorizon() {
-				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "ramp_capacity_timeout", delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, "ramp_capacity_timeout", delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
 					return err
 				}
 				if err := w.ramp.Release(ctx, j.MessageID); err != nil {
@@ -429,7 +443,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			// Fail toward retry, never toward an unthrottled submit: the
 			// provider is never exposed because the limiter is down.
 			if j.pastRetryHorizon() {
-				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "send_rate_timeout: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, "send_rate_timeout: "+rerr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
 					return err
 				}
 				if w.ramp != nil && j.rampEligible() {
@@ -445,7 +459,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		}
 		if !decision.Allowed {
 			if j.pastRetryHorizon() {
-				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, "send_rate_timeout", delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+				if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, "send_rate_timeout", delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
 					return err
 				}
 				if w.ramp != nil && j.rampEligible() {
@@ -485,7 +499,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	}
 	if len(suppressed) > 0 {
 		supErr := fmt.Errorf("recipient_suppressed: %s%s", strings.Join(suppressed, ", "), outbound.SuppressionRemediation(j.AgentID))
-		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, supErr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, suppressed); err != nil {
+		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, supErr.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, suppressed); err != nil {
 			return err
 		}
 		if w.ramp != nil && j.rampEligible() {
@@ -524,7 +538,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		// contract — emitTerminal emits count and latency together, here and
 		// everywhere else, and the SNS-feedback path stays uninstrumented
 		// for both.
-		emitTerminal(w.metrics, terminalSent, j.AcceptedAt, observedAt)
+		emitTerminal(w.metrics, terminalSent, j.submissionAnchor(), observedAt)
 		if w.ramp != nil && j.rampEligible() {
 			if err := w.ramp.Confirm(ctx, j.MessageID); err != nil {
 				return fmt.Errorf("confirm sending ramp: %w", err)
@@ -537,7 +551,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	// Provenance 'provider': SES itself refused this submission, so the §3.1
 	// correction never revives it.
 	if out.Permanent {
-		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, out.Err.Error(), delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil); err != nil {
+		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, out.Err.Error(), delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil); err != nil {
 			return err
 		}
 		if w.ramp != nil && j.rampEligible() {
@@ -554,7 +568,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	// (provenance 'local': the provider never confirmed a rejection).
 	if out.Outage {
 		if j.pastRetryHorizon() {
-			if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.AcceptedAt, observedAt, out.Err.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
+			if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, out.Err.Error(), delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); err != nil {
 				return err
 			}
 			if w.ramp != nil && j.rampEligible() {
@@ -661,7 +675,7 @@ const (
 	terminalWriteBackoff = 150 * time.Millisecond
 )
 
-func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int64, attempt int, acceptedAt, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error {
+func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int64, attempt int, anchorAt, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error {
 	var err error
 	for i := 0; i < terminalWriteRetries; i++ {
 		var settled delivery.Status
@@ -678,9 +692,9 @@ func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int
 			// latency reports what the write did, not what the caller asked.
 			switch settled {
 			case delivery.StatusFailed:
-				emitTerminal(w.metrics, terminalOutcome(source, reason, blockedRecipients), acceptedAt, settledAt)
+				emitTerminal(w.metrics, terminalOutcome(source, reason, blockedRecipients), anchorAt, settledAt)
 			case delivery.StatusSent:
-				emitTerminal(w.metrics, terminalSent, acceptedAt, settledAt)
+				emitTerminal(w.metrics, terminalSent, anchorAt, settledAt)
 			}
 			return nil
 		}

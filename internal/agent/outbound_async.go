@@ -179,6 +179,9 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 	if p.ScheduledAt != nil {
 		sj.ScheduledAt = *p.ScheduledAt
 	}
+	if p.ReviewedAt != nil {
+		sj.ReviewedAt = *p.ReviewedAt
+	}
 	return sj, nil
 }
 
