@@ -89,7 +89,7 @@ acceptance SLI below deliberately excludes them.
 | `e2a_outbound_attempt_duration_seconds` | histogram | — | Upstream (SES/SMTP relay) submission duration. |
 | `e2a_outbound_rate_deferred_total` | counter | — | Submissions deferred by the per-agent fire-time rate limiter (`internal/sendrate`, 60/min/agent sliding window, enforced in the send worker immediately before provider submission). A deferral snoozes the job without burning an attempt, metering, or emitting a terminal event — the message fires when the window frees capacity (re-fire spread by a deterministic per-message jitter). A sustained high rate means agents are queueing behind their own budget. Deferral loops are bounded by the 72h retry horizon, so a backlog beyond ~259,200 messages/agent/burst (60 × 60 × 72) fails its tail terminally with `send_rate_timeout` (`failed_local_retries`). |
 | `e2a_outbound_terminal_total` | counter | `outcome` | Messages reaching a terminal submission outcome, **exactly once per message**: `sent`, `failed_suppressed`, `failed_provider`, `failed_local_retries`, `failed_cancelled` (policy cancel settled by the reconciler — kept out of `failed_local_retries` so cancellations can't mask a retries-exhausted regression). A deferred final attempt is counted when the terminal reconciler settles it — as `sent` when provider-accept evidence arrived (never a false failure), else as a failure. |
-| `e2a_outbound_terminal_latency_seconds` | histogram | — | Acceptance→terminal latency per message (the terminal write's occurred_at − `messages.created_at`), observed **exactly once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both). Provider-evidence settles use the evidence's accept time as occurred_at, so they measure acceptance→provider-accept, not acceptance→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
+| `e2a_outbound_terminal_latency_seconds` | histogram | — | Acceptance→terminal latency per message (the terminal write's occurred_at − the **submission anchor**), observed **exactly once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both). The anchor is `messages.created_at` for an ordinary send, and the latest of `created_at`, `scheduled_at`, and `reviewed_at` otherwise: a HITL hold anchors at the moment it was approved into the send pipeline, a scheduled send at its fire time. Neither wait is e2a latency, and charging them here made every hold approved after >5 min — and every send scheduled further out than the window — an automatic SLO miss. Provider-evidence settles use the evidence's accept time as occurred_at, so they measure anchor→provider-accept, not anchor→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
 
 ### Webhook delivery
 
@@ -270,8 +270,11 @@ max(e2a_queue_oldest_age_seconds{queue="outbound"})
 ```
 
 **Outbound acceptance→terminal** — fraction of messages reaching a terminal
-outcome within 5 minutes of acceptance (the `le="300"` bucket edge is the
-SLO threshold):
+outcome within 5 minutes of becoming eligible to submit (the `le="300"`
+bucket edge is the SLO threshold). "Acceptance" here is the submission anchor
+in the catalog above, not raw `created_at`: a HITL hold's review dwell and a
+scheduled send's deliberate delay are outside the measurement, so a reviewer
+who takes an hour cannot burn e2a's budget:
 
 ```promql
 sum(rate(e2a_outbound_terminal_latency_seconds_bucket{le="300"}[1h]))

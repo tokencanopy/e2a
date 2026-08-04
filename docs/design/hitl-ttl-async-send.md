@@ -164,6 +164,15 @@ time — so a hold approved >72h after creation, during a provider outage at sen
 time, would terminate immediately instead of snoozing. Narrow edge; shared with the
 normal-send anchor, out of scope here.
 
+**F2 addendum (2026-08-04):** the same `created_at` anchor also fed the
+acceptance→terminal latency SLI, so a hold's review dwell was recorded as e2a
+latency — a reviewer clearing a queue of held messages put every one of them
+outside the 300s SLO window and burned the hosted error budget (prod alert,
+2026-08-03). The **metric** now anchors at `messages.reviewed_at` for a held
+message via `outboundsend.submissionAnchor`; `SendJob.AcceptedAt` and the 72h
+retry horizon are deliberately untouched, so F2 itself remains open as
+described above.
+
 ## Scope / non-goals
 
 - Both approve paths (TTL sweep + human endpoint). Self-sends stay on the sync

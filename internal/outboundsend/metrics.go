@@ -62,17 +62,45 @@ func (noopMetrics) OutboundRateDeferred()           {}
 // lives in this single helper so no call site can emit one without the
 // other. occurredAt is the terminal write's EFFECTIVE occurred_at (what the
 // write actually did: the provider-accept evidence time on an evidence
-// settle, the caller's observation time otherwise); acceptedAt is
-// messages.created_at. A zero timestamp or non-positive delta records the
+// settle, the caller's observation time otherwise); anchorAt is the
+// submission anchor (see submissionAnchor — messages.created_at for an
+// ordinary send). A zero timestamp or non-positive delta records the
 // count but no latency sample (same discipline as the queue-wait guard).
-func emitTerminal(m Metrics, outcome string, acceptedAt, occurredAt time.Time) {
+func emitTerminal(m Metrics, outcome string, anchorAt, occurredAt time.Time) {
 	m.OutboundTerminal(outcome)
-	if acceptedAt.IsZero() || occurredAt.IsZero() {
+	if anchorAt.IsZero() || occurredAt.IsZero() {
 		return
 	}
-	if d := occurredAt.Sub(acceptedAt); d > 0 {
+	if d := occurredAt.Sub(anchorAt); d > 0 {
 		m.OutboundTerminalLatency(d.Seconds())
 	}
+}
+
+// submissionAnchor is the acceptance→terminal SLI's baseline: the instant a
+// message became ELIGIBLE for provider submission, which is not always its
+// accept time. Two gates deliberately hold an accepted row before the pipeline
+// may touch it, and both are the caller's choice rather than e2a latency:
+//
+//   - a HITL hold sits in pending_review until a reviewer (or the TTL sweep)
+//     resolves it — reviewedAt is when it was approved into the send pipeline;
+//   - a scheduled send waits for its fire time — scheduledAt.
+//
+// Measuring from messages.created_at charged both waits to e2a's error budget,
+// so a reviewer taking six minutes, or any send scheduled further out than the
+// 300s SLO window, recorded as a miss (docs/observability.md: every target
+// measures e2a's own behavior). Taking the latest of the three mirrors
+// pastRetryHorizon's existing max(accept, scheduled) reasoning and keeps the
+// send worker and the terminal reconciler on one definition. Zero values are
+// inert — an unheld, unscheduled message anchors at acceptedAt as before.
+func submissionAnchor(acceptedAt, scheduledAt, reviewedAt time.Time) time.Time {
+	anchor := acceptedAt
+	if scheduledAt.After(anchor) {
+		anchor = scheduledAt
+	}
+	if reviewedAt.After(anchor) {
+		anchor = reviewedAt
+	}
+	return anchor
 }
 
 // terminalOutcome maps a MarkFailed call's provenance to the OutboundTerminal

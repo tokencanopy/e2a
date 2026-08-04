@@ -77,13 +77,29 @@ type terminalCandidate struct {
 	attempt                  int
 	state                    string
 	finalizedAt              *time.Time
-	acceptedAt               time.Time // messages.created_at — the latency SLI baseline
+	acceptedAt               time.Time  // messages.created_at
+	scheduledAt              *time.Time // messages.scheduled_at (nil unless scheduled)
+	reviewedAt               *time.Time // messages.reviewed_at (nil unless HITL-held)
 	failureSource            delivery.FailureSource
 	detail                   string
 	failureReason            string
 	failureOccurredAt        *time.Time
 	failureAttempt           *int
 	failureBlockedRecipients []string
+}
+
+// submissionAnchor is this candidate's acceptance→terminal SLI baseline — the
+// same definition the send worker uses, so a message settled by the reconciler
+// and one settled inline are measured identically.
+func (c terminalCandidate) submissionAnchor() time.Time {
+	var scheduledAt, reviewedAt time.Time
+	if c.scheduledAt != nil {
+		scheduledAt = *c.scheduledAt
+	}
+	if c.reviewedAt != nil {
+		reviewedAt = *c.reviewedAt
+	}
+	return submissionAnchor(c.acceptedAt, scheduledAt, reviewedAt)
 }
 
 func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[TerminalReconcileArgs]) error {
@@ -98,7 +114,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		        COALESCE(r.attempt, 0),
 		        CASE WHEN r.id IS NULL THEN 'missing' ELSE r.state::text END,
 		        r.finalized_at,
-		        m.created_at,
+		        m.created_at, m.scheduled_at, m.reviewed_at,
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_detail,''),COALESCE(m.delivery_failure_reason_code,''),
 		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.delivery_failure_blocked_recipients
 		   FROM messages m
@@ -122,7 +138,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 	candidates := make([]terminalCandidate, 0)
 	for rows.Next() {
 		var candidate terminalCandidate
-		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.acceptedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients); err != nil {
+		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.acceptedAt, &candidate.scheduledAt, &candidate.reviewedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients); err != nil {
 			return err
 		}
 		candidates = append(candidates, candidate)
@@ -185,9 +201,9 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// acceptance→sweep.
 		switch settled {
 		case delivery.StatusFailed:
-			emitTerminal(w.metrics, terminalOutcome(source, reason, candidate.failureBlockedRecipients), candidate.acceptedAt, settledAt)
+			emitTerminal(w.metrics, terminalOutcome(source, reason, candidate.failureBlockedRecipients), candidate.submissionAnchor(), settledAt)
 		case delivery.StatusSent:
-			emitTerminal(w.metrics, terminalSent, candidate.acceptedAt, settledAt)
+			emitTerminal(w.metrics, terminalSent, candidate.submissionAnchor(), settledAt)
 		}
 		if w.ramp != nil {
 			if err := w.ramp.Resolve(ctx, candidate.messageID); err != nil {

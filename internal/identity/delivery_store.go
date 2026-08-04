@@ -437,6 +437,11 @@ type OutboundSendPayload struct {
 	// ScheduledAt) so a long-scheduled send keeps the full outage-tolerant tail
 	// from its fire time instead of a horizon already blown at fire.
 	ScheduledAt *time.Time
+	// ReviewedAt is messages.reviewed_at — when a HITL hold was resolved into the
+	// send pipeline (human approve or TTL auto-approve), nil for a message that
+	// was never held. Feeds the worker's acceptance→terminal SLI anchor only, so
+	// a reviewer's dwell time is not charged to e2a's latency budget.
+	ReviewedAt *time.Time
 	// ProviderMessageID is the evidence-repaired provider id ('' when none).
 	ProviderMessageID string
 }
@@ -584,6 +589,7 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		failureOccurredAt  *time.Time
 		failureAttempt     *int
 		scheduledAt        *time.Time
+		reviewedAt         *time.Time
 	)
 	var userID, registeredDomain string
 	// Lock agent first to match permanent agent deletion's lock order, then
@@ -607,14 +613,14 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		        m.to_recipients, m.cc, m.bcc, m.raw_message, m.created_at,
 		        m.deleted_at, m.send_job_id, m.provider_accepted_at, COALESCE(m.provider_message_id,''),
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_failure_reason_code,''),
-		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.scheduled_at
+		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.scheduled_at,m.reviewed_at
 		   FROM messages m
 		  WHERE m.id = $1 AND m.agent_id = $2 AND m.direction = 'outbound'
 		  FOR UPDATE OF m`,
 		messageID, agentID,
 	).Scan(&deliveryStatus, &envelopeFrom, &sentAs, &messageType, &to, &cc, &bcc, &raw, &createdAt,
 		&deletedAt, &stampedJobID, &providerAcceptedAt, &providerMessageID,
-		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt, &scheduledAt)
+		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt, &scheduledAt, &reviewedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -703,6 +709,7 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		ProviderAcceptedAt: providerAcceptedAt,
 		ProviderMessageID:  providerMessageID,
 		ScheduledAt:        scheduledAt,
+		ReviewedAt:         reviewedAt,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
