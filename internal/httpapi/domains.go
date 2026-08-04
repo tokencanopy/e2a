@@ -483,7 +483,27 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 	if s.deps.SharedDomain != "" && strings.EqualFold(normalized, s.deps.SharedDomain) {
 		return nil, NewError(http.StatusBadRequest, "reserved_domain", "reserved domain")
 	}
-	if s.deps.EnforceDomainCreate != nil {
+	// The create cap applies to creates. A same-owner claim is idempotent —
+	// ClaimOrCreateDomain returns the existing row untouched — so charging it
+	// against max_domains 402s a caller for re-POSTing a domain they already
+	// hold, naming a resource the request would not have consumed.
+	//
+	// "Already owned" is decided by the same user-scoped lookup GET uses, so
+	// this cannot become a bypass: another account's row is invisible to it
+	// and stays charged (then rejected by the claim as a conflict), and a
+	// parent/child claim is a genuinely new row that no exact-match lookup
+	// finds. Anything other than a clean hit — dep unwired, lookup failed,
+	// nil row — falls through to enforcing, so a limit is never skipped by
+	// accident. The check is deliberately outside the claim transaction: it
+	// is the same non-transactional shape the cap already had, so two racing
+	// creates could still both pass, exactly as before this change.
+	alreadyOwned := false
+	if s.deps.LookupDomain != nil {
+		if existing, lookupErr := s.deps.LookupDomain(ctx, normalized, user.ID); lookupErr == nil && existing != nil {
+			alreadyOwned = true
+		}
+	}
+	if !alreadyOwned && s.deps.EnforceDomainCreate != nil {
 		if err := s.deps.EnforceDomainCreate(ctx, user.ID); err != nil {
 			if env, ok := limitEnvelope(err); ok {
 				return nil, env
