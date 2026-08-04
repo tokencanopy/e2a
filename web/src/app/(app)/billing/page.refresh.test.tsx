@@ -191,6 +191,42 @@ describe("BillingPage — post-checkout reconciliation", () => {
     expect(window.location.search).toBe("");
   });
 
+  // The reconcile deadline is stamped once, into a ref, when the window
+  // opens — deliberately not a local recomputed on every run of the effect
+  // that owns the interval. That effect depends on SWR's bound mutators; if
+  // a future SWR returned a fresh identity per render, a recomputed deadline
+  // would be pushed forward on every re-render and the timeout would never
+  // be reached, leaving this polling the billing sidecar indefinitely.
+  //
+  // This pins the wall-clock boundary from both sides: it must still be
+  // waiting just before the window elapses, and must have given up just
+  // after. A deadline that drifts fails the second assertion.
+  it("holds the reconcile window to wall-clock time, then gives up", async () => {
+    window.history.replaceState({}, "", "/billing?status=success");
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument(),
+    );
+
+    // Just inside the window, after many poll ticks and the re-renders
+    // each resolved read causes — still waiting.
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(19000);
+    });
+    expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument();
+    expect(screen.queryByText(/hasn't appeared yet/i)).not.toBeInTheDocument();
+
+    // Just past it — given up, on schedule rather than whenever the effect
+    // last happened to re-run.
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(3000);
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/hasn't appeared yet/i)).toBeInTheDocument(),
+    );
+  });
+
   it("gives up with an explanation when the webhook never lands", async () => {
     window.history.replaceState({}, "", "/billing?status=success");
     renderPage();

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import { billingPolling } from "../../../lib/livePolling";
 import { limitsKey } from "../../../lib/swrKeys";
@@ -370,11 +370,26 @@ export default function BillingPage() {
   // is deliberately separate from the background `billingPolling`
   // cadence: 30s is fine for idle drift, far too slow for someone
   // staring at the page they just paid on.
+  // The deadline lives in a ref, not a local, so it is set ONCE when the
+  // reconcile window opens and survives any re-run of this effect. A local
+  // would be recomputed on every re-run, and this effect depends on `mutate`
+  // and `mutatePlan` — SWR's bound mutators, which are referentially stable
+  // in v2 but are not ours to guarantee. If a future SWR ever returned a
+  // fresh identity per render, a recomputed deadline would push the timeout
+  // permanently out of reach and this would poll the billing sidecar
+  // forever. The ref makes termination depend only on wall-clock time.
+  const reconcileDeadlineRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (reconcile !== "pending") return;
-    const deadline = Date.now() + RECONCILE_TIMEOUT_MS;
+    if (reconcile !== "pending") {
+      // Leaving the window (resolved, timed out, or unmounted) clears the
+      // deadline so a subsequent reconcile starts a fresh one.
+      reconcileDeadlineRef.current = null;
+      return;
+    }
+    reconcileDeadlineRef.current ??= Date.now() + RECONCILE_TIMEOUT_MS;
     const id = setInterval(() => {
-      if (Date.now() >= deadline) {
+      if (Date.now() >= (reconcileDeadlineRef.current ?? 0)) {
         setReconcile("timeout");
         return;
       }
