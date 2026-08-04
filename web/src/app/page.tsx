@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useState } from "react";
 import { useAuth } from "./components/AuthProvider";
 import { Eyebrow } from "@e2a/ui";
+import { JsonLd } from "./components/JsonLd";
 import { TokenCanopyBadge } from "./components/loft/TokenCanopyBadge";
+import { faqPage, type FaqEntry } from "../lib/jsonld";
 import { SIGN_IN_URL } from "../lib/site";
 
 // Onboarding surfaces, in the order an agent-native user meets them: install
@@ -33,6 +35,7 @@ const PRODUCT_LINKS: NavItem[] = [
   { label: "Build agent systems", href: "#build" },
   { label: "Human-in-the-loop", href: "#hitl" },
   { label: "Use cases", href: "#use-cases" },
+  { label: "FAQ", href: "#faq" },
 ];
 
 const RESOURCE_LINKS: NavItem[] = [
@@ -94,6 +97,54 @@ const FOOTER_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Feedback", href: "/feedback" },
 ];
 
+// The landing page's answer surface. Every entry is rendered twice: as visible
+// prose below, and as FAQPage structured data — Google only honors FAQ markup
+// whose answers are on the page, and an answer engine that quotes one of these
+// will quote whichever copy it reached first, so they must be the same strings.
+//
+// Each answer is written to survive being lifted on its own, with none of the
+// surrounding page attached: it names e2a rather than saying "we" or "it", and
+// it states only what ships today. The questions are the ones people actually
+// type; deliberately distinct from /mcp's, which answer "how do I connect".
+const FAQ: FaqEntry[] = [
+  {
+    question: "Can an AI agent have its own email address?",
+    answer:
+      "Yes. e2a gives an AI agent its own real, authenticated email address — on the shared agents.e2a.dev domain, or on a domain you verify yourself — that it can send from, receive to, and reply in-thread on. The inbox belongs to the agent rather than to a human whose mailbox the agent reads, so recipients can tell agent mail apart from yours and revoking the agent never touches anyone's personal mail. The agent reaches that inbox over MCP tools, a signed webhook, a WebSocket stream, REST polling, or the TypeScript and Python SDKs.",
+  },
+  {
+    question: "How do you verify an email actually came from an AI agent?",
+    answer:
+      "e2a evaluates SPF, every DKIM signature, and DMARC on every inbound message, then hands the agent a normalized verdict — including whether DMARC passed with alignment — as structured evidence instead of raw headers the agent has to parse and trust. That proves the message really came from the domain it claims, so mail from an agent on a verified e2a domain is distinguishable from a spoof of it. e2a treats an aligned DMARC pass as authorization to use the From domain, not as proof of a particular person or mailbox.",
+  },
+  {
+    question:
+      "What is the difference between e2a and a transactional email API like Resend?",
+    answer:
+      "A transactional email API sends mail on behalf of an application; e2a gives an AI agent a two-way mailbox of its own. e2a accepts inbound mail over SMTP, verifies SPF/DKIM/DMARC, and delivers it to the agent over webhook, WebSocket, REST, or MCP, then sends the agent's replies back out in-thread through its HTTP API — with an optional approval hold and optional prompt-injection screening on the way through. The two are not mutually exclusive: e2a can use an upstream provider such as Amazon SES or Resend as the relay that carries its outbound mail to human recipients.",
+  },
+  {
+    question: "Is there an open-source email API for AI agents?",
+    answer:
+      "Yes — e2a is Apache-2.0, and the whole stack is public at github.com/tokencanopy/e2a: the Go server and SMTP relay, the TypeScript and Python SDKs, the CLI, the MCP server, and the dashboard. You can self-host it against your own Postgres and your own outbound SMTP relay, and every feature works the same way there. The hosted service at e2a.dev runs that same open-source server image, so choosing hosted is a deployment decision rather than a different product.",
+  },
+  {
+    question: "How do you stop an AI agent from sending an email without approval?",
+    answer:
+      "e2a has an opt-in human-in-the-loop approval gate you turn on per agent. With it on, an outbound send is accepted but not dispatched — the API returns 202 with status pending_review — and the message leaves only once a person approves it from the dashboard, the CLI, the MCP tools, the API, or a magic link mailed to the reviewer's own inbox. A recipient allowlist can narrow the gate so only unfamiliar recipients are held, and a hold that expires without a decision can be configured to reject rather than send.",
+  },
+  {
+    question: "How do you protect an agent inbox from prompt injection over email?",
+    answer:
+      "e2a can screen inbound mail before the agent ever sees it. Its opt-in content screening flags prompt-injection payloads — hidden HTML, Unicode-tag smuggling, encoded instructions — with dependency-free heuristics, and, with the optional LLM detector enabled, phishing as well; each message is then routed to allow, review, or block. Messages routed to review land in the same queue as held outbound mail, so a person decides before the agent acts on them. e2a also attaches SPF, DKIM, and DMARC results to every inbound message, so an agent can weigh how far to trust a sender instead of trusting the From header.",
+  },
+  {
+    question: "How does an AI agent receive email if it runs locally, with no public URL?",
+    answer:
+      "e2a delivers inbound mail over a WebSocket stream and plain REST polling as well as webhooks, so an agent running on a laptop, in a notebook, or behind a firewall never needs a public HTTPS endpoint. The e2a CLI's listen command bridges that stream to a local HTTP handler, and the hosted MCP server exposes the same inbox as tools for agents that run no server at all. When you do host a webhook, e2a signs every delivery with a per-webhook HMAC secret that the SDKs verify in one call.",
+  },
+];
+
 export default function Home() {
   const { user, loading: checkingAuth } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>("claude");
@@ -108,6 +159,12 @@ export default function Home() {
         fontFamily: "var(--f-ui)",
       }}
     >
+      {/* Organization / WebSite / SoftwareApplication come from the root
+          layout; the FAQ is page-specific, so it is emitted here rather than
+          site-wide. Static export prerenders this client component, so the
+          markup lands in the HTML crawlers get without running our JS. */}
+      <JsonLd data={faqPage(FAQ)} />
+
       {/* Nav */}
       <nav
         className="sticky top-0 z-50 backdrop-blur-md backdrop-saturate-150"
@@ -812,12 +869,66 @@ export default function Home() {
         </div>
       </section>
 
-      {/* CTA — continues the alternation: 04 Use cases is light, so the
-          closing section takes the elevated background. */}
+      {/* FAQ — continues the alternation: 04 Use cases is light, so this one
+          takes the elevated background. Question-shaped H2/H3 with the answer
+          immediately below is the shape both featured snippets and LLM
+          extraction key off, and it mirrors the same content emitted as
+          FAQPage structured data at the top of this page. */}
+      <section
+        id="faq"
+        className="px-6 md:px-8 py-12 md:py-16 scroll-mt-20"
+        style={{
+          background: "var(--bg-elev)",
+          borderTop: "1px solid var(--border)",
+        }}
+      >
+        <div className="max-w-[760px] mx-auto">
+          <div className="mb-8">
+            <Eyebrow>05 · FAQ</Eyebrow>
+            <h2
+              className="mt-3"
+              style={{
+                fontFamily: "var(--f-editorial)",
+                fontWeight: 400,
+                fontSize: "clamp(28px, 4vw, 38px)",
+                letterSpacing: "-0.01em",
+                color: "var(--fg)",
+              }}
+            >
+              Questions people ask.
+            </h2>
+          </div>
+          <div>
+            {FAQ.map((f) => (
+              <div
+                key={f.question}
+                className="py-5"
+                style={{ borderTop: "1px solid var(--border)" }}
+              >
+                <h3
+                  className="text-[15px] font-semibold mb-2"
+                  style={{ color: "var(--fg)" }}
+                >
+                  {f.question}
+                </h3>
+                <p
+                  className="text-[14px] leading-[1.65]"
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  {f.answer}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA — continues the alternation: 05 FAQ is elevated, so the closing
+          section drops back to the page background. */}
       <section
         className="px-6 md:px-8 py-14 md:py-[72px] text-center"
         style={{
-          background: "var(--bg-elev)",
+          background: "var(--bg)",
           borderTop: "1px solid var(--border)",
         }}
       >
