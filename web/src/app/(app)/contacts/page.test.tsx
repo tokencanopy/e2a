@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ContactsPage from "./page";
 
@@ -515,4 +515,76 @@ it("does not emit duplicate-key warnings for headers that collide after trimming
   } finally {
     consoleError.mockRestore();
   }
+});
+
+it("keeps the latest CSV when an earlier file read resolves last", async () => {
+  fetchMock
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [], next_cursor: null }) })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        batch_id: "cimp_latest_file",
+        created: 1,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        results: [{ index: 0, address: "second@example.com", status: "created" }],
+      }),
+    })
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [], next_cursor: null }) });
+  render(<ContactsPage />);
+
+  await screen.findAllByText("No contacts yet. Create one or import a CSV.");
+  await userEvent.click(screen.getByRole("button", { name: "Import CSV" }));
+  const importHeading = screen.getByRole("heading", { name: "Import CSV" });
+  const importPanel = importHeading.closest("section");
+  expect(importPanel).not.toBeNull();
+  const fileInput = within(importPanel as HTMLElement).getByLabelText("CSV file");
+
+  let resolveFirstText!: (value: string) => void;
+  let resolveSecondText!: (value: string) => void;
+  const firstText = new Promise<string>((resolve) => { resolveFirstText = resolve; });
+  const secondText = new Promise<string>((resolve) => { resolveSecondText = resolve; });
+  const firstCsv = "email,name,company\nfirst@example.com,First,First Capital";
+  const secondCsv = "email,name,role\nsecond@example.com,Second,GP";
+  const firstFile = new File([firstCsv], "first.csv", { type: "text/csv" });
+  const secondFile = new File([secondCsv], "second.csv", { type: "text/csv" });
+  Object.defineProperty(firstFile, "text", { value: () => firstText });
+  Object.defineProperty(secondFile, "text", { value: () => secondText });
+
+  await userEvent.upload(fileInput, firstFile);
+  await userEvent.upload(fileInput, secondFile);
+  await act(async () => {
+    resolveSecondText(secondCsv);
+    await secondText;
+  });
+  expect(within(importPanel as HTMLElement).getByText(/second\.csv: 1 row ready/)).toBeInTheDocument();
+
+  await act(async () => {
+    resolveFirstText(firstCsv);
+    await firstText;
+  });
+  expect(within(importPanel as HTMLElement).getByText(/second\.csv: 1 row ready/)).toBeInTheDocument();
+  expect(within(importPanel as HTMLElement).queryByText(/first\.csv:/)).not.toBeInTheDocument();
+  const mapping = within(importPanel as HTMLElement).getByRole("region", {
+    name: "CSV metadata mapping",
+  });
+  expect(within(mapping).getByText("role")).toBeInTheDocument();
+  expect(within(mapping).getByText("GP")).toBeInTheDocument();
+  expect(within(mapping).queryByText("company")).not.toBeInTheDocument();
+  expect(within(mapping).queryByText("First Capital")).not.toBeInTheDocument();
+
+  await userEvent.click(within(importPanel as HTMLElement).getByRole("button", {
+    name: "Import 1 contact",
+  }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  const [, importRequest] = fetchMock.mock.calls[1] as [string, RequestInit];
+  expect(JSON.parse(importRequest.body as string)).toEqual({
+    contacts: [{
+      address: "second@example.com",
+      display_name: "Second",
+      metadata: { role: "GP" },
+    }],
+    on_conflict: "merge",
+  });
 });
