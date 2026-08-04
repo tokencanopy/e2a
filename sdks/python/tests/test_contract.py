@@ -3,6 +3,10 @@
 Runs against a live test server. Requires env vars:
   E2A_TEST_BASE_URL  — test server URL (e.g. http://localhost:8080)
   E2A_TEST_API_KEY   — valid API key for the test user
+  E2A_TEST_CAPPED_API_KEY — optional; key for the contract server's secondary
+    account, seeded with tiny plan caps. Scenarios asserting quota enforcement
+    run as that account and skip without it (a deployed staging target has no
+    capped account to offer).
 
 The runner drives the server over raw HTTP (a thin scenario interpreter, not
 the ergonomic client):
@@ -42,6 +46,7 @@ from e2a.v1.generated.models import PageMessageLifecycleTransition
 
 BASE_URL = os.environ.get("E2A_TEST_BASE_URL", "")
 API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
+CAPPED_API_KEY = os.environ.get("E2A_TEST_CAPPED_API_KEY", "")
 
 # tests/test_contract.py -> sdks/python/tests/ -> sdks/python/ -> sdks/ -> repo root
 SCENARIOS_PATH = Path(__file__).resolve().parents[3] / "tests" / "contract" / "scenarios.yaml"
@@ -130,6 +135,17 @@ def values_equal(json_val: Any, yaml_val: Any) -> bool:
 
 STORE_ACTIONS = {"inject_message", "verify_and_retry"}
 
+CAPPED_KEY_PLACEHOLDER = "{capped_api_key}"
+
+
+def scenario_needs_capped_account(sc: dict[str, Any]) -> bool:
+    """True when the scenario authenticates as the capped-plan account.
+
+    Those scenarios need a cap they can actually reach, which only the contract
+    server's seeded secondary account provides.
+    """
+    return CAPPED_KEY_PLACEHOLDER in json_mod.dumps(sc)
+
 
 def scenario_needs_store(sc: dict[str, Any]) -> bool:
     setup = sc.get("setup") or []
@@ -159,6 +175,10 @@ class Runner:
             "future_rfc3339": future.isoformat().replace("+00:00", "Z"),
             "scenario_token": uuid.uuid4().hex[:12],
         }
+        # Bound only when supplied: scenarios needing it skip otherwise, so an
+        # empty bearer token can never reach the wire as a confusing 401.
+        if CAPPED_API_KEY:
+            self.vars["capped_api_key"] = CAPPED_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -980,6 +1000,46 @@ def test_scheduled_send_scenario_is_self_cleaning_and_projection_complete():
     ]
 
 
+def test_limits_scenario_shape():
+    """Always-on guard for the quota scenario.
+
+    The live quota run skips without a capped key (a deployed target has no
+    capped account), so this shape test is what keeps that skip from decaying
+    into zero coverage. It fails if the scenario is deleted, stops using the
+    capped account, or loses either direction of enforcement.
+    """
+    scenario = _scenario_by_name("account_limits_enforced")
+    assert scenario_needs_capped_account(scenario)
+
+    steps = {step["id"]: step for step in scenario["steps"]}
+
+    # Refused AT the cap, with the machine-readable envelope an SDK needs to
+    # say WHICH quota stopped the caller.
+    refused = steps["second_domain_hits_the_cap"]["expect"]
+    assert refused["status"] == 402
+    assert refused["body_match"]["error.code"] == "limit_exceeded"
+    assert refused["body_match"]["error.details.resource"] == "domains"
+    assert refused["body_match"]["error.details.limit"] == 1
+    assert steps["second_agent_hits_the_cap"]["expect"]["body_match"][
+        "error.details.resource"
+    ] == "agents"
+
+    # ...and allowed when it should be. Without these, a server that 402'd
+    # unconditionally would satisfy every assertion above.
+    assert steps["reregister_owned_domain_at_cap_is_allowed"]["expect"]["status"] == 201
+    assert (
+        steps["agent_create_succeeds_again_after_freeing_a_slot"]["expect"]["status"]
+        == 201
+    )
+
+    # The capped account holds one slot per resource, so a leak puts the NEXT
+    # run at its cap on step one.
+    assert [step["id"] for step in scenario["cleanup"]] == [
+        "delete_agent_permanently",
+        "delete_domain",
+    ]
+
+
 @pytest.fixture(params=_scenario_ids() if SCENARIOS_PATH.exists() else [])
 def scenario(request):
     return _scenario_by_name(request.param)
@@ -989,6 +1049,11 @@ def scenario(request):
 def test_contract_scenario(scenario):
     if scenario_needs_store(scenario):
         pytest.skip(f"scenario {scenario['name']}: requires store access (inject_message/verify_domain)")
+    # No capped account on this target (e.g. a deployed server) → no reachable
+    # cap. The Go runner always has one, and test_limits_scenario_shape below
+    # runs everywhere, so this skip cannot silently become zero coverage.
+    if scenario_needs_capped_account(scenario) and not CAPPED_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_CAPPED_API_KEY")
 
     runner = Runner(BASE_URL, API_KEY, scenario)
     try:

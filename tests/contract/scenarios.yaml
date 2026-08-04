@@ -2030,3 +2030,141 @@ scenarios:
           status: 404
           body_match:
             "error.code": contact_not_found
+
+  - name: account_limits_enforced
+    description: >
+      Plan caps are enforced on the create paths and surface as a 402
+      limit_exceeded envelope carrying the resource, the cap, and the current
+      usage — the fields an SDK needs to tell a caller WHICH quota stopped
+      them and by how much. Everything here runs as a SECOND, permanently
+      capped account (auth_override with {capped_api_key}) that the contract
+      server seeds at startup with max_domains 1 / max_agents 1. Nothing
+      mutates a cap, so this scenario cannot leak enforcement into the ones
+      that follow — which is the whole reason the caps are a separate account
+      instead of a limits-seeding step: both the TS and Python runners
+      silently ignore setup keys they do not recognize, so a "reset the caps"
+      cleanup that one runner skipped would 402 every later scenario.
+      Until this existed, no limit path in the product was covered by any
+      live-server test in any language (the contract server deliberately set
+      caps to 100000, per the comment in testutil.StartContractServer).
+    steps:
+      # The capped account starts empty, so its single domain slot is free.
+      - id: first_domain_fits_the_cap
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-{scenario_token}.test.dev
+        expect:
+          status: 201
+          body_match:
+            domain: capped-{scenario_token}.test.dev
+
+      # The cap bites, and says so in a machine-readable way: an SDK surfacing
+      # only "402" leaves the caller guessing which of four quotas they hit.
+      - id: second_domain_hits_the_cap
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-2-{scenario_token}.test.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": domains
+            "error.details.limit": 1
+            "error.details.current": 1
+
+      # The exemption (#811 / #819): a same-owner re-register creates nothing —
+      # the claim returns the existing row — so the CREATE cap must not apply
+      # to it. Pre-fix this 402'd, failing an SDK retry of a request the server
+      # had already satisfied. This step is the reason the account is capped at
+      # exactly 1: the account is provably AT its cap on the line above.
+      - id: reregister_owned_domain_at_cap_is_allowed
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-{scenario_token}.test.dev
+        expect:
+          status: 201
+          body_match:
+            domain: capped-{scenario_token}.test.dev
+
+      # A DIFFERENT resource, so a passing suite cannot come from one quota
+      # being wired while the others are not. The shared domain needs no
+      # verification, so the agent cap is reachable over pure HTTP in every
+      # runner.
+      - id: first_agent_fits_the_cap
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 201
+          body_match:
+            email: capped-bot-{scenario_token}@agents.e2a.dev
+
+      - id: second_agent_hits_the_cap
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-2-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": agents
+            "error.details.limit": 1
+            "error.details.current": 1
+
+      # The cap is a cap, not a wall: freeing the slot makes the create work
+      # again. Without this, a server that 402'd unconditionally would pass
+      # every assertion above.
+      - id: agent_slot_frees_on_delete
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: agent_create_succeeds_again_after_freeing_a_slot
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-2-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 201
+
+    cleanup:
+      # Self-cleaning is load-bearing here, not tidiness: the capped account
+      # has exactly one slot per resource, so anything left behind puts the
+      # NEXT run at its cap on the very first step.
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-2-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+        expect:
+          status: 200
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/capped-{scenario_token}.test.dev?confirm=DELETE
+        auth_override: "Bearer {capped_api_key}"
+        expect:
+          status: 200
