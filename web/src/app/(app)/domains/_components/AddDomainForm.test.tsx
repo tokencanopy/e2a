@@ -19,6 +19,11 @@ describe("AddDomainForm", () => {
     expect(screen.getByRole("button", { name: "Register domain" })).toBeDisabled();
   });
 
+  it("includes Cloudflare MCP guidance in the field hint", () => {
+    render(<AddDomainForm onRegistered={jest.fn()} />);
+    expect(screen.getByText(/Cloudflare MCP/)).toBeInTheDocument();
+  });
+
   it("lowercases the domain as the user types", async () => {
     render(<AddDomainForm onRegistered={jest.fn()} />);
     const input = screen.getByPlaceholderText("mail.yourcompany.com");

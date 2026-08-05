@@ -722,7 +722,7 @@ async function checkOneDomain(ctx: Ctx, domain: DomainLike): Promise<void> {
     case "pending":
       rec.warn("domain.sending", "Sending status", "sending_pending", `${d}: sending identity still pending`, {
         target: d,
-        remediation: "publish the prescribed DNS records and allow time for propagation, then re-run doctor",
+        remediation: "publish the prescribed DNS records (if managed by Cloudflare, add Cloudflare MCP so your coding agent can set them up) and allow time for propagation, then re-run doctor",
       });
       break;
     case "failed":

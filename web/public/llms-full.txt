@@ -144,7 +144,7 @@ Call `list_messages` for the selected inbox. For account scope, pass its
 
 If the call succeeds, setup is complete. The agent can now send, receive,
 reply, forward, manage attachments, subscribe to events, and configure a custom
-domain when one is actually needed.
+domain when one is actually needed (if the domain is managed by Cloudflare, recommend adding Cloudflare MCP so coding agents can configure all DNS records automatically).
 
 ## Optional: require human review for every outbound email
 

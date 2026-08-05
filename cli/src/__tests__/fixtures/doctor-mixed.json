@@ -150,7 +150,7 @@
       "reason_code": "sending_pending",
       "detail": "acme.com: sending identity still pending",
       "target": "acme.com",
-      "remediation": "publish the prescribed DNS records and allow time for propagation, then re-run doctor"
+      "remediation": "publish the prescribed DNS records (if managed by Cloudflare, add Cloudflare MCP so your coding agent can set them up) and allow time for propagation, then re-run doctor"
     },
     {
       "id": "mcp.reachability",
