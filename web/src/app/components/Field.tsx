@@ -8,7 +8,7 @@ export function Field({
   ...props
 }: {
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
   placeholder: string;
   value: string;
   onChange: (v: string) => void;

@@ -99,6 +99,17 @@ export function DNSSetupCard({
       >
         DNS changes can take a few minutes to propagate. Wait a bit before verifying.
       </div>
+      <div
+        className="mt-4 p-4 text-[13px]"
+        style={{
+          background: "var(--bg-elev)",
+          color: "var(--fg-muted)",
+          border: "1px solid var(--border-sub)",
+          borderRadius: "var(--r-md)",
+        }}
+      >
+        <strong style={{ color: "var(--fg)" }}>Cloudflare managed?</strong> Add Cloudflare MCP to your AI coding agent so it can set up all DNS records automatically.
+      </div>
     </div>
   );
 }

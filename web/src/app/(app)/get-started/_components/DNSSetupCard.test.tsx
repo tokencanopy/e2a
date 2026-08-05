@@ -96,4 +96,9 @@ describe("DNSSetupCard", () => {
       screen.getByText(/DNS changes can take a few minutes to propagate/),
     ).toBeInTheDocument();
   });
+
+  it("shows the Cloudflare MCP notice", () => {
+    render(<DNSSetupCard domain={domain} />);
+    expect(screen.getByText("Cloudflare managed?")).toBeInTheDocument();
+  });
 });
