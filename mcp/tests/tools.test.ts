@@ -551,7 +551,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(80);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -584,7 +584,7 @@ describe("e2a MCP server", () => {
     registerMetricsTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(80);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -593,15 +593,15 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
-    expect(RUNTIME_TOOLS.size).toBe(21);
+    expect(RUNTIME_TOOLS.size).toBe(23);
     expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(toolNamesForScope("account").size).toBe(80);
   });
 
   it("account scope exposes all 78 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(80);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -611,7 +611,7 @@ describe("e2a MCP server", () => {
   it("agent scope exposes runtime inbox and outreach tools", async () => {
     const ag = await connect(makeStubClient({ scope: "agent" }));
     const names = new Set((await ag.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(21);
+    expect(names.size).toBe(23);
     // Runtime tools present: an agent can send and read its own mailbox, but
     // account review discovery and decisions stay with the account owner.
     for (const n of [

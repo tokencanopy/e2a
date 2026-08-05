@@ -200,8 +200,9 @@ describe("MCP events tools", () => {
       // full registered set (incl. the 8 beta template tools and the 3
       // api-key tools, the 3 trash-lifecycle tools, the beta message-lifecycle
       // diagnostic tool, contact/outreach and suppression tools, the two
-      // delivery-metrics tools, and compatibility aliases) is 78 tools.
-      expect(tools).toHaveLength(78);
+      // delivery-metrics tools, the two batch tools, and compatibility
+      // aliases) is 80 tools.
+      expect(tools).toHaveLength(80);
       expect(names.has("list_events")).toBe(true);
       expect(names.has("get_event")).toBe(true);
       expect(names.has("redeliver_event")).toBe(true);

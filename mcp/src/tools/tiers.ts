@@ -31,6 +31,9 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   // correct its own behavior without a human. The REST handler pins an
   // agent-scoped credential to its bound agent, so it can never widen this.
   "get_agent_metrics",
+  // Batch read: handleGetBatch uses requireUser (not requireAccountUser), so an
+  // agent-scoped credential may read its account's batches — runtime tier.
+  "get_batch",
   "get_attachment",
   "get_attachment_data",
   // Soft delete + restore are both per-agent inbox hygiene: the REST handler
@@ -47,6 +50,8 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "get_conversation",
   "send_message",
   "send_email",
+  // send_batch resolves the owned agent like send_message — agent scope can use it.
+  "send_batch",
   "reply_to_message",
   "forward_message",
   "list_outreach_contacts",

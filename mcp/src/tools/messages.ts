@@ -1,6 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpClient, SendOpts } from "../client.js";
-import type { MessageSummaryView, MessageView } from "@e2a/sdk/v1";
+import type {
+  MessageSummaryView,
+  MessageView,
+  SendBatchRequest,
+  SendBatchResponse,
+  BatchView,
+} from "@e2a/sdk/v1";
 import { z } from "zod";
 import { runTool, strictInputSchema, paginationInput, emailSelector } from "./util.js";
 import { attachmentsArraySchema, type AttachmentInput } from "./attachments.js";
@@ -95,6 +101,51 @@ export function messageSummaryViewForTool(message: MessageSummaryView) {
     labels: message.labels,
     created_at: message.createdAt,
     deleted_at: message.deletedAt,
+  };
+}
+
+// SendBatchResponse → context-safe MCP shape. Snake_case wire names; the
+// per-item results stay positionally aligned to the request `messages`.
+function batchSendResultForTool(r: SendBatchResponse) {
+  return {
+    batch_id: r.batchId,
+    accepted: r.accepted,
+    suppressed: r.suppressedCount,
+    results: r.results.map((res) => ({
+      status: res.status,
+      ...(res.messageId !== undefined ? { message_id: res.messageId } : {}),
+      ...(res.suppressed !== undefined
+        ? { suppressed: { address: res.suppressed.address, reason: res.suppressed.reason } }
+        : {}),
+    })),
+  };
+}
+
+// BatchView → context-safe MCP shape (header counts + live delivery rollup +
+// accept-time suppressions), snake_case to match the rest of the tool surface.
+function batchViewForTool(v: BatchView) {
+  const r = v.statusRollup;
+  return {
+    batch_id: v.batchId,
+    agent_id: v.agentId,
+    requested: v.requested,
+    accepted: v.accepted,
+    created_at: v.createdAt,
+    status_rollup: {
+      accepted: r.accepted,
+      sending: r.sending,
+      sent: r.sent,
+      delivered: r.delivered,
+      deferred: r.deferred,
+      bounced: r.bounced,
+      complained: r.complained,
+      failed: r.failed,
+    },
+    suppressed: v.suppressed.map((s) => ({
+      item_index: s.itemIndex,
+      address: s.address,
+      reason: s.reason,
+    })),
   };
 }
 
@@ -597,6 +648,92 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         // available, so we don't pre-check here.
         const email = await client.getMessage(args.message_id, args.email);
         return messageViewForTool(email);
+      }),
+  );
+
+  server.registerTool(
+    "send_batch",
+    {
+      title: "Send a batch of emails (beta)",
+      annotations: { destructiveHint: false },
+      description:
+        "Beta: send up to 100 INDEPENDENT emails in one call — each item is its own message with its own recipients and state, NOT one email to many people (use send_message cc/bcc for that). Always asynchronous: returns { batch_id, accepted, suppressed, results[] } where results are positionally aligned to the input `messages`. Each result is either { status: \"accepted\", message_id } or { status: \"suppressed\", suppressed: { address, reason } } — a suppressed item was dropped by the recipient block list (compliance), NOT a failure, and does not stop the rest. **`accepted` is success — do NOT re-send;** reuse `idempotency_key` if you must retry after an ambiguous failure. Terminal delivery arrives later via webhook events or by polling `get_batch` / `get_message`. HITL-enabled agents are refused (403 batch_hitl_unsupported) — use per-recipient send_message for those. Per-item fields (including templates) match send_message. The batch surface may change before it is declared stable.",
+      inputSchema: strictInputSchema({
+        messages: z
+          .array(
+            z.object({
+              to: z.array(z.string()).describe("Recipient email addresses for this item (one or more)."),
+              subject: z.string().optional(),
+              text: z.string().optional(),
+              html: z.string().optional(),
+              template_id: z.string().optional(),
+              template_alias: z.string().optional(),
+              template_data: z.record(z.string(), z.unknown()).optional(),
+              cc: z.array(z.string()).optional(),
+              bcc: z.array(z.string()).optional(),
+              attachments: attachmentsArraySchema,
+              conversation_id: z.string().optional(),
+              reply_to: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .max(100)
+          .describe("1 to 100 independent messages; each item uses the same per-item fields as send_message."),
+        reply_to: z
+          .string()
+          .optional()
+          .describe("Batch-level default Reply-To header for items that don't set their own."),
+        idempotency_key: z
+          .string()
+          .optional()
+          .describe(
+            "Stable key so a retried batch can't double-send. When omitted the SDK mints a fresh UUIDv4 per call (network-retry safety only).",
+          ),
+        email: emailSelector,
+      }),
+    },
+    async (args) =>
+      runTool(() => {
+        const opts: SendOpts =
+          args.idempotency_key !== undefined ? { idempotencyKey: args.idempotency_key } : {};
+        const body: SendBatchRequest = {
+          messages: args.messages.map((m) => ({
+            to: m.to,
+            ...(m.subject !== undefined ? { subject: m.subject } : {}),
+            ...(m.text !== undefined ? { text: m.text } : {}),
+            ...(m.html !== undefined ? { html: m.html } : {}),
+            ...(m.template_id !== undefined ? { templateId: m.template_id } : {}),
+            ...(m.template_alias !== undefined ? { templateAlias: m.template_alias } : {}),
+            ...(m.template_data !== undefined ? { templateData: m.template_data } : {}),
+            ...(m.cc !== undefined ? { cc: m.cc } : {}),
+            ...(m.bcc !== undefined ? { bcc: m.bcc } : {}),
+            ...(mapAttachments(m.attachments) !== undefined
+              ? { attachments: mapAttachments(m.attachments) }
+              : {}),
+            ...(m.conversation_id !== undefined ? { conversationId: m.conversation_id } : {}),
+            ...(m.reply_to !== undefined ? { replyTo: m.reply_to } : {}),
+          })),
+          ...(args.reply_to !== undefined ? { replyTo: args.reply_to } : {}),
+        };
+        return client.sendBatch(body, opts, args.email).then(batchSendResultForTool);
+      }),
+  );
+
+  server.registerTool(
+    "get_batch",
+    {
+      title: "Get a batch (beta)",
+      annotations: { readOnlyHint: true, idempotentHint: true },
+      description:
+        "Beta: fetch a batch's header (requested/accepted counts + the items dropped by the suppression filter at accept time) plus a LIVE delivery-status rollup of its child messages — poll it after send_batch to watch progress. Account-scoped: the batch_id alone identifies it; a batch owned by another account returns not_found. For per-recipient detail use list_messages filtered by the batch id. The batch surface may change before it is declared stable.",
+      inputSchema: strictInputSchema({
+        batch_id: z.string().describe("The batch id returned by send_batch (bat_…)."),
+      }),
+    },
+    async (args) =>
+      runTool(async () => {
+        const v = await client.getBatch(args.batch_id);
+        return batchViewForTool(v);
       }),
   );
 
