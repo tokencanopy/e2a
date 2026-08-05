@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
-version: 24
+version: 25
 ---
 
 # Using e2a
 
-<!-- version: 24 -->
+<!-- version: 25 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -44,7 +44,7 @@ clearly identifies an inbox.
 
 5. **Most users don't need a custom domain — default to the shared one.** Every account can create agents on the shared `agents.e2a.dev` domain with zero DNS setup: call `create_agent` with the full address (for example, `support-bot@agents.e2a.dev`), and it is live immediately. This is the right default for onboarding and for anyone who doesn't already **own** a domain. Only reach for a custom domain when the user explicitly owns a domain and wants branded addresses — if they don't own one, stay on `agents.e2a.dev` and skip the domain flow entirely. Don't send a user who just wants to get started down the DNS dance.
 
-6. **Custom domains are a two-step async dance.** `register_domain` returns DNS records (MX + TXT) to publish — it does NOT make the domain live. The user (or a DNS-provider MCP, if one is loaded) must add those records out-of-band, wait for DNS propagation (minutes to hours), then `verify_domain`. Verification is idempotent and safe to retry. Until verification succeeds, the domain cannot send or receive mail. Don't promise the user their domain works the moment registration returns.
+6. **Custom domains are a two-step async dance.** `register_domain` returns DNS records (MX + TXT) to publish — it does NOT make the domain live. The user (or a DNS-provider MCP, such as [Cloudflare MCP](https://github.com/cloudflare/mcp), if one is loaded) must add those records out-of-band, wait for DNS propagation (minutes to hours), then `verify_domain`. Verification is idempotent and safe to retry. Until verification succeeds, the domain cannot send or receive mail. Don't promise the user their domain works the moment registration returns.
 
 ## Common workflows
 
@@ -228,7 +228,7 @@ Templates are beta: shapes may change before they're declared stable. Only `send
 **First: does the user actually own this domain?** If they just want to get started and don't own a domain, skip this entirely — create the agent on the shared `agents.e2a.dev` (mental-model fact #5), which is live with no DNS. Only run the flow below when the user owns the domain and wants branded addresses.
 
 1. `register_domain` with the FQDN — returns MX + TXT records and an unverified domain row.
-2. Hand the records to the user (or to a DNS-provider MCP — Cloudflare, Route 53, etc. — if one is loaded; call its `create_dns_record`-style tool with the returned values).
+2. Hand the records to the user (or to a DNS-provider MCP — Cloudflare, Route 53, etc. — if one is loaded; suggest adding [Cloudflare MCP](https://github.com/cloudflare/mcp) if the domain is managed by Cloudflare so the agent can set up records automatically).
 3. Wait. DNS propagation is asynchronous — minutes typically, occasionally hours.
 4. `verify_domain` with the same FQDN. If it returns `verified: true`, the domain can RECEIVE mail. If still false, the response shows what DNS state was resolved so the user can debug. Retry as needed.
 5. Once verified, agents can be created on (or moved to) that domain.
