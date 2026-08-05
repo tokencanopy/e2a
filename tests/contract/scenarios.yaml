@@ -1362,11 +1362,12 @@ scenarios:
       shapes are accepted end-to-end; a bad member in the list is rejected at
       the edge with 400 invalid_request. Proves the send/reply/forward request
       contract widened compatibly (see the oneOf on reply_to in openapi.yaml).
+      The agent lives on the shared domain (no custom-domain verify_domain
+      setup), so this scenario runs in the Go, TypeScript, and Python contract
+      runners alike instead of being store-seeded and skipped in TS/Python.
     setup:
-      - register_domain: replyto-list.test.dev
-      - verify_domain: replyto-list.test.dev
       - register_agent:
-          email: bot@replyto-list.test.dev
+          email: bot-reply-to-{scenario_token}@agents.e2a.dev
     steps:
       - id: send_reply_to_array
         action: request
