@@ -22,6 +22,11 @@ on:
       - "CLAUDE.md"
       - "LICENSE"
       - "NOTICE"
+  # Manual trigger (an API dispatch, not a webhook): lets operators re-run the
+  # full battery on any ref when pull_request webhook delivery is unavailable
+  # (e.g. a GitHub Actions incident throttles webhooks) or to re-verify a pinned
+  # commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
