@@ -5251,8 +5251,8 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name stri
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+		`SELECT id, email, name, google_subject, created_at, account_class FROM users WHERE id = $1`, id,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
 	if err != nil {
 		return nil, err
 	}

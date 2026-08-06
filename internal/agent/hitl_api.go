@@ -217,6 +217,13 @@ func (a *API) approveOutboundAsyncComposed(ctx context.Context, agent *identity.
 	if isPlatformTest {
 		comp, err = a.sender.ComposePlatformForAccept(sendReq)
 	} else {
+		// Held mail composes here, at approval time, so the outbound-footer
+		// decision is resolved here too (same freeze-with-the-bytes semantics
+		// as DeliverOutbound's accept path). The flag is not persisted on the
+		// held row; the owning account's entitlement at approval time decides.
+		// Keyed to the agent's owner, not the reviewing userID param, though
+		// the ownership check upstream makes them the same account.
+		sendReq.AppendOutboundFooter = a.resolveOutboundFooterByUserID(ctx, agent.UserID)
 		comp, err = a.sender.ComposeForAccept(agent, sendReq)
 	}
 	if err != nil {

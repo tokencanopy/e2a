@@ -197,27 +197,28 @@ type API struct {
 	// it when the deployment serves the API on a different host than the web
 	// app (e.g. api.e2a.dev vs e2a.dev). The OAuth authorization_endpoint
 	// and login/consent pages stay on publicURL (the browser-facing web app).
-	apiURL              string
-	production          bool
-	sendLimit           *ratelimit.Limiter
-	regLimit            *ratelimit.Limiter
-	pollLimit           *ratelimit.Limiter
-	feedbackLimit       *ratelimit.Limiter
-	dcrLimit            *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
-	downloadLimit       *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
-	unsubscribeLimit    *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
-	approvalSigner      *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
-	notifyEnq           NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
-	oauthProvider       fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
-	oauthStorage        *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
-	signer              *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
-	idempotency         *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
-	enforcer            limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
-	usageStore          *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
-	internalAPISecret   string                // optional; when empty, /api/internal/* endpoints return 503
-	provisioningEnabled bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
-	provisioningSecret  string                // required with provisioningEnabled; signs /api/internal/users/provision
-	billingHookURL      string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	apiURL                string
+	production            bool
+	sendLimit             *ratelimit.Limiter
+	regLimit              *ratelimit.Limiter
+	pollLimit             *ratelimit.Limiter
+	feedbackLimit         *ratelimit.Limiter
+	dcrLimit              *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
+	downloadLimit         *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
+	unsubscribeLimit      *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
+	approvalSigner        *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
+	notifyEnq             NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
+	oauthProvider         fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
+	oauthStorage          *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
+	signer                *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
+	idempotency           *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
+	enforcer              limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
+	outboundFooterEnabled bool                  // config outbound_footer.enabled — master switch for the send-time outbound footer
+	usageStore            *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
+	internalAPISecret     string                // optional; when empty, /api/internal/* endpoints return 503
+	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
+	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
+	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -455,6 +456,58 @@ func (a *API) SetIdempotencyStore(s *idempotency.Store) { a.idempotency = s }
 // unlimited capacity. The cmd/e2a runtime always sets it; tests that
 // don't care about limits omit it and continue to work as before.
 func (a *API) SetEnforcer(e limits.Enforcer) { a.enforcer = e }
+
+// SetOutboundFooterEnabled wires the outbound_footer.enabled master switch.
+// False (the default) keeps the outbound-footer resolution entirely off —
+// no limits read, no footer, zero behavior change.
+func (a *API) SetOutboundFooterEnabled(enabled bool) { a.outboundFooterEnabled = enabled }
+
+// resolveOutboundFooter decides whether an external outbound send carries the
+// operator-configured outbound footer:
+//
+//	append := cfg.Enabled
+//	       && (row present ? row.OutboundFooterEnabled : cfg.DefaultEnabled)
+//	       && user.AccountClass == standard
+//
+// The row-present/row-absent ternary is exactly what the enforcer's Get
+// already resolves (limits.Defaults.OutboundFooterEnabled is wired from
+// outbound_footer.default_enabled), so the decision rides the existing limits
+// cache + invalidate flow untouched. Fail-closed: any limits read error means
+// NO footer — a missing footer is a lost impression, while a wrongly-added
+// footer on entitled-off mail is a customer-facing bug. Non-standard account
+// classes (internal/system/demo — probers, monitors, conformance accounts)
+// never get the footer, so body-asserting gates stay green. Strict equality
+// also means an EMPTY AccountClass (principals not resolved via API key) gets
+// no footer — the same fail-closed direction, deliberately.
+func (a *API) resolveOutboundFooter(ctx context.Context, user *identity.User) bool {
+	if !a.outboundFooterEnabled || a.enforcer == nil {
+		return false
+	}
+	if user == nil || usage.AccountClass(user.AccountClass) != usage.ClassStandard {
+		return false
+	}
+	lim, err := a.enforcer.Get(ctx, user.ID)
+	if err != nil {
+		return false
+	}
+	return lim.OutboundFooterEnabled
+}
+
+// resolveOutboundFooterByUserID is resolveOutboundFooter for call sites that
+// hold only the owning account's user id (the HITL approval funnel, where the
+// held row composes at approval time). Loads the user for its account_class;
+// fail-closed on any lookup error. The master-switch short-circuit keeps the
+// common self-host case (feature off) free of the extra user read.
+func (a *API) resolveOutboundFooterByUserID(ctx context.Context, userID string) bool {
+	if !a.outboundFooterEnabled || a.enforcer == nil {
+		return false
+	}
+	u, err := a.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return false
+	}
+	return a.resolveOutboundFooter(ctx, u)
+}
 
 // SendLimitAllow exposes the per-agent outbound rate limiter so the v1 httpapi
 // layer shares the *same* token bucket as the legacy handlers (a caller hitting
@@ -1379,6 +1432,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To))
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
+	// Outbound branding/disclosure footer: resolved here — strictly after the
+	// self-send branch (loopback delivery never runs Sender.compose, so
+	// self-sends never carry it) and after the hold branch (held mail
+	// re-resolves at approval time, when it actually composes) — then frozen
+	// into the composed bytes below with the rest of the message.
+	req.AppendOutboundFooter = a.resolveOutboundFooter(ctx, user)
 	comp, cerr := a.sender.ComposeForAccept(agent, req)
 	if cerr != nil {
 		if sizeErr := composedSizeOutboundError(cerr); sizeErr != nil {
