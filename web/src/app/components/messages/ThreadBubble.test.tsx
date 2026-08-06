@@ -55,8 +55,6 @@ function msg(id: string): MessageSummary {
     created_at: new Date().toISOString(),
   };
 }
-const CP = { email: "james@x.com", name: "James" };
-
 function inbound(wire: Record<string, unknown>) {
   mockGet.mockResolvedValue(wire as never);
 }
@@ -102,7 +100,7 @@ describe("ThreadBubble canonical lifecycle", () => {
       status: "sent",
     };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     const toggle = screen.getByRole("button", { name: /show lifecycle/i });
     expect(toggle).not.toHaveTextContent(/beta/i);
@@ -121,7 +119,7 @@ describe("ThreadBubble canonical lifecycle", () => {
 describe("ThreadBubble body precedence", () => {
   it("renders parsed.html in the sandboxed iframe when present", async () => {
     inbound({ parsed: { text: "flat text", html: "<p>rich <b>html</b></p>" }, raw_message: "" });
-    render(<ThreadBubble message={msg("msg_html")} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={msg("msg_html")} agentEmail="support@acme.dev" />);
     await waitFor(() => {
       const frame = screen.getByTitle("Email body") as HTMLIFrameElement;
       expect(frame.getAttribute("srcdoc")).toContain("rich <b>html</b>");
@@ -132,11 +130,31 @@ describe("ThreadBubble body precedence", () => {
 
   it("falls back to parsed.text (no iframe) when there is no HTML part", async () => {
     inbound({ parsed: { text: "just the plain body" }, raw_message: "" });
-    render(<ThreadBubble message={msg("msg_text")} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={msg("msg_text")} agentEmail="support@acme.dev" />);
     await waitFor(() => {
       expect(screen.getByText("just the plain body")).toBeInTheDocument();
     });
     expect(screen.queryByTitle("Email body")).not.toBeInTheDocument();
+  });
+});
+
+describe("ThreadBubble inbound sender identity", () => {
+  // In a multi-party thread (e.g. the agent is Cc'd on mail between two other
+  // parties), a message's From can differ from the thread's derived
+  // counterparty. The bubble must identify each inbound message by its own
+  // From — labeling it with the thread counterparty misattributes the mail.
+  it("renders the message's own From, not the thread counterparty", async () => {
+    inbound({ parsed: { text: "body" }, raw_message: "" });
+    const m = { ...msg("msg_multiparty_sender"), from: "casey@sender.example" };
+
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
+
+    await screen.findByText("body");
+    // Header: name derived from the From address, plus the address itself.
+    expect(screen.getByText("Casey")).toBeInTheDocument();
+    expect(screen.getByText("casey@sender.example")).toBeInTheDocument();
+    // Avatar initials come from the sender too.
+    expect(screen.getByText("CA")).toBeInTheDocument();
   });
 });
 
@@ -145,7 +163,7 @@ describe("ThreadBubble inbound authentication summary", () => {
     inbound({ parsed: { text: "body" }, raw_message: "" });
     const m = { ...msg("msg_dmarc_pass"), verified_domain: "example.com" };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     expect(screen.getByText("DMARC verified · example.com")).toBeInTheDocument();
   });
@@ -154,7 +172,7 @@ describe("ThreadBubble inbound authentication summary", () => {
     inbound({ parsed: { text: "body" }, raw_message: "" });
     const m = { ...msg("msg_dmarc_not_verified"), verified_domain: null };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     expect(screen.getByText("DMARC not verified")).toBeInTheDocument();
   });
@@ -167,7 +185,7 @@ describe("ThreadBubble marks-read cache refresh", () => {
   it("invalidates the thread list + unread badge after reading an unread inbound message", async () => {
     inbound({ parsed: { text: "body" }, raw_message: "" });
     const m = { ...msg("msg_unread_inbound"), read_status: "unread" };
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
     await waitFor(() => {
       expect(mockInvalidateMessages).toHaveBeenCalledWith("support@acme.dev");
       expect(mockInvalidateUnread).toHaveBeenCalledWith("support@acme.dev");
@@ -177,7 +195,7 @@ describe("ThreadBubble marks-read cache refresh", () => {
   it("does not invalidate when the inbound message was already read", async () => {
     inbound({ parsed: { text: "body" }, raw_message: "" });
     const m = { ...msg("msg_read_inbound"), read_status: "read" };
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
     // Wait for the body fetch to resolve so onSuccess has had its chance.
     await waitFor(() => expect(screen.getByText("body")).toBeInTheDocument());
     expect(mockInvalidateMessages).not.toHaveBeenCalled();
@@ -187,7 +205,7 @@ describe("ThreadBubble marks-read cache refresh", () => {
   it("does not invalidate for outbound messages", async () => {
     outbound("sent body");
     const m: MessageSummary = { ...msg("msg_outbound"), direction: "outbound", read_status: "" };
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
     await waitFor(() => expect(screen.getByText("sent body")).toBeInTheDocument());
     expect(mockInvalidateMessages).not.toHaveBeenCalled();
     expect(mockInvalidateUnread).not.toHaveBeenCalled();
@@ -216,7 +234,7 @@ describe("ThreadBubble outbound delivery status", () => {
       status,
     };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     expect(await screen.findByText(label)).toHaveClass("shrink-0", "whitespace-nowrap");
   });
@@ -237,7 +255,7 @@ describe("ThreadBubble outbound delivery status", () => {
       review_status,
     };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     expect(await screen.findByText(label)).toHaveClass("shrink-0", "whitespace-nowrap");
   });
@@ -246,7 +264,7 @@ describe("ThreadBubble outbound delivery status", () => {
     inbound({ parsed: { text: "inbound body" }, raw_message: "" });
     const m = { ...msg("msg_status_inbound"), status: "failed" };
 
-    render(<ThreadBubble message={m} counterparty={CP} agentEmail="support@acme.dev" />);
+    render(<ThreadBubble message={m} agentEmail="support@acme.dev" />);
 
     await screen.findByText("inbound body");
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
