@@ -125,6 +125,65 @@ func TestDeliverOutboundFooterGatingMatrix(t *testing.T) {
 	}
 }
 
+// TestApprovePendingFooterResolvedAtApprovalTime: held mail composes at
+// approval time, so the footer decision is resolved by the approve funnel
+// (dashboard ApprovePendingCore → approveOutboundAsyncComposed, shared with
+// the magic-link path) via the owning account's DB user — not by any flag on
+// the held row. The held draft itself must stay footer-free.
+func TestApprovePendingFooterResolvedAtApprovalTime(t *testing.T) {
+	api, store, pool := setupFooterAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "footerapprove")
+	user.AccountClass = "standard"
+	// Force a review hold for the external send.
+	ag.OutboundPolicy = identity.OutboundPolicyAllowlist
+	ag.OutboundPolicyAction = "review"
+	ag.OutboundScan = identity.ScanOff
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"user@example.net"}, Subject: "held then footered", Body: "body text",
+	}, "send", "", nil, nil)
+	if oerr != nil || res == nil || !res.Held {
+		t.Fatalf("result=%+v error=%+v, want held", res, oerr)
+	}
+	var heldBody string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(body_text,'') FROM messages WHERE id=$1`, res.PendingMessageID).Scan(&heldBody); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(heldBody, footerMarker) {
+		t.Fatalf("held draft must not carry the footer (it composes at approval):\n%s", heldBody)
+	}
+
+	// Dashboard approve: the funnel resolves the footer from the DB user
+	// (account_class defaults to 'standard') + the row-less entitlement default.
+	sent, aerr := api.ApprovePendingCore(ctx, user.ID, res.PendingMessageID, "", agent.ApproveOverrides{}, nil)
+	if aerr != nil {
+		t.Fatalf("ApprovePendingCore: status=%d code=%s msg=%s", aerr.Status, aerr.Code, aerr.Msg)
+	}
+	if raw := acceptedRaw(t, store, sent.ID); !strings.Contains(raw, footerMarker) {
+		t.Fatalf("approved held mail missing the footer:\n%s", raw)
+	}
+
+	// Same funnel, non-standard owner: flip the DB class and approve a second
+	// hold — no footer.
+	if err := store.SetAccountClass(ctx, user.ID, "internal"); err != nil {
+		t.Fatal(err)
+	}
+	res2, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"user@example.net"}, Subject: "held internal class", Body: "body text",
+	}, "send", "", nil, nil)
+	if oerr != nil || !res2.Held {
+		t.Fatalf("result=%+v error=%+v, want held", res2, oerr)
+	}
+	sent2, aerr := api.ApprovePendingCore(ctx, user.ID, res2.PendingMessageID, "", agent.ApproveOverrides{}, nil)
+	if aerr != nil {
+		t.Fatalf("ApprovePendingCore (internal): %+v", aerr)
+	}
+	if raw := acceptedRaw(t, store, sent2.ID); strings.Contains(raw, footerMarker) {
+		t.Fatalf("internal-class owner's approved mail carries the footer:\n%s", raw)
+	}
+}
+
 // TestDeliverOutboundFooterSelfSendNeverFootered: self-send loopback bypasses
 // Sender.compose entirely, so an entitled account's note-to-self carries no
 // footer — in either stored copy.

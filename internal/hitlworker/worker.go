@@ -76,6 +76,14 @@ type Worker struct {
 	outboundEnq       OutboundEnqueuer
 	unsubscribeIssuer ManagedUnsubscribeIssuer
 	wsHub             WebSocketHub
+	// footerResolver decides whether a TTL-auto-approved external send carries
+	// the operator-configured outbound footer (SendRequest.AppendOutboundFooter).
+	// Held rows do not persist the flag — every approval funnel resolves it at
+	// compose time — so the sweep needs the same per-account decision the human
+	// approve paths use (main wires agent.API.OutboundFooterForAccount).
+	// Optional and fail-closed: nil (self-host default, feature off) means the
+	// sweep never appends a footer.
+	footerResolver func(ctx context.Context, userID string) bool
 	// inboundScreen runs the agent's inbound protection over the loopback
 	// inbound leg of a TTL-auto-approved self-send — the same engine
 	// construction (heuristics + optional Gemini) the relay uses for SMTP
@@ -100,6 +108,12 @@ func (w *Worker) SetOutboundEnqueuer(e OutboundEnqueuer) { w.outboundEnq = e }
 
 func (w *Worker) SetManagedUnsubscribeIssuer(i ManagedUnsubscribeIssuer) { w.unsubscribeIssuer = i }
 func (w *Worker) SetWebSocketHub(h WebSocketHub)                         { w.wsHub = h }
+
+// SetOutboundFooterResolver wires the per-account outbound-footer decision for
+// TTL auto-approved sends. See the footerResolver field for semantics.
+func (w *Worker) SetOutboundFooterResolver(r func(ctx context.Context, userID string) bool) {
+	w.footerResolver = r
+}
 
 // New constructs a Worker. fromDomain is the deployment's outbound
 // from-domain (cfg.OutboundSMTP.FromDomain) — used by the self-send
@@ -320,6 +334,15 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 	if isPlatformTest {
 		comp, err = w.sender.ComposePlatformForAccept(req)
 	} else {
+		// Outbound footer: TTL auto-approval composes here, so the footer
+		// decision is resolved here — the same approval-time semantics as the
+		// human approve funnel (internal/agent approveOutboundAsyncComposed).
+		// Without this, an expires-to-approve hold would ship unfootered while
+		// the identical hold approved by a human a minute earlier would not.
+		// Fail-closed: nil resolver (feature off / self-host) = no footer.
+		if w.footerResolver != nil {
+			req.AppendOutboundFooter = w.footerResolver(ctx, agent.UserID)
+		}
 		comp, err = w.sender.ComposeForAccept(agent, req)
 	}
 	if err != nil {

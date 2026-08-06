@@ -27,9 +27,13 @@ import (
 // part. Both fragments are operator-trusted config, not user input — the
 // HTML is appended verbatim, so the operator owns its escaping. Empty
 // text+html = no-op.
+//
+// The text separator is the RFC 3676 signature delimiter "-- \n"
+// (dash-dash-SPACE-newline) — the convention mail clients recognize to trim
+// signatures when quoting a reply. The trailing space is load-bearing.
 func appendOutboundFooter(textBody, htmlBody, text, htmlFragment string) (string, string) {
 	if text != "" {
-		textBody += "\n\n--\n" + text
+		textBody += "\n\n-- \n" + text
 	}
 	if htmlBody != "" && htmlFragment != "" {
 		htmlBody += htmlFragment

@@ -5296,10 +5296,10 @@ func (s *Store) CreateUserSession(ctx context.Context, userID string) (string, e
 func (s *Store) GetUserSession(ctx context.Context, token string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class
 		 FROM user_sessions s JOIN users u ON s.user_id = u.id
 		 WHERE s.token = $1 AND s.expires_at > now()`, token,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
 	if err != nil {
 		return nil, err
 	}

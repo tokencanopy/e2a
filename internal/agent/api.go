@@ -493,6 +493,15 @@ func (a *API) resolveOutboundFooter(ctx context.Context, user *identity.User) bo
 	return lim.OutboundFooterEnabled
 }
 
+// OutboundFooterForAccount is the exported form of resolveOutboundFooterByUserID
+// for out-of-package composers that finalize held mail — today the hitlworker
+// TTL sweep, whose auto-approve composes at expiry time and therefore needs
+// the same per-account decision the human approve funnel resolves. Fail-closed
+// like the internal resolver.
+func (a *API) OutboundFooterForAccount(ctx context.Context, userID string) bool {
+	return a.resolveOutboundFooterByUserID(ctx, userID)
+}
+
 // resolveOutboundFooterByUserID is resolveOutboundFooter for call sites that
 // hold only the owning account's user id (the HITL approval funnel, where the
 // held row composes at approval time). Loads the user for its account_class;

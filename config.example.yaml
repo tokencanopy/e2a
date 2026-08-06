@@ -244,7 +244,8 @@ metrics:
 # Per-account gating reads account_limits.outbound_footer_enabled: an account
 # WITH a row gets the footer only when that column is true (written by
 # whatever provisions the row); default_enabled covers accounts with NO row.
-# text is appended to the plain-text part after a blank line + "--" separator;
+# text is appended to the plain-text part after a blank line + the RFC 3676
+# signature separator ("-- " with a trailing space, so clients trim it on reply);
 # html is an operator-trusted fragment appended verbatim to the HTML part when
 # the message has one. Both empty = no-op. Override the master switch with
 # E2A_OUTBOUND_FOOTER_ENABLED.

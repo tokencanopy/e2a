@@ -135,8 +135,10 @@ type OutboundFooterConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// DefaultEnabled applies to accounts with NO account_limits row.
 	DefaultEnabled bool `yaml:"default_enabled"`
-	// Text is the plain-text footer, appended after a blank line + "--"
-	// separator. Empty = no text-part append.
+	// Text is the plain-text footer, appended after a blank line + the
+	// RFC 3676 signature separator ("-- " on its own line, trailing space
+	// included, so mail clients trim it when quoting a reply). Empty = no
+	// text-part append.
 	Text string `yaml:"text"`
 	// HTML is the HTML fragment appended to the HTML part when the message
 	// has one. Empty = no HTML-part append.

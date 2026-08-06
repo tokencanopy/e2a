@@ -170,6 +170,11 @@ func TestComposeOutboundFooterTextOnlySendSkipsHTMLFragment(t *testing.T) {
 	if strings.Contains(raw, "<a href") {
 		t.Fatalf("text-only send must not gain an HTML part:\n%s", raw)
 	}
+	// RFC 3676 signature separator: dash-dash-SPACE-newline, so mail clients
+	// trim the footer when quoting a reply. The trailing space is the point.
+	if !strings.Contains(raw, "-- \nCreated with") && !strings.Contains(raw, "-- \r\nCreated with") {
+		t.Fatalf("footer must follow the RFC 3676 %q separator:\n%q", "-- \\n", raw)
+	}
 }
 
 // TestComposeOutboundFooterRejectsPostFooterComposedSize: the composed-size
@@ -249,7 +254,9 @@ func TestComposeOutboundFooterIsDKIMSigned(t *testing.T) {
 }
 
 // TestComposeOutboundFooterForAcceptMatchesSyncComposeBytes: the async/sync
-// stored-bytes invariant holds with the footer applied.
+// stored-bytes invariant holds with the footer applied — ComposeForAccept
+// returns byte-identical Sent-folder bytes to the sync compose path (the same
+// contract TestComposeForAccept_MatchesSyncComposeBytes pins footer-free).
 func TestComposeOutboundFooterForAcceptMatchesSyncComposeBytes(t *testing.T) {
 	s := footerSender()
 	req := SendRequest{To: []string{"user@example.net"}, Subject: "hi", Body: "plain body", AppendOutboundFooter: true}
@@ -261,7 +268,10 @@ func TestComposeOutboundFooterForAcceptMatchesSyncComposeBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(c.sentBody, []byte("Created with")) || !bytes.Contains(cr.Raw, []byte("Created with")) {
-		t.Fatal("both paths must carry the footer")
+	if !bytes.Equal(cr.Raw, c.sentBody) {
+		t.Errorf("ComposeForAccept.Raw (%d B) != compose().sentBody (%d B) — async/sync stored-bytes drift with the footer on", len(cr.Raw), len(c.sentBody))
+	}
+	if !bytes.Contains(cr.Raw, []byte("Created with")) {
+		t.Fatal("compared bytes do not carry the footer — the equality above would be vacuous")
 	}
 }
