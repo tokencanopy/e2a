@@ -177,12 +177,7 @@ export function ThreadDetail({
         style={{ padding: "24px 28px 28px" }}
       >
         {thread.messages.map((m) => (
-          <ThreadBubble
-            key={m.id}
-            message={m}
-            counterparty={thread.counterparty}
-            agentEmail={agentEmail}
-          />
+          <ThreadBubble key={m.id} message={m} agentEmail={agentEmail} />
         ))}
 
         {pendingDraft && (

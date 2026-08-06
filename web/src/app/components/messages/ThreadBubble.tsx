@@ -27,7 +27,7 @@ import {
   messageDetailKey,
 } from "../../../lib/swrKeys";
 import type { AttachmentMeta, MessageSummary } from "../types";
-import type { Counterparty } from "./threading";
+import { nameFromEmail } from "./threading";
 
 // Absolute, human time for the message header (e.g. "Jun 21, 8:07 PM").
 // title carries the full locale string for hover.
@@ -70,11 +70,9 @@ function MetaRow({ label, value }: { label: string; value: string }) {
 
 export function ThreadBubble({
   message,
-  counterparty,
   agentEmail,
 }: {
   message: MessageSummary;
-  counterparty: Counterparty;
   agentEmail: string;
 }) {
   const isInbound = message.direction === "inbound";
@@ -164,8 +162,11 @@ export function ThreadBubble({
   // surface as download chips beneath it.
   const chipAttachments = downloadableAttachments(attachments, htmlBody);
 
-  const senderName = isInbound ? counterparty.name : "Inbox";
-  const senderEmail = isInbound ? counterparty.email : agentEmail;
+  // Identify inbound mail by the message's own From, never the thread-level
+  // counterparty: in a multi-party thread (agent Cc'd on mail between other
+  // parties) the counterparty can be a different participant entirely.
+  const senderName = isInbound ? nameFromEmail(message.from) : "Inbox";
+  const senderEmail = isInbound ? message.from : agentEmail;
   const toList = (message.to ?? []).join(", ");
 
   return (
@@ -175,10 +176,10 @@ export function ThreadBubble({
       className="flex"
       style={{ gap: 12, marginBottom: 20, alignItems: "flex-start" }}
     >
-      {/* Avatar — counterparty face for inbound, e2a tile for outbound. */}
+      {/* Avatar — sender face for inbound, e2a tile for outbound. */}
       <div style={{ flexShrink: 0, paddingTop: 2 }}>
         {isInbound ? (
-          <CounterpartyAvatar email={counterparty.email} name={counterparty.name} size={32} />
+          <CounterpartyAvatar email={senderEmail} name={senderName} size={32} />
         ) : (
           <span
             aria-hidden
