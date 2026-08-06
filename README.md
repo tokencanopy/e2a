@@ -5,6 +5,8 @@
   <img src="assets/e2a-wordmark-light.svg" width="320" alt="e2a">
 </picture>
 
+### The first open-source email service built for AI agents.
+
 ### Give your AI agents a real, authenticated email address.
 
 Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Every sender — human or agent — **identity-verified**.
