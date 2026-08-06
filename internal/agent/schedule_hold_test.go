@@ -167,3 +167,75 @@ func TestApprovePendingCore_PastScheduleSendsImmediately(t *testing.T) {
 		t.Fatalf("enqueued ScheduledAt = %v, want the immediate arm (zero) for a lapsed schedule", enq.scheduledAt)
 	}
 }
+
+// TestApprovePendingCore_EditedSelfSendFutureScheduleRejects: approving a held
+// message that still carries a future send_at while EDITING the recipients to the
+// agent's own address is rejected up front — self-delivery is an immediate
+// loopback with no scheduled arm, so the approve would silently drop the schedule
+// (#815). The hold stays pending_review, so a corrected approve (without the
+// self-addressed edit) succeeds and re-arms the schedule.
+func TestApprovePendingCore_EditedSelfSendFutureScheduleRejects(t *testing.T) {
+	api, store, _, enq := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "editselfsched")
+	ag = reviewGatedAgent(t, store, ctx, user, ag)
+	at := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+
+	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
+		To: []string{"alice@external.test"}, Subject: "held + scheduled", Body: "b",
+		ScheduledAt: &at,
+	}, "send", "", nil, nil)
+	if oerr != nil {
+		t.Fatalf("DeliverOutbound: %+v", oerr)
+	}
+
+	self := []string{ag.EmailAddress()}
+	_, oerr = api.ApprovePendingCore(ctx, user.ID, res.PendingMessageID, ag.Email, agent.ApproveOverrides{To: &self}, nil)
+	if oerr == nil || oerr.Status != 400 || oerr.Code != "invalid_request" {
+		t.Fatalf("edited self-send on a still-scheduled hold: want 400 invalid_request, got %+v", oerr)
+	}
+
+	// The hold is untouched — a corrected approve (original recipients, no edit)
+	// succeeds and re-arms the schedule.
+	sent, oerr := api.ApprovePendingCore(ctx, user.ID, res.PendingMessageID, ag.Email, agent.ApproveOverrides{}, nil)
+	if oerr != nil {
+		t.Fatalf("corrected approve: status=%d code=%s msg=%s", oerr.Status, oerr.Code, oerr.Msg)
+	}
+	if sent.ScheduledAt == nil || !sent.ScheduledAt.Equal(at) {
+		t.Fatalf("corrected approve ScheduledAt = %v, want %v (re-armed)", sent.ScheduledAt, at)
+	}
+	if !enq.scheduledAt.Equal(at) {
+		t.Fatalf("corrected approve enqueued ScheduledAt = %v, want %v", enq.scheduledAt, at)
+	}
+}
+
+// TestApprovePendingCore_EditedSelfSendLapsedScheduleDeliversNow: once the
+// schedule has lapsed while the message sat in review, "not before" is satisfied —
+// so a reviewer edit that re-targets the agent's own address is allowed and the
+// approval delivers via the immediate loopback (no schedule to drop).
+func TestApprovePendingCore_EditedSelfSendLapsedScheduleDeliversNow(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "editselfschedlapsed")
+
+	msg, err := store.CreatePendingOutboundMessage(ctx, ag.ID,
+		[]string{"alice@external.test"}, nil, nil, "lapsed then re-targeted", "b", "", nil, "send", "", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second)
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		return store.StampScheduledAtTx(ctx, tx, msg.ID, past)
+	}); err != nil {
+		t.Fatalf("StampScheduledAtTx: %v", err)
+	}
+
+	self := []string{ag.EmailAddress()}
+	sent, oerr := api.ApprovePendingCore(ctx, user.ID, msg.ID, ag.Email, agent.ApproveOverrides{To: &self}, nil)
+	if oerr != nil {
+		t.Fatalf("approve of lapsed schedule with self-edit: status=%d code=%s msg=%s", oerr.Status, oerr.Code, oerr.Msg)
+	}
+	if sent.Method != "loopback" {
+		t.Fatalf("Method = %q, want loopback (immediate self-delivery for a lapsed schedule)", sent.Method)
+	}
+}

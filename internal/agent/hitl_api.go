@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -137,6 +138,20 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 	}
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, agent.UserID, agent, &mergedReq, true); uerr != nil {
 		return nil, uerr
+	}
+	// A held draft that carried a future send_at must not silently lose it to a
+	// reviewer edit (#815): self-delivery is an immediate in-process loopback with
+	// no scheduled arm, so approving a still-scheduled hold whose FINAL (edited)
+	// recipients target the agent's own address would deliver now and drop the
+	// schedule. Reject before dispatch — the hold stays pending_review and the
+	// reviewer re-targets an external recipient (or waits for the schedule to
+	// lapse, after which approval delivers immediately). Mirrors the accept-path
+	// rejection in DeliverOutbound; a lapsed schedule is already satisfied, so it
+	// falls through to the immediate loopback below.
+	if preview.ScheduledAt != nil && preview.ScheduledAt.After(time.Now()) && isSelfSend(mergedReq, agent.EmailAddress()) {
+		return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request",
+			Msg: fmt.Sprintf("cannot approve: this held message is scheduled to send at %s and the edited recipients target the agent's own address, which is delivered as an immediate loopback — change the recipients to an external address to approve",
+				preview.ScheduledAt.UTC().Format(time.RFC3339))}
 	}
 	// Transition the hold to review_approved + delivery_status='accepted'
 	// and enqueue an outbound_send job; the SendWorker performs the SMTP submit +

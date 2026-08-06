@@ -3096,6 +3096,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		method, msgType    *string
 		approvalExpires    *time.Time
 		reviewedAt         *time.Time
+		scheduledAt        *time.Time
 		rejectionReason    *string
 		reviewedByID       *string
 		reviewedByName     *string
@@ -3106,7 +3107,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		        m.method, m.message_type,
 		        m.conversation_id, m.created_at, m.expires_at,
 		        m.to_recipients, m.cc, m.bcc, m.reply_to,
-		        m.status, m.approval_expires_at, m.reviewed_at,
+		        m.status, m.approval_expires_at, m.reviewed_at, m.scheduled_at,
 		        m.rejection_reason, m.edited,
 		        m.body_text, m.body_html, m.attachments_json, m.managed_unsubscribe,
 		        m.reviewed_by_user_id, r.name,
@@ -3123,7 +3124,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		&method, &msgType,
 		&m.ConversationID, &m.CreatedAt, &m.ExpiresAt,
 		&m.ToRecipients, &m.CC, &m.BCC, &m.ReplyTo,
-		&m.Status, &approvalExpires, &reviewedAt,
+		&m.Status, &approvalExpires, &reviewedAt, &scheduledAt,
 		&rejectionReason, &m.Edited,
 		&bodyText, &bodyHTML, &attachments, &m.ManagedUnsubscribe,
 		&reviewedByID, &reviewedByName,
@@ -3143,6 +3144,9 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 	}
 	if reviewedAt != nil {
 		m.ReviewedAt = reviewedAt
+	}
+	if scheduledAt != nil {
+		m.ScheduledAt = scheduledAt
 	}
 	if rejectionReason != nil {
 		m.RejectionReason = *rejectionReason
