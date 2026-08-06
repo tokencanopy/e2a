@@ -671,6 +671,8 @@ type ReviewWire = {
   review_status: string;
   hold_reason?: PendingMessageSummary["hold_reason"];
   created_at: string;
+  // Future send_at an outbound hold carried (#815); absent otherwise.
+  scheduled_at?: string;
 };
 
 type ReviewPageWire = {
@@ -691,6 +693,7 @@ function pendingSummary(r: ReviewWire): PendingMessageSummary {
     status: r.review_status,
     created_at: r.created_at,
     hold_reason: r.hold_reason,
+    scheduled_at: r.scheduled_at,
   };
 }
 

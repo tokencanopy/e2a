@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,10 @@ import (
 // instead of blocking on Sender.Send. Self-sends never use it (they loopback).
 type OutboundEnqueuer interface {
 	EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error)
+	// EnqueueScheduledSendTx enqueues the send to run no earlier than `at`, used
+	// when an auto-approved hold carried a still-future send_at (#815). Same
+	// outbox tx as EnqueueSendTx; only the job's first-run time differs.
+	EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error)
 }
 
 type ManagedUnsubscribeIssuer interface {
@@ -332,7 +337,7 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 		To: comp.To, CC: comp.CC, BCC: comp.BCC, Subject: req.Subject,
 		Method: comp.Method, EnvelopeFrom: comp.EnvelopeFrom, SentAs: comp.SentAs, Raw: comp.Raw,
 	}
-	sent, err := w.store.ApproveAndAccept(ctx, c.MessageID, "", identity.MessageStatusReviewExpiredApproved, false, acc, w.outboundEnq.EnqueueSendTx, nil)
+	sent, err := w.store.ApproveAndAccept(ctx, c.MessageID, "", identity.MessageStatusReviewExpiredApproved, false, acc, w.outboundEnq.EnqueueSendTx, w.outboundEnq.EnqueueScheduledSendTx, nil)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotPendingApproval) {
 			return true // resolved between load and transition

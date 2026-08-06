@@ -39,11 +39,12 @@ class ReviewView(BaseModel):
     hold_reason: Optional[HoldReasonView] = Field(default=None, description="Plain-language reason this message was held. Clients should render summary directly and treat code as an open machine-readable value.")
     id: StrictStr = Field(description="The review's id. This is the SAME value as the held message's id (msg_…) — a review IS the held message pending approval, so GET /v1/reviews/{id} and the message id are interchangeable. Intentional and stable.")
     review_status: StrictStr = Field(description="Hold state of this queue item. Open set; tolerate unknown values. Currently always pending_review (the queue lists held items).")
+    scheduled_at: Optional[datetime] = Field(default=None, description="Beta: scheduled sending may change before it is declared stable. Present only on an outbound hold that carried a future send_at (#815): the instant the message is queued to be submitted once approved. The schedule survives the hold — approving submits at this instant if it is still in the future, or immediately if it has already passed. Absent on inbound holds and on outbound holds without a schedule.")
     subject: StrictStr
     to: List[StrictStr]
     verified_domain: Optional[StrictStr] = Field(description="RFC 5322 Author Domain validated by an aligned DMARC pass. Null otherwise — including dmarc.status=none (no DMARC record published, common and NOT itself suspicious), not just dmarc.status=fail (an actual mismatch). Only DMARC ties a passing SPF or DKIM identity back to this header domain; a bare SPF or DKIM pass without DMARC does not. This authenticates the domain, not the address local part, individual sender, or message content.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "conversation_id", "created_at", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "review_status", "subject", "to", "verified_domain"]
+    __properties: ClassVar[List[str]] = ["agent_email", "conversation_id", "created_at", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "review_status", "scheduled_at", "subject", "to", "verified_domain"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -132,6 +133,7 @@ class ReviewView(BaseModel):
             "hold_reason": HoldReasonView.from_dict(obj["hold_reason"]) if obj.get("hold_reason") is not None else None,
             "id": obj.get("id"),
             "review_status": obj.get("review_status"),
+            "scheduled_at": obj.get("scheduled_at"),
             "subject": obj.get("subject"),
             "to": obj.get("to"),
             "verified_domain": obj.get("verified_domain")

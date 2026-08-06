@@ -64,6 +64,10 @@ export type PendingMessageSummary = {
   // Product-facing explanation from the review API. Render summary directly;
   // code is an open machine-readable value for automation.
   hold_reason?: HoldReason;
+  // Future send_at an outbound hold carried (#815). The schedule survives the
+  // hold, so the queue shows when this message will send once approved. Present
+  // only on outbound holds with a schedule; absent otherwise.
+  scheduled_at?: string;
 };
 
 export type PendingAttachment = {

@@ -3,19 +3,33 @@ package hitlworker_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
-// fakeEnq records EnqueueSendTx calls (the outbound_send enqueue) so the async
-// branch can be asserted without a real River client.
-type fakeEnq struct{ calls []string }
+// fakeEnq records EnqueueSendTx / EnqueueScheduledSendTx calls (the outbound_send
+// enqueue) so the async branch can be asserted without a real River client.
+// scheduledCalls captures the re-armed schedule instant for #815 assertions.
+type fakeEnq struct {
+	calls          []string
+	scheduledCalls map[string]time.Time
+}
 
 func (f *fakeEnq) EnqueueSendTx(_ context.Context, _ pgx.Tx, messageID string) (int64, error) {
 	f.calls = append(f.calls, messageID)
 	return 7777, nil
+}
+
+func (f *fakeEnq) EnqueueScheduledSendTx(_ context.Context, _ pgx.Tx, messageID string, at time.Time) (int64, error) {
+	f.calls = append(f.calls, messageID)
+	if f.scheduledCalls == nil {
+		f.scheduledCalls = map[string]time.Time{}
+	}
+	f.scheduledCalls[messageID] = at
+	return 7778, nil
 }
 
 // TestWorkerAutoApproveAsync: with an outbound enqueuer wired (async mode), an
@@ -63,6 +77,45 @@ func TestWorkerAutoApproveAsync(t *testing.T) {
 	}
 	if sendJobID == nil || *sendJobID != 7777 {
 		t.Errorf("send_job_id = %v, want 7777", sendJobID)
+	}
+}
+
+// TestWorkerAutoApproveAsync_ReArmsFutureSchedule: a TTL auto-approve of a hold
+// that carried a still-future send_at re-arms the schedule rather than sending
+// immediately — the send is enqueued on the scheduled arm at scheduled_at (#815).
+func TestWorkerAutoApproveAsync_ReArmsFutureSchedule(t *testing.T) {
+	w, store, pool, smtpDone := setupWorker(t)
+	ctx := context.Background()
+
+	agent := prepareAgent(t, store, "approve-async-sched", identity.HITLExpirationApprove)
+	enq := &fakeEnq{}
+	w.SetOutboundEnqueuer(enq)
+
+	msg, err := store.CreatePendingOutboundMessage(ctx, agent.ID,
+		[]string{"alice@external.test"}, nil, nil,
+		"Held + scheduled", "body", "", nil, "send", "", "", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		return store.StampScheduledAtTx(ctx, tx, msg.ID, at)
+	}); err != nil {
+		t.Fatalf("StampScheduledAtTx: %v", err)
+	}
+	backdateExpiry(t, pool, msg.ID)
+
+	w.RunOnce(ctx)
+
+	if msgs := smtpDone(); len(msgs) != 0 {
+		t.Fatalf("async approve must NOT send inline, got %d SMTP messages", len(msgs))
+	}
+	got, ok := enq.scheduledCalls[msg.ID]
+	if !ok {
+		t.Fatalf("message was not enqueued on the scheduled arm; scheduledCalls=%v calls=%v", enq.scheduledCalls, enq.calls)
+	}
+	if !got.Equal(at) {
+		t.Fatalf("re-armed ScheduledAt = %v, want %v", got, at)
 	}
 }
 

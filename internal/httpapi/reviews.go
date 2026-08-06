@@ -42,6 +42,7 @@ type ReviewView struct {
 	FlagReason     string          `json:"flag_reason,omitempty"`
 	HoldReason     *HoldReasonView `json:"hold_reason,omitempty" doc:"Plain-language reason this message was held. Clients should render summary directly and treat code as an open machine-readable value."`
 	CreatedAt      time.Time       `json:"created_at"`
+	ScheduledAt    *time.Time      `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Present only on an outbound hold that carried a future send_at (#815): the instant the message is queued to be submitted once approved. The schedule survives the hold — approving submits at this instant if it is still in the future, or immediately if it has already passed. Absent on inbound holds and on outbound holds without a schedule."`
 }
 
 func reviewView(it identity.ReviewListItem) ReviewView {
@@ -60,6 +61,7 @@ func reviewView(it identity.ReviewListItem) ReviewView {
 		FlagReason:     it.FlagReason,
 		HoldReason:     baseHoldReason(it.ReviewReason),
 		CreatedAt:      it.CreatedAt,
+		ScheduledAt:    utcPtr(it.ScheduledAt),
 	}
 }
 

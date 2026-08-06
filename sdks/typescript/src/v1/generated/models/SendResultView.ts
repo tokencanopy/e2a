@@ -25,7 +25,7 @@ export class SendResultView {
     */
     'providerMessageId'?: string;
     /**
-    * Beta: scheduled sending may change before it is declared stable. Set only when status=scheduled: the future instant this message is queued to be submitted (approximate — treat as \"not before\"). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.
+    * Beta: scheduled sending may change before it is declared stable. The future instant this message is queued to be submitted (approximate — treat as \"not before\"). Set when status=scheduled, and also when status=pending_review if the held draft carried a future send_at — the review hold preserves the schedule, and approval re-arms the send at this instant (if it is still future) or submits immediately (if it has already passed). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.
     */
     'scheduledAt'?: Date;
     /**

@@ -40,6 +40,21 @@ function formatQueuedAgo(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+// A held outbound draft can carry a future send_at (#815): the schedule survives
+// the hold, so the reviewer sees when it will send once approved. Renders the
+// local date-time; if the instant has already passed, approval sends immediately.
+function formatScheduledFor(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  if (at.getTime() <= Date.now()) return "Sends on approval";
+  return `Sends ${at.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
+}
+
 function initialsFor(email: string): string {
   const local = email.split("@")[0] || email;
   return (
@@ -280,6 +295,9 @@ export function PendingRow({
         <Chip tone="warn">
           <Dot tone="warn" /> Pending
         </Chip>
+        {summary.scheduled_at && formatScheduledFor(summary.scheduled_at) && (
+          <Chip tone="info">{formatScheduledFor(summary.scheduled_at)}</Chip>
+        )}
         <span
           className="font-mono text-[11px] shrink-0"
           style={{ color: "var(--fg-subtle)" }}

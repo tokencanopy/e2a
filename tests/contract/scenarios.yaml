@@ -1078,6 +1078,96 @@ scenarios:
             deleted: true
             email: "{agent_email}"
 
+  - name: scheduled_send_survives_review_hold
+    description: >
+      A future send_at caught by an outbound review hold is preserved, not
+      discarded (#815). The send returns 202 + status=pending_review AND echoes
+      scheduled_at (proving the schedule is persisted on the held draft, not
+      silently dropped). Approving the hold re-arms the schedule: status=scheduled
+      with the same normalized scheduled_at, and the message detail carries it
+      through with delivery_status=accepted.
+    setup:
+      - register_agent:
+          email: sched-hold-{scenario_token}@agents.e2a.dev
+    steps:
+      - id: enable_outbound_review
+        # Empty-allowlist outbound review gate → every recipient is held for review.
+        action: request
+        method: PUT
+        path: /v1/agents/{agent_email}/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+          body_match:
+            outbound.gate.action: review
+
+      - id: schedule_and_hold
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: scheduled and held
+          text: later, if approved
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_contains:
+            - approval_expires_at
+          body_match:
+            status: pending_review
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          held_id: message_id
+
+      - id: approve_rearms_schedule
+        # A review's id IS the held message's id (POST /v1/reviews/{id}/approve).
+        # Approve with no reviewer overrides — send an empty JSON body ({}) so the
+        # request carries a body the operation's schema expects (a bodyless POST
+        # is a 400). All approveRequest fields are optional, so {} = "approve as-is".
+        action: request
+        method: POST
+        path: /v1/reviews/{held_id}/approve
+        body: {}
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+
+      - id: get_after_approve
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{held_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{held_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_sched_hold_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
   - name: scheduled_reply_fields
     description: >
       A future send_at on REPLY takes the same scheduled path as send: durably

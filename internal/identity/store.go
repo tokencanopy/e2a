@@ -3096,6 +3096,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		method, msgType    *string
 		approvalExpires    *time.Time
 		reviewedAt         *time.Time
+		scheduledAt        *time.Time
 		rejectionReason    *string
 		reviewedByID       *string
 		reviewedByName     *string
@@ -3106,7 +3107,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		        m.method, m.message_type,
 		        m.conversation_id, m.created_at, m.expires_at,
 		        m.to_recipients, m.cc, m.bcc, m.reply_to,
-		        m.status, m.approval_expires_at, m.reviewed_at,
+		        m.status, m.approval_expires_at, m.reviewed_at, m.scheduled_at,
 		        m.rejection_reason, m.edited,
 		        m.body_text, m.body_html, m.attachments_json, m.managed_unsubscribe,
 		        m.reviewed_by_user_id, r.name,
@@ -3123,7 +3124,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		&method, &msgType,
 		&m.ConversationID, &m.CreatedAt, &m.ExpiresAt,
 		&m.ToRecipients, &m.CC, &m.BCC, &m.ReplyTo,
-		&m.Status, &approvalExpires, &reviewedAt,
+		&m.Status, &approvalExpires, &reviewedAt, &scheduledAt,
 		&rejectionReason, &m.Edited,
 		&bodyText, &bodyHTML, &attachments, &m.ManagedUnsubscribe,
 		&reviewedByID, &reviewedByName,
@@ -3143,6 +3144,9 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 	}
 	if reviewedAt != nil {
 		m.ReviewedAt = reviewedAt
+	}
+	if scheduledAt != nil {
+		m.ScheduledAt = scheduledAt
 	}
 	if rejectionReason != nil {
 		m.RejectionReason = *rejectionReason
@@ -3758,12 +3762,22 @@ type AcceptedSend struct {
 // must NOT resolve — trashed holds stay pending_review with their clock paused
 // until RestoreAgent shifts approval_expires_at (or the trash purge drops them).
 // Draft body and attachment columns remain retained after approval.
+//
+// Scheduling survives the hold (#815): the CAS RETURNING reads back the draft's
+// own scheduled_at (never modified by this UPDATE, so this is snapshot-safe — not
+// a data-modifying-CTE re-select). When it is still in the future, the send is
+// re-armed via enqueueScheduled (River first-run = scheduled_at) instead of the
+// immediate enqueue, and the returned Message carries ScheduledAt so the caller
+// renders status=scheduled. A scheduled_at that has already passed by approval
+// time falls through to the immediate enqueue — "not before" is satisfied and
+// approval was the last blocker.
 func (s *Store) ApproveAndAccept(
 	ctx context.Context,
 	messageID, reviewedByUserID, targetStatus string,
 	edited bool,
 	acc AcceptedSend,
 	enqueue func(ctx context.Context, tx pgx.Tx, messageID string) (int64, error),
+	enqueueScheduled func(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error),
 	completeIdempotency func(ctx context.Context, tx pgx.Tx, approved *Message) error,
 ) (*Message, error) {
 	var reviewReason messagelifecycle.ReasonCode
@@ -3799,7 +3813,7 @@ func (s *Store) ApproveAndAccept(
 			  WHERE id = $1 AND direction = 'outbound' AND status = 'pending_review'
 			    AND NOT EXISTS (SELECT 1 FROM agent_identities ai
 			                     WHERE ai.id = messages.agent_id AND ai.deleted_at IS NOT NULL)
-			  RETURNING id, agent_id, message_type, subject, to_recipients, cc, bcc, status, edited`,
+			  RETURNING id, agent_id, message_type, subject, to_recipients, cc, bcc, status, edited, scheduled_at`,
 			messageID,
 			targetStatus,
 			acc.To, acc.CC, acc.BCC,
@@ -3811,7 +3825,7 @@ func (s *Store) ApproveAndAccept(
 			nullIfEmptyBytes(acc.Raw),
 			nullIfEmptyString(reviewedByUserID),
 			edited,
-		).Scan(&m.ID, &m.AgentID, &msgType, &m.Subject, &m.ToRecipients, &m.CC, &m.BCC, &m.Status, &m.Edited)
+		).Scan(&m.ID, &m.AgentID, &msgType, &m.Subject, &m.ToRecipients, &m.CC, &m.BCC, &m.Status, &m.Edited, &m.ScheduledAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotPendingApproval
 		}
@@ -3829,7 +3843,19 @@ func (s *Store) ApproveAndAccept(
 			return err
 		}
 		m.LifecycleTransitions = []messagelifecycle.MessageLifecycleTransition{transition}
-		jobID, err := enqueue(ctx, tx, m.ID)
+		// Re-arm a preserved schedule (#815): a held draft's future send_at is
+		// honored by enqueueing the send to run no earlier than scheduled_at. A
+		// scheduled_at already in the past submits immediately (the immediate enqueue
+		// below), exactly like a directly-scheduled row whose instant has arrived —
+		// scheduled_at stays on the row as the historical marker in both cases.
+		// enqueueScheduled may be nil in setups without the scheduled arm wired — fall
+		// back to immediate.
+		var jobID int64
+		if m.ScheduledAt != nil && m.ScheduledAt.After(time.Now()) && enqueueScheduled != nil {
+			jobID, err = enqueueScheduled(ctx, tx, m.ID, *m.ScheduledAt)
+		} else {
+			jobID, err = enqueue(ctx, tx, m.ID)
+		}
 		if err != nil {
 			return err
 		}

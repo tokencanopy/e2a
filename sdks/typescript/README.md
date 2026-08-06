@@ -168,9 +168,10 @@ if (res.status === "scheduled") console.log(res.scheduledAt);
 ```
 
 `sendAt` must be no more than 90 days ahead. Direct loopback to the sending
-agent's own address cannot be scheduled and returns `400 invalid_request`
-unless a review hold takes precedence; held messages drop the schedule and send
-when approved.
+agent's own address cannot be scheduled and returns `400 invalid_request` (even
+when the message would otherwise be held for review). A schedule survives a
+review hold: a held message keeps its `sendAt`, and approving it submits at that
+instant if it is still in the future, or immediately if it has passed.
 
 ### Managed unsubscribe (beta)
 
