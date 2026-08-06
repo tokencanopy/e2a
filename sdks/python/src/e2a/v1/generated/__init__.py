@@ -103,6 +103,7 @@ __all__ = [
     "EventView",
     "FieldError",
     "ForwardRequest",
+    "ForwardRequestReplyTo",
     "HoldReasonView",
     "ImportContactsRequest",
     "LimitExceededDetails",
@@ -287,6 +288,7 @@ from e2a.v1.generated.models.event_envelope import EventEnvelope as EventEnvelop
 from e2a.v1.generated.models.event_view import EventView as EventView
 from e2a.v1.generated.models.field_error import FieldError as FieldError
 from e2a.v1.generated.models.forward_request import ForwardRequest as ForwardRequest
+from e2a.v1.generated.models.forward_request_reply_to import ForwardRequestReplyTo as ForwardRequestReplyTo
 from e2a.v1.generated.models.hold_reason_view import HoldReasonView as HoldReasonView
 from e2a.v1.generated.models.import_contacts_request import ImportContactsRequest as ImportContactsRequest
 from e2a.v1.generated.models.limit_exceeded_details import LimitExceededDetails as LimitExceededDetails

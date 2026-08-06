@@ -301,7 +301,7 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
       sendAt?: Date;
     },
     opts: SendOpts = {},
@@ -320,7 +320,7 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
       sendAt?: Date;
     },
     opts: SendOpts = {},
@@ -344,7 +344,7 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
       sendAt?: Date;
     },
     opts: SendOpts = {},

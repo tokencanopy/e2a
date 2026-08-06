@@ -82,6 +82,7 @@ models/EventEnvelope.ts
 models/EventView.ts
 models/FieldError.ts
 models/ForwardRequest.ts
+models/ForwardRequestReplyTo.ts
 models/HoldReasonView.ts
 models/ImportContactsRequest.ts
 models/LimitExceededDetails.ts

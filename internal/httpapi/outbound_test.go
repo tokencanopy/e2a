@@ -109,8 +109,10 @@ func TestSendInvalidReplyTo(t *testing.T) {
 	}
 }
 
-// TestSendMultiReplyToRejected: Reply-To carries a single mailbox in our contract;
-// a comma list is rejected so callers don't rely on unspecified multi-address behavior.
+// TestSendMultiReplyToRejected: the STRING form of reply_to still carries a
+// single mailbox — a comma list packed into one string is rejected. Several
+// destinations must come as the array form (see TestSendReplyToArrayPropagates),
+// so a bare comma-string can't smuggle an ambiguous multi-address value through.
 func TestSendMultiReplyToRejected(t *testing.T) {
 	srv := testServer(t)
 	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
@@ -119,6 +121,86 @@ func TestSendMultiReplyToRejected(t *testing.T) {
 	})
 	if code != 400 || errCode(body) != "invalid_request" {
 		t.Fatalf("want 400 invalid_request for multi reply_to, got %d %v", code, body)
+	}
+}
+
+// TestSendReplyToArrayPropagates: the array form directs replies to several
+// destinations. Entries are preserved verbatim and joined into one RFC 5322
+// address-list on the Reply-To header.
+func TestSendReplyToArrayPropagates(t *testing.T) {
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"alice@x.com"}, "subject": "Hi", "text": "hello",
+		"reply_to": []string{"Support <support@acme.com>", "owner@acme.com"},
+	})
+	if code != 200 || body["status"] != "sent" {
+		t.Fatalf("want 200 sent, got %d %v", code, body)
+	}
+	const want = "Support <support@acme.com>, owner@acme.com"
+	if got := lastDeliveredReq().ReplyTo; got != want {
+		t.Fatalf("delivered ReplyTo = %q, want %q", got, want)
+	}
+}
+
+// TestSendReplyToSingleElementArray: a one-element array is equivalent to the
+// string form — the single address reaches the delivery layer verbatim.
+func TestSendReplyToSingleElementArray(t *testing.T) {
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"alice@x.com"}, "subject": "Hi", "text": "hello",
+		"reply_to": []string{"Support <support@acme.com>"},
+	})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	if got := lastDeliveredReq().ReplyTo; got != "Support <support@acme.com>" {
+		t.Fatalf("delivered ReplyTo = %q, want verbatim single address", got)
+	}
+}
+
+// TestSendReplyToArrayInvalidMember: one bad address in the list rejects the
+// whole request at the edge — no partially-valid Reply-To reaches the composer.
+func TestSendReplyToArrayInvalidMember(t *testing.T) {
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"alice@x.com"}, "subject": "Hi", "text": "hello",
+		"reply_to": []string{"ok@acme.com", "not an address"},
+	})
+	if code != 400 || errCode(body) != "invalid_request" {
+		t.Fatalf("want 400 invalid_request for bad array member, got %d %v", code, body)
+	}
+}
+
+// TestSendEmptyReplyToTreatedAsUnset: an explicit empty-string reply_to is
+// accepted and treated as "not set" (the historical scalar behavior), NOT
+// rejected — so a caller that sends "" instead of omitting the field keeps
+// working. It reaches the delivery layer as "" (compose then defaults Reply-To
+// to the agent's own address).
+func TestSendEmptyReplyToTreatedAsUnset(t *testing.T) {
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"alice@x.com"}, "subject": "Hi", "text": "hello",
+		"reply_to": "",
+	})
+	if code != 200 || body["status"] != "sent" {
+		t.Fatalf("empty reply_to must be accepted as unset, got %d %v", code, body)
+	}
+	if got := lastDeliveredReq().ReplyTo; got != "" {
+		t.Fatalf("empty reply_to must reach delivery unset (\"\"), got %q", got)
+	}
+}
+
+// TestSendReplyToArrayTooMany: more than maxReplyToAddresses entries is rejected
+// (schema maxItems at the edge, backstopped by validateReplyTo).
+func TestSendReplyToArrayTooMany(t *testing.T) {
+	srv := testServer(t)
+	over := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "f@x.com"}
+	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"alice@x.com"}, "subject": "Hi", "text": "hello",
+		"reply_to": over,
+	})
+	if code != 400 && code != 422 {
+		t.Fatalf("want 400/422 for over-cap reply_to, got %d %v", code, body)
 	}
 }
 
@@ -366,6 +448,41 @@ func TestReplyInvalidReplyTo(t *testing.T) {
 	}
 }
 
+// TestReplyReplyToArrayPropagates: the reply path applies the same string|
+// array reply_to normalization as send — several destinations are joined into
+// one canonical address-list on the delivered request.
+func TestReplyReplyToArrayPropagates(t *testing.T) {
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",
+		map[string]any{"text": "thanks", "reply_to": []string{"Support <support@acme.com>", "owner@acme.com"}})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	const want = "Support <support@acme.com>, owner@acme.com"
+	if got := lastDeliveredReq().ReplyTo; got != want {
+		t.Fatalf("reply delivered ReplyTo = %q, want %q", got, want)
+	}
+}
+
+func TestReplyReplyToArrayInvalidMember(t *testing.T) {
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",
+		map[string]any{"text": "thanks", "reply_to": []string{"ok@acme.com", "not an address"}})
+	if code != 400 || errCode(body) != "invalid_request" {
+		t.Fatalf("want 400 invalid_request for bad array member, got %d %v", code, body)
+	}
+}
+
+func TestReplyReplyToArrayTooMany(t *testing.T) {
+	srv := testServer(t)
+	over := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "f@x.com"}
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",
+		map[string]any{"text": "thanks", "reply_to": over})
+	if code != 400 && code != 422 {
+		t.Fatalf("want 400/422 for over-cap reply_to, got %d %v", code, body)
+	}
+}
+
 func TestForwardReplyToPropagates(t *testing.T) {
 	srv := testServer(t)
 	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
@@ -384,6 +501,41 @@ func TestForwardInvalidReplyTo(t *testing.T) {
 		map[string]any{"to": []string{"newperson@x.com"}, "text": "fyi", "reply_to": "a@x.com, b@x.com"})
 	if code != 400 || errCode(body) != "invalid_request" {
 		t.Fatalf("want 400 invalid_request for multi reply_to, got %d %v", code, body)
+	}
+}
+
+// TestForwardReplyToArrayPropagates: the forward path applies the same string|
+// array reply_to normalization as send — several destinations are joined into
+// one canonical address-list on the delivered request.
+func TestForwardReplyToArrayPropagates(t *testing.T) {
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
+		map[string]any{"to": []string{"newperson@x.com"}, "text": "fyi", "reply_to": []string{"Support <support@acme.com>", "owner@acme.com"}})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	const want = "Support <support@acme.com>, owner@acme.com"
+	if got := lastDeliveredReq().ReplyTo; got != want {
+		t.Fatalf("forward delivered ReplyTo = %q, want %q", got, want)
+	}
+}
+
+func TestForwardReplyToArrayInvalidMember(t *testing.T) {
+	srv := testServer(t)
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
+		map[string]any{"to": []string{"newperson@x.com"}, "text": "fyi", "reply_to": []string{"ok@acme.com", "not an address"}})
+	if code != 400 || errCode(body) != "invalid_request" {
+		t.Fatalf("want 400 invalid_request for bad array member, got %d %v", code, body)
+	}
+}
+
+func TestForwardReplyToArrayTooMany(t *testing.T) {
+	srv := testServer(t)
+	over := []string{"a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com", "f@x.com"}
+	code, body := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/forward", "good",
+		map[string]any{"to": []string{"newperson@x.com"}, "text": "fyi", "reply_to": over})
+	if code != 400 && code != 422 {
+		t.Fatalf("want 400/422 for over-cap reply_to, got %d %v", code, body)
 	}
 }
 

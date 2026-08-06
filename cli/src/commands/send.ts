@@ -13,7 +13,7 @@ export interface SendOptions {
   bodyFile?: string;
   htmlFile?: string;
   conversationId?: string;
-  replyTo?: string;
+  replyTo?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
@@ -25,12 +25,22 @@ export interface ReplyOptions {
   body?: string;
   bodyFile?: string;
   htmlFile?: string;
-  replyTo?: string;
+  replyTo?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
   attach?: string[];
   sendAt?: string;
+}
+
+// --reply-to is repeatable (an RFC 5322 Reply-To may name several addresses).
+// An empty list means the flag was not given, so the field is omitted and the
+// server defaults Reply-To to the agent's own address. A SINGLE --reply-to is
+// sent as a scalar string — byte-identical to the pre-list CLI wire shape and
+// maximally compatible with older servers; several become an array.
+function replyToArg(replyTo?: string[]): string | string[] | undefined {
+  if (!replyTo || replyTo.length === 0) return undefined;
+  return replyTo.length === 1 ? replyTo[0] : replyTo;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -182,7 +192,7 @@ export async function send(opts: SendOptions): Promise<void> {
       text: body,
       html: htmlBody,
       conversationId: opts.conversationId,
-      replyTo: opts.replyTo,
+      replyTo: replyToArg(opts.replyTo),
       attachments: readAttachments(opts.attach),
       sendAt,
     },
@@ -201,7 +211,7 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
   const result = await client.messages.reply(
     agentEmail,
     messageId,
-    { text: body, html: htmlBody, replyTo: opts.replyTo, attachments: readAttachments(opts.attach), sendAt },
+    { text: body, html: htmlBody, replyTo: replyToArg(opts.replyTo), attachments: readAttachments(opts.attach), sendAt },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
   emitSendResult(result, opts.json);

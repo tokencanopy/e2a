@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from typing import Any, ClassVar, Dict, List, Optional
 from typing_extensions import Annotated
 from e2a.v1.generated.models.attachment import Attachment
+from e2a.v1.generated.models.forward_request_reply_to import ForwardRequestReplyTo
 from e2a.v1.generated.models.unsubscribe_options import UnsubscribeOptions
 from typing import Optional, Set
 from typing_extensions import Self
@@ -36,7 +37,7 @@ class ReplyRequest(BaseModel):
     conversation_id: Optional[Annotated[str, Field(strict=True, max_length=200)]] = Field(default=None, description="Caller-assigned application conversation/grouping id override. This value is independent of email thread topology, which is derived from the referenced message. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.")
     html: Optional[Annotated[str, Field(strict=True, max_length=1048576)]] = None
     reply_all: Optional[StrictBool] = None
-    reply_to: Optional[Annotated[str, Field(strict=True, max_length=320)]] = Field(default=None, description="Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined), and the address itself must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.")
+    reply_to: Optional[ForwardRequestReplyTo] = None
     send_at: Optional[datetime] = Field(default=None, description="Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent's own address returns 400 invalid_request because loopback is immediate. Scheduling does not survive a review hold: if held, send_at is dropped and the reply sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.")
     text: Annotated[str, Field(strict=True, max_length=1048576)]
     unsubscribe: Optional[UnsubscribeOptions] = Field(default=None, description="Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.")
@@ -91,6 +92,9 @@ class ReplyRequest(BaseModel):
                 if _item_attachments:
                     _items.append(_item_attachments.to_dict())
             _dict['attachments'] = _items
+        # override the default output from pydantic by calling `to_dict()` of reply_to
+        if self.reply_to:
+            _dict['reply_to'] = self.reply_to.to_dict()
         # override the default output from pydantic by calling `to_dict()` of unsubscribe
         if self.unsubscribe:
             _dict['unsubscribe'] = self.unsubscribe.to_dict()
@@ -117,7 +121,7 @@ class ReplyRequest(BaseModel):
             "conversation_id": obj.get("conversation_id"),
             "html": obj.get("html"),
             "reply_all": obj.get("reply_all"),
-            "reply_to": obj.get("reply_to"),
+            "reply_to": ForwardRequestReplyTo.from_dict(obj["reply_to"]) if obj.get("reply_to") is not None else None,
             "send_at": obj.get("send_at"),
             "text": obj.get("text"),
             "unsubscribe": UnsubscribeOptions.from_dict(obj["unsubscribe"]) if obj.get("unsubscribe") is not None else None

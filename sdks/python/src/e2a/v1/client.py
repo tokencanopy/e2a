@@ -56,6 +56,7 @@ from .generated.models import (
     DomainView,
     EventView,
     ForwardRequest,
+    ForwardRequestReplyTo,
     AccountView,
     AttachmentView,
     MessageSummaryView,
@@ -161,6 +162,25 @@ def _resolve_base_url() -> Optional[str]:
             stacklevel=3,
         )
     return legacy
+
+
+def _reply_to_union(body: Optional[Body]) -> Optional[Body]:
+    """Wrap a raw ``reply_to`` on a dict body in the generated oneOf union.
+
+    Reply-To is an RFC 5322 address-list: the API accepts one address or a list
+    of up to five. The generated request models type ``reply_to`` as the
+    ``ForwardRequestReplyTo`` oneOf, which pydantic will NOT build from a bare
+    ``str``/``list`` when :func:`_coerce` validates the body — so wrap those here
+    so both ``{"reply_to": "a@x"}`` (the historical single-address form) and
+    ``{"reply_to": ["a@x", "b@y"]}`` keep working. Non-dict bodies and values
+    that are already a ``ForwardRequestReplyTo`` (or ``None``) pass through
+    unchanged. The body dict is copied, never mutated in place.
+    """
+    if isinstance(body, dict):
+        rt = body.get("reply_to")
+        if isinstance(rt, (str, list)):
+            return {**body, "reply_to": ForwardRequestReplyTo(actual_instance=rt)}
+    return body
 
 
 def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
@@ -608,7 +628,7 @@ class MessagesResource:
         time. Default: no wait. Always branch on the result's ``status``, not
         the HTTP code.
         """
-        req = _coerce(SendEmailRequest, body)
+        req = _coerce(SendEmailRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 # _coerce returns the caller's own model when body is already a
@@ -638,7 +658,7 @@ class MessagesResource:
         beta, and ``wait="sent"`` requests the same bounded wait (see
         :meth:`send`).
         """
-        req = _coerce(ReplyRequest, body)
+        req = _coerce(ReplyRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 req = req.model_copy()
@@ -665,7 +685,7 @@ class MessagesResource:
         beta, and ``wait="sent"`` requests the same bounded wait (see
         :meth:`send`).
         """
-        req = _coerce(ForwardRequest, body)
+        req = _coerce(ForwardRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 req = req.model_copy()

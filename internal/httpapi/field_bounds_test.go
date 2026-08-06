@@ -57,15 +57,15 @@ func TestGABoundTagsMatchConsts(t *testing.T) {
 		}},
 		{"SendEmailRequest", SendEmailRequest{}, []want{
 			{"To", addrTag}, {"CC", addrTag}, {"BCC", addrTag},
-			{"ReplyTo", addrTag}, {"ConversationID", convTag},
+			{"ConversationID", convTag},
 		}},
 		{"ReplyRequest", ReplyRequest{}, []want{
 			{"CC", addrTag}, {"BCC", addrTag},
-			{"ReplyTo", addrTag}, {"ConversationID", convTag},
+			{"ConversationID", convTag},
 		}},
 		{"ForwardRequest", ForwardRequest{}, []want{
 			{"To", addrTag}, {"CC", addrTag}, {"BCC", addrTag},
-			{"ReplyTo", addrTag}, {"ConversationID", convTag},
+			{"ConversationID", convTag},
 		}},
 		{"ApproveOverrides", agent.ApproveOverrides{}, []want{
 			{"To", addrTag}, {"CC", addrTag}, {"BCC", addrTag},
@@ -85,6 +85,26 @@ func TestGABoundTagsMatchConsts(t *testing.T) {
 			}
 		})
 	}
+	// reply_to is a string|array union (ReplyToField.Schema), not a maxLength
+	// struct tag, so its bounds are guarded here directly: both the string
+	// branch and the array's items cap at maxEmailAddressLen (per-address), and
+	// the array caps at maxReplyToAddresses entries. Same drift guard the tag
+	// cases above give the other bounded fields.
+	rt := ReplyToField{}.Schema(nil)
+	if len(rt.OneOf) != 2 {
+		t.Fatalf("reply_to schema must be a 2-branch oneOf, got %d branches", len(rt.OneOf))
+	}
+	strBranch, arrBranch := rt.OneOf[0], rt.OneOf[1]
+	if strBranch.MaxLength == nil || *strBranch.MaxLength != maxEmailAddressLen {
+		t.Errorf("reply_to string branch maxLength = %v, want %d", strBranch.MaxLength, maxEmailAddressLen)
+	}
+	if arrBranch.Items == nil || arrBranch.Items.MaxLength == nil || *arrBranch.Items.MaxLength != maxEmailAddressLen {
+		t.Errorf("reply_to array items maxLength = %v, want %d", arrBranch.Items, maxEmailAddressLen)
+	}
+	if arrBranch.MaxItems == nil || *arrBranch.MaxItems != maxReplyToAddresses {
+		t.Errorf("reply_to array maxItems = %v, want %d", arrBranch.MaxItems, maxReplyToAddresses)
+	}
+
 	// The httpapi alias and the webhook/list filter caps must stay equal to the
 	// canonical constants — the conversation_id descriptions promise it.
 	if maxEmailAddressLen != agent.MaxAddressLen {
@@ -331,13 +351,14 @@ func TestValidateRecipientsRuneSemantics(t *testing.T) {
 // schema doesn't cover) count runes too.
 func TestReplyToAndConversationIDBackstopRuneSemantics(t *testing.T) {
 	display := maxEmailAddressLen - 12
-	if env := validateReplyTo(`"` + cjk(display) + `" <r@x.com>`); env != nil {
+	replyToField := func(s string) ReplyToField { return ReplyToField{values: []string{s}} }
+	if _, env := validateReplyTo(replyToField(`"` + cjk(display) + `" <r@x.com>`)); env != nil {
 		t.Fatalf("reply_to at 320 code points must pass, got %v", env)
 	}
-	if env := validateReplyTo(`"` + cjk(display+1) + `" <r@x.com>`); env == nil {
+	if _, env := validateReplyTo(replyToField(`"` + cjk(display+1) + `" <r@x.com>`)); env == nil {
 		t.Fatal("reply_to at 321 code points must fail")
 	}
-	if env := validateReplyTo(strings.Repeat("😀", 250) + "@b.test"); env == nil {
+	if _, env := validateReplyTo(replyToField(strings.Repeat("😀", 250) + "@b.test")); env == nil {
 		t.Fatal("reply_to with an oversized UTF-8 addr-spec must fail")
 	}
 	if err := validateConversationID(cjk(maxConversationIDLen)); err != nil {

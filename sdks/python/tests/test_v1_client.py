@@ -502,6 +502,104 @@ async def test_send_serializes_send_at_and_parses_scheduled_result(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_send_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form: a bare str reply_to on a dict body is
+    # wrapped into the generated oneOf and reaches the wire as a scalar string,
+    # verbatim (display name preserved).
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.send(
+            "bot@test.dev",
+            {
+                "to": ["a@x.com"],
+                "subject": "Hi",
+                "text": "yo",
+                "reply_to": "Support <support@acme.com>",
+            },
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_send_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form: a list reply_to reaches the wire as a JSON array
+    # so the server can direct replies to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.send(
+            "bot@test.dev",
+            {
+                "to": ["a@x.com"],
+                "subject": "Hi",
+                "text": "yo",
+                "reply_to": ["support@acme.com", "owner@acme.com"],
+            },
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
+async def test_reply_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form works on reply too: a bare str reply_to
+    # is wrapped into the generated oneOf and reaches the wire verbatim.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "thanks", "reply_to": "Support <support@acme.com>"},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_reply_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form works on reply too: a list reply_to reaches the
+    # wire as a JSON array so replies can be directed to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "thanks", "reply_to": ["support@acme.com", "owner@acme.com"]},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
+async def test_forward_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form works on forward too.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "fyi", "reply_to": "Support <support@acme.com>"},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_forward_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form works on forward too: a list reply_to reaches
+    # the wire as a JSON array so replies can be directed to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "fyi", "reply_to": ["support@acme.com", "owner@acme.com"]},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
 async def test_reply_serializes_send_at_and_parses_scheduled_result(httpx_mock):
     send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
     httpx_mock.add_response(

@@ -11,6 +11,7 @@
  */
 
 import { Attachment } from '../models/Attachment.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { HttpFile } from '../http/http.js';
 
@@ -35,10 +36,7 @@ export class SendEmailRequest {
     * Literal HTML body. Mutually exclusive with template_id/template_alias.
     */
     'html'?: string;
-    /**
-    * Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined), and the address itself must fit SMTP\'s mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent\'s own address.
-    */
-    'replyTo'?: string;
+    'replyTo'?: ForwardRequestReplyTo;
     /**
     * Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler\'s poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future direct loopback whose only recipient is the sending agent\'s own address returns 400 invalid_request because loopback is immediate. Scheduling does NOT survive a review hold: if held, send_at is dropped and the message sends on approval (the hold takes precedence over the loopback check). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.
     */
@@ -110,7 +108,7 @@ export class SendEmailRequest {
         {
             "name": "replyTo",
             "baseName": "reply_to",
-            "type": "string",
+            "type": "ForwardRequestReplyTo",
             "format": ""
         },
         {
