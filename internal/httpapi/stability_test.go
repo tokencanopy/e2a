@@ -324,6 +324,25 @@ func TestSpecBetaMarkers(t *testing.T) {
 		}
 	}
 
+	// listMessages stays GA at the operation level, but its `filter` query
+	// parameter is beta (the grammar may still evolve). The marker rides on
+	// the parameter's inline schema — huma.Param has no extension slot.
+	{
+		params, _ := opFor("listMessages")["parameters"].([]any)
+		var filterSchema map[string]any
+		for _, p := range params {
+			if pm, _ := p.(map[string]any); pm["name"] == "filter" {
+				filterSchema, _ = pm["schema"].(map[string]any)
+			}
+		}
+		if filterSchema == nil {
+			t.Fatalf("listMessages filter parameter (with inline schema) not found")
+		}
+		if got := filterSchema["x-stability-level"]; got != "beta" {
+			t.Errorf("listMessages filter parameter schema must carry x-stability-level: beta, got %v", got)
+		}
+	}
+
 	comps, _ := doc["components"].(map[string]any)
 	schemas, _ := comps["schemas"].(map[string]any)
 	schemaExt := func(name, extension string) any {

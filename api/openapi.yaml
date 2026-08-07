@@ -4992,6 +4992,7 @@ paths:
           schema:
             description: "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."
             type: string
+            x-stability-level: beta
       responses:
         "200":
           content:

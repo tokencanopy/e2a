@@ -230,10 +230,14 @@ every `/v1` operation not listed here is covered by the GA freeze.
 - **Beta surfaces are marked `x-stability-level: beta`** in the spec
   for automated compatibility tools
   (operations, schemas, and individual fields — e.g. the `template_*` fields on
-  send, `hold_reason`, the review-detail `protection` evidence, and the
-  `flagged` / `flag_reason` verdict) and `(beta)` in prose — today: templates,
+  send, `hold_reason`, the review-detail `protection` evidence, the
+  `flagged` / `flag_reason` verdict, and the `filter` query parameter on
+  `GET /v1/agents/{email}/messages`, whose marker rides on the parameter's
+  inline schema) and `(beta)` in prose — today: templates,
   starter templates, reviews, the agent protection config, agent-scoped
-  suppression management, and managed unsubscribe (including its raw
+  suppression management, message-list boolean filtering (the `filter`
+  parameter's field/operator vocabulary may still evolve — see
+  [Message filtering](filtering.md)), and managed unsubscribe (including its raw
   confirmation flow). They are **exempt from the
   freeze**: they may change or be removed without a major version. Where only
   specific *values* of a stable field are experimental (the screening +
@@ -415,7 +419,8 @@ single message.
 
 - `GET …/messages` — list inbound + outbound with filters (`direction`,
   `read_status`, `sort`, `from`, `subject_contains`, `conversation_id`, `labels`,
-  `since`, `until`) and cursor pagination. `filter` adds boolean composition; see
+  `since`, `until`) and cursor pagination. `filter` (beta) adds boolean
+  composition; see
   [message filtering](filtering.md) for its grammar and v1 fields. Held outbound
   drafts appear with `status=pending_review`.
 - `POST …/messages` — send a new email (a new thread). Returns `202 Accepted` for

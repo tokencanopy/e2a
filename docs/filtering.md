@@ -5,6 +5,12 @@ language. It is an addition to—not a replacement for—the existing flat list
 parameters. See the [filter-query design](superpowers/specs/2026-07-25-filter-query-language-design.md)
 for rationale and rollout details.
 
+**Beta.** The `filter` parameter is `x-stability-level: beta` (see
+[Versioning & stability](api.md#versioning--stability)): the field and
+operator vocabulary documented here may grow or change before it is declared
+stable. The flat list parameters (`from`, `subject_contains`, `labels`, …)
+are GA and unaffected.
+
 ## Syntax
 
 Keywords are uppercase and case-sensitive: `AND`, `OR`, and `NOT`.
