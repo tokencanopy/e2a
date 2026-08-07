@@ -1,6 +1,6 @@
 {
   "name": "@e2a/sdk",
-  "version": "5.5.0",
+  "version": "5.6.0",
   "description": "TypeScript SDK for e2a — email for AI agents",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
