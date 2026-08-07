@@ -32,7 +32,10 @@ tool failures whose structured error reports `retryable: true`.
 - `what's in my inbox?` — exercises `list_messages` + `get_message`
 - `reply to the most recent message politely` — exercises `reply_to_message` (preserves threading headers)
 - `who am I?` — exercises `whoami`
-- `what's waiting for my approval?` — exercises `list_reviews` (works once you've enabled HITL on your agent)
+- `what's waiting for my approval?` — exercises `list_reviews`. This is an
+  account-owner review-queue tool, not agent self-approval, so it's only
+  visible to an **account-scoped** key — it won't register as a tool at all
+  under the agent-scoped key these examples otherwise use.
 
 ## Pointing at a self-hosted e2a
 
