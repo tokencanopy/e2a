@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.0
+
+Additive only — no flag, output-field, or exit-code meaning changes to any
+command that shipped in 2.2.0.
+
+**Changed:** `--reply-to <email>` on `e2a send` and `e2a reply` is now
+repeatable (max 5 addresses), so a caller can direct replies to several
+destinations (e.g. a shared triage inbox and an individual owner). A single
+`--reply-to` still sends the byte-identical scalar wire form as before;
+several become an address list, matching the server's widened `reply_to`
+field.
+
 ## 2.2.0
 
 Additive only — no flag, output-field, or exit-code meaning changes to any

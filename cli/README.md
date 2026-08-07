@@ -208,8 +208,9 @@ e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 
 Common `send`/`reply` flags: `--body` / `--body-file`, `--html-file` (text
 fallback derived if no `--body`), `--attach` (repeatable; max 10 files, 10 MB
-each, 25 MB total), `--reply-to`, `--send-at` (RFC 3339 with an explicit UTC
-offset, at most 90 days ahead), `--idempotency-key`, `--agent`, `--json`
+each, 25 MB total), `--reply-to` (repeatable; max 5 addresses), `--send-at`
+(RFC 3339 with an explicit UTC offset, at most 90 days ahead),
+`--idempotency-key`, `--agent`, `--json`
 (print the full send result). `send`-only: `--to` (repeatable), `--subject`,
 `--conversation-id` (alias `--conversation`) — `reply` infers these from the
 message being replied to and rejects them as unknown flags.
