@@ -2,7 +2,7 @@
 // only thing cleanup() calls on its client is `delete(path)`, so a fake stands
 // in for ApiClient and no network request is made. Deliberately NOT under
 // `suites/` — `npm test` globs `suites/*.test.ts` and runs against live prod.
-// Run these with `npm run test:harness`.
+// Run these with `npm run test:unit` (CI's harness-tests job runs the same glob).
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiClient, RawResponse } from "./client.ts";
@@ -323,9 +323,11 @@ test("armLeakReporter is idempotent — one listener per signal", () => {
   armLeakReporter();
   assert.equal(process.listenerCount("SIGINT"), 1);
   assert.equal(process.listenerCount("SIGTERM"), 1);
+  assert.equal(process.listenerCount("SIGHUP"), 1);
   assert.equal(process.listenerCount("exit"), 1);
   disarmLeakReporter();
   assert.equal(process.listenerCount("SIGINT"), 0);
+  assert.equal(process.listenerCount("SIGHUP"), 0);
   assert.equal(process.listenerCount("exit"), 0);
 });
 
@@ -363,8 +365,9 @@ test("the SIGINT handler translates the signal into a non-zero exit", () => {
   // wired to exit (which is what runs the exit-time reportLeaks).
   process.emit("SIGINT");
   process.emit("SIGTERM");
+  process.emit("SIGHUP");
 
-  assert.deepEqual(cap.exits, [130, 143]);
+  assert.deepEqual(cap.exits, [130, 143, 129]);
   disarmLeakReporter();
 });
 

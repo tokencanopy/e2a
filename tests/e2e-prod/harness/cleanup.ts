@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import type { ApiClient } from "./client.ts";
 
 type Kind = "agent" | "domain";
@@ -15,7 +16,6 @@ export interface CleanupResult {
 }
 
 export interface CleanupOpts {
-  force?: boolean;
   /**
    * Total DELETE attempts per fixture before giving up. Cleanup runs at the
    * tail of a suite, when the run's rate-limit budget is most depleted and a
@@ -190,7 +190,17 @@ export interface ReporterDeps {
 }
 
 const defaultReporterDeps: ReporterDeps = {
-  write: (line) => process.stderr.write(line),
+  // writeSync(2), not process.stderr.write: an async write during the 'exit'
+  // event can be truncated, and on Ctrl-C the runner may already have torn
+  // down the pipe — an EPIPE thrown here escapes the 'exit' listener as an
+  // uncaught exception, masks the exit code, and buries the leak report.
+  write: (line) => {
+    try {
+      writeSync(2, line);
+    } catch {
+      // stderr is gone; the exit path must never throw.
+    }
+  },
   exit: (code) => process.exit(code),
 };
 
@@ -201,9 +211,12 @@ let reported = false;
 // A signal fires no `process.on("exit")`, so translate the common ones into an
 // explicit exit — which DOES run the exit handler, and thus the reporter. Kept
 // as named references so disarm can remove exactly these, never the runner's.
+// SIGHUP matters for runs over SSH: a terminal close default-terminates
+// without an 'exit' event, so without a handler no report would print.
 const onExit = () => reportLeaks("exit");
 const onSigint = () => reporterDeps.exit(130);
 const onSigterm = () => reporterDeps.exit(143);
+const onSighup = () => reporterDeps.exit(129);
 
 /** Idempotent; called automatically from track(). */
 export function armLeakReporter(): void {
@@ -212,6 +225,7 @@ export function armLeakReporter(): void {
   process.on("exit", onExit);
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
+  process.on("SIGHUP", onSighup);
 }
 
 /**
@@ -224,6 +238,7 @@ export function disarmLeakReporter(): void {
   process.off("exit", onExit);
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
+  process.off("SIGHUP", onSighup);
   reporterArmed = false;
   reported = false;
 }
@@ -243,7 +258,8 @@ export function reportLeaks(cause: string): void {
   if (reported || tracked.length === 0) return;
   reported = true;
   reporterDeps.write(
-    `\n[e2e-prod] ${tracked.length} fixture(s) still tracked at ${cause} — teardown did not run to completion:\n`,
+    `\n[e2e-prod] ${tracked.length} fixture(s) still tracked at ${cause} — teardown did not run to completion:\n` +
+      `[e2e-prod] (a tracked identity whose create never succeeded may appear here; its manual delete will 404, harmlessly)\n`,
   );
   for (const t of tracked) {
     reporterDeps.write(`[e2e-prod]   LEAKED ${t.kind} ${t.id} — delete manually\n`);
