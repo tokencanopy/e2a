@@ -870,3 +870,284 @@ scenarios:
         auth_override: none
         expect:
           status: 401
+
+  - name: messages_list_filter
+    description: >
+      The beta `filter` query parameter on listMessages narrows results by
+      subject, from, label, and created with boolean composition, ANDs with
+      the flat filters, rejects unknown fields and malformed expressions with
+      invalid_filter, and binds the raw filter into pagination cursors
+      (changed or dropped filter on continuation is invalid_cursor). All
+      setup goes through public requests so every SDK contract runner
+      executes this scenario rather than skipping store-backed setup.
+      Percent-encoding in paths (%20 space, %3E >, %28 paren) is deliberate:
+      it is exactly what a real client must send over the wire.
+    steps:
+      - id: register_domain
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: filter-contract.test.dev
+        expect:
+          status: 201
+
+      - id: verify_domain
+        action: request
+        method: POST
+        path: /v1/domains/filter-contract.test.dev/verify
+        expect:
+          status: 200
+          body_match:
+            verified: true
+
+      - id: register_agent
+        action: request
+        method: POST
+        path: /v1/agents
+        body:
+          email: bot@filter-contract.test.dev
+        expect:
+          status: 201
+          body_match:
+            email: bot@filter-contract.test.dev
+
+      - id: enable_outbound_review
+        # The contract harness has no outbound delivery queue, so an accepted
+        # send 500s (outbound delivery queue unavailable). The HITL hold path
+        # persists the same outbound rows synchronously without the queue, so
+        # the scenario gates every send into pending_review — the rows are
+        # listable and label-able like any other outbound message.
+        action: request
+        method: PUT
+        path: /v1/agents/bot@filter-contract.test.dev/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+
+      - id: send_alpha
+        action: request
+        method: POST
+        path: /v1/agents/bot@filter-contract.test.dev/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: Filter contract AlphaToken
+          text: alpha body
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+        capture:
+          alpha_message_id: message_id
+
+      - id: send_beta
+        action: request
+        method: POST
+        path: /v1/agents/bot@filter-contract.test.dev/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: Filter contract BetaToken
+          text: beta body
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+
+      - id: label_alpha
+        action: request
+        method: PATCH
+        path: /v1/agents/bot@filter-contract.test.dev/messages/{alpha_message_id}
+        body:
+          add_labels:
+            - contracttag
+        expect:
+          status: 200
+          body_match:
+            "labels[0]": contracttag
+
+      - id: list_all
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_subject
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:AlphaToken
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_from_match
+        # Outbound rows send as the agent itself: ILIKE substring on sender.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from:filter-contract
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_from_no_match
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from:alice
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
+      - id: filter_label
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_or
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:AlphaToken%20OR%20subject:BetaToken
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_not
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=NOT%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract BetaToken
+
+      - id: filter_and_flat_composition
+        # The flat labels filter ANDs with the expression: BetaToken matches
+        # the expression but carries no label, so the composition is empty.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&labels=contracttag&filter=subject:BetaToken
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
+      - id: filter_created_on_or_after
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=created%3E=2020-01-01
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_created_before
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=created%3C2020-01-01
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
+      - id: filter_unknown_field_rejected
+        # has:attachment is deliberately not a v1 field.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=has:attachment
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_filter
+
+      - id: filter_malformed_rejected
+        # Unbalanced parenthesis (%28) must not parse.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=%28subject:AlphaToken
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_filter
+
+      - id: filter_cursor_page1
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&limit=1&filter=created%3E=2020-01-01
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+        capture:
+          filter_cursor: next_cursor
+
+      - id: filter_cursor_page2_same_filter
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&limit=1&filter=created%3E=2020-01-01&cursor={filter_cursor}
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+
+      - id: filter_cursor_changed_filter_rejected
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&limit=1&filter=subject:BetaToken&cursor={filter_cursor}
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+      - id: filter_cursor_dropped_filter_rejected
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&limit=1&cursor={filter_cursor}
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+    cleanup:
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@filter-contract.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@filter-contract.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/filter-contract.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: filter-contract.test.dev

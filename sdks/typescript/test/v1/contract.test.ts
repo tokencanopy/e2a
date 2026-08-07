@@ -512,13 +512,16 @@ class Runner {
         rawBody = await resp.text();
       } catch (err) {
         if (err instanceof RawApiError) {
-          // SDK threw on a non-2xx status — verify it matches expectation.
-          if (ex?.status) {
-            expect(err.statusCode, `step ${step.id}: status`).toBe(ex.status);
-          }
-          return;
+          // SDK threw on a non-2xx status — keep the status AND the error
+          // body and fall through, so expect.body_match / body_contains are
+          // asserted on error envelopes too (previously the catch returned
+          // early and every error-code assertion in the shared scenarios was
+          // silently status-only in this runner).
+          status = err.statusCode;
+          rawBody = err.message;
+        } else {
+          throw err;
         }
-        throw err;
       }
     }
 
