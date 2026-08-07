@@ -165,13 +165,16 @@ test("concurrency: parallel DELETE of the same agent is idempotent under content
   // because the previous assert (>=1 success) accepted all 4 returning
   // 2xx and only emitted info(). If you want to lock in first-writer-wins
   // specifically, tighten the assertion to ok.length === 1.
-  const slug = uniqueSlug("del");
+  const email = `${uniqueSlug("del")}@${client.env.sharedDomain}`;
+  // Track even though the test is expected to consume it: if all four parallel
+  // DELETEs below get rate-limited, the agent survives, and an untracked
+  // survivor is exactly the leak this suite was caught producing. Teardown
+  // treats the already-deleted case as a 404, i.e. success.
+  track("agent", email);
   const c = await client.post<{ email: string }>("/v1/agents", {
-    body: { email: `${slug}@${client.env.sharedDomain}`, name: "del" },
+    body: { email, name: "del" },
   });
   assert.equal(c.status, 201);
-  const email = c.body!.email;
-  // Don't track — this test consumes it.
 
   const results = await Promise.all(
     Array.from({ length: 4 }, () => burst.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`)),
