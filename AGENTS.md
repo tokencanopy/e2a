@@ -77,7 +77,8 @@ with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
 - `tests/contract/` — Go contract tests driven by `scenarios.yaml`;
   `tests/e2e-prod/` — production smoke-test harness (TypeScript).
 - `docs/` — `api.md`, `deployment.md`, `events.md`, `templates.md`,
-  `data-handling.md`, `api-compatibility-gate.md`, `design/`, `runbooks/`.
+  `observability.md`, `data-handling.md`, `api-compatibility-gate.md`,
+  `design/`, `runbooks/`.
 - `scripts/` — CI guardrails (OpenAPI compat check, plugin validator,
   SDK version-sync check, repo text-integrity check).
 - `examples/adk-cloud-webhook/`, `examples/agent-framework-webhooks/` —

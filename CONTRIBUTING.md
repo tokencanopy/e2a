@@ -243,10 +243,13 @@ alone don't catch schema drift.
 
 ## Making changes that touch the API
 
-e2a maintains parity across **eight client surfaces** for every API
+e2a maintains parity across **seven client surfaces** for every API
 change: the Go handler, OpenAPI spec, TypeScript SDK (raw + high-level),
-Python SDK sync (raw + high-level), Python SDK async (raw + high-level),
-CLI, MCP server, and the web dashboard. Each surface has its own tests.
+Python SDK (raw + hand-written `AsyncE2AClient`), CLI, MCP server, and the
+web dashboard. Each surface has its own tests. The Python sync client
+(`sync_client.py`) is a background-thread facade over `AsyncE2AClient` that
+mirrors its resources dynamically via `__getattr__`, so it needs no separate
+parity work — only `AsyncE2AClient` is hand-edited.
 
 The `/v1` OpenAPI document at `api/openapi.yaml` is emitted directly
 from the live Huma handlers, and generated SDK code lives in
