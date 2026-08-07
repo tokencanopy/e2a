@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.6.0
+
+Additive only. Every 5.5.0 call site keeps working identically. Available on
+both ``AsyncE2AClient`` and the synchronous ``E2AClient``.
+
+### Changed
+- **``reply_to`` on ``client.messages.send`` / ``.reply`` / ``.forward`` now
+  accepts a list.** It keeps taking a single RFC 5322 address string
+  (unchanged, and still the byte-identical wire form), or a list of up to 5
+  addresses to direct replies to several destinations (e.g. a shared triage
+  inbox and an individual owner). Each address is validated server-side; a
+  violation is a typed 400.
+
 ## 5.5.0
 
 Additive only. Every 5.4.0 call site keeps working identically. The new
