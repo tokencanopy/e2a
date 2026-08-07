@@ -49,7 +49,7 @@ What you get on top of bare SMTP:
 - **No public URL required** — WebSocket, REST polling, and MCP all work from a laptop or behind a firewall
 - **Outbound API** — agents send to other agents (SMTP relay) or humans (upstream SMTP, e.g. SES, Resend)
 - **Human in the loop** — opt-in approval gate that holds outbound mail until a reviewer approves via dashboard, magic-link email, the MCP tools, or the API
-- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening)
+- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening). *Available on self-hosted deployments; not yet enabled on the hosted service.*
 - **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
 - **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
 - **Contacts & outreach (beta)** — account-level contact identity (CRUD + bulk import with safe reversal) and per-agent outreach state with server-derived reply/delivery facts, plus the `contact.due` due-queue notification event → [docs/api.md](docs/api.md#contacts--outreach-v1contacts-v1agentsemailcontacts-beta)
@@ -92,6 +92,14 @@ You can either use the hosted instance or self-host.
 
 - **Hosted** — sign up at [e2a.dev](https://e2a.dev). Includes the shared `agents.e2a.dev` domain for instant slug-based onboarding (no DNS setup), a dashboard, the hosted MCP server, and managed deliverability.
 - **Self-host** — see [Self-host (Docker)](#self-host-docker) and [Deployment](#deployment). Every feature works the same; the shared-domain slug shortcut just needs you to point a mail domain at your relay and set `shared_domain` in `config.yaml`.
+
+## What you can build
+
+- **A support inbox for your AI assistant** — give an agent `support@yourbrand.com`, receive customer mail with SPF/DKIM/DMARC already evaluated as structured evidence, and reply in-thread. Add HITL so anything sensitive waits for a human to approve before it goes out.
+- **Email between agents — yours and other organizations'** — every agent has a real, verified address, so two companies' agents can exchange mail the same way humans do: no new client, protocol, or shared platform to install.
+- **A personal concierge on your laptop** — subscribe over WebSocket (no public URL, no ngrok, no port forwarding), so a local agent can watch an inbox from behind any firewall, triage it, draft replies, and take actions.
+- **Email-triggered workflows** — turn inbound mail into structured events: order confirmations, forms, support tickets, notifications, and receipts rendered server-side from templates, with `conversation_id` correlated back to your app's state.
+- **Autopilot with human oversight** — an agent drafts outbound mail (newsletters, outreach, reports) and holds each send for one-click approval via magic-link email or the review queue, with automatic expiry policy if no one reviews in time.
 
 ## How it works
 
@@ -221,6 +229,9 @@ Inbound email is a prime **indirect prompt-injection** vector — a message can 
 A built-in, dependency-free **heuristics** detector flags prompt-injection, jailbreak, obfuscation, and data-exfiltration patterns (mapped to OWASP LLM01 / MITRE ATLAS); an optional LLM detector adds semantic injection **and phishing** classification. Each message gets a verdict — **allow · review · block** — set by the agent's scan sensitivity (`off · low · medium · high`): `review` routes it into the shared [HITL](#human-in-the-loop-hitl) queue, `block` drops it before delivery. Screening is **fail-safe** — if a detector times out or degrades, the message fails *to review*, never to a silent allow — and every verdict is written to `protection_events` for audit and threshold tuning.
 
 Turn it on with `PUT /v1/agents/{email}/protection` (the same sub-resource as HITL holds), which carries the inbound/outbound × gate/scan posture.
+
+> [!NOTE]
+> Content screening is currently available on **self-hosted** deployments only — it is **not yet enabled on the hosted service** at [e2a.dev](https://e2a.dev). Self-host the image (see [Deployment](#deployment)) to use it today.
 
 ### Human in the loop (HITL)
 
