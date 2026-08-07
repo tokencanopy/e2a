@@ -165,7 +165,7 @@ before it is declared stable**.
 | `reply_to_message` | Reply to a message — one the agent received (replies to its sender) or one it sent (continues the thread to the original recipients). Preserves In-Reply-To / References for thread continuity and accepts the same optional `send_at` as `send_message`. |
 | `forward_message` | Forward a message into a new thread, carrying its existing attachments by default. Accepts the same optional `send_at` as `send_message`. |
 | `list_messages` | List mail; pass `deleted:true` to list trash. Filter by `read_status` (unread / read / all) and sender with reserved-word-safe `from_`; cursor-paginated (`cursor` + `limit` in, `next_cursor` out). |
-| `delete_message` | Move a message to the trash (restorable for ~30 days). Requires `confirm: true`. Permanent deletion is deliberately not exposed over MCP — use the REST API/SDK. |
+| `delete_message` | Move a message to the trash (restorable for ~30 days). Requires `confirm: true`. Per-message permanent deletion is deliberately not exposed over MCP — use the REST API/SDK. (Purging a whole inbox is available to account scope via `delete_agent`'s `permanent: true`.) |
 | `restore_message` | Restore a soft-deleted message and resume its retention clock. |
 | `get_message` | Fetch full body, headers, and attachment metadata for one message. |
 | `get_attachment` | Get one attachment's metadata + a short-lived `download_url` (fetch the bytes out of band); `inline: true` returns base64 `data` for small files (≤256 KB). |

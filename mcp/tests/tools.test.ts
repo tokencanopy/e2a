@@ -1849,6 +1849,16 @@ describe("e2a MCP server", () => {
     expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com", true);
   });
 
+  it("delete_agent still requires confirm:true when permanent:true is set", async () => {
+    // `permanent` must never be a way around the confirm gate.
+    const res = await client.callTool({
+      name: "delete_agent",
+      arguments: { email: "bot@example.com", permanent: true },
+    });
+    expect(res.isError).toBe(true);
+    expect(stub.deleteAgent).not.toHaveBeenCalled();
+  });
+
   it("list_agents forwards deleted:true for the trash", async () => {
     await client.callTool({ name: "list_agents", arguments: { deleted: true } });
     expect(stub.listAgents).toHaveBeenCalledWith({ deleted: true });

@@ -30,9 +30,11 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "get_attachment_data",
   // Soft delete + restore are both per-agent inbox hygiene: the REST handler
   // pins an agent-scoped credential to its own bound agent (resolveOwnedAgent).
-  // The PERMANENT purge is account-only server-side, and the MCP tool doesn't
+  // The PERMANENT purge is account-only server-side, and delete_message doesn't
   // expose it at all — so no agent-scoped session can destroy evidence
-  // irreversibly, which is why this stays runtime while delete_agent is admin.
+  // irreversibly, which is why this stays runtime. delete_agent does expose a
+  // purge (`permanent: true`), which is exactly why it is admin: reaching it at
+  // all requires account scope.
   "delete_message",
   "restore_message",
   "update_message_labels",

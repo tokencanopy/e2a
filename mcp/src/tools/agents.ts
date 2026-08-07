@@ -251,7 +251,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
       title: "Delete an agent inbox (DESTRUCTIVE)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Move the agent inbox to trash for about 30 days by default. The agent stops receiving mail and disappears from normal lists, but its messages and configuration are retained so it can be restored before automatic purge. Pass `permanent: true` to skip the trash and delete irreversibly right away instead (accepts live and trashed agents); this is what `delete_domain` requires before a domain can be re-registered once every agent on it is gone for good. Requires `confirm: true` — set it explicitly to acknowledge the destructive action.",
+        "Move the agent inbox to trash for about 30 days by default. The agent stops receiving mail and disappears from normal lists, but its messages and configuration are retained so it can be restored before automatic purge. Pass `permanent: true` to skip the trash and delete the inbox and every message in it irreversibly right away instead (accepts live and trashed agents); `delete_domain` succeeds only when the domain has no agents, so permanently delete every live or trashed agent on it first. Requires `confirm: true` — set it explicitly to acknowledge the destructive action.",
       inputSchema: strictInputSchema({
         email: z
           .string()
@@ -269,7 +269,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
           .boolean()
           .optional()
           .describe(
-            "Skip the trash and delete irreversibly right away, for a live or already-trashed agent. Defaults to false (moves to trash, restorable for about 30 days).",
+            "Skip the trash and delete irreversibly right away, for a live or already-trashed agent. Purges every message in the inbox with no restore path. Defaults to false (moves to trash, restorable for about 30 days).",
           ),
       }),
     },
