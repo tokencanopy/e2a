@@ -120,11 +120,12 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 		resolved = row
 	} else {
 		resolved = Limits{
-			PlanCode:         e.defaults.PlanCode,
-			MaxAgents:        e.defaults.MaxAgents,
-			MaxDomains:       e.defaults.MaxDomains,
-			MaxMessagesMonth: e.defaults.MaxMessagesMonth,
-			MaxStorageBytes:  e.defaults.MaxStorageBytes,
+			PlanCode:              e.defaults.PlanCode,
+			MaxAgents:             e.defaults.MaxAgents,
+			MaxDomains:            e.defaults.MaxDomains,
+			MaxMessagesMonth:      e.defaults.MaxMessagesMonth,
+			MaxStorageBytes:       e.defaults.MaxStorageBytes,
+			OutboundFooterEnabled: e.defaults.OutboundFooterEnabled,
 		}
 	}
 	e.cachePut(userID, resolved, gen)

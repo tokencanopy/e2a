@@ -242,6 +242,11 @@ func main() {
 	// configuration set so SES publishes delivery/bounce/complaint events.
 	// Empty = off (no header, no events).
 	sender.SetSESConfigurationSet(cfg.DeliveryFeedback.SESConfigurationSet)
+	// Outbound branding/disclosure footer (`outbound_footer:` config block):
+	// the CONTENT lives on the sender; the per-send DECISION is stamped on
+	// each request by the agent layer (SetOutboundFooterEnabled below +
+	// account_limits.outbound_footer_enabled). Empty content = inert.
+	sender.SetOutboundFooter(cfg.OutboundFooter.Text, cfg.OutboundFooter.HTML)
 
 	// Sender-identity manager (decision 4 / Slice 4). Only wired when SES is
 	// configured: domain verify enqueues a BYODKIM provision job + reconciler;
@@ -627,10 +632,21 @@ func main() {
 			MaxDomains:       cfg.Limits.MaxDomains,
 			MaxMessagesMonth: cfg.Limits.MaxMessagesMonth,
 			MaxStorageBytes:  cfg.Limits.MaxStorageBytes,
+			// Row-less fallback for the outbound-footer entitlement — the
+			// `outbound_footer:` block's default_enabled, not `limits:`.
+			OutboundFooterEnabled: cfg.OutboundFooter.DefaultEnabled,
 		},
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
 	api.SetEnforcer(enforcer)
+	// Master switch for the outbound footer; the enforcer above carries the
+	// per-account entitlement + row-less default the decision reads.
+	api.SetOutboundFooterEnabled(cfg.OutboundFooter.Enabled)
+	// The TTL sweep composes held mail at auto-approve time, so it needs the
+	// same per-account footer decision the human-approve funnel resolves —
+	// otherwise an expires-to-approve hold ships unfootered while the identical
+	// human-approved hold does not.
+	hitlWorker.SetOutboundFooterResolver(api.OutboundFooterForAccount)
 	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
 	// month a scheduled send actually fires (accept-time enforcement can't know a
 	// future fire month). Over-cap → refuse terminally; a transient lookup error

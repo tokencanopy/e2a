@@ -156,6 +156,44 @@ func TestUpsert_PreservesColumnsOutsideSetList_RealDB(t *testing.T) {
 	}
 }
 
+// TestStoreGet_OutboundFooterColumn_RealDB pins the migration-095 column read:
+// a fresh row carries the column default FALSE; an external provisioner
+// flipping it to TRUE is visible through Store.Get. (Upsert deliberately does
+// NOT include the column in its SET list — the preserve-on-conflict test above
+// covers that class of column.)
+func TestStoreGet_OutboundFooterColumn_RealDB(t *testing.T) {
+	pool, _, _, _, userID := setupLimitsUser(t, "footercol")
+	ctx := context.Background()
+	limitsStore := limits.NewStore(pool)
+
+	if err := limitsStore.Upsert(ctx, userID, limits.Limits{
+		PlanCode: "free", MaxAgents: 1, MaxDomains: 1,
+		MaxMessagesMonth: 100, MaxStorageBytes: 1 << 20,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, found, err := limitsStore.Get(ctx, userID)
+	if err != nil || !found {
+		t.Fatalf("Get: err=%v found=%v", err, found)
+	}
+	if got.OutboundFooterEnabled {
+		t.Error("fresh row OutboundFooterEnabled = true, want column default false")
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE account_limits SET outbound_footer_enabled = TRUE WHERE user_id = $1`, userID,
+	); err != nil {
+		t.Fatalf("UPDATE: %v", err)
+	}
+	got, found, err = limitsStore.Get(ctx, userID)
+	if err != nil || !found {
+		t.Fatalf("Get (after flip): err=%v found=%v", err, found)
+	}
+	if !got.OutboundFooterEnabled {
+		t.Error("OutboundFooterEnabled = false after provisioner flip, want true")
+	}
+}
+
 func TestEnforcer_BlocksAtAgentCap_RealDB(t *testing.T) {
 	pool, idStore, usageStore, _, userID := setupLimitsUser(t, "agentcap")
 	ctx := context.Background()

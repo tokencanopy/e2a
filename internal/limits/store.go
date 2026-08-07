@@ -27,9 +27,9 @@ func NewStore(pool *pgxpool.Pool) *Store {
 func (s *Store) Get(ctx context.Context, userID string) (Limits, bool, error) {
 	l := Limits{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes, upgrade_url
+		`SELECT plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes, upgrade_url, outbound_footer_enabled
 		   FROM account_limits WHERE user_id = $1`, userID,
-	).Scan(&l.PlanCode, &l.MaxAgents, &l.MaxDomains, &l.MaxMessagesMonth, &l.MaxStorageBytes, &l.UpgradeURL)
+	).Scan(&l.PlanCode, &l.MaxAgents, &l.MaxDomains, &l.MaxMessagesMonth, &l.MaxStorageBytes, &l.UpgradeURL, &l.OutboundFooterEnabled)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Limits{}, false, nil

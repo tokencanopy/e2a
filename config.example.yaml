@@ -233,6 +233,28 @@ metrics:
   listen_addr: "127.0.0.1:9091"
   build: "unknown"               # release/image tag; attached to every sample
 
+# — Outbound footer ———————————————————————————————————————————————————————————
+# Optional footer appended to all SMTP-egress outbound mail at composition
+# time (inside the DKIM-signed body, above the managed-unsubscribe line, and
+# counted against the composed-size ceiling). Fully inert when enabled: false
+# (the default). Not applied to self-send loopback delivery or to non-standard
+# account classes (internal/system/demo). Useful for hosted branding or
+# self-host AI-disclosure notices.
+#
+# Per-account gating reads account_limits.outbound_footer_enabled: an account
+# WITH a row gets the footer only when that column is true (written by
+# whatever provisions the row); default_enabled covers accounts with NO row.
+# text is appended to the plain-text part after a blank line + the RFC 3676
+# signature separator ("-- " with a trailing space, so clients trim it on reply);
+# html is an operator-trusted fragment appended verbatim to the HTML part when
+# the message has one. Both empty = no-op. Override the master switch with
+# E2A_OUTBOUND_FOOTER_ENABLED.
+# outbound_footer:
+#   enabled: false          # master switch
+#   default_enabled: false  # applies to accounts with NO account_limits row
+#   text: ""                # plain-text footer
+#   html: ""                # HTML fragment appended to the HTML part
+
 
 
 # — Content screening (piguard) ——————————————————————————————————————————————

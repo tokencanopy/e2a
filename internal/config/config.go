@@ -54,6 +54,7 @@ type Config struct {
 	RateLimits       RateLimitsConfig       `yaml:"rate_limits"`
 	Trash            TrashConfig            `yaml:"trash"`
 	Metrics          MetricsConfig          `yaml:"metrics"`
+	OutboundFooter   OutboundFooterConfig   `yaml:"outbound_footer"`
 	Env              string                 `yaml:"env"` // "development" or "production"
 	// SharedDomain enables slug-based agent registration. When set
 	// (e.g. "agents.example.com"), users can register agents with just a
@@ -114,6 +115,34 @@ type MetricsConfig struct {
 	// Build is the bounded release/image identifier attached to every sample.
 	// Override with E2A_METRICS_BUILD. Empty is exposed as "unknown".
 	Build string `yaml:"build"`
+}
+
+// OutboundFooterConfig controls an optional operator-configured footer
+// appended to all SMTP-egress outbound mail at composition time (before the
+// composed-size check, the MIME build, and DKIM signing, and above the managed
+// unsubscribe line). Fully inert when Enabled is false (the default) — zero
+// behavior change for existing deployments. Never applied to self-send
+// loopback delivery or to non-standard account classes (internal/system/demo).
+//
+// Per-account gating rides account_limits.outbound_footer_enabled: a present
+// row decides for itself; DefaultEnabled covers accounts with NO row. Text and
+// HTML are operator-trusted content (config, not user input) — the HTML
+// fragment is appended verbatim to the HTML part, so the operator owns its
+// escaping. Both empty with Enabled true = a no-op, not an error.
+type OutboundFooterConfig struct {
+	// Enabled is the master switch for the feature.
+	// Override with E2A_OUTBOUND_FOOTER_ENABLED.
+	Enabled bool `yaml:"enabled"`
+	// DefaultEnabled applies to accounts with NO account_limits row.
+	DefaultEnabled bool `yaml:"default_enabled"`
+	// Text is the plain-text footer, appended after a blank line + the
+	// RFC 3676 signature separator ("-- " on its own line, trailing space
+	// included, so mail clients trim it when quoting a reply). Empty = no
+	// text-part append.
+	Text string `yaml:"text"`
+	// HTML is the HTML fragment appended to the HTML part when the message
+	// has one. Empty = no HTML-part append.
+	HTML string `yaml:"html"`
 }
 
 type DatabaseConfig struct {
@@ -458,6 +487,11 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_METRICS_BUILD"); v != "" {
 		cfg.Metrics.Build = v
+	}
+	if v := os.Getenv("E2A_OUTBOUND_FOOTER_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.OutboundFooter.Enabled = b
+		}
 	}
 	// An explicit empty listen_addr would otherwise bind ":80" (Go's
 	// default) — silently public and usually fatal. Empty means default.

@@ -16,6 +16,31 @@ import (
 	"github.com/tokencanopy/e2a/internal/mailfrom"
 )
 
+// appendOutboundFooter appends the operator-configured branding/disclosure
+// footer (config `outbound_footer:` block) to both body parts. Called BEFORE
+// appendUnsubscribeFooter so the unsubscribe line keeps its compliance
+// position as the last body content, and before the composed-size check and
+// the MIME build / DKIM signing — the footer is inside the signed,
+// size-capped bytes. The text footer is appended even when the text body is
+// empty (HTML-only sends), keeping the disclosure visible to text-part
+// readers; the HTML fragment is appended only when the message has an HTML
+// part. Both fragments are operator-trusted config, not user input — the
+// HTML is appended verbatim, so the operator owns its escaping. Empty
+// text+html = no-op.
+//
+// The text separator is the RFC 3676 signature delimiter "-- \n"
+// (dash-dash-SPACE-newline) — the convention mail clients recognize to trim
+// signatures when quoting a reply. The trailing space is load-bearing.
+func appendOutboundFooter(textBody, htmlBody, text, htmlFragment string) (string, string) {
+	if text != "" {
+		textBody += "\n\n-- \n" + text
+	}
+	if htmlBody != "" && htmlFragment != "" {
+		htmlBody += htmlFragment
+	}
+	return textBody, htmlBody
+}
+
 func appendUnsubscribeFooter(textBody, htmlBody, agentAddress, link string) (string, string) {
 	textBody += "\n\nUnsubscribe from emails sent by " + agentAddress + ": " + link
 	if htmlBody != "" {
@@ -79,6 +104,13 @@ type SendRequest struct {
 	ConversationID   string              `json:"conversation_id,omitempty"`
 	Attachments      []Attachment        `json:"attachments,omitempty"`
 	Unsubscribe      *UnsubscribeOptions `json:"unsubscribe,omitempty"`
+	// AppendOutboundFooter, when true, makes compose append the
+	// operator-configured outbound footer (Sender.SetOutboundFooter) to the
+	// message body, above any managed-unsubscribe line. Resolved server-side
+	// by the agent layer (per-account entitlement + account class + config
+	// master switch) — never caller-supplied, never part of the wire API
+	// contract.
+	AppendOutboundFooter bool `json:"-"`
 	// ScheduledAt, when non-nil, defers this send to a future instant: the
 	// message is accepted + queued immediately (delivery_status='accepted'), but
 	// its River outbound_send job is held until this time. Nil means send now.
@@ -160,6 +192,21 @@ type Sender struct {
 	// SES publishes delivery/bounce/complaint events (decision 9 / Slice 4b).
 	// Empty (the default) = no header, no events — dev/self-host without SES.
 	sesConfigSet string
+	// footerText / footerHTML are the operator-configured outbound-footer
+	// fragments (config outbound_footer.text / .html), appended by compose
+	// only when the request carries AppendOutboundFooter. Both empty (the
+	// default) makes the append a no-op.
+	footerText string
+	footerHTML string
+}
+
+// SetOutboundFooter configures the operator-defined footer content appended
+// when a SendRequest carries AppendOutboundFooter. Optional-setter pattern
+// (cf. SetSendingStatusLookup) so existing call sites and tests are
+// unaffected; empty text+html leaves the append a no-op.
+func (s *Sender) SetOutboundFooter(text, html string) {
+	s.footerText = text
+	s.footerHTML = html
 }
 
 // SetSESConfigurationSet enables SES event publishing for outbound mail by
@@ -366,6 +413,13 @@ func (s *Sender) compose(agent *identity.AgentIdentity, req SendRequest) (*compo
 	to, cc, bcc, envelope, err := NormalizeRecipients(agent, s.fromDomain, req)
 	if err != nil {
 		return nil, err
+	}
+	// Operator-configured outbound footer — appended strictly before the
+	// unsubscribe footer (compliance: the unsubscribe line stays last) and
+	// therefore before the composed-size check and the MIME build / DKIM
+	// signing below.
+	if req.AppendOutboundFooter {
+		req.Body, req.HTMLBody = appendOutboundFooter(req.Body, req.HTMLBody, s.footerText, s.footerHTML)
 	}
 	if req.Unsubscribe != nil {
 		if req.Unsubscribe.Mode != "managed" || req.Unsubscribe.URL == "" {

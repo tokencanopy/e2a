@@ -139,6 +139,47 @@ func TestEnforcer_GetReturnsRowWhenPresent(t *testing.T) {
 	}
 }
 
+// TestEnforcer_OutboundFooterRowVsDefault pins the outbound-footer
+// entitlement's resolution contract: a present row decides for itself
+// (its value wins in BOTH directions), a missing row falls back to
+// Defaults.OutboundFooterEnabled (wired from outbound_footer.default_enabled).
+func TestEnforcer_OutboundFooterRowVsDefault(t *testing.T) {
+	defaults := defaultsForTest()
+	defaults.OutboundFooterEnabled = true
+
+	cases := []struct {
+		name  string
+		store *fakeStore
+		want  bool
+	}{
+		{"no_row_uses_default", &fakeStore{found: false}, true},
+		{"row_false_overrides_true_default", &fakeStore{found: true, row: Limits{PlanCode: "pro", MaxAgents: 1, MaxDomains: 1, MaxMessagesMonth: 1, MaxStorageBytes: 1, OutboundFooterEnabled: false}}, false},
+		{"row_true_wins", &fakeStore{found: true, row: Limits{PlanCode: "free", MaxAgents: 1, MaxDomains: 1, MaxMessagesMonth: 1, MaxStorageBytes: 1, OutboundFooterEnabled: true}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnforcerWithReader(tc.store, &fakeCounter{}, defaults, 0)
+			got, err := e.Get(context.Background(), "user1")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.OutboundFooterEnabled != tc.want {
+				t.Errorf("OutboundFooterEnabled = %v, want %v", got.OutboundFooterEnabled, tc.want)
+			}
+		})
+	}
+
+	// Default false + no row stays false (self-host inert default).
+	e := newEnforcerWithReader(&fakeStore{found: false}, &fakeCounter{}, defaultsForTest(), 0)
+	got, err := e.Get(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OutboundFooterEnabled {
+		t.Error("zero-value default must resolve to false for row-less users")
+	}
+}
+
 func TestEnforcer_GetPropagatesStoreError(t *testing.T) {
 	sentinel := errors.New("db down")
 	store := &fakeStore{err: sentinel}
