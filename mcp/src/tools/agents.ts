@@ -251,7 +251,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
       title: "Delete an agent inbox (DESTRUCTIVE)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Move the agent inbox to trash for about 30 days. The agent stops receiving mail and disappears from normal lists, but its messages and configuration are retained so it can be restored before automatic purge. Requires `confirm: true` — set it explicitly to acknowledge the destructive action.",
+        "Move the agent inbox to trash for about 30 days by default. The agent stops receiving mail and disappears from normal lists, but its messages and configuration are retained so it can be restored before automatic purge. Pass `permanent: true` to skip the trash and delete the inbox and every message in it irreversibly right away instead (accepts live and trashed agents); `delete_domain` succeeds only when the domain has no agents, so permanently delete every live or trashed agent on it first. Requires `confirm: true` — set it explicitly to acknowledge the destructive action.",
       inputSchema: strictInputSchema({
         email: z
           .string()
@@ -265,6 +265,12 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
           .describe(
             "Must be set to true to proceed. Guard against an LLM hallucinating a delete from ambiguous context.",
           ),
+        permanent: z
+          .boolean()
+          .optional()
+          .describe(
+            "Skip the trash and delete irreversibly right away, for a live or already-trashed agent. Purges every message in the inbox with no restore path. Defaults to false (moves to trash, restorable for about 30 days).",
+          ),
       }),
     },
     async (args) =>
@@ -276,7 +282,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
         }
         // Return the server's deletion receipt verbatim:
         // {deleted:true, email, messages_deleted}.
-        return client.deleteAgent(args.email);
+        return client.deleteAgent(args.email, args.permanent);
       }),
   );
 }

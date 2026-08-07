@@ -1824,7 +1824,7 @@ describe("e2a MCP server", () => {
       name: "delete_agent",
       arguments: { email: "bot@example.com", confirm: true },
     });
-    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com");
+    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com", undefined);
     const content = res.content as Array<{ type: string; text: string }>;
     expect(JSON.parse(content[0]!.text)).toEqual({
       deleted: true,
@@ -1838,7 +1838,25 @@ describe("e2a MCP server", () => {
       name: "delete_agent",
       arguments: { confirm: true },
     });
-    expect(stub.deleteAgent).toHaveBeenCalledWith(undefined);
+    expect(stub.deleteAgent).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("delete_agent forwards permanent:true to skip the trash", async () => {
+    await client.callTool({
+      name: "delete_agent",
+      arguments: { email: "bot@example.com", confirm: true, permanent: true },
+    });
+    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com", true);
+  });
+
+  it("delete_agent still requires confirm:true when permanent:true is set", async () => {
+    // `permanent` must never be a way around the confirm gate.
+    const res = await client.callTool({
+      name: "delete_agent",
+      arguments: { email: "bot@example.com", permanent: true },
+    });
+    expect(res.isError).toBe(true);
+    expect(stub.deleteAgent).not.toHaveBeenCalled();
   });
 
   it("list_agents forwards deleted:true for the trash", async () => {
