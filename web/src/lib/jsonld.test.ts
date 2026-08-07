@@ -1,5 +1,6 @@
 import {
   ORGANIZATION_ID,
+  SOFTWARE_ID,
   blogPosting,
   breadcrumbs,
   faqPage,
@@ -17,6 +18,28 @@ describe("structured data", () => {
     expect(website().publisher).toEqual({ "@id": ORGANIZATION_ID });
     expect(softwareApplication("desc").publisher).toEqual({
       "@id": ORGANIZATION_ID,
+    });
+  });
+
+  it("gives the product a stable @id the pricing page can attach Offers to", () => {
+    // The pricing page ships from a different repo and hangs its paid-tier
+    // Offer nodes off this @id. Drop it and that reference dangles, leaving
+    // two competing SoftwareApplication nodes for one product.
+    expect(softwareApplication("desc")["@id"]).toBe(SOFTWARE_ID);
+    expect(SOFTWARE_ID).toMatch(/#software$/);
+    // Resolved from SITE_URL, never a hardcoded host — a self-host overrides it.
+    expect(SOFTWARE_ID.startsWith(String(softwareApplication("desc").url))).toBe(
+      true,
+    );
+  });
+
+  it("keeps dollar amounts off the software node", () => {
+    // Only the free tier is stated here; paid amounts live on the pricing
+    // page so structured data cannot drift away from billing.
+    expect(softwareApplication("desc").offers).toEqual({
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
     });
   });
 

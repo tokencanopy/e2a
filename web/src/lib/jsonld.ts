@@ -62,10 +62,20 @@ export function website(): JsonLdNode {
   };
 }
 
+/**
+ * The product node's stable @id, for the same reason ORGANIZATION_ID exists:
+ * the pricing page is served from the hosted deployment's own repo, and it
+ * attaches its paid-tier Offer nodes to this @id. Without one, that reference
+ * dangles and the two pages describe two competing SoftwareApplications
+ * instead of one.
+ */
+export const SOFTWARE_ID = `${SITE_URL}/#software`;
+
 export function softwareApplication(description: string): JsonLdNode {
   return {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
+    "@id": SOFTWARE_ID,
     name: SITE_NAME,
     description,
     url: SITE_URL,
@@ -73,9 +83,12 @@ export function softwareApplication(description: string): JsonLdNode {
     operatingSystem: "Any",
     publisher: { "@id": ORGANIZATION_ID },
     // The free tier is real and requires no card, so a zero-price Offer is
-    // accurate. Paid tiers are described on /pricing, which carries its own
-    // Offer nodes rather than restating dollar amounts here where they would
-    // drift out of sync with billing.
+    // accurate here. Dollar amounts are deliberately NOT restated in this
+    // file: paid tiers belong to the pricing page, which is not part of this
+    // app (see PRICING_PATH in ./site) and describes them against SOFTWARE_ID.
+    // Duplicating them here is how structured data drifts out of sync with
+    // billing — and a deployment that overrides SITE_URL may price differently
+    // or not sell at all.
     offers: {
       "@type": "Offer",
       price: "0",
