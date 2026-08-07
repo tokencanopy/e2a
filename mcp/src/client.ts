@@ -164,9 +164,9 @@ export class McpClient {
     return this.sdk.agents.replaceProtection(this.resolveAddress(explicitAddress), config);
   }
 
-  async deleteAgent(explicitAddress?: string): Promise<DeleteAgentResult> {
+  async deleteAgent(explicitAddress?: string, permanent?: boolean): Promise<DeleteAgentResult> {
     const address = this.resolveAddress(explicitAddress);
-    return this.sdk.agents.delete(address);
+    return this.sdk.agents.delete(address, { permanent });
   }
 
   restoreAgent(explicitAddress?: string): Promise<AgentView> {
