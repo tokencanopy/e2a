@@ -1,8 +1,10 @@
 # Sending ramp operations
 
 The sending ramp is an operator-managed safeguard for newly verified custom
-sender domains. End users can read its state through the domain API but cannot
-change the schedule, exempt themselves, or reset progression.
+sender domains. End users can read its state through the domain API (the
+`sending_ramp` field — see
+[`docs/api.md` → Domains](../api.md#domains-v1domains)) but cannot change the
+schedule, exempt themselves, or reset progression.
 
 ## Progression and timeout
 

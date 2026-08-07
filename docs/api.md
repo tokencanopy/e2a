@@ -594,6 +594,16 @@ DKIM probe was skipped because no per-domain keypair is stored yet; `mismatch`
 means a DKIM record is published but its key doesn't match the issued one —
 usually a truncated TXT.)
 
+Every domain response also carries **`sending_ramp`** — the platform-managed
+recipient-volume ramp state for newly verified custom sender domains:
+`status` (open set; known values `inactive | ramping | complete | exempt`),
+`daily_recipient_limit` (zero means no cap applies), `recipients_used_today`,
+`active_days` / `ramp_days`, and `resets_at` / `estimated_completion_at`. You
+can read this state but cannot change the schedule, exempt yourself, or reset
+progression through the API — see
+[`docs/runbooks/sending-ramp.md`](runbooks/sending-ramp.md) for the
+operator-side mechanics.
+
 ### Agents (`/v1/agents`)
 
 An agent is an addressable inbox. Its email must be on a verified domain you own,
