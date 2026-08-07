@@ -131,7 +131,7 @@ const FAQ: FaqEntry[] = [
   {
     question: "How do you stop an AI agent from sending an email without approval?",
     answer:
-      "e2a has an opt-in human-in-the-loop approval gate you turn on per agent. With it on, an outbound send is accepted but not dispatched — the API returns 202 with status pending_review — and the message leaves only once a person approves it from the dashboard, the CLI, the MCP tools, the API, or a magic link mailed to the reviewer's own inbox. A recipient allowlist can narrow the gate so only unfamiliar recipients are held, and a hold that expires without a decision can be configured to reject rather than send.",
+      "e2a has an opt-in human-in-the-loop approval gate you turn on per agent. With it on, an outbound send is accepted but not dispatched — the API returns 202 with status pending_review — and the message leaves only once a person approves it from the dashboard, the MCP tools, the API, or a magic link mailed to the reviewer's own inbox. A recipient allowlist can narrow the gate so only unfamiliar recipients are held, and a hold that expires without a decision can be configured to reject rather than send.",
   },
   {
     question: "How do you protect an agent inbox from prompt injection over email?",

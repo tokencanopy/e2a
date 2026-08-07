@@ -21,9 +21,9 @@ own, with two-way send and receive.
   headers the agent has to parse and trust.
 - **An approval gate before anything is sent.** Opt-in, per agent: an outbound
   message is accepted but not dispatched (`status: pending_review`) until a
-  person approves it from the dashboard, the CLI, the API, or a magic link
-  mailed to them. A hold that expires without a decision can be set to reject
-  rather than send.
+  person approves it from the dashboard, the API, the MCP tools, or a magic
+  link mailed to them. A hold that expires without a decision can be set to
+  reject rather than send.
 - **Prompt-injection and phishing screening on inbound.** Opt-in content
   screening flags hidden HTML, Unicode-tag smuggling, and encoded instructions
   with dependency-free heuristics — and phishing when the optional LLM detector
