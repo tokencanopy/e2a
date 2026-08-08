@@ -20,7 +20,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { E2AClient } from "../src/v1/index.js";
 import { walkErgonomicSurface } from "./coverage/introspect.js";
-import { recordSurface, recordCovered, flushCoverage } from "./coverage/recorder.js";
+import {
+  recordSurface,
+  recordCovered,
+  flushCoverage,
+} from "./coverage/recorder.js";
 import { loadLiveEnv } from "./coverage/helpers.js";
 
 const env = loadLiveEnv();
@@ -59,7 +63,11 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
       expect(m.rates.complaintRate).toBeNull();
       expect(m.rates.deliveredRate).toBeNull();
     } else {
-      for (const r of [m.rates.deliveredRate, m.rates.bounceRate, m.rates.complaintRate]) {
+      for (const r of [
+        m.rates.deliveredRate,
+        m.rates.bounceRate,
+        m.rates.complaintRate,
+      ]) {
         if (r !== null) {
           expect(r).toBeGreaterThanOrEqual(0);
           expect(r).toBeLessThanOrEqual(1);
@@ -84,26 +92,43 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     recordCovered("messages.getMetrics");
   });
 
-  it("account.metrics() aggregates across the account and can group by agent", async () => {
+  it("account.metrics() aggregates across the account", async () => {
     const flat = await client.account.metrics();
 
     expect(flat.start.getTime()).toBeLessThan(flat.end.getTime());
     expect(flat.messagesInWindow).toBeGreaterThanOrEqual(0);
-    expect(flat.messagesWithLifecycle).toBeLessThanOrEqual(flat.messagesInWindow);
+    expect(flat.messagesWithLifecycle).toBeLessThanOrEqual(
+      flat.messagesInWindow,
+    );
     if (flat.messagesInWindow === 0) {
       expect(flat.rates.bounceRate).toBeNull();
     }
 
-    // groupBy is the only shape-changing parameter, so it is worth exercising:
-    // the per-agent rows must not claim more messages than the account total
-    // they were aggregated from.
-    const grouped = await client.account.metrics({ groupBy: "agent" });
-    const perAgentTotal = (grouped.agents ?? []).reduce(
-      (sum, a) => sum + a.messagesInWindow,
-      0,
-    );
-    expect(perAgentTotal).toBeLessThanOrEqual(grouped.messagesInWindow);
-
     recordCovered("account.metrics");
   });
+
+  // Split from the flat read, and the only test in this suite carrying an
+  // explicit timeout. group_by=agent fans the aggregate out per agent, so its
+  // cost scales with how many agents the account owns — unbounded and
+  // environment-dependent. Two of these calls in one test exceeded vitest's 5s
+  // default on a populated account while passing comfortably on a small one.
+  // Do not "tidy" this back to the default: it will pass locally and fail the
+  // release pipeline.
+  it("account.metrics({ groupBy: 'agent' }) partitions the account total", async () => {
+    const grouped = await client.account.metrics({ groupBy: "agent" });
+    expect(grouped.start.getTime()).toBeLessThan(grouped.end.getTime());
+
+    // Per-agent rows are a partition of the account total, so they cannot
+    // claim more messages than the whole they came from. Skipped when the
+    // response is truncated, where the rows are deliberately a subset.
+    if (!grouped.agentsTruncated) {
+      const perAgentTotal = (grouped.agents ?? []).reduce(
+        (sum, a) => sum + a.messagesInWindow,
+        0,
+      );
+      expect(perAgentTotal).toBeLessThanOrEqual(grouped.messagesInWindow);
+    }
+
+    recordCovered("account.metrics");
+  }, 30_000);
 });
