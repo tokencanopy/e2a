@@ -26,8 +26,9 @@ import (
 // EnqueueWarningTx), which is how the AutoDisableWorker sweep reaches it
 // without importing this package.
 type Jobs struct {
-	store Store
-	enq   jobs.Enqueuer
+	store   Store
+	enq     jobs.Enqueuer
+	metrics Metrics
 
 	mu        sync.RWMutex
 	deliverer Deliverer
@@ -64,11 +65,18 @@ func (j *Jobs) Deliver(ctx context.Context, wh *identity.Webhook, kind string) D
 	return d.Deliver(ctx, wh, kind)
 }
 
+// WithMetrics wires the observability backend the NotifyWorker emits the
+// notification-outcome counter on. Nil-safe; call before RegisterJobs.
+func (j *Jobs) WithMetrics(m Metrics) *Jobs {
+	j.metrics = m
+	return j
+}
+
 // RegisterJobs adds the NotifyWorker (with Jobs as the late-binding
 // Deliverer). No periodics — the maintenance sweep is the only producer.
 // Implements jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, NewNotifyWorker(j.store, j))
+	river.AddWorker(w, NewNotifyWorker(j.store, j).WithMetrics(j.metrics))
 	return nil
 }
 

@@ -341,7 +341,7 @@ func main() {
 	// (pre-feature behavior).
 	var webhookNotifyJobs *webhooknotify.Jobs
 	if cfg.OutboundSMTP.FromDomain != "" {
-		webhookNotifyJobs = webhooknotify.NewJobs(store)
+		webhookNotifyJobs = webhooknotify.NewJobs(store).WithMetrics(metrics)
 		registrars = append(registrars, webhookNotifyJobs)
 	}
 
