@@ -70,7 +70,7 @@ func TestNotifier_DisabledEmailContent(t *testing.T) {
 	if len(relay.to) != 1 || relay.to[0] != "owner@example.com" {
 		t.Errorf("recipients = %v, want the account owner", relay.to)
 	}
-	if relay.from != "webhooks-noreply@send.example.com" {
+	if relay.from != "webhooks@send.example.com" {
 		t.Errorf("envelope from = %q, want the fallback local part on from_domain", relay.from)
 	}
 	msg := string(relay.message)

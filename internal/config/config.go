@@ -232,13 +232,17 @@ type OutboundSMTPConfig struct {
 }
 
 // NotificationsConfig carries settings for the platform's operational
-// notification emails (currently the webhook health warning/disabled
-// alerts).
+// notification emails: HITL approval requests (internal/hitlnotify) and the
+// webhook health warning/disabled alerts (internal/webhooknotify). Both
+// senders read these settings.
 type NotificationsConfig struct {
 	// FromAddress is the sender address for operational notification
-	// emails. Optional. When empty, notifications fall back to a fixed
-	// no-reply local part on outbound_smtp.from_domain (the hitlnotify
-	// pattern), so self-hosted deployments work with zero configuration.
+	// emails. Optional. When empty, each sender falls back to its OWN
+	// fixed local part on outbound_smtp.from_domain (approvals@ and
+	// webhooks@ respectively, kept distinct so a time-boxed approval stays
+	// filterable apart from routine webhook mail), so self-hosted
+	// deployments work with zero configuration. Setting this collapses
+	// both senders into a single identity.
 	// The value MUST be an address the deployment's sending identity is
 	// allowed to send as. Deliberately configuration, never a constant: a
 	// hardcoded operator address would make every self-host try to send
@@ -250,9 +254,12 @@ type NotificationsConfig struct {
 	// with no mailbox behind it, so replies land in a real support inbox
 	// on another domain — the same From-on-the-relay-domain +
 	// Reply-To-at-the-real-inbox pattern the product's shared-domain
-	// sends already use. Optional: empty emits NO Reply-To header
-	// (replies follow From), the sane default when from_address is
-	// itself a real mailbox. Override with E2A_NOTIFICATIONS_REPLY_TO.
+	// sends already use. Optional: empty means replies follow the sender
+	// address — webhook mail emits no Reply-To, while approval mail emits
+	// one pointing at its own sender (its long-standing behaviour, kept so
+	// unconfigured deployments are byte-identical to before). The sane
+	// default when from_address is itself a real mailbox. Override with
+	// E2A_NOTIFICATIONS_REPLY_TO.
 	ReplyTo string `yaml:"reply_to"`
 }
 

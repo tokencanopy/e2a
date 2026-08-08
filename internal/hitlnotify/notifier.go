@@ -28,10 +28,18 @@ import (
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
 
-// notifyLocalPart is the fixed local-part of the notification sender
-// address. Reusing a single from-address lets mail clients group all HITL
-// notifications into a single conversation / filter.
-const notifyLocalPart = "hitl-noreply"
+// notifyLocalPart is the default local-part of the notification sender
+// address, used when notifications.from_address is unset. Reusing a single
+// from-address lets mail clients group all HITL notifications into a single
+// conversation / filter — deliberately a DIFFERENT default from
+// webhooknotify's, so an approval (time-boxed: miss it and the hold expires)
+// stays filterable apart from routine webhook-health mail.
+//
+// Not "hitl-noreply": once notifications.reply_to points at a real inbox, a
+// From that says noreply tells the reader the opposite of what we want, and
+// the From is the most visible address in a mail client. "hitl" was also
+// internal jargon on a customer-facing address.
+const notifyLocalPart = "approvals"
 
 // tokenGraceAfterTTL extends the magic-link token's exp slightly past the
 // message's approval_expires_at so a click received just before TTL is
@@ -42,25 +50,63 @@ const tokenGraceAfterTTL = 10 * time.Minute
 // call NotifyPendingApproval from the HITL gate right after the pending
 // row is written. Errors are logged, never returned upstream.
 type Notifier struct {
-	store      *identity.Store
-	relay      *outbound.SMTPRelay
-	signer     *approvaltoken.Signer
+	store  *identity.Store
+	relay  *outbound.SMTPRelay
+	signer *approvaltoken.Signer
+	// fromAddress is the resolved sender: notifications.from_address when
+	// set, else notifyLocalPart on fromDomain.
+	fromAddress string
+	// fromDomain is the domain used for Message-ID generation. It tracks
+	// fromAddress's domain when that is configured, so a Message-ID never
+	// claims a domain the From does not use.
 	fromDomain string
-	publicURL  string
+	// replyTo is notifications.reply_to. Empty preserves the historical
+	// behaviour of pointing Reply-To back at the sender address.
+	replyTo   string
+	publicURL string
+	// dkim, when wired via WithDKIM, signs for the From-header domain.
+	// nil (the zero-config self-host path) sends unsigned.
+	dkim outbound.DKIMKeyLookup
 }
 
 // New returns a Notifier that sends mail through relay using the given
-// public URL to build magic-link URLs. fromDomain is the platform
-// relay's from-domain — e.g. "send.example.com" — which is combined with
-// the fixed local-part to produce the From address.
-func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken.Signer, fromDomain, publicURL string) *Notifier {
-	return &Notifier{
-		store:      store,
-		relay:      relay,
-		signer:     signer,
-		fromDomain: fromDomain,
-		publicURL:  strings.TrimRight(publicURL, "/"),
+// public URL to build magic-link URLs. fromDomain is the platform relay's
+// from-domain — e.g. "send.example.com" — combined with notifyLocalPart to
+// produce the From address when fromAddress is empty.
+//
+// fromAddress and replyTo are notifications.from_address / .reply_to. Setting
+// fromAddress to the same value here and in webhooknotify is what
+// consolidates both senders into one identity; leaving it unset keeps them
+// distinct and separately filterable. Resolution deliberately mirrors
+// webhooknotify.New line for line; it is a copy rather than a shared helper,
+// so changing one means changing the other.
+func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
+	addr := strings.TrimSpace(fromAddress)
+	if addr == "" {
+		addr = fmt.Sprintf("%s@%s", notifyLocalPart, fromDomain)
 	}
+	msgIDDomain := fromDomain
+	if i := strings.LastIndex(addr, "@"); i >= 0 && i+1 < len(addr) {
+		msgIDDomain = addr[i+1:]
+	}
+	return &Notifier{
+		store:       store,
+		relay:       relay,
+		signer:      signer,
+		fromAddress: addr,
+		fromDomain:  msgIDDomain,
+		replyTo:     strings.TrimSpace(replyTo),
+		publicURL:   strings.TrimRight(publicURL, "/"),
+	}
+}
+
+// WithDKIM wires per-domain DKIM signing, mirroring webhooknotify. The relay
+// itself never signs and an upstream provider only signs identities it
+// manages, so a custom notifications.from_address domain is signed here or
+// not at all. nil-safe and fail-open via outbound.SignWithDKIM.
+func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
+	n.dkim = lookup
+	return n
 }
 
 // NotifyPendingApproval composes and sends the notification email for a held
@@ -113,8 +159,19 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 	text := renderText(msg, agent, approveURL, rejectURL, dashboardURL)
 	htmlBody := renderHTML(msg, agent, approveURL, rejectURL, dashboardURL)
 
-	fromAddr := fmt.Sprintf("%s@%s", notifyLocalPart, n.fromDomain)
+	fromAddr := n.fromAddress
 	fromHeader := fmt.Sprintf("e2a <%s>", fromAddr)
+
+	// Reply-To: the configured inbox when there is one, else the sender
+	// address as before. The historical value pointed replies back at the
+	// platform rather than the agent, which was the right instinct — but the
+	// platform relay domain has no mailbox, so a reviewer who hit Reply was
+	// talking to the bounce endpoint. That matters most here: an approval is
+	// time-boxed, and a reviewer who cannot sign in has only the magic links.
+	replyTo := n.replyTo
+	if replyTo == "" {
+		replyTo = fromAddr
+	}
 
 	message, err := outbound.ComposeMultipartMessage(
 		fromHeader, []string{owner.Email}, nil,
@@ -122,7 +179,7 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 		"",           // no reply-to-message-id (fresh notification)
 		nil,          // no references chain (fresh notification)
 		n.fromDomain, // from_domain (Message-ID generation)
-		fromAddr,     // reply_to — point replies back at the platform, not the agent
+		replyTo,      // reply_to — a real inbox when configured, never the agent
 		"",           // no conversation_id
 	)
 	if err != nil {
@@ -150,6 +207,22 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 	// assigned id (no dedup, but no injection either).
 	if !strings.ContainsAny(msgIDHeader, "\r\n") {
 		message = append([]byte("Message-ID: "+msgIDHeader+"\r\n"), message...)
+	}
+
+	// DKIM-sign for the From-header domain AFTER the Message-ID prepend, so the
+	// signature covers the final header set.
+	//
+	// Required for parity with webhooknotify once from_address is configurable:
+	// the SMTP relay never signs, and an upstream provider only signs identities
+	// IT manages, so a custom from_address domain (BYODKIM — e2a holds the key)
+	// is signed here or not at all. Without this, an operator who set
+	// notifications.from_address would get signed webhook-health mail and
+	// UNSIGNED approval mail — leaving the most time-sensitive email the
+	// platform sends on a single SPF leg, and so quarantined the moment anyone
+	// forwards it. Fail-open via outbound.SignWithDKIM: no lookup, no stored key
+	// for the domain, or a signing failure all send unsigned, exactly as before.
+	if signed, ok := outbound.SignWithDKIM(n.dkim, message, n.fromDomain); ok {
+		message = signed
 	}
 
 	// SendOnce, not Send: this runs inside a River job, so River (not the relay's

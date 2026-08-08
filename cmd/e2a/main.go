@@ -600,7 +600,7 @@ func main() {
 		// unreachable in practice — kept as a defensive guard against future drift.
 		log.Printf("[hitl] notifier disabled: notification job pipeline not registered")
 	} else {
-		notifier := hitlnotify.New(store, smtpRelay, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.HTTP.PublicURL)
+		notifier := hitlnotify.New(store, smtpRelay, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
 		// Late-bind the concrete Deliverer onto the registered NotifyWorker (which
 		// has been running since jobsClient.Start; jobs enqueued before this bind
 		// simply retry) and give the hold path its accept-tx enqueuer. The HTTP
