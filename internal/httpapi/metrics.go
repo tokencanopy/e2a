@@ -40,12 +40,13 @@ type MetricsSummaryView struct {
 	BouncedUndetermined int64 `json:"bounced_undetermined" doc:"Bounces the provider did not classify. Kept separate rather than folded into soft, which would understate hard-bounce risk."`
 	Complained          int64 `json:"complained" doc:"Recipients who reported the message as spam."`
 	Suppressed          int64 `json:"suppressed" doc:"Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses."`
+	Loopback            int64 `json:"loopback" doc:"Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out."`
 	SendFailed          int64 `json:"send_failed" doc:"Messages that reached a terminal submission failure: provider rejection, local retry exhaustion, or policy cancellation. Break the three apart via counters[]."`
 
-	Received  int64 `json:"received" doc:"Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."`
-	DMARCPass int64 `json:"dmarc_pass" doc:"Inbound messages with an aligned DMARC pass."`
-	DMARCFail int64 `json:"dmarc_fail" doc:"Inbound messages whose DMARC evaluation failed."`
-	DMARCNone int64 `json:"dmarc_none" doc:"Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious."`
+	Received   int64 `json:"received" doc:"Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."`
+	DMARCPass  int64 `json:"dmarc_pass" doc:"Inbound messages with an aligned DMARC pass."`
+	DMARCFail  int64 `json:"dmarc_fail" doc:"Inbound messages whose DMARC evaluation failed."`
+	DMARCNone  int64 `json:"dmarc_none" doc:"Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious."`
 	DMARCError int64 `json:"dmarc_error" doc:"Inbound messages whose DMARC evaluation could not be completed (temporary or permanent resolver error)."`
 
 	ReviewHeld            int64 `json:"review_held" doc:"Messages placed on a human-in-the-loop review hold."`
@@ -62,10 +63,10 @@ type MetricsSummaryView struct {
 // is indistinguishable from a genuine total failure, which is the one reading
 // a caller must never make by accident.
 type MetricsRatesView struct {
-	DeliveredRate        *float64 `json:"delivered_rate" nullable:"true" doc:"delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest 'did my mail arrive' number."`
-	BounceRate           *float64 `json:"bounce_rate" nullable:"true" doc:"(bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review."`
+	DeliveredRate        *float64 `json:"delivered_rate" nullable:"true" doc:"delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure."`
+	BounceRate           *float64 `json:"bounce_rate" nullable:"true" doc:"(bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review."`
 	ComplaintRate        *float64 `json:"complaint_rate" nullable:"true" doc:"complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs."`
-	SuppressionBlockRate *float64 `json:"suppression_block_rate" nullable:"true" doc:"suppressed / accepted. The share of requested sends that never left e2a."`
+	SuppressionBlockRate *float64 `json:"suppression_block_rate" nullable:"true" doc:"suppressed / (accepted − loopback). The share of outward sends that never left e2a."`
 }
 
 // AgentMetricsView is the metrics response.
@@ -200,6 +201,7 @@ func deriveMetrics(metrics messagelifecycle.AgentMetrics) ([]MetricsCounterView,
 		BouncedUndetermined: sum(messagelifecycle.ReasonDeliveryUndeterminedBounce),
 		Complained:          sum(messagelifecycle.ReasonComplaintRecipientReported),
 		Suppressed:          sum(messagelifecycle.ReasonSuppressionRecipientBlocked),
+		Loopback:            sum(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted),
 		SendFailed: sum(messagelifecycle.ReasonSubmissionProviderRejected,
 			messagelifecycle.ReasonSubmissionLocalRetriesExhausted,
 			messagelifecycle.ReasonSubmissionCancelled),
@@ -219,11 +221,23 @@ func deriveMetrics(metrics messagelifecycle.AgentMetrics) ([]MetricsCounterView,
 	}
 
 	bounced := summary.BouncedHard + summary.BouncedSoft + summary.BouncedUndetermined
+
+	// Rates describe mail that had to leave the deployment. Loopback sends
+	// never reach a recipient server, so they can neither be delivered nor
+	// bounce — leaving them in the denominator made agent-to-agent traffic,
+	// which is e2a's flagship flow, report a delivery rate near zero.
+	//
+	// Only messages KNOWN to have gone loopback are removed. A message that
+	// was accepted and then suppressed has no submission observation at all
+	// and stays in the denominator, because it was a real attempt to send
+	// outward that did not happen.
+	externalAccepted := summary.Accepted - summary.Loopback
+	externalSubmitted := summary.Submitted - summary.Loopback
 	rates := MetricsRatesView{
-		DeliveredRate:        ratio(summary.Delivered, summary.Accepted),
-		BounceRate:           ratio(bounced, summary.Submitted),
+		DeliveredRate:        ratio(summary.Delivered, externalAccepted),
+		BounceRate:           ratio(bounced, externalSubmitted),
 		ComplaintRate:        ratio(summary.Complained, summary.Delivered),
-		SuppressionBlockRate: ratio(summary.Suppressed, summary.Accepted),
+		SuppressionBlockRate: ratio(summary.Suppressed, externalAccepted),
 	}
 	return counters, summary, rates
 }

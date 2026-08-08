@@ -840,6 +840,7 @@ export type MetricsSummary = {
   complained: number;
   suppressed: number;
   send_failed: number;
+  loopback: number;
   received: number;
   dmarc_pass: number;
   dmarc_fail: number;

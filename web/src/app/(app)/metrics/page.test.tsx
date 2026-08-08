@@ -23,7 +23,7 @@ function summary(over: Record<string, number> = {}) {
   return {
     accepted: 0, submitted: 0, delivered: 0,
     bounced_hard: 0, bounced_soft: 0, bounced_undetermined: 0,
-    complained: 0, suppressed: 0, send_failed: 0,
+    complained: 0, suppressed: 0, send_failed: 0, loopback: 0,
     received: 0, dmarc_pass: 0, dmarc_fail: 0, dmarc_none: 0, dmarc_error: 0,
     review_held: 0, review_approved: 0, review_rejected: 0,
     review_expired_approved: 0, review_expired_rejected: 0,

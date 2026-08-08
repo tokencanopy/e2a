@@ -164,12 +164,17 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 // suppression_block_rate, so an agent talking to another agent on the same
 // deployment reads as though half its mail vanished.
 func TestAgentMetricsKeepsLoopbackArrivalsOutOfTheSendDenominator(t *testing.T) {
+	// A MIXED account: one external send that was delivered, plus one
+	// agent-to-agent pair. The earlier fixture gave a single message both a
+	// loopback submission and a recipient-server delivery, which the pipeline
+	// never produces — a loopback send has no recipient server to accept it.
 	srv, _ := newMetricsServer(t, messagelifecycle.AgentMetrics{
-		MessagesInWindow:      2,
-		MessagesWithLifecycle: 2,
+		MessagesInWindow:      3,
+		MessagesWithLifecycle: 3,
 		Counts: []messagelifecycle.ReasonCodeCount{
-			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 1, 1),
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 2, 2),
 			metricsCount(messagelifecycle.ReasonAcceptanceLocalLoopback, 1, 1),
+			metricsCount(messagelifecycle.ReasonSubmissionUpstreamAccepted, 1, 1),
 			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 1, 1),
 			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 1, 1),
 		},
@@ -180,15 +185,73 @@ func TestAgentMetricsKeepsLoopbackArrivalsOutOfTheSendDenominator(t *testing.T) 
 		t.Fatalf("status = %d, body = %#v", status, body)
 	}
 	summary := metricsSection(t, body, "summary")
-	if got := summary["accepted"].(float64); got != 1 {
-		t.Errorf("accepted = %v, want 1: the loopback arrival is not a send", got)
+	if got := summary["accepted"].(float64); got != 2 {
+		t.Errorf("accepted = %v, want 2: the loopback ARRIVAL is not a send", got)
 	}
 	if got := summary["received"].(float64); got != 1 {
 		t.Errorf("received = %v, want 1: the loopback arrival is inbound mail", got)
 	}
-	// One send, one delivery — a full-marks agent must read as exactly 1.0.
+	// One external send, one delivery — the loopback pair leaves the rate
+	// entirely, so this reads 1.0 rather than 0.5.
 	if got := metricsSection(t, body, "rates")["delivered_rate"].(float64); got != 1 {
 		t.Errorf("delivered_rate = %v, want 1", got)
+	}
+}
+
+// TestAgentMetricsExcludesLoopbackFromRates: agent-to-agent mail never reaches
+// a recipient server, so it can neither be delivered nor bounce. Leaving it in
+// the denominator made e2a's flagship flow report a delivery rate near zero.
+func TestAgentMetricsExcludesLoopbackFromRates(t *testing.T) {
+	srv, _ := newMetricsServer(t, messagelifecycle.AgentMetrics{
+		MessagesInWindow:      20,
+		MessagesWithLifecycle: 20,
+		Counts: []messagelifecycle.ReasonCodeCount{
+			// 10 sends: 6 external, 4 loopback.
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 10, 10),
+			metricsCount(messagelifecycle.ReasonSubmissionUpstreamAccepted, 6, 6),
+			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 4, 4),
+			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 6, 6),
+		},
+	})
+
+	status, body := metricsGET(t, srv, "agent@example.com", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %#v", status, body)
+	}
+	summary := metricsSection(t, body, "summary")
+	if got := summary["loopback"].(float64); got != 4 {
+		t.Errorf("loopback = %v, want 4", got)
+	}
+	// 6 delivered of 6 external sends — not 6 of 10.
+	if got := metricsSection(t, body, "rates")["delivered_rate"].(float64); got != 1 {
+		t.Errorf("delivered_rate = %v, want 1: loopback must leave the denominator", got)
+	}
+}
+
+// An account that ONLY talks agent-to-agent has no external traffic to rate,
+// so the rate is null rather than a misleading 0%%.
+func TestAgentMetricsRateIsNullForPureLoopbackTraffic(t *testing.T) {
+	srv, _ := newMetricsServer(t, messagelifecycle.AgentMetrics{
+		MessagesInWindow:      10,
+		MessagesWithLifecycle: 10,
+		Counts: []messagelifecycle.ReasonCodeCount{
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 5, 5),
+			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 5, 5),
+			metricsCount(messagelifecycle.ReasonAcceptanceLocalLoopback, 5, 5),
+		},
+	})
+
+	_, body := metricsGET(t, srv, "agent@example.com", "")
+	rates := metricsSection(t, body, "rates")
+	if rates["delivered_rate"] != nil {
+		t.Errorf("delivered_rate = %#v, want null: there is no external mail to rate", rates["delivered_rate"])
+	}
+	if rates["bounce_rate"] != nil {
+		t.Errorf("bounce_rate = %#v, want null", rates["bounce_rate"])
+	}
+	// The traffic is still visible in the counters — only the rate ignores it.
+	if got := metricsSection(t, body, "summary")["received"].(float64); got != 5 {
+		t.Errorf("received = %v, want 5", got)
 	}
 }
 

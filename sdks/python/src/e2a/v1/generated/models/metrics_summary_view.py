@@ -36,6 +36,7 @@ class MetricsSummaryView(BaseModel):
     dmarc_fail: StrictInt = Field(description="Inbound messages whose DMARC evaluation failed.")
     dmarc_none: StrictInt = Field(description="Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious.")
     dmarc_pass: StrictInt = Field(description="Inbound messages with an aligned DMARC pass.")
+    loopback: StrictInt = Field(description="Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out.")
     received: StrictInt = Field(description="Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path).")
     review_approved: StrictInt = Field(description="Holds a reviewer explicitly approved.")
     review_expired_approved: StrictInt = Field(description="Holds released by TTL expiry rather than a decision. A rising count means nobody is working the queue.")
@@ -46,7 +47,7 @@ class MetricsSummaryView(BaseModel):
     submitted: StrictInt = Field(description="Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate.")
     suppressed: StrictInt = Field(description="Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["accepted", "bounced_hard", "bounced_soft", "bounced_undetermined", "complained", "delivered", "dmarc_error", "dmarc_fail", "dmarc_none", "dmarc_pass", "received", "review_approved", "review_expired_approved", "review_expired_rejected", "review_held", "review_rejected", "send_failed", "submitted", "suppressed"]
+    __properties: ClassVar[List[str]] = ["accepted", "bounced_hard", "bounced_soft", "bounced_undetermined", "complained", "delivered", "dmarc_error", "dmarc_fail", "dmarc_none", "dmarc_pass", "loopback", "received", "review_approved", "review_expired_approved", "review_expired_rejected", "review_held", "review_rejected", "send_failed", "submitted", "suppressed"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -116,6 +117,7 @@ class MetricsSummaryView(BaseModel):
             "dmarc_fail": obj.get("dmarc_fail"),
             "dmarc_none": obj.get("dmarc_none"),
             "dmarc_pass": obj.get("dmarc_pass"),
+            "loopback": obj.get("loopback"),
             "received": obj.get("received"),
             "review_approved": obj.get("review_approved"),
             "review_expired_approved": obj.get("review_expired_approved"),

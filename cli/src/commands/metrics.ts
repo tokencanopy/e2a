@@ -41,7 +41,8 @@ function summaryLines(s: MetricsSummaryView): string {
     `  outbound  accepted ${s.accepted}  submitted ${s.submitted}  delivered ${s.delivered}\n` +
     `            bounced ${bounced} (hard ${s.bouncedHard}/soft ${s.bouncedSoft}/undetermined ${s.bouncedUndetermined})  ` +
     `complained ${s.complained}\n` +
-    `            suppressed ${s.suppressed}  failed ${s.sendFailed}\n` +
+    `            suppressed ${s.suppressed}  failed ${s.sendFailed}` +
+    (s.loopback > 0 ? `  loopback ${s.loopback} (excluded from rates)` : "") + `\n` +
     `  inbound   received ${s.received}  dmarc pass ${s.dmarcPass}/fail ${s.dmarcFail}/none ${s.dmarcNone}/error ${s.dmarcError}\n` +
     `  review    held ${s.reviewHeld}  approved ${s.reviewApproved}  rejected ${s.reviewRejected}  ` +
     `expired ${s.reviewExpiredApproved + s.reviewExpiredRejected}\n`
