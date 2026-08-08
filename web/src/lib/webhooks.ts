@@ -194,18 +194,22 @@ export function describeWebhookToggleError(
   bodyText: string,
 ): string {
   let code = "";
+  let message = "";
   try {
     const parsed = JSON.parse(bodyText) as {
       error?: { code?: string; message?: string };
     };
     code = parsed.error?.code ?? "";
+    message = parsed.error?.message ?? "";
   } catch {
     // Non-JSON body (proxy error page, empty) — fall through to raw text.
   }
   if (status === 409 && (code === "webhook_cooldown" || bodyText.includes("webhook_cooldown"))) {
     return WEBHOOK_COOLDOWN_MESSAGE;
   }
-  return bodyText.trim() || `HTTP ${status}`;
+  // A parsed envelope renders as its human message, never the raw JSON;
+  // raw text is the last resort for non-envelope bodies.
+  return message || bodyText.trim() || `HTTP ${status}`;
 }
 
 export type WebhookScope =

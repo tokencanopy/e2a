@@ -248,11 +248,11 @@ describe("describeWebhookToggleError", () => {
     );
   });
 
-  it("does not map other 409s to cooldown copy", () => {
+  it("renders other envelope errors as their message, not raw JSON", () => {
     const body = JSON.stringify({
       error: { code: "webhook_disabled", message: "webhook is disabled" },
     });
-    expect(describeWebhookToggleError(409, body)).toBe(body.trim());
+    expect(describeWebhookToggleError(409, body)).toBe("webhook is disabled");
   });
 
   it("falls back to the raw body for other failures", () => {

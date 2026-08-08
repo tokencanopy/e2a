@@ -10,16 +10,17 @@ When e2a auto-disables a customer's webhook for chronic delivery failure, **the 
 is never told**, and once told they have **no way to act on it from the dashboard**. A
 production incident makes both concrete.
 
-A customer's endpoint began returning `HTTP 404` to every POST on 2026-08-03. The breaker
-tripped on 2026-08-04 19:35 PT. Between those points and today the account owner received
-no signal of any kind. The evidence, from prod:
+A production customer's endpoint began returning `HTTP 404` to every POST; the breaker
+tripped roughly a day later. Between those points the account owner received no signal
+of any kind. The evidence shape (values approximated here; exact figures live in the
+private ops incident record):
 
-| status | last_error | count | created |
+| status | last_error | count | window |
 |---|---|---|---|
-| delivered | — | 56 | 07-06 → 07-28 |
-| failed | HTTP 404 | 50 | 07-06 → 08-03 |
-| failed | HTTP 500 | 2 | 07-16 |
-| **pending** | HTTP 404 | **128** | 08-03 → 08-04 |
+| delivered | — | ~50 | the weeks before the break |
+| failed | HTTP 404 | ~50 | up to the break |
+| failed | HTTP 500 | a few | isolated blip |
+| **pending** | HTTP 404 | **~130** | break → breaker trip (~1 day) |
 
 Three distinct defects:
 
@@ -30,10 +31,11 @@ Three distinct defects:
    / delete. The detail page renders a banner that tells the user to leave: *"Fix the
    endpoint, then re-enable it through the API after the five-minute cooldown."* The CLI
    has no `webhooks` command at all, so the only recovery path is a hand-written HTTP call.
-3. **128 deliveries are stuck pending forever.** Once a webhook is disabled, the delivery
+3. **~130 deliveries are stuck pending forever.** Once a webhook is disabled, the delivery
    worker snoozes rather than failing (`worker.go:278-282`), **uncapped**. Those rows will
-   wake hourly until `expires_at = 2026-11-01` — roughly 270,000 no-op job wakeups — and
-   show the customer `pending` for three months on deliveries that will never be attempted.
+   wake hourly until their `expires_at`, ~3 months out — on the order of 270,000 no-op job
+   wakeups — and show the customer `pending` the whole time on deliveries that will never
+   be attempted.
 
 Defect 3 is created *by* fixing defect 1: a "delivery has stopped" email that contradicts a
 dashboard reading `pending` is worse than no email. They must ship together.
@@ -144,7 +146,7 @@ not have helped this customer**, and it is worth being precise about why.
 A delivery only reaches terminal `failed` after exhausting all 8 attempts across the frozen
 `retryBackoffs` envelope — **29h21m** (`worker.go:34-42`). So a warning keyed on terminal
 failures cannot fire sooner than ~29h after the endpoint breaks, no matter how low the
-threshold. The customer broke on 08-03 and the first terminal failure was not until 08-04.
+threshold. The customer's endpoint broke a full day before its first terminal failure.
 
 Instead the warn condition reads **first-attempt failures**, which land within seconds:
 
@@ -153,9 +155,10 @@ Instead the warn condition reads **first-attempt failures**, which land within s
 > **and** zero rows reached `delivered`, **and** the webhook is `enabled`, **and**
 > `warn_notified_at IS NULL`.
 
-Against the real incident: 42 rows were created on 08-03, each failing its first attempt
-immediately. The condition is satisfied on the **next 5-minute sweep** — satisfying SC1
-and giving the customer a day of warning before the breaker fires.
+Against the real incident: dozens of rows were created on the day the endpoint broke,
+each failing its first attempt immediately. The condition is satisfied on the **next
+5-minute sweep** — satisfying SC1 and giving the customer a day of warning before the
+breaker fires.
 
 This rides the existing 5-minute maintenance sweep (`MaintenanceJobs`, `maintenance.go`) as
 a second pass; no new schedule.
@@ -394,7 +397,7 @@ that row is already `enabled = false`. That customer needs a manual note; see op
 | Two server replicas sweep concurrently | The `UPDATE … WHERE enabled = true … RETURNING` is atomic; only one tx observes the transition |
 | Sweep tx commits, process dies before River runs the job | Job is committed and durable — River picks it up. This is the whole point of the same-tx enqueue |
 | Delivery succeeds on the attempt after the snooze cap fires | `TransitionSubscriberFailedIfPending` is conditional on still-pending; a delivered row is never clobbered |
-| User re-enables with 128 rows snoozed | They all wake within the hour and POST. Intended — but see open question Q3 on the burst |
+| User re-enables with ~130 rows snoozed | They all wake within the hour and POST. Intended — but see open question Q3 on the burst |
 
 **Fail-closed choices:** an unknown/absent notification kind does not send; a missing owner
 email cancels rather than retries forever; the snooze cap writes a terminal state rather
@@ -459,11 +462,11 @@ inbound and the staging MX round trip works.
 - **Q2. Snooze cap value.** Proposed 24 (≈24h). Trades maintenance-window grace against how
   long a delivery may sit `pending`. If the answer is "no one disables an endpoint for a
   whole day", 6–8 is defensible and tightens SC3.
-- **Q3. The 128 stranded deliveries on the live account.** Shipping the cap terminates them
+- **Q3. The ~130 stranded deliveries on the live account.** Shipping the cap terminates them
   as `failed` on first wake after deploy, which is honest but final. Sharper than it first
   looks: because replay is gated on `matched_webhook_ids` (see Part 2), events published
-  *after* the disable are not replayable to this endpoint at all — so those 128 rows, plus
-  the 50 already terminally failed, are the **last recoverable events that account has**.
+  *after* the disable are not replayable to this endpoint at all — so those pending rows,
+  plus the ones already terminally failed, are the **last recoverable events that account has**.
   Terminating them without contacting the customer first forecloses their only path back.
   **This is a product call, not a technical one**, and it should be made before this deploys.
 - **Q7 (follow-up, separate issue). Should fan-out record would-have-matched-but-disabled

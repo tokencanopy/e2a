@@ -86,6 +86,47 @@ func TestAutoDisableFailingWebhooks_EnqueuesExactlyOncePerTransition(t *testing.
 	}
 }
 
+// TestAutoDisableFailingWebhooks_ReasonBoundedToWindow: the captured
+// auto_disable_reason must come from the disable window, never from an
+// arbitrarily old failure that happens to be the newest row carrying a
+// last_error.
+func TestAutoDisableFailingWebhooks_ReasonBoundedToWindow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-reason-window@example.com", "Owner", "google-wh-reason-window")
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/wh", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	// A stale failure far outside AutoDisableWindow with a distinctive error.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO webhook_subscriber_deliveries
+		    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at, created_at)
+		 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 410 stale', now() - interval '100 hours', now() - interval '100 hours')`,
+		"whd_rw_stale_"+wh.ID, wh.ID,
+	); err != nil {
+		t.Fatalf("seed stale: %v", err)
+	}
+	// In-window terminal failures that trip the breaker but carry no error text.
+	for i := 0; i < 10; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8)`,
+			fmt.Sprintf("whd_rw_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	if n, err := store.AutoDisableFailingWebhooks(ctx, nil); err != nil || n != 1 {
+		t.Fatalf("sweep: n=%d err=%v, want 1", n, err)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.AutoDisableReason != "" {
+		t.Errorf("AutoDisableReason = %q — must not surface a failure outside the disable window", after.AutoDisableReason)
+	}
+}
+
 func TestAutoDisableFailingWebhooks_EnqueueFailureRollsBackDisable(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)

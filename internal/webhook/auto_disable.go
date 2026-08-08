@@ -58,20 +58,27 @@ func (w *AutoDisableWorker) SetNotifier(n HealthNotifyEnqueuer) { w.notifier = n
 // guard drops a stale warning against a since-disabled webhook as a
 // second line of defense.)
 func (w *AutoDisableWorker) Tick(ctx context.Context) {
-	var disabledTx, warningTx identity.WebhookNotifyTx
+	var disabledTx identity.WebhookNotifyTx
 	if w.notifier != nil {
 		disabledTx = w.notifier.EnqueueDisabledTx
-		warningTx = w.notifier.EnqueueWarningTx
 	}
 	if n, err := w.store.AutoDisableFailingWebhooks(ctx, disabledTx); err != nil {
 		log.Printf("[wsd-autodisable] AutoDisableFailingWebhooks err: %v", err)
 	} else if n > 0 {
 		log.Printf("[wsd-autodisable] disabled %d failing webhook(s)", n)
 	}
-	if n, err := w.store.WarnFailingWebhooks(ctx, warningTx); err != nil {
-		log.Printf("[wsd-autodisable] WarnFailingWebhooks err: %v", err)
-	} else if n > 0 {
-		log.Printf("[wsd-autodisable] warned %d failing webhook(s)", n)
+	// The warn pass exists ONLY to feed the notification pipeline, so with
+	// no notifier wired it is skipped entirely rather than run with a nil
+	// enqueuer: stamping warn_notified_at without an email would be dead
+	// bookkeeping that also suppresses the first real warning if the
+	// operator later configures SMTP. (The disable pass above is different
+	// — the breaker is core behavior and runs with or without emails.)
+	if w.notifier != nil {
+		if n, err := w.store.WarnFailingWebhooks(ctx, w.notifier.EnqueueWarningTx); err != nil {
+			log.Printf("[wsd-autodisable] WarnFailingWebhooks err: %v", err)
+		} else if n > 0 {
+			log.Printf("[wsd-autodisable] warned %d failing webhook(s)", n)
+		}
 	}
 	if n, err := w.store.ClearExpiredPrevSecrets(ctx); err != nil {
 		log.Printf("[wsd-autodisable] ClearExpiredPrevSecrets err: %v", err)

@@ -592,7 +592,7 @@ func SignWithDKIM(lookup DKIMKeyLookup, message []byte, domain string) ([]byte, 
 	}
 	selector, privKey, err := lookup.GetDKIMKeyInternal(context.Background(), domain)
 	if err != nil {
-		log.Printf("[sender] dkim key lookup for %s: %v", domain, err)
+		log.Printf("[dkim-sign] key lookup for %s: %v", domain, err)
 		return nil, false
 	}
 	if selector == "" || len(privKey) == 0 {
@@ -600,7 +600,7 @@ func SignWithDKIM(lookup DKIMKeyLookup, message []byte, domain string) ([]byte, 
 	}
 	signed, err := dkim.Sign(message, domain, selector, privKey)
 	if err != nil {
-		log.Printf("[sender] dkim sign for %s failed (sending unsigned): %v", domain, err)
+		log.Printf("[dkim-sign] sign for %s failed (sending unsigned): %v", domain, err)
 		return nil, false
 	}
 	return signed, true

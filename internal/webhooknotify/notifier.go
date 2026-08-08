@@ -69,6 +69,11 @@ type Notifier struct {
 	// sends already use. Empty = no header; replies follow From.
 	replyTo   string
 	publicURL string
+	// replyable gates the "reply to this email" closing line: true only
+	// when the operator configured a real address (from_address and/or
+	// reply_to). On the zero-config fallback the sender is a noreply
+	// local part, and inviting replies to it would strand them.
+	replyable bool
 }
 
 // New returns a Notifier. fromDomain is cfg.OutboundSMTP.FromDomain (must
@@ -93,6 +98,7 @@ func New(store NotifierStore, r relay, fromDomain, fromAddress, replyTo, publicU
 		fromDomain:  msgIDDomain,
 		replyTo:     strings.TrimSpace(replyTo),
 		publicURL:   strings.TrimRight(publicURL, "/"),
+		replyable:   strings.TrimSpace(fromAddress) != "" || strings.TrimSpace(replyTo) != "",
 	}
 }
 
@@ -173,8 +179,8 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) 
 		dashURL = n.publicURL + "/webhooks/detail?id=" + url.QueryEscape(wh.ID)
 	}
 
-	text := renderText(wh, kind, reason, stats.FailedAttempts, window, dashURL)
-	htmlBody := renderHTML(wh, kind, reason, stats.FailedAttempts, window, dashURL)
+	text := renderText(wh, kind, reason, stats.FailedAttempts, window, dashURL, n.replyable)
+	htmlBody := renderHTML(wh, kind, reason, stats.FailedAttempts, window, dashURL, n.replyable)
 
 	fromHeader := fmt.Sprintf("e2a <%s>", n.fromAddress)
 	// Reply-To is emitted only when notifications.reply_to is configured.
@@ -267,7 +273,7 @@ func windowLabel(d time.Duration) string {
 // after it were never queued for this endpoint). The copy below states
 // exactly that.
 
-func renderText(wh *identity.Webhook, kind, reason string, failures int, window time.Duration, dashURL string) string {
+func renderText(wh *identity.Webhook, kind, reason string, failures int, window time.Duration, dashURL string, replyable bool) string {
 	var b strings.Builder
 	if kind == KindDisabled {
 		fmt.Fprintf(&b, "e2a has disabled one of your webhooks after repeated delivery failures.\n\n")
@@ -302,14 +308,16 @@ func renderText(wh *identity.Webhook, kind, reason string, failures int, window 
 			b.WriteString(" (delivery history is on the e2a dashboard's Webhooks page).\n")
 		}
 	}
-	b.WriteString("\nReply to this email if you need help.\n")
+	if replyable {
+		b.WriteString("\nReply to this email if you need help.\n")
+	}
 	return b.String()
 }
 
 // renderHTML mirrors hitlnotify's email styling (the dashboard's "Loft"
 // palette, table-free simple card) so the notification reads as the same
 // product. All dynamic strings are escaped.
-func renderHTML(wh *identity.Webhook, kind, reason string, failures int, window time.Duration, dashURL string) string {
+func renderHTML(wh *identity.Webhook, kind, reason string, failures int, window time.Duration, dashURL string, replyable bool) string {
 	const (
 		fontStack = `"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif`
 		bg        = "#FAF7F2"
@@ -355,7 +363,9 @@ func renderHTML(wh *identity.Webhook, kind, reason string, failures int, window 
 			html.EscapeString(dashURL), primary, onAccent, label)
 	}
 
-	fmt.Fprintf(&b, `<p style="margin-top:24px;font-size:12px;color:%s">Reply to this email if you need help.</p>`, subtle)
+	if replyable {
+		fmt.Fprintf(&b, `<p style="margin-top:24px;font-size:12px;color:%s">Reply to this email if you need help.</p>`, subtle)
+	}
 	b.WriteString(`</div></body></html>`)
 	return b.String()
 }

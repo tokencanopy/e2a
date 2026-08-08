@@ -95,6 +95,12 @@ func TestNotifier_DisabledEmailContent(t *testing.T) {
 	if !strings.Contains(msg, "Subject: [e2a] webhook disabled: hooks.example.com") {
 		t.Errorf("subject missing/wrong; message headers:\n%s", msg[:min(len(msg), 600)])
 	}
+	// Zero-config fallback sender is a noreply local part — inviting a
+	// reply to it would strand the reply, so the closing line is gated on
+	// a configured address.
+	if strings.Contains(msg, "Reply to this email") {
+		t.Errorf("fallback (noreply) sender must not invite replies")
+	}
 }
 
 func TestNotifier_WarningEmailContent(t *testing.T) {
@@ -175,6 +181,9 @@ func TestNotifier_ConfiguredReplyTo(t *testing.T) {
 	}
 	if !strings.Contains(msg, "Reply-To: support@agents.example.com") {
 		t.Errorf("Reply-To must carry the configured reply_to address")
+	}
+	if !strings.Contains(msg, "Reply to this email") {
+		t.Errorf("a configured (replyable) sender should invite replies")
 	}
 }
 

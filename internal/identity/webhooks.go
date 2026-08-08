@@ -587,6 +587,7 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 		         FROM webhook_subscriber_deliveries d
 		         WHERE d.webhook_id = webhooks.id
 		           AND d.status = 'failed'
+		           AND d.created_at > now() - $2::interval
 		           AND d.last_error IS NOT NULL AND d.last_error <> ''
 		         ORDER BY d.last_attempt_at DESC NULLS LAST
 		         LIMIT 1

@@ -142,3 +142,40 @@ func TestAutoDisableWorker_WarnsBeforeBreakerCanTrip(t *testing.T) {
 		t.Errorf("webhook must stay enabled — the warn pass never disables")
 	}
 }
+
+// TestAutoDisableWorker_NoNotifierSkipsWarnPass: with no notification
+// pipeline wired (self-host without SMTP), the warn pass must not run at
+// all — stamping warn_notified_at without an email is dead bookkeeping
+// that would also suppress the first REAL warning if the operator later
+// configures SMTP. The disable pass (core breaker) still runs.
+func TestAutoDisableWorker_NoNotifierSkipsWarnPass(t *testing.T) {
+	pool := testutil.TestDB(t)
+	istore := identity.NewStore(pool)
+	ctx := context.Background()
+
+	user, _ := istore.CreateOrGetUser(ctx, "ad-no-notifier@example.com", "Owner", "google-ad-no-notifier")
+	wh, _ := istore.CreateWebhook(ctx, user.ID, "https://example.com/wh", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	for i := 0; i < identity.WarnThreshold; i++ {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'pending', 1, 'HTTP 404', now())`,
+			fmt.Sprintf("whd_nonotif_%d_%s", i, wh.ID), wh.ID,
+		)
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	w := webhook.NewAutoDisableWorker(istore) // no SetNotifier
+	w.Tick(ctx)
+
+	after, _ := istore.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.WarnNotifiedAt != nil {
+		t.Errorf("warn_notified_at stamped with no notifier wired — the warn pass must be skipped entirely")
+	}
+	if !after.Enabled {
+		t.Errorf("webhook must stay enabled (warn-level failures only)")
+	}
+}
