@@ -60,6 +60,8 @@ from .generated.models import (
     AccountView,
     AttachmentView,
     MessageSummaryView,
+    AccountMetricsView,
+    AgentMetricsView,
     PageMessageLifecycleTransition,
     MessageView,
     RedeliverEventRequest,
@@ -552,6 +554,36 @@ class MessagesResource:
                 message_id,
                 cursor=cursor,
                 limit=limit,
+                _headers=h,
+            )
+        )
+
+    async def get_metrics(
+        self,
+        email: str,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+    ) -> AgentMetricsView:
+        """Beta: counter metrics for one agent over a cohort window.
+
+        Messages belong to the window by their own creation time, not by when
+        each observation landed, so a rate never mixes numerator and
+        denominator from different populations. Bounce and complaint feedback
+        keeps arriving for up to 72 hours, so treat the most recent days as
+        provisional.
+
+        Every field of ``rates`` is ``None`` — never ``0`` — when its
+        denominator is zero, so "no traffic" stays distinguishable from
+        "everything failed".
+
+        Defaults to the last 30 days; the window may not exceed 92 days.
+        """
+        return await self._c._read(
+            lambda h: self._api.get_agent_metrics(
+                email,
+                start=start,
+                end=end,
                 _headers=h,
             )
         )
@@ -1269,6 +1301,35 @@ class AccountResource:
 
     async def export(self) -> UserExport:
         return await self._c._read(lambda h: self._api.export_account(_headers=h))
+
+    async def metrics(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        group_by: Optional[str] = None,
+    ) -> AccountMetricsView:
+        """Beta: counter metrics across every agent this account owns.
+
+        Uses the same cohort-window and denominator contract as
+        ``messages.get_metrics()``, so an account total and the per-agent
+        numbers under it can never disagree about what a rate means.
+
+        Pass ``group_by="agent"`` for a per-agent breakdown, busiest first. It
+        is capped at 200 agents and sets ``agents_truncated`` when it cuts; the
+        totals stay complete regardless.
+
+        Account-scoped credentials only — an agent-scoped key reads its own
+        agent through ``messages.get_metrics()`` instead.
+        """
+        return await self._c._read(
+            lambda h: self._api.get_account_metrics(
+                start=start,
+                end=end,
+                group_by=group_by,
+                _headers=h,
+            )
+        )
 
     async def delete(self) -> DeleteUserDataResult:
         # Deliberately NOT retried (unlike the other DELETEs): account deletion is

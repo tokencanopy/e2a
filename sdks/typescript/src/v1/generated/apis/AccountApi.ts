@@ -8,6 +8,7 @@ import {canConsumeForm, isCodeInRange} from '../util.js';
 import {SecurityAuthentication} from '../auth/auth.js';
 
 
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountView } from '../models/AccountView.js';
 import { CreateAPIKeyRequest } from '../models/CreateAPIKeyRequest.js';
 import { CreateAPIKeyResponse } from '../models/CreateAPIKeyResponse.js';
@@ -262,6 +263,57 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
         // Make Request Context
         const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param start Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param end Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param groupBy Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public async getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+
+
+
+        // Path Params
+        const localVarPath = '/v1/metrics';
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Query Params
+        if (start !== undefined) {
+            requestContext.setQueryParam("start", ObjectSerializer.serialize(start, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (end !== undefined) {
+            requestContext.setQueryParam("end", ObjectSerializer.serialize(end, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (groupBy !== undefined) {
+            requestContext.setQueryParam("group_by", ObjectSerializer.serialize(groupBy, "'agent'", ""));
+        }
 
 
         let authMethod: SecurityAuthentication | undefined;
@@ -609,6 +661,42 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "AccountView", ""
             ) as AccountView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to getAccountMetrics
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getAccountMetricsWithHttpInfo(response: ResponseContext): Promise<HttpInfo<AccountMetricsView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: AccountMetricsView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "AccountMetricsView", ""
+            ) as AccountMetricsView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: AccountMetricsView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "AccountMetricsView", ""
+            ) as AccountMetricsView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

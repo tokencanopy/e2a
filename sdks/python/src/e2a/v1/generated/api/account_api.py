@@ -16,9 +16,11 @@ from pydantic import validate_call, Field, StrictFloat, StrictStr, StrictInt
 from typing import Any, Dict, List, Optional, Tuple, Union
 from typing_extensions import Annotated
 
+from datetime import datetime
 from pydantic import Field, StrictStr, field_validator
 from typing import Optional
 from typing_extensions import Annotated
+from e2a.v1.generated.models.account_metrics_view import AccountMetricsView
 from e2a.v1.generated.models.account_view import AccountView
 from e2a.v1.generated.models.create_api_key_request import CreateAPIKeyRequest
 from e2a.v1.generated.models.create_api_key_response import CreateAPIKeyResponse
@@ -1644,6 +1646,321 @@ class AccountApi:
         return self.api_client.param_serialize(
             method='GET',
             resource_path='/v1/account',
+            path_params=_path_params,
+            query_params=_query_params,
+            header_params=_header_params,
+            body=_body_params,
+            post_params=_form_params,
+            files=_files,
+            auth_settings=_auth_settings,
+            collection_formats=_collection_formats,
+            _host=_host,
+            _request_auth=_request_auth
+        )
+
+
+
+
+    @validate_call
+    async def get_account_metrics(
+        self,
+        start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
+        end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> AccountMetricsView:
+        """Get account-wide delivery metrics (beta)
+
+        Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+
+        :param start: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+        :type start: datetime
+        :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+        :type end: datetime
+        :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+        :type group_by: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_account_metrics_serialize(
+            start=start,
+            end=end,
+            group_by=group_by,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "AccountMetricsView",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        ).data
+
+
+    @validate_call
+    async def get_account_metrics_with_http_info(
+        self,
+        start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
+        end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> ApiResponse[AccountMetricsView]:
+        """Get account-wide delivery metrics (beta)
+
+        Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+
+        :param start: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+        :type start: datetime
+        :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+        :type end: datetime
+        :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+        :type group_by: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_account_metrics_serialize(
+            start=start,
+            end=end,
+            group_by=group_by,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "AccountMetricsView",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        )
+
+
+    @validate_call
+    async def get_account_metrics_without_preload_content(
+        self,
+        start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
+        end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> RESTResponseType:
+        """Get account-wide delivery metrics (beta)
+
+        Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+
+        :param start: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+        :type start: datetime
+        :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+        :type end: datetime
+        :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+        :type group_by: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._get_account_metrics_serialize(
+            start=start,
+            end=end,
+            group_by=group_by,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "AccountMetricsView",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        return response_data.response
+
+
+    def _get_account_metrics_serialize(
+        self,
+        start,
+        end,
+        group_by,
+        _request_auth,
+        _content_type,
+        _headers,
+        _host_index,
+    ) -> RequestSerialized:
+
+        _host = None
+
+        _collection_formats: Dict[str, str] = {
+        }
+
+        _path_params: Dict[str, str] = {}
+        _query_params: List[Tuple[str, str]] = []
+        _header_params: Dict[str, Optional[str]] = _headers or {}
+        _form_params: List[Tuple[str, str]] = []
+        _files: Dict[
+            str, Union[str, bytes, List[str], List[bytes], List[Tuple[str, bytes]]]
+        ] = {}
+        _body_params: Optional[bytes] = None
+
+        # process the path parameters
+        # process the query parameters
+        if start is not None:
+            if isinstance(start, datetime):
+                _query_params.append(
+                    (
+                        'start',
+                        start.strftime(
+                            self.api_client.configuration.datetime_format
+                        )
+                    )
+                )
+            else:
+                _query_params.append(('start', start))
+            
+        if end is not None:
+            if isinstance(end, datetime):
+                _query_params.append(
+                    (
+                        'end',
+                        end.strftime(
+                            self.api_client.configuration.datetime_format
+                        )
+                    )
+                )
+            else:
+                _query_params.append(('end', end))
+            
+        if group_by is not None:
+            
+            _query_params.append(('group_by', group_by))
+            
+        # process the header parameters
+        # process the form parameters
+        # process the body parameter
+
+
+        # set the HTTP header `Accept`
+        if 'Accept' not in _header_params:
+            _header_params['Accept'] = self.api_client.select_header_accept(
+                [
+                    'application/json'
+                ]
+            )
+
+
+        # authentication setting
+        _auth_settings: List[str] = [
+            'bearer'
+        ]
+
+        return self.api_client.param_serialize(
+            method='GET',
+            resource_path='/v1/metrics',
             path_params=_path_params,
             query_params=_query_params,
             header_params=_header_params,

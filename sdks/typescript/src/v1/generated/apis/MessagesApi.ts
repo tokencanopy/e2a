@@ -8,6 +8,7 @@ import {canConsumeForm, isCodeInRange} from '../util.js';
 import {SecurityAuthentication} from '../auth/auth.js';
 
 
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
@@ -148,6 +149,58 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
             contentType
         );
         requestContext.setBody(serializedBody);
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email 
+     * @param start Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param end Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public async getAgentMetrics(email: string, start?: Date, end?: Date, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("MessagesApi", "getAgentMetrics", "email");
+        }
+
+
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/metrics'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Query Params
+        if (start !== undefined) {
+            requestContext.setQueryParam("start", ObjectSerializer.serialize(start, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (end !== undefined) {
+            requestContext.setQueryParam("end", ObjectSerializer.serialize(end, "Date", "date-time"));
+        }
+
 
         let authMethod: SecurityAuthentication | undefined;
         // Apply auth methods
@@ -833,6 +886,42 @@ export class MessagesApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "SendResultView", ""
             ) as SendResultView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to getAgentMetrics
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getAgentMetricsWithHttpInfo(response: ResponseContext): Promise<HttpInfo<AgentMetricsView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: AgentMetricsView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "AgentMetricsView", ""
+            ) as AgentMetricsView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: AgentMetricsView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "AgentMetricsView", ""
+            ) as AgentMetricsView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

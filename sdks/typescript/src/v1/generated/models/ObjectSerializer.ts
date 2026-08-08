@@ -1,8 +1,11 @@
 export * from '../models/APIKeyExportEntry.js';
 export * from '../models/APIKeyView.js';
+export * from '../models/AccountMetricsView.js';
 export * from '../models/AccountUserView.js';
 export * from '../models/AccountView.js';
 export * from '../models/AgentIdentity.js';
+export * from '../models/AgentMetricsGroupView.js';
+export * from '../models/AgentMetricsView.js';
 export * from '../models/AgentSuppressionAddedData.js';
 export * from '../models/AgentSuppressionView.js';
 export * from '../models/AgentView.js';
@@ -77,6 +80,9 @@ export * from '../models/MessageLifecycleTransition.js';
 export * from '../models/MessageParsedView.js';
 export * from '../models/MessageSummaryView.js';
 export * from '../models/MessageView.js';
+export * from '../models/MetricsCounterView.js';
+export * from '../models/MetricsRatesView.js';
+export * from '../models/MetricsSummaryView.js';
 export * from '../models/OAuthConnectionEntry.js';
 export * from '../models/PageAPIKeyView.js';
 export * from '../models/PageAgentSuppressionView.js';
@@ -153,15 +159,20 @@ export * from '../models/ValidateTemplateResponse.js';
 export * from '../models/ValidationErrorDetails.js';
 export * from '../models/VerifyDomainView.js';
 export * from '../models/WebhookDeliveryView.js';
+export * from '../models/WebhookEndpointMetricsView.js';
 export * from '../models/WebhookFiltersRequest.js';
 export * from '../models/WebhookFiltersView.js';
+export * from '../models/WebhookMetricsView.js';
 export * from '../models/WebhookView.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -235,6 +246,9 @@ import { MessageLifecycleTransition , MessageLifecycleTransitionDirectionEnum   
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsCounterView } from '../models/MetricsCounterView.js';
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -311,8 +325,10 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
+import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 
 /* tslint:disable:no-unused-variable */
@@ -358,9 +374,12 @@ let enumsMap: Set<string> = new Set<string>([
 let typeMap: {[index: string]: any} = {
     "APIKeyExportEntry": APIKeyExportEntry,
     "APIKeyView": APIKeyView,
+    "AccountMetricsView": AccountMetricsView,
     "AccountUserView": AccountUserView,
     "AccountView": AccountView,
     "AgentIdentity": AgentIdentity,
+    "AgentMetricsGroupView": AgentMetricsGroupView,
+    "AgentMetricsView": AgentMetricsView,
     "AgentSuppressionAddedData": AgentSuppressionAddedData,
     "AgentSuppressionView": AgentSuppressionView,
     "AgentView": AgentView,
@@ -434,6 +453,9 @@ let typeMap: {[index: string]: any} = {
     "MessageParsedView": MessageParsedView,
     "MessageSummaryView": MessageSummaryView,
     "MessageView": MessageView,
+    "MetricsCounterView": MetricsCounterView,
+    "MetricsRatesView": MetricsRatesView,
+    "MetricsSummaryView": MetricsSummaryView,
     "OAuthConnectionEntry": OAuthConnectionEntry,
     "PageAPIKeyView": PageAPIKeyView,
     "PageAgentSuppressionView": PageAgentSuppressionView,
@@ -510,8 +532,10 @@ let typeMap: {[index: string]: any} = {
     "ValidationErrorDetails": ValidationErrorDetails,
     "VerifyDomainView": VerifyDomainView,
     "WebhookDeliveryView": WebhookDeliveryView,
+    "WebhookEndpointMetricsView": WebhookEndpointMetricsView,
     "WebhookFiltersRequest": WebhookFiltersRequest,
     "WebhookFiltersView": WebhookFiltersView,
+    "WebhookMetricsView": WebhookMetricsView,
     "WebhookView": WebhookView,
 }
 
