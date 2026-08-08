@@ -17,7 +17,8 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional, Union
 from typing import Optional, Set
 from typing_extensions import Self
@@ -26,8 +27,11 @@ class WebhookEndpointMetricsView(BaseModel):
     """
     WebhookEndpointMetricsView
     """ # noqa: E501
+    auto_disable_reason: StrictStr = Field(description="Why it was auto-disabled. Empty when it was not.")
+    auto_disabled_at: Optional[datetime] = Field(description="When e2a auto-disabled this endpoint after sustained failure. Non-null means events are being DROPPED, not retried — the most urgent thing on this page.")
     delivered: StrictInt
     deliveries: StrictInt
+    enabled: StrictBool = Field(description="False means this endpoint is not receiving events right now.")
     endpoint_rejected: StrictInt
     last_status_code: Optional[StrictInt] = Field(description="Most recent HTTP status this endpoint returned in the window; null when it never answered. A constant 401 or 405 names the fix directly.")
     no_response: StrictInt
@@ -36,7 +40,7 @@ class WebhookEndpointMetricsView(BaseModel):
     url_host: StrictStr = Field(description="The endpoint's host. Only the host is reported — a webhook URL can carry a shared secret in its path or query string, which a metrics payload must not echo back.")
     webhook_id: StrictStr
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["delivered", "deliveries", "endpoint_rejected", "last_status_code", "no_response", "pending", "success_rate", "url_host", "webhook_id"]
+    __properties: ClassVar[List[str]] = ["auto_disable_reason", "auto_disabled_at", "delivered", "deliveries", "enabled", "endpoint_rejected", "last_status_code", "no_response", "pending", "success_rate", "url_host", "webhook_id"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -84,6 +88,11 @@ class WebhookEndpointMetricsView(BaseModel):
             for _key, _value in self.additional_properties.items():
                 _dict[_key] = _value
 
+        # set to None if auto_disabled_at (nullable) is None
+        # and model_fields_set contains the field
+        if self.auto_disabled_at is None and "auto_disabled_at" in self.model_fields_set:
+            _dict['auto_disabled_at'] = None
+
         # set to None if last_status_code (nullable) is None
         # and model_fields_set contains the field
         if self.last_status_code is None and "last_status_code" in self.model_fields_set:
@@ -106,8 +115,11 @@ class WebhookEndpointMetricsView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
+            "auto_disable_reason": obj.get("auto_disable_reason"),
+            "auto_disabled_at": obj.get("auto_disabled_at"),
             "delivered": obj.get("delivered"),
             "deliveries": obj.get("deliveries"),
+            "enabled": obj.get("enabled"),
             "endpoint_rejected": obj.get("endpoint_rejected"),
             "last_status_code": obj.get("last_status_code"),
             "no_response": obj.get("no_response"),

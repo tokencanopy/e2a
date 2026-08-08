@@ -880,6 +880,34 @@ export type AgentMetricsGroup = {
   counters: MetricsCounter[] | null;
 };
 
+export type WebhookEndpointMetrics = {
+  webhook_id: string;
+  url_host: string;
+  deliveries: number;
+  delivered: number;
+  pending: number;
+  endpoint_rejected: number;
+  no_response: number;
+  success_rate: number | null;
+  last_status_code: number | null;
+  enabled: boolean;
+  auto_disabled_at: string | null;
+  auto_disable_reason: string;
+};
+
+export type WebhookMetrics = {
+  deliveries: number;
+  delivered: number;
+  pending: number;
+  endpoint_rejected: number;
+  no_response: number;
+  success_rate: number | null;
+  window_exceeds_retention: boolean;
+  endpoints_auto_disabled: number;
+  endpoints: WebhookEndpointMetrics[] | null;
+  endpoints_truncated: boolean;
+};
+
 export type AccountMetrics = {
   start: string;
   end: string;
@@ -891,6 +919,7 @@ export type AccountMetrics = {
   counters: MetricsCounter[] | null;
   agents: AgentMetricsGroup[] | null;
   agents_truncated: boolean;
+  webhooks: WebhookMetrics;
 };
 
 // GET /v1/metrics. `groupByAgent` adds the per-inbox breakdown, which is what

@@ -31,13 +31,14 @@ class WebhookMetricsView(BaseModel):
     deliveries: StrictInt = Field(description="Delivery rows in the window. The grain is one row per (event, subscriber) pair, so an account with three matching webhooks produces three rows for one message — this legitimately exceeds message counts and does not mean duplicated mail.")
     endpoint_rejected: StrictInt = Field(description="The endpoint answered with a non-2xx. Unambiguously the subscriber's own response — check last_status_code per endpoint.")
     endpoints: Optional[List[WebhookEndpointMetricsView]] = Field(description="Per-endpoint breakdown, busiest first.")
+    endpoints_auto_disabled: StrictInt = Field(description="Endpoints e2a has auto-disabled after sustained failure. Counted across every endpoint the account owns, whether or not it had traffic in this window — a disabled endpoint with no recent deliveries is exactly the case worth surfacing.")
     endpoints_truncated: StrictBool = Field(description="True when more endpoints have traffic than are listed (cap: 50). The totals above stay complete.")
     no_response: StrictInt = Field(description="No HTTP response was ever received: connect, DNS or TLS failure, a blocked URL, or a delivery that expired while pending. Predominantly an unreachable endpoint, but it can include rare e2a-side failures, so it is not a clean fault split.")
     pending: StrictInt = Field(description="Deliveries still retrying. Excluded from success_rate's denominator because they have not settled.")
     success_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="delivered / (delivered + endpoint_rejected + no_response). Null — never 0 — when nothing has settled.")
     window_exceeds_retention: StrictBool = Field(description="True when the window reaches past the 30-day delivery-retention horizon. Older rows are pruned, so the counts understate that stretch — a drop here is a retention boundary, not a delivery collapse.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["delivered", "deliveries", "endpoint_rejected", "endpoints", "endpoints_truncated", "no_response", "pending", "success_rate", "window_exceeds_retention"]
+    __properties: ClassVar[List[str]] = ["delivered", "deliveries", "endpoint_rejected", "endpoints", "endpoints_auto_disabled", "endpoints_truncated", "no_response", "pending", "success_rate", "window_exceeds_retention"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -118,6 +119,7 @@ class WebhookMetricsView(BaseModel):
             "deliveries": obj.get("deliveries"),
             "endpoint_rejected": obj.get("endpoint_rejected"),
             "endpoints": [WebhookEndpointMetricsView.from_dict(_item) for _item in obj["endpoints"]] if obj.get("endpoints") is not None else None,
+            "endpoints_auto_disabled": obj.get("endpoints_auto_disabled"),
             "endpoints_truncated": obj.get("endpoints_truncated"),
             "no_response": obj.get("no_response"),
             "pending": obj.get("pending"),

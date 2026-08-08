@@ -71,6 +71,17 @@ function body(over: Record<string, unknown> = {}) {
       },
     ],
     agents_truncated: false,
+    webhooks: webhooks(),
+    ...over,
+  };
+}
+
+function webhooks(over: Record<string, unknown> = {}) {
+  return {
+    deliveries: 0, delivered: 0, pending: 0,
+    endpoint_rejected: 0, no_response: 0,
+    success_rate: null, window_exceeds_retention: false,
+    endpoints_auto_disabled: 0, endpoints: [], endpoints_truncated: false,
     ...over,
   };
 }
@@ -265,5 +276,80 @@ describe("metric tooltips", () => {
     ]) {
       expect(screen.getByRole("button", { name: `What is ${label}?` })).toBeInTheDocument();
     }
+  });
+});
+
+describe("webhook delivery panel", () => {
+  it("stays hidden for an account with no webhooks", async () => {
+    respond(body());
+    renderPage();
+    await screen.findByText("97.8%");
+    expect(screen.queryByText("Webhook delivery")).not.toBeInTheDocument();
+  });
+
+  it("separates an endpoint that answered from one that never did", async () => {
+    respond(
+      body({
+        webhooks: webhooks({
+          deliveries: 102, delivered: 96, pending: 2,
+          endpoint_rejected: 3, no_response: 1, success_rate: 0.96,
+          endpoints: [{
+            webhook_id: "wh_1", url_host: "hooks.example.test",
+            deliveries: 102, delivered: 96, pending: 2,
+            endpoint_rejected: 3, no_response: 1, success_rate: 0.96,
+            last_status_code: 405, enabled: true,
+            auto_disabled_at: null, auto_disable_reason: "",
+          }],
+        }),
+      }),
+    );
+    renderPage();
+    await screen.findByText("Webhook delivery");
+    expect(screen.getByText(/endpoint answered non-2xx 3 · no response 1/)).toBeInTheDocument();
+    // Pending is excluded from the denominator.
+    expect(screen.getByText(/96 of 100 settled/)).toBeInTheDocument();
+    expect(screen.getByText("405")).toBeInTheDocument();
+    expect(screen.getByText("hooks.example.test")).toBeInTheDocument();
+  });
+
+  // An auto-disabled endpoint is dropping events, not retrying them — the most
+  // urgent state the page can show, so it must be stated, not just tinted.
+  it("calls out auto-disabled endpoints in words", async () => {
+    respond(
+      body({
+        webhooks: webhooks({
+          deliveries: 10, delivered: 2, endpoint_rejected: 8, success_rate: 0.2,
+          endpoints_auto_disabled: 1,
+          endpoints: [{
+            webhook_id: "wh_dead", url_host: "dead.example.test",
+            deliveries: 10, delivered: 2, pending: 0,
+            endpoint_rejected: 8, no_response: 0, success_rate: 0.2,
+            last_status_code: 500, enabled: false,
+            auto_disabled_at: "2026-08-01T00:00:00Z",
+            auto_disable_reason: "sustained_failure",
+          }],
+        }),
+      }),
+    );
+    renderPage();
+    await screen.findByText("Webhook delivery");
+    expect(screen.getByText(/1 endpoint is auto-disabled/)).toBeInTheDocument();
+    expect(screen.getByText(/events are being\s+dropped, not retried/)).toBeInTheDocument();
+    expect(screen.getByText("auto-disabled")).toBeInTheDocument();
+  });
+
+  it("shows the panel for a disabled endpoint even with no recent deliveries", async () => {
+    respond(body({ webhooks: webhooks({ endpoints_auto_disabled: 1 }) }));
+    renderPage();
+    await screen.findByText("Webhook delivery");
+  });
+
+  it("explains the 30-day delivery retention horizon", async () => {
+    respond(
+      body({ webhooks: webhooks({ deliveries: 5, delivered: 5, success_rate: 1, window_exceeds_retention: true }) }),
+    );
+    renderPage();
+    await screen.findByText("Webhook delivery");
+    expect(screen.getByText(/Delivery history is kept 30 days/)).toBeInTheDocument();
   });
 });

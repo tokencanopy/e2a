@@ -3023,8 +3023,16 @@ scenarios:
             - counters
             - agents
             - agents_truncated
+            - webhooks
           body_match:
             agents_truncated: false
+            # Webhook delivery is a separate fact source with its own grain and
+            # a shorter retention; it must be present and zeroed for an account
+            # with no subscribers, never absent.
+            "webhooks.deliveries": 0
+            "webhooks.endpoints_auto_disabled": 0
+            "webhooks.success_rate": null
+            "webhooks.endpoints.length": 0
           # The rollup is account-wide; it must never leak a per-agent identity
           # into the top level the way the per-agent operation does.
           body_excludes:

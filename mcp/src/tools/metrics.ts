@@ -102,6 +102,10 @@ export function registerMetricsTools(server: McpServer, client: McpClient): void
         "disagree. Use this for an account-level health check; use get_agent_metrics to drill into one inbox. " +
         "Set group_by:'agent' to also receive a per-agent breakdown in `agents`, busiest first — it is capped " +
         "at 200 agents and sets `agents_truncated` when it cuts, while the account totals stay complete either way. " +
+        "Also returns a `webhooks` block: whether YOUR CODE received the events, which the email counters cannot answer. " +
+        "Its grain is one row per event per subscriber, so those counts legitimately exceed message counts. " +
+        "`webhooks.endpoints_auto_disabled` above zero is the most urgent signal here — e2a has stopped delivering to " +
+        "an endpoint after sustained failure, so events are being DROPPED rather than retried. " +
         `${WINDOW_NOTE} ${RATES_NOTE} ${COVERAGE_NOTE} ` +
         "Account scope only; an agent-scoped credential reads its own inbox with get_agent_metrics instead.",
       inputSchema: strictInputSchema({

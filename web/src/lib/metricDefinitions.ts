@@ -47,6 +47,18 @@ export const METRIC_HELP = {
   review:
     "Human-in-the-loop review outcomes. Expired means a hold aged out without anyone deciding — that is lost work, not an approval, and a rising count means nobody is working the queue.",
 
+  // ── Webhooks ───────────────────────────────────────────
+  webhookSuccess:
+    "The share of webhook deliveries your endpoints accepted. This is a different question from email delivery: it asks whether YOUR CODE received the event, not whether the mail reached a recipient. Deliveries still retrying are excluded from the denominator, because a delivery mid-retry has not failed yet.",
+  webhookGrain:
+    "One row per event per subscriber. An account with three webhooks matching the same event produces three delivery rows for one message, so these counts legitimately exceed message counts — it does not mean mail was duplicated.",
+  webhookFailures:
+    "Two kinds, and they have different owners. 'Endpoint answered' means your endpoint returned a non-2xx — a constant 401 or 405 usually names the fix exactly. 'No response' means nothing ever answered: a connect, DNS or TLS failure, a blocked URL, or a delivery that expired while waiting. That second bucket is mostly an unreachable endpoint but can include rare e2a-side failures, so it is not a clean fault split.",
+  webhookAutoDisabled:
+    "e2a stops delivering to an endpoint that keeps failing. While it is disabled, events are DROPPED rather than retried — this is the most urgent state on this page. Re-enable the webhook once the endpoint is healthy.",
+  webhookRetention:
+    "Delivery history is kept for 30 days, unlike message history. A window reaching further back reports on rows that have already been pruned, so a drop-off there is a retention boundary rather than a fall in webhook volume.",
+
   // ── Meta ───────────────────────────────────────────────
   window:
     "Messages belong to this window by their own send time, not by when each observation landed — otherwise a rate's numerator and denominator would describe different populations. The cost is that recent days keep moving: bounce and complaint feedback arrives for up to 72 hours.",

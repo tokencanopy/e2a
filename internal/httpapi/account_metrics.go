@@ -31,6 +31,10 @@ type WebhookEndpointMetricsView struct {
 	NoResponse       int64    `json:"no_response"`
 	SuccessRate      *float64 `json:"success_rate" nullable:"true" doc:"delivered / (delivered + failed). Null when nothing has settled yet."`
 	LastStatusCode   *int32   `json:"last_status_code" nullable:"true" doc:"Most recent HTTP status this endpoint returned in the window; null when it never answered. A constant 401 or 405 names the fix directly."`
+
+	Enabled           bool       `json:"enabled" doc:"False means this endpoint is not receiving events right now."`
+	AutoDisabledAt    *time.Time `json:"auto_disabled_at" nullable:"true" doc:"When e2a auto-disabled this endpoint after sustained failure. Non-null means events are being DROPPED, not retried — the most urgent thing on this page."`
+	AutoDisableReason string     `json:"auto_disable_reason" doc:"Why it was auto-disabled. Empty when it was not."`
 }
 
 // WebhookMetricsView is the account's webhook delivery health — the "did my
@@ -46,6 +50,8 @@ type WebhookMetricsView struct {
 	SuccessRate *float64 `json:"success_rate" nullable:"true" doc:"delivered / (delivered + endpoint_rejected + no_response). Null — never 0 — when nothing has settled."`
 
 	WindowExceedsRetention bool `json:"window_exceeds_retention" doc:"True when the window reaches past the 30-day delivery-retention horizon. Older rows are pruned, so the counts understate that stretch — a drop here is a retention boundary, not a delivery collapse."`
+
+	EndpointsAutoDisabled int64 `json:"endpoints_auto_disabled" doc:"Endpoints e2a has auto-disabled after sustained failure. Counted across every endpoint the account owns, whether or not it had traffic in this window — a disabled endpoint with no recent deliveries is exactly the case worth surfacing."`
 
 	Endpoints          []WebhookEndpointMetricsView `json:"endpoints" doc:"Per-endpoint breakdown, busiest first."`
 	EndpointsTruncated bool                         `json:"endpoints_truncated" doc:"True when more endpoints have traffic than are listed (cap: 50). The totals above stay complete."`
@@ -200,6 +206,7 @@ func webhookMetricsView(m webhook.AccountDeliveryMetrics) WebhookMetricsView {
 		EndpointRejected:       m.Totals.EndpointRejected,
 		NoResponse:             m.Totals.NoResponse,
 		SuccessRate:            ratio(m.Totals.Delivered, m.Totals.Delivered+m.Totals.Failed()),
+		EndpointsAutoDisabled:  m.EndpointsAutoDisabled,
 		WindowExceedsRetention: m.WindowExceedsRetention,
 		EndpointsTruncated:     m.EndpointsTruncated,
 		Endpoints:              make([]WebhookEndpointMetricsView, 0, len(m.Endpoints)),
@@ -213,8 +220,11 @@ func webhookMetricsView(m webhook.AccountDeliveryMetrics) WebhookMetricsView {
 			Pending:          e.Counts.Pending,
 			EndpointRejected: e.Counts.EndpointRejected,
 			NoResponse:       e.Counts.NoResponse,
-			SuccessRate:      ratio(e.Counts.Delivered, e.Counts.Delivered+e.Counts.Failed()),
-			LastStatusCode:   e.LastStatusCode,
+			SuccessRate:       ratio(e.Counts.Delivered, e.Counts.Delivered+e.Counts.Failed()),
+			LastStatusCode:    e.LastStatusCode,
+			Enabled:           e.Enabled,
+			AutoDisabledAt:    e.AutoDisabledAt,
+			AutoDisableReason: e.AutoDisableReason,
 		})
 	}
 	return view

@@ -28,6 +28,10 @@ export class WebhookMetricsView {
     */
     'endpoints': Array<WebhookEndpointMetricsView> | null;
     /**
+    * Endpoints e2a has auto-disabled after sustained failure. Counted across every endpoint the account owns, whether or not it had traffic in this window — a disabled endpoint with no recent deliveries is exactly the case worth surfacing.
+    */
+    'endpointsAutoDisabled': number;
+    /**
     * True when more endpoints have traffic than are listed (cap: 50). The totals above stay complete.
     */
     'endpointsTruncated': boolean;
@@ -76,6 +80,12 @@ export class WebhookMetricsView {
             "baseName": "endpoints",
             "type": "Array<WebhookEndpointMetricsView>",
             "format": ""
+        },
+        {
+            "name": "endpointsAutoDisabled",
+            "baseName": "endpoints_auto_disabled",
+            "type": "number",
+            "format": "int64"
         },
         {
             "name": "endpointsTruncated",

@@ -19,6 +19,7 @@ import { METRIC_HELP } from "../../../lib/metricDefinitions";
 import {
   getAccountMetrics,
   type MetricsSummary,
+  type WebhookMetrics,
 } from "../../components/onboarding/api";
 
 const RANGES = [
@@ -410,6 +411,8 @@ export default function MetricsPage() {
             </Panel>
           </div>
 
+          <WebhookPanel webhooks={data.webhooks} />
+
           <ReasonCodeDetail counters={data.counters ?? []} />
         </>
       )}
@@ -500,6 +503,102 @@ function AuthBar({ segments }: { segments: AuthSegment[] }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * Webhook delivery health — "did my code receive it", which no email counter
+ * on this page can answer. Rendered only when the account has webhooks, so an
+ * account without any is not handed a block of zeroes it cannot act on.
+ */
+function WebhookPanel({ webhooks: w }: { webhooks?: WebhookMetrics }) {
+  if (!w || (w.deliveries === 0 && w.endpoints_auto_disabled === 0)) return null;
+  const settled = w.delivered + w.endpoint_rejected + w.no_response;
+  const endpoints = w.endpoints ?? [];
+  return (
+    <Panel title="Webhook delivery" help={METRIC_HELP.webhookSuccess}>
+      {w.endpoints_auto_disabled > 0 && (
+        <p className="mb-3 flex items-start text-[12px]" style={{ color: "var(--danger)" }}>
+          <span>
+            {num(w.endpoints_auto_disabled)} endpoint
+            {w.endpoints_auto_disabled === 1 ? " is" : "s are"} auto-disabled — events are being
+            dropped, not retried.
+          </span>
+          <InfoTip label="auto-disabled endpoints" text={METRIC_HELP.webhookAutoDisabled} />
+        </p>
+      )}
+
+      <div className="mb-3 flex flex-wrap items-baseline gap-x-6 gap-y-1">
+        <span className="text-[22px] font-semibold leading-none" style={{ color: "var(--fg-strong)" }}>
+          {pct(w.success_rate)}
+        </span>
+        <span className="text-[11px]" style={{ color: "var(--fg-subtle)" }}>
+          {num(w.delivered)} of {num(settled)} settled
+          {w.pending > 0 ? ` · ${num(w.pending)} still retrying` : ""}
+        </span>
+        <span className="flex items-center text-[11px]" style={{ color: "var(--fg-muted)" }}>
+          endpoint answered non-2xx {num(w.endpoint_rejected)} · no response {num(w.no_response)}
+          <InfoTip label="webhook failures" text={METRIC_HELP.webhookFailures} />
+        </span>
+      </div>
+
+      {w.window_exceeds_retention && (
+        <p className="mb-2 flex items-start text-[11px]" style={{ color: "var(--fg-muted)" }}>
+          <span>Delivery history is kept 30 days; earlier counts in this window are pruned.</span>
+          <InfoTip label="webhook retention" text={METRIC_HELP.webhookRetention} />
+        </p>
+      )}
+
+      {endpoints.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr style={{ color: "var(--fg-muted)" }}>
+                <th className="py-1.5 text-left font-normal">Endpoint</th>
+                <th className="py-1.5 text-right font-normal">
+                  <span className="inline-flex items-center">
+                    Deliveries
+                    <InfoTip label="the delivery grain" text={METRIC_HELP.webhookGrain} />
+                  </span>
+                </th>
+                <th className="py-1.5 text-right font-normal">Success</th>
+                <th className="py-1.5 text-right font-normal">Last status</th>
+                <th className="py-1.5 text-right font-normal">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {endpoints.map((e) => (
+                <tr key={e.webhook_id} style={{ borderTop: "1px solid var(--border-sub)" }}>
+                  <td className="py-1.5">{e.url_host || e.webhook_id}</td>
+                  <td className="py-1.5 text-right tabular-nums">{num(e.deliveries)}</td>
+                  <td className="py-1.5 text-right tabular-nums">{pct(e.success_rate)}</td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {e.last_status_code ?? "—"}
+                  </td>
+                  <td
+                    className="py-1.5 text-right"
+                    style={{
+                      color: e.auto_disabled_at
+                        ? "var(--danger)"
+                        : e.enabled
+                          ? "var(--fg-subtle)"
+                          : "var(--warn)",
+                    }}
+                  >
+                    {e.auto_disabled_at ? "auto-disabled" : e.enabled ? "active" : "disabled"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {w.endpoints_truncated && (
+        <p className="mt-2 text-[11px]" style={{ color: "var(--fg-muted)" }}>
+          More endpoints have traffic than are listed here.
+        </p>
+      )}
+    </Panel>
   );
 }
 

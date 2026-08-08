@@ -59,6 +59,17 @@ function makeAccountView(over: Record<string, unknown> = {}) {
     counters: [],
     agents: [],
     agentsTruncated: false,
+    webhooks: makeWebhooks(),
+    ...over,
+  };
+}
+
+function makeWebhooks(over: Record<string, unknown> = {}) {
+  return {
+    deliveries: 0, delivered: 0, pending: 0,
+    endpointRejected: 0, noResponse: 0, successRate: null,
+    windowExceedsRetention: false, endpointsAutoDisabled: 0,
+    endpoints: [], endpointsTruncated: false,
     ...over,
   };
 }
@@ -202,6 +213,44 @@ describe("metrics command", () => {
       metrics("bot@agents.localhost", { start: "2026-07-01T00:00:00" }),
     ).rejects.toThrow("process.exit");
     expect(mockGetMetrics).not.toHaveBeenCalled();
+  });
+
+  it("prints webhook health and flags an auto-disabled endpoint", async () => {
+    mockAccountMetrics.mockResolvedValue(
+      makeAccountView({
+        webhooks: makeWebhooks({
+          deliveries: 102, delivered: 96, pending: 2,
+          endpointRejected: 3, noResponse: 1, successRate: 0.96,
+          endpointsAutoDisabled: 1,
+          endpoints: [{
+            webhookId: "wh_1", urlHost: "hooks.example.test",
+            deliveries: 102, delivered: 96, pending: 2,
+            endpointRejected: 3, noResponse: 1, successRate: 0.96,
+            lastStatusCode: 405, enabled: false,
+            autoDisabledAt: new Date("2026-08-01T00:00:00Z"), autoDisableReason: "sustained_failure",
+          }],
+        }),
+      }),
+    );
+    await metrics(undefined, {});
+    const text = out();
+    expect(text).toContain("webhook delivery");
+    expect(text).toContain("96 delivered of 100 settled");
+    expect(text).toContain("endpoint answered non-2xx 3");
+    expect(text).toContain("auto-disabled");
+    expect(text).toContain("last HTTP 405");
+  });
+
+  it("omits the webhook block for an account with no webhooks", async () => {
+    mockAccountMetrics.mockResolvedValue(makeAccountView());
+    await metrics(undefined, {});
+    expect(out()).not.toContain("webhook delivery");
+  });
+
+  it("tolerates a response with no webhook block at all", async () => {
+    mockAccountMetrics.mockResolvedValue(makeAccountView({ webhooks: undefined }));
+    await metrics(undefined, {});
+    expect(out()).toContain("account totals");
   });
 
   it("rejects an inverted window before calling the API", async () => {

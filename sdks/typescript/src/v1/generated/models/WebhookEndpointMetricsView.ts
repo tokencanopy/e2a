@@ -13,8 +13,20 @@
 import { HttpFile } from '../http/http.js';
 
 export class WebhookEndpointMetricsView {
+    /**
+    * Why it was auto-disabled. Empty when it was not.
+    */
+    'autoDisableReason': string;
+    /**
+    * When e2a auto-disabled this endpoint after sustained failure. Non-null means events are being DROPPED, not retried — the most urgent thing on this page.
+    */
+    'autoDisabledAt': Date | null;
     'delivered': number;
     'deliveries': number;
+    /**
+    * False means this endpoint is not receiving events right now.
+    */
+    'enabled': boolean;
     'endpointRejected': number;
     /**
     * Most recent HTTP status this endpoint returned in the window; null when it never answered. A constant 401 or 405 names the fix directly.
@@ -38,6 +50,18 @@ export class WebhookEndpointMetricsView {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
+            "name": "autoDisableReason",
+            "baseName": "auto_disable_reason",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "autoDisabledAt",
+            "baseName": "auto_disabled_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
             "name": "delivered",
             "baseName": "delivered",
             "type": "number",
@@ -48,6 +72,12 @@ export class WebhookEndpointMetricsView {
             "baseName": "deliveries",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "enabled",
+            "baseName": "enabled",
+            "type": "boolean",
+            "format": ""
         },
         {
             "name": "endpointRejected",

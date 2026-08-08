@@ -54,6 +54,15 @@ type EndpointDeliveryMetrics struct {
 	// endpoint in the window, or nil when nothing ever answered. A constant
 	// 405 or 401 tells a customer exactly what to fix.
 	LastStatusCode *int32
+
+	// Enabled / AutoDisabledAt / AutoDisableReason mirror the webhook's health
+	// state. An endpoint e2a auto-disabled after sustained failure is the most
+	// actionable fact on this whole page — it means events are being dropped
+	// right now, not merely retried — so it travels with the counts rather
+	// than living only on the webhooks screen.
+	Enabled           bool
+	AutoDisabledAt    *time.Time
+	AutoDisableReason string
 }
 
 // AccountDeliveryMetrics is the account-wide webhook aggregate.
@@ -63,6 +72,11 @@ type AccountDeliveryMetrics struct {
 	// EndpointsTruncated reports that the account has more endpoints with
 	// traffic than Endpoints contains. Totals stay complete.
 	EndpointsTruncated bool
+	// EndpointsAutoDisabled counts endpoints e2a has auto-disabled. Computed
+	// across every endpoint the account owns, not just the listed ones, and
+	// independent of whether the endpoint had traffic in this window.
+	EndpointsAutoDisabled int64
+
 	// WindowExceedsRetention is true when the requested window starts before
 	// the delivery-retention horizon, so older rows have been pruned and the
 	// counts below understate that stretch. Without this a 90-day view looks
@@ -116,6 +130,13 @@ func (s *SubscriberStore) CountDeliveriesForAccount(ctx context.Context, userID 
 	if err != nil {
 		return metrics, fmt.Errorf("aggregate webhook delivery metrics: %w", err)
 	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*)::bigint FROM webhooks
+		WHERE user_id = $1 AND auto_disabled_at IS NOT NULL
+	`, userID).Scan(&metrics.EndpointsAutoDisabled); err != nil {
+		return metrics, fmt.Errorf("count auto-disabled webhooks: %w", err)
+	}
+
 	if metrics.Totals.Total == 0 {
 		return metrics, nil
 	}
@@ -123,11 +144,12 @@ func (s *SubscriberStore) CountDeliveriesForAccount(ctx context.Context, userID 
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.webhook_id, w.url, `+outcomeSQL+`,
 		       (ARRAY_AGG(d.last_status_code ORDER BY d.last_attempt_at DESC NULLS LAST)
-		          FILTER (WHERE coalesce(d.last_status_code, 0) > 0))[1]
+		          FILTER (WHERE coalesce(d.last_status_code, 0) > 0))[1],
+		       w.enabled, w.auto_disabled_at, coalesce(w.auto_disable_reason, '')
 		FROM webhook_subscriber_deliveries d
 		JOIN webhooks w ON w.id = d.webhook_id
 		WHERE w.user_id = $1 AND d.created_at >= $2 AND d.created_at < $3
-		GROUP BY d.webhook_id, w.url
+		GROUP BY d.webhook_id, w.url, w.enabled, w.auto_disabled_at, w.auto_disable_reason
 		ORDER BY count(*) DESC, d.webhook_id ASC
 		LIMIT $4
 	`, userID, start, end, MaxDeliveryMetricsEndpoints+1)
@@ -142,7 +164,8 @@ func (s *SubscriberStore) CountDeliveriesForAccount(ctx context.Context, userID 
 		var lastStatus *int32
 		if err := rows.Scan(&endpoint.WebhookID, &rawURL,
 			&endpoint.Counts.Total, &endpoint.Counts.Delivered, &endpoint.Counts.Pending,
-			&endpoint.Counts.EndpointRejected, &endpoint.Counts.NoResponse, &lastStatus); err != nil {
+			&endpoint.Counts.EndpointRejected, &endpoint.Counts.NoResponse, &lastStatus,
+			&endpoint.Enabled, &endpoint.AutoDisabledAt, &endpoint.AutoDisableReason); err != nil {
 			return metrics, fmt.Errorf("scan webhook delivery endpoint: %w", err)
 		}
 		endpoint.URLHost = hostOnly(rawURL)

@@ -1,4 +1,7 @@
-import type { AgentMetricsView, AccountMetricsView, MetricsSummaryView, MetricsRatesView } from "@e2a/sdk/v1";
+import type {
+  AgentMetricsView, AccountMetricsView, MetricsSummaryView, MetricsRatesView,
+  WebhookMetricsView,
+} from "@e2a/sdk/v1";
 import { createClient } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
 import { parseRfc3339 } from "../time.js";
@@ -74,6 +77,33 @@ function renderAgent(view: AgentMetricsView): string {
   );
 }
 
+/**
+ * Webhook delivery health — "did my code receive it", as opposed to "did the
+ * mail arrive". Printed only when the account has webhooks, so an account
+ * without any doesn't get a block of zeroes it can't act on.
+ */
+function webhookLines(w: WebhookMetricsView | undefined): string {
+  if (!w) return "";
+  if (w.deliveries === 0 && w.endpointsAutoDisabled === 0) return "";
+  let out =
+    `\nwebhook delivery (one row per event x subscriber)\n` +
+    `  success ${pct(w.successRate)}   ${w.delivered} delivered of ${w.delivered + w.endpointRejected + w.noResponse} settled` +
+    (w.pending > 0 ? `  (${w.pending} still retrying)\n` : `\n`) +
+    `  failures  endpoint answered non-2xx ${w.endpointRejected}  ·  no response ${w.noResponse}\n`;
+  if (w.endpointsAutoDisabled > 0) {
+    out += `  ATTENTION: ${w.endpointsAutoDisabled} endpoint(s) auto-disabled — events are being dropped, not retried\n`;
+  }
+  if (w.windowExceedsRetention) {
+    out += `  note: delivery history is kept 30 days; earlier counts in this window are pruned\n`;
+  }
+  for (const e of w.endpoints ?? []) {
+    const flag = e.autoDisabledAt ? "  [AUTO-DISABLED]" : e.enabled ? "" : "  [disabled]";
+    const last = e.lastStatusCode ? `  last HTTP ${e.lastStatusCode}` : "";
+    out += `  ${e.urlHost || e.webhookId}  ${pct(e.successRate)}  (${e.delivered}/${e.deliveries})${last}${flag}\n`;
+  }
+  return out;
+}
+
 function renderAccount(view: AccountMetricsView): string {
   let out =
     `account totals\n` +
@@ -93,6 +123,7 @@ function renderAccount(view: AccountMetricsView): string {
         `rate ${pct(a.rates.deliveredRate)}\n`;
     }
   }
+  out += webhookLines(view.webhooks);
   if (view.agentsTruncated) {
     out +=
       `  note: more agents have traffic than are listed; the totals above still\n` +
