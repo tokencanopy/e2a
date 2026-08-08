@@ -17,6 +17,10 @@ const MaxDeliveryMetricsEndpoints = 50
 // on rows that no longer exist.
 const DeliveryRetention = 30 * 24 * time.Hour
 
+// retentionGrace keeps a window that merely touches the retention boundary
+// from being reported as exceeding it.
+const retentionGrace = time.Hour
+
 // DeliveryOutcomeCounts is one population's delivery tally.
 //
 // The two failure buckets are what the TABLE can actually prove, which is not
@@ -105,7 +109,11 @@ func (s *SubscriberStore) CountDeliveriesForAccount(ctx context.Context, userID 
 	if !end.After(start) {
 		return metrics, fmt.Errorf("webhook delivery metrics: end must be after start")
 	}
-	metrics.WindowExceedsRetention = start.Before(time.Now().Add(-DeliveryRetention))
+	// A grace margin matters here: the DEFAULT 30-day window starts a hair
+	// before the 30-day horizon, so an exact comparison raises the warning on
+	// every ordinary page load. A flag that is always on is ignored by the
+	// time it matters — which is the 90-day view it exists for.
+	metrics.WindowExceedsRetention = start.Before(time.Now().Add(-DeliveryRetention - retentionGrace))
 
 	// A non-2xx status code is proof the endpoint answered; 0/NULL means
 	// nothing ever did. This is the only attribution the table supports.

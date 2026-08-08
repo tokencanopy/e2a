@@ -145,6 +145,17 @@ func TestDeliveryMetricsFlagsRetentionHorizon(t *testing.T) {
 	userID := seedDeliveryAccount(t, pool, "whretain")
 	now := time.Now()
 
+	// The default window sits exactly on the boundary and must stay quiet —
+	// a warning that fires on every page load is ignored by the time a 90-day
+	// view actually needs it.
+	atBoundary, err := store.CountDeliveriesForAccount(context.Background(), userID, now.Add(-webhook.DeliveryRetention), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atBoundary.WindowExceedsRetention {
+		t.Error("the default 30-day window sits on the horizon and must not be flagged")
+	}
+
 	within, err := store.CountDeliveriesForAccount(context.Background(), userID, now.Add(-20*24*time.Hour), now)
 	if err != nil {
 		t.Fatal(err)
