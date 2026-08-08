@@ -38,6 +38,54 @@ func TestBuildReplyQuoteBodyEmptyParentIsVerbatim(t *testing.T) {
 	}
 }
 
+func TestBuildReplyQuoteBodyDerivesTextFromHTMLOnlyParent(t *testing.T) {
+	// An HTML-only parent must still produce a quoted TEXT part. Otherwise the
+	// reply's two multipart/alternative parts disagree — the HTML one carries
+	// the thread, the text one (what plaintext clients and receiving agents
+	// read) does not.
+	ctx := ForwardContext{
+		From: "a@example.com",
+		HTML: "<p>first &amp; foremost</p><p>second</p>",
+	}
+	got := BuildReplyQuoteBody("Top.", ctx)
+	for _, want := range []string{
+		"Top.\r\n\r\na@example.com wrote:\r\n",
+		"> first & foremost\r\n", // entities decoded, block boundary honored
+		"> second\r\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%q", want, got)
+		}
+	}
+}
+
+func TestBuildReplyQuoteBodyPrefersParentTextOverHTML(t *testing.T) {
+	// Precedence pin: the parent's own text/plain part is the lexically
+	// faithful copy, so an HTML rendition must never displace it.
+	ctx := ForwardContext{
+		From: "a@example.com",
+		Text: "the text part",
+		HTML: "<p>the html part</p>",
+	}
+	got := BuildReplyQuoteBody("Top.", ctx)
+	if !strings.Contains(got, "> the text part\r\n") {
+		t.Fatalf("expected the parent's text part to be quoted, got:\n%q", got)
+	}
+	if strings.Contains(got, "the html part") {
+		t.Fatalf("HTML rendition must not displace the text part, got:\n%q", got)
+	}
+}
+
+func TestBuildReplyQuoteBodyMarkupOnlyParentIsVerbatim(t *testing.T) {
+	// HTML that renders to nothing (an image-only body) has no quotable text:
+	// emit the reply verbatim rather than an attribution line over a blank
+	// quote block.
+	ctx := ForwardContext{From: "a@example.com", HTML: `<img src="cid:logo">`}
+	if got := BuildReplyQuoteBody("Body only.", ctx); got != "Body only." {
+		t.Fatalf("expected verbatim body, got %q", got)
+	}
+}
+
 func TestBuildReplyQuoteHTMLBodyPrefersParentHTML(t *testing.T) {
 	ctx := ForwardContext{
 		From: "a@example.com",

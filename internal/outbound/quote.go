@@ -2,6 +2,8 @@ package outbound
 
 import (
 	"strings"
+
+	"github.com/tokencanopy/e2a/internal/mailparse"
 )
 
 // EXPERIMENTAL: reply quote-history composition. Generalizes the forward
@@ -24,14 +26,35 @@ func BuildReplyQuoteAttribution(ctx ForwardContext) string {
 	return from + " wrote:"
 }
 
+// quotedParentText picks the parent body to quote into the text/plain part:
+// the parent's own text/plain part when it has one, else a plain-text
+// rendition of its HTML.
+//
+// The fallback is what keeps a multipart/alternative reply internally
+// consistent. Without it, a reply to an HTML-ONLY parent shipped a text part
+// with no history while its HTML part carried the full quote — two
+// non-equivalent renderings of one message, so whether the recipient saw the
+// thread depended on which alternative their client picked. Deriving text
+// from HTML is also what mail clients do in the same spot.
+func quotedParentText(ctx ForwardContext) string {
+	if ctx.Text != "" {
+		return ctx.Text
+	}
+	if ctx.HTML == "" {
+		return ""
+	}
+	return mailparse.HTMLToText(ctx.HTML)
+}
+
 // BuildReplyQuoteBody composes the text/plain body of a quoted reply: the
 // caller's reply text, a blank line, the attribution line, then the parent
 // text with every line ">"-prefixed. A parent that already carries ">"
-// quoting nests naturally (">>"), matching mail-client behavior. An empty
-// parent text drops the quote block entirely — the reply goes out exactly
-// as the caller wrote it.
+// quoting nests naturally (">>"), matching mail-client behavior. A parent
+// with no quotable body at all drops the quote block entirely — the reply
+// goes out exactly as the caller wrote it.
 func BuildReplyQuoteBody(replyText string, ctx ForwardContext) string {
-	if ctx.Text == "" {
+	parent := quotedParentText(ctx)
+	if strings.TrimSpace(parent) == "" {
 		return replyText
 	}
 	var buf strings.Builder
@@ -39,7 +62,7 @@ func BuildReplyQuoteBody(replyText string, ctx ForwardContext) string {
 	buf.WriteString("\r\n\r\n")
 	buf.WriteString(BuildReplyQuoteAttribution(ctx))
 	buf.WriteString("\r\n")
-	text := strings.ReplaceAll(ctx.Text, "\r\n", "\n")
+	text := strings.ReplaceAll(parent, "\r\n", "\n")
 	text = strings.TrimRight(text, "\n")
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, ">") {

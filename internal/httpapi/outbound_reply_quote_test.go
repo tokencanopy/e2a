@@ -36,6 +36,47 @@ func TestReplyQuoteHistoryHTMLFallsBackToEscapedText(t *testing.T) {
 	}
 }
 
+// An HTML-only parent must quote into BOTH alternatives of the reply. The
+// text part is derived from the parent's HTML; without that derivation the
+// two alternatives disagree and whether the recipient sees the thread depends
+// on which one their client renders.
+func TestReplyQuoteHistoryHTMLOnlyParentQuotesBothParts(t *testing.T) {
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in_htmlonly/reply", "good",
+		map[string]any{"text": "thanks", "html": "<p>thanks</p>", "quote_history": true})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	req := lastDeliveredReq()
+	// Entities are decoded on the way into the text part ("&amp;" → "&").
+	wantText := "thanks\r\n\r\nalice@x.com wrote:\r\n> hi & hello\r\n"
+	if req.Body != wantText {
+		t.Fatalf("delivered Body = %q, want %q", req.Body, wantText)
+	}
+	// The HTML part still quotes the parent's own markup verbatim.
+	if !strings.Contains(req.HTMLBody, "<blockquote") || !strings.Contains(req.HTMLBody, "<p>hi &amp; hello</p>") {
+		t.Fatalf("delivered HTMLBody missing quoted parent markup, got %q", req.HTMLBody)
+	}
+}
+
+// A text-only reply to an HTML-only parent still gets its history — the
+// derivation is not conditional on the caller supplying html.
+func TestReplyQuoteHistoryHTMLOnlyParentTextOnlyReply(t *testing.T) {
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in_htmlonly/reply", "good",
+		map[string]any{"text": "thanks", "quote_history": true})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	req := lastDeliveredReq()
+	if !strings.Contains(req.Body, "> hi & hello") {
+		t.Fatalf("delivered Body missing derived quote, got %q", req.Body)
+	}
+	if req.HTMLBody != "" {
+		t.Fatalf("a text-only reply must stay text-only, got HTMLBody %q", req.HTMLBody)
+	}
+}
+
 func TestReplyWithoutQuoteHistoryIsVerbatim(t *testing.T) {
 	srv := testServer(t)
 	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1/reply", "good",

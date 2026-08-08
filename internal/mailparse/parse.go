@@ -210,6 +210,16 @@ func decode(body io.Reader, cte string) string {
 	}
 }
 
+// HTMLToText renders an HTML body to readable plain text — the same rendition
+// Parse falls back to when a message carries no text/plain part, with the
+// blank-line collapsing applied so the result is usable on its own. Exported
+// for outbound composition: quoting an HTML-only parent into a text/plain
+// body needs exactly this rendering, and duplicating it there would let the
+// two drift.
+func HTMLToText(h string) string {
+	return normalizeWhitespace(htmlToText(h))
+}
+
 // htmlToText renders HTML to plain text: drops script/style, inserts newlines
 // at block boundaries, and decodes entities (via the tokenizer).
 func htmlToText(h string) string {

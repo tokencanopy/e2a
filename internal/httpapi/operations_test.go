@@ -567,6 +567,18 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 					RawMessage: []byte("From: alice@x.com\r\nTo: support@acme.com\r\nSubject: Question\r\nMessage-ID: <abc@x.com>\r\n\r\nhi"),
 				}, nil
 			}
+			if messageID == "msg_in_htmlonly" {
+				// An inbound carrying ONLY a text/html part — no text/plain to
+				// quote from. Exercises the reply-quote path's HTML→text
+				// derivation (a bare text/html message is common from bulk
+				// senders and some clients).
+				return &identity.Message{
+					ID: "msg_in_htmlonly", AgentID: "support@acme.com", Sender: "alice@x.com",
+					Subject: "Question", EmailMessageID: "<htmlonly@x.com>",
+					RawMessage: []byte("From: alice@x.com\r\nTo: support@acme.com\r\nSubject: Question\r\n" +
+						"Message-ID: <htmlonly@x.com>\r\nContent-Type: text/html\r\n\r\n<p>hi &amp; hello</p>"),
+				}, nil
+			}
 			if messageID == "msg_bigthread" {
 				// An inbound on a thread with 60 To recipients — reply_all fans
 				// them all into the outbound set, exceeding the 50 cap.
