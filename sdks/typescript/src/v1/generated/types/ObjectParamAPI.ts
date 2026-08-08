@@ -81,6 +81,7 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
@@ -250,6 +251,13 @@ export interface AccountApiGetAccountMetricsRequest {
      */
     end?: Date
     /**
+     * Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
+     * Defaults to: undefined
+     * @type &#39;day&#39;
+     * @memberof AccountApigetAccountMetrics
+     */
+    bucket?: 'day'
+    /**
      * Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      * Defaults to: undefined
      * @type &#39;agent&#39;
@@ -417,7 +425,7 @@ export class ObjectAccountApi {
      * @param param the request object
      */
     public getAccountMetricsWithHttpInfo(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
-        return this.api.getAccountMetricsWithHttpInfo(param.start, param.end, param.groupBy,  options).toPromise();
+        return this.api.getAccountMetricsWithHttpInfo(param.start, param.end, param.bucket, param.groupBy,  options).toPromise();
     }
 
     /**
@@ -426,7 +434,7 @@ export class ObjectAccountApi {
      * @param param the request object
      */
     public getAccountMetrics(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<AccountMetricsView> {
-        return this.api.getAccountMetrics(param.start, param.end, param.groupBy,  options).toPromise();
+        return this.api.getAccountMetrics(param.start, param.end, param.bucket, param.groupBy,  options).toPromise();
     }
 
     /**

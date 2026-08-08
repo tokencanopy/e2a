@@ -150,6 +150,9 @@ type Deps struct {
 	// Optional — nil yields a zeroed block rather than failing the read, so a
 	// deployment without the subscriber store still serves email counters.
 	CountWebhookDeliveries WebhookDeliveryCounter
+	// CountAccountDaily backs ?bucket=day. Optional — nil simply omits the
+	// buckets array rather than failing the read.
+	CountAccountDaily AccountDailyCounter
 	// ModifyMessageLabels applies a labels delta to a message scoped to an
 	// agent, returning the post-update set. Mirrors store.ModifyMessageLabels.
 	ModifyMessageLabels func(ctx context.Context, messageID, agentID string, add, remove []string) ([]string, error)

@@ -1308,12 +1308,17 @@ class AccountResource:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         group_by: Optional[str] = None,
+        bucket: Optional[str] = None,
     ) -> AccountMetricsView:
         """Beta: counter metrics across every agent this account owns.
 
         Uses the same cohort-window and denominator contract as
         ``messages.get_metrics()``, so an account total and the per-agent
         numbers under it can never disagree about what a rate means.
+
+        Pass ``bucket="day"`` for per-day buckets suitable for charting;
+        they are gap-filled so a silent day is present with zeroes rather
+        than missing.
 
         Pass ``group_by="agent"`` for a per-agent breakdown, busiest first. It
         is capped at 200 agents and sets ``agents_truncated`` when it cuts; the
@@ -1326,6 +1331,7 @@ class AccountResource:
             lambda h: self._api.get_account_metrics(
                 start=start,
                 end=end,
+                bucket=bucket,
                 group_by=group_by,
                 _headers=h,
             )

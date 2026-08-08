@@ -16,6 +16,7 @@ import { PageShell } from "../../components/loft/PageShell";
 import { Chip } from "../../components/loft/Chip";
 import { InfoTip } from "../../components/loft/InfoTip";
 import { metricsKey } from "../../../lib/swrKeys";
+import { TrendChart, type TrendPoint } from "./_components/TrendChart";
 import { METRIC_HELP } from "../../../lib/metricDefinitions";
 import {
   getAccountMetrics,
@@ -189,7 +190,7 @@ export default function MetricsPage() {
   const [days, setDays] = useState<number>(30);
 
   const { data, error, isLoading } = useSWR(metricsKey(days, true), () =>
-    getAccountMetrics({ groupByAgent: true, start: startOf(days), end: new Date() }),
+    getAccountMetrics({ groupByAgent: true, bucketByDay: true, start: startOf(days), end: new Date() }),
   );
   // Comparison window: the equal-length period immediately before this one.
   const { data: prior } = useSWR(["metrics-prior", days], () =>
@@ -198,6 +199,17 @@ export default function MetricsPage() {
 
   const summary = data?.summary;
   const rates = data?.rates;
+  const trend: TrendPoint[] = useMemo(
+    () =>
+      (data?.buckets ?? []).map((b) => ({
+        day: b.day,
+        deliveredRate: b.rates.delivered_rate,
+        accepted: b.summary.accepted,
+        delivered: b.summary.delivered,
+        bounced: b.summary.bounced_hard + b.summary.bounced_soft + b.summary.bounced_undetermined,
+      })),
+    [data],
+  );
   const agents = useMemo(
     () => (data?.agents ?? []).slice().sort((a, b) => b.messages_in_window - a.messages_in_window),
     [data],
@@ -300,6 +312,15 @@ export default function MetricsPage() {
             inWindow={data.messages_in_window}
             withLifecycle={data.messages_with_lifecycle}
           />
+
+          {trend.length > 1 && (
+            <Panel
+              title="Delivery rate over time"
+              help="One point per UTC day. A day with no sends has no rate to plot, so the line breaks rather than dropping to zero — a gap means nothing was sent, not that everything failed. The bars below are daily volume, on their own scale."
+            >
+              <TrendChart points={trend} />
+            </Panel>
+          )}
 
           <Panel title="Where mail went">
             {summary.accepted === 0 && (

@@ -63,6 +63,7 @@ Usage:
   e2a metrics [<email>]             Delivery counters; no inbox = account rollup
         --start/--end <rfc3339>    Cohort window (default: last 30 days)
         --by-agent                 Break the account rollup down per inbox
+        --by-day                   Per-day buckets (UTC) for trend analysis
         --json                     Raw response
   e2a protection get <email>        Show the protection (screening/review) config
   e2a protection set <email>        Flip review posture, only the named knobs
@@ -209,7 +210,7 @@ function hasFlag(args: string[], flag: string): boolean {
 // message id.
 const BOOLEAN_FLAGS = new Set([
   "--json", "--text", "--once", "--dry-run", "--help", "--version",
-  "--clear-name", "--clear-stage", "--by-agent",
+  "--clear-name", "--clear-stage", "--by-agent", "--by-day",
 ]);
 
 function getPositionals(args: string[], exactCount?: number, usage?: string): string[] {
@@ -592,7 +593,7 @@ async function main() {
       break;
     }
     case "metrics": {
-      checkFlags(args, ["--start", "--end", "--by-agent", "--json"]);
+      checkFlags(args, ["--start", "--end", "--by-agent", "--by-day", "--json"]);
       // Zero positionals = the account rollup; one = that inbox. Anything more
       // is a typo, and guessing which one was meant would silently report the
       // wrong scope.
@@ -605,6 +606,7 @@ async function main() {
         start: getFlagChecked(args, "--start"),
         end: getFlagChecked(args, "--end"),
         byAgent: hasFlag(args, "--by-agent"),
+        byDay: hasFlag(args, "--by-day"),
         json: hasFlag(args, "--json"),
       });
       break;

@@ -11,6 +11,7 @@
  */
 
 import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
@@ -26,6 +27,10 @@ export class AccountMetricsView {
     * True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut.
     */
     'agentsTruncated': boolean;
+    /**
+    * Per-day breakdown, oldest first. Empty unless bucket=day was requested. Each bucket\'s counters sum to the window totals above; its rates do not average to the window rate, because a rate of rates is not the rate.
+    */
+    'buckets': Array<MetricsBucketView> | null;
     /**
     * Every reason code observed across the account in the window, ordered by code.
     */
@@ -75,6 +80,12 @@ export class AccountMetricsView {
             "name": "agentsTruncated",
             "baseName": "agents_truncated",
             "type": "boolean",
+            "format": ""
+        },
+        {
+            "name": "buckets",
+            "baseName": "buckets",
+            "type": "Array<MetricsBucketView>",
             "format": ""
         },
         {

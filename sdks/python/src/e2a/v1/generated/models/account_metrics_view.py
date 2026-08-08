@@ -21,6 +21,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from typing import Any, ClassVar, Dict, List, Optional
 from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupView
+from e2a.v1.generated.models.metrics_bucket_view import MetricsBucketView
 from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView
 from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView
 from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView
@@ -34,6 +35,7 @@ class AccountMetricsView(BaseModel):
     """ # noqa: E501
     agents: Optional[List[AgentMetricsGroupView]] = Field(description="Per-agent breakdown, busiest first. Empty unless group_by=agent was requested.")
     agents_truncated: StrictBool = Field(description="True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut.")
+    buckets: Optional[List[MetricsBucketView]] = Field(description="Per-day breakdown, oldest first. Empty unless bucket=day was requested. Each bucket's counters sum to the window totals above; its rates do not average to the window rate, because a rate of rates is not the rate.")
     counters: Optional[List[MetricsCounterView]] = Field(description="Every reason code observed across the account in the window, ordered by code.")
     end: datetime = Field(description="Exclusive end of the cohort window.")
     messages_in_window: StrictInt = Field(description="Messages created in the window across every agent this account owns.")
@@ -44,7 +46,7 @@ class AccountMetricsView(BaseModel):
     summary: MetricsSummaryView = Field(description="Account-wide counters. Always computed across every agent, never from the possibly-truncated agents array.")
     webhooks: WebhookMetricsView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agents", "agents_truncated", "counters", "end", "messages_in_window", "messages_with_lifecycle", "rates", "reconstructed_observations", "start", "summary", "webhooks"]
+    __properties: ClassVar[List[str]] = ["agents", "agents_truncated", "buckets", "counters", "end", "messages_in_window", "messages_with_lifecycle", "rates", "reconstructed_observations", "start", "summary", "webhooks"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -94,6 +96,13 @@ class AccountMetricsView(BaseModel):
                 if _item_agents:
                     _items.append(_item_agents.to_dict())
             _dict['agents'] = _items
+        # override the default output from pydantic by calling `to_dict()` of each item in buckets (list)
+        _items = []
+        if self.buckets:
+            for _item_buckets in self.buckets:
+                if _item_buckets:
+                    _items.append(_item_buckets.to_dict())
+            _dict['buckets'] = _items
         # override the default output from pydantic by calling `to_dict()` of each item in counters (list)
         _items = []
         if self.counters:
@@ -120,6 +129,11 @@ class AccountMetricsView(BaseModel):
         if self.agents is None and "agents" in self.model_fields_set:
             _dict['agents'] = None
 
+        # set to None if buckets (nullable) is None
+        # and model_fields_set contains the field
+        if self.buckets is None and "buckets" in self.model_fields_set:
+            _dict['buckets'] = None
+
         # set to None if counters (nullable) is None
         # and model_fields_set contains the field
         if self.counters is None and "counters" in self.model_fields_set:
@@ -139,6 +153,7 @@ class AccountMetricsView(BaseModel):
         _obj = cls.model_validate({
             "agents": [AgentMetricsGroupView.from_dict(_item) for _item in obj["agents"]] if obj.get("agents") is not None else None,
             "agents_truncated": obj.get("agents_truncated"),
+            "buckets": [MetricsBucketView.from_dict(_item) for _item in obj["buckets"]] if obj.get("buckets") is not None else None,
             "counters": [MetricsCounterView.from_dict(_item) for _item in obj["counters"]] if obj.get("counters") is not None else None,
             "end": obj.get("end"),
             "messages_in_window": obj.get("messages_in_window"),

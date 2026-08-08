@@ -80,6 +80,7 @@ export * from '../models/MessageLifecycleTransition.js';
 export * from '../models/MessageParsedView.js';
 export * from '../models/MessageSummaryView.js';
 export * from '../models/MessageView.js';
+export * from '../models/MetricsBucketView.js';
 export * from '../models/MetricsCounterView.js';
 export * from '../models/MetricsRatesView.js';
 export * from '../models/MetricsSummaryView.js';
@@ -246,6 +247,7 @@ import { MessageLifecycleTransition , MessageLifecycleTransitionDirectionEnum   
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
@@ -453,6 +455,7 @@ let typeMap: {[index: string]: any} = {
     "MessageParsedView": MessageParsedView,
     "MessageSummaryView": MessageSummaryView,
     "MessageView": MessageView,
+    "MetricsBucketView": MetricsBucketView,
     "MetricsCounterView": MetricsCounterView,
     "MetricsRatesView": MetricsRatesView,
     "MetricsSummaryView": MetricsSummaryView,
