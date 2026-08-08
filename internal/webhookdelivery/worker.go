@@ -223,7 +223,7 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		// webhook_deleted.
 		if job.Attempt >= MaxDeliveryAttempts {
 			w.emitAttempt("exhausted", "none", -1)
-			transitioned, merr := w.subStore.TransitionSubscriberFailedIfPending(ctx, job.Args.DeliveryID, job.Attempt, "internal error loading delivery", 0)
+			transitioned, merr := w.subStore.TransitionSubscriberFailedIfPending(ctx, job.Args.DeliveryID, job.Attempt, identity.LastErrorInternalLoadDelivery, 0)
 			if merr != nil {
 				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after row-load error (row stays pending; the reconciler will re-drive it once this job is discarded): %v", job.Args.DeliveryID, merr)
 			} else if transitioned {
@@ -260,7 +260,7 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 			// error would leak internal hosts/IPs and DB identifiers. The
 			// returned err carries the real detail to River's job-error log.
 			w.emitAttempt("exhausted", "none", -1)
-			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "internal error resolving webhook", 0)
+			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, identity.LastErrorInternalResolveWebhook, 0)
 			if merr != nil {
 				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending; the reconciler will re-drive it once this job is discarded): %v", d.ID, merr)
 			} else if transitioned {

@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 // SubscriberDelivery is one row in webhook_subscriber_deliveries.
@@ -283,11 +285,11 @@ func (s *SubscriberStore) DeleteExpiredSubscriberDeliveries(ctx context.Context)
 	for {
 		tag, err := s.pool.Exec(ctx,
 			`UPDATE webhook_subscriber_deliveries
-			    SET status = 'failed', last_error = 'expired before delivery'
+			    SET status = 'failed', last_error = $2
 			  WHERE ctid IN (
 			   SELECT ctid FROM webhook_subscriber_deliveries
 			    WHERE expires_at <= now() AND status = 'pending' LIMIT $1)`,
-			expiredDeleteBatch)
+			expiredDeleteBatch, identity.LastErrorExpiredBeforeDelivery)
 		if err != nil {
 			return deleted, marked, err
 		}

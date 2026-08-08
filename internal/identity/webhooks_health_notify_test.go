@@ -845,3 +845,184 @@ func TestUpdateWebhook_RealReenableStillResetsTheEvidenceWindow(t *testing.T) {
 		t.Errorf("disabled %d (err %v) — want 0: pre-re-enable failures are stale evidence and must not immediately re-disable", n, err)
 	}
 }
+
+// An e2a-side outage must never disable a customer's webhook, and must never
+// be quoted back to them as the reason. Before the fix only the "webhook
+// disabled" sentinel was excluded, so the other three e2a-attributable errors
+// both counted toward the threshold and were eligible as auto_disable_reason —
+// meaning a sustained DB/queue failure on our side would disable customers'
+// endpoints and email them "Most recent error: internal error loading
+// delivery."
+func TestSweeps_IgnoreE2AAttributableFailures(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-e2afault@example.com", "Owner", "google-wh-e2afault")
+
+	// Deliberately NOT ranging over identity.E2AAttributableLastErrors: a test
+	// parameterised by the production list cannot detect that list losing an
+	// entry, which is the exact regression this guards. These strings are
+	// asserted independently, and must match what the writers actually emit.
+	e2aErrors := []string{
+		"webhook disabled",
+		"expired before delivery",
+		"internal error loading delivery",
+		"internal error resolving webhook",
+	}
+	for i, e2aErr := range e2aErrors {
+		t.Run(e2aErr, func(t *testing.T) {
+			wh, _ := store.CreateWebhook(ctx, user.ID,
+				fmt.Sprintf("https://example.com/e2a-fault-%d", i), "",
+				[]string{"email.received"}, identity.WebhookFilters{})
+
+			// Well past both thresholds — but every row is OUR fault.
+			for j := 0; j < identity.AutoDisableThreshold+5; j++ {
+				if _, err := pool.Exec(ctx,
+					`INSERT INTO webhook_subscriber_deliveries
+					    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at, last_attempt_at)
+					 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, $3, now() - interval '1 hour', now() - interval '1 hour')`,
+					fmt.Sprintf("whd_e2a_%d_%d_%s", i, j, wh.ID), wh.ID, e2aErr,
+				); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+
+			recD := &notifyRecorder{}
+			if n, err := store.AutoDisableFailingWebhooks(ctx, recD.enqueue); err != nil || n != 0 {
+				t.Errorf("auto-disabled %d (err %v) — want 0: %q is an e2a-side failure and must never disable a customer's webhook", n, err, e2aErr)
+			}
+			recW := &notifyRecorder{}
+			if n, err := store.WarnFailingWebhooks(ctx, recW.enqueue); err != nil || n != 0 {
+				t.Errorf("warned %d (err %v) — want 0: %q must not trigger a customer warning either", n, err, e2aErr)
+			}
+
+			// And it must never be quoted at the customer.
+			st, err := store.RecentWebhookFailureStats(ctx, wh.ID, identity.AutoDisableWindow)
+			if err != nil {
+				t.Fatalf("stats: %v", err)
+			}
+			if st.LastError == e2aErr {
+				t.Errorf("email would quote %q as the customer's failure reason", e2aErr)
+			}
+			if st.FailedAttempts != 0 {
+				t.Errorf("email would report %d failed deliveries built entirely from e2a-side errors", st.FailedAttempts)
+			}
+		})
+	}
+}
+
+// A real endpoint failure mixed in with e2a-side noise must still trip the
+// breaker on its own merits — the exclusion must not become a way to hide
+// genuine customer failures.
+func TestAutoDisable_StillFiresOnRealFailuresAmongE2ANoise(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-mixed@example.com", "Owner", "google-wh-mixed")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/mixed", "", []string{"email.received"}, identity.WebhookFilters{})
+	insert := func(id, lastErr string) {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, $3, now() - interval '1 hour', now() - interval '1 hour')`,
+			id, wh.ID, lastErr,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	for j := 0; j < 4; j++ {
+		insert(fmt.Sprintf("whd_mix_noise_%d_%s", j, wh.ID), identity.LastErrorInternalLoadDelivery)
+	}
+	for j := 0; j < identity.AutoDisableThreshold; j++ {
+		insert(fmt.Sprintf("whd_mix_real_%d_%s", j, wh.ID), "HTTP 404")
+	}
+
+	rec := &notifyRecorder{}
+	n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue)
+	if err != nil {
+		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("disabled %d — want 1: %d genuine HTTP 404 failures must still trip the breaker", n, identity.AutoDisableThreshold)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.AutoDisableReason != "HTTP 404" {
+		t.Errorf("auto_disable_reason = %q — want the real endpoint error, not e2a's", after.AutoDisableReason)
+	}
+}
+
+// The disable pass must be capped like the warn pass, and the cap must drain.
+func TestAutoDisableFailingWebhooks_CapDrainsAcrossTicks(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-dcap@example.com", "Owner", "google-wh-dcap")
+
+	const extra = 3
+	const perUser = 25
+	total := identity.DisableSweepMaxPerTick + extra
+	owner := user
+	for i := 0; i < total; i++ {
+		if i > 0 && i%perUser == 0 {
+			owner, _ = store.CreateOrGetUser(ctx,
+				fmt.Sprintf("wh-dcap-%d@example.com", i), "Owner",
+				fmt.Sprintf("google-wh-dcap-%d", i))
+		}
+		wh, err := store.CreateWebhook(ctx, owner.ID, fmt.Sprintf("https://example.com/dcap-%d", i), "", []string{"email.received"}, identity.WebhookFilters{})
+		if err != nil {
+			t.Fatalf("create webhook %d: %v", i, err)
+		}
+		for j := 0; j < identity.AutoDisableThreshold; j++ {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO webhook_subscriber_deliveries
+				    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at, last_attempt_at)
+				 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 500', now() - interval '1 hour', now() - interval '1 hour')`,
+				fmt.Sprintf("whd_dcap_%d_%d_%s", i, j, wh.ID), wh.ID,
+			); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+	}
+
+	disabled := 0
+	for tick := 1; tick <= 3; tick++ {
+		rec := &notifyRecorder{}
+		n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue)
+		if err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		if n > identity.DisableSweepMaxPerTick {
+			t.Fatalf("tick %d disabled %d — exceeds the per-tick cap of %d", tick, n, identity.DisableSweepMaxPerTick)
+		}
+		disabled += n
+		if disabled == total {
+			break
+		}
+	}
+	if disabled != total {
+		t.Fatalf("disabled %d of %d after three ticks — the cap does not drain", disabled, total)
+	}
+}
+
+// The exclusion list and the strings the writers actually emit must not drift
+// apart. Both are constants, so this is a cheap tripwire rather than a test of
+// behaviour — but a silent drift here re-opens the "blame the customer for
+// e2a's outage" failure with no other signal.
+func TestE2AAttributableLastErrors_MatchesTheWrittenVocabulary(t *testing.T) {
+	want := map[string]bool{
+		"webhook disabled":                 true,
+		"expired before delivery":          true,
+		"internal error loading delivery":  true,
+		"internal error resolving webhook": true,
+	}
+	if len(identity.E2AAttributableLastErrors) != len(want) {
+		t.Fatalf("E2AAttributableLastErrors has %d entries, want %d: %v",
+			len(identity.E2AAttributableLastErrors), len(want), identity.E2AAttributableLastErrors)
+	}
+	for _, got := range identity.E2AAttributableLastErrors {
+		if !want[got] {
+			t.Errorf("unexpected entry %q — if a writer changed, update both sides deliberately", got)
+		}
+	}
+}

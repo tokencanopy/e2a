@@ -605,6 +605,59 @@ const (
 // self-referential reason "webhook disabled" mailed to the customer.
 const LastErrorWebhookDisabled = "webhook disabled"
 
+// The remaining e2a-attributable terminal errors. Each is written when
+// something on OUR side failed — in two of the three cases no HTTP request
+// ever reached the customer's endpoint. They are declared here, beside the
+// exclusion list that consumes them, and referenced by the packages that
+// write them so the vocabulary cannot drift.
+const (
+	// LastErrorExpiredBeforeDelivery — the janitor found a row still pending
+	// at its TTL, i.e. we never got it out (internal/webhook).
+	LastErrorExpiredBeforeDelivery = "expired before delivery"
+	// LastErrorInternalLoadDelivery — our DB read of the delivery row failed
+	// on the final attempt (internal/webhookdelivery).
+	LastErrorInternalLoadDelivery = "internal error loading delivery"
+	// LastErrorInternalResolveWebhook — our DB read of the webhook row failed
+	// on the final attempt (internal/webhookdelivery).
+	LastErrorInternalResolveWebhook = "internal error resolving webhook"
+)
+
+// E2AAttributableLastErrors is the full set of terminal last_error values
+// that describe an e2a-side failure rather than a customer endpoint failure.
+// The breaker count, the warn count, the captured auto_disable_reason, and
+// the email's failure stats all exclude every one of them.
+//
+// The original code excluded only LastErrorWebhookDisabled, on the correct
+// reasoning that "the breaker must not eat its own output" — but applied it
+// to a single string rather than to the class. The other three count toward
+// the disable threshold AND are eligible to be quoted verbatim as the
+// customer-facing reason, so a sustained e2a outage (DB degradation, queue
+// backlog) would disable customers' webhooks and email them:
+//
+//	"e2a has disabled one of your webhooks after repeated delivery
+//	 failures. Most recent error: internal error loading delivery."
+//
+// That is e2a destroying a customer's event flow during e2a's own outage and
+// naming its own internal error as the customer's fault — and auto-disable is
+// lossy forwards, so the events published while it stays disabled can never
+// be replayed to that endpoint.
+var E2AAttributableLastErrors = []string{
+	LastErrorWebhookDisabled,
+	LastErrorExpiredBeforeDelivery,
+	LastErrorInternalLoadDelivery,
+	LastErrorInternalResolveWebhook,
+}
+
+// DisableSweepMaxPerTick bounds how many webhooks one auto-disable pass may
+// flip + enqueue, mirroring WarnSweepMaxPerTick. The disable pass needed this
+// MORE than the warn pass did, not less: it sends the louder email and it
+// destroys state (auto-disable stops fan-out, and events published while
+// disabled are never queued for that webhook, so they cannot be replayed).
+// Applied INSIDE the candidate subquery alongside the eligibility filter, so
+// the cap bounds rows we might actually disable and drains across sweeps.
+// TUNABLE.
+const DisableSweepMaxPerTick = 100
+
 // WarnSweepMaxPerTick bounds how many webhooks one warn pass may stamp +
 // enqueue. A systemic failure on OUR side (egress outage) makes every
 // active webhook satisfy the warn condition at once; an unbounded pass
@@ -654,7 +707,7 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 		           AND d.status = 'failed'
 		           AND d.created_at > now() - $2::interval
 		           AND d.created_at > COALESCE(webhooks.reenabled_at, '-infinity'::timestamptz)
-		           AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3
+		           AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> ALL($3::text[])
 		         ORDER BY d.last_attempt_at DESC NULLS LAST
 		         LIMIT 1
 		     )
@@ -662,15 +715,17 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 		     SELECT d.webhook_id
 		     FROM webhook_subscriber_deliveries d
 		     JOIN webhooks w2 ON w2.id = d.webhook_id
+		          AND w2.enabled = true
 		     WHERE d.created_at > now() - $2::interval
 		       AND d.created_at > COALESCE(w2.reenabled_at, '-infinity'::timestamptz)
 		     GROUP BY d.webhook_id
-		     HAVING COUNT(*) FILTER (WHERE d.status = 'failed' AND (d.last_error IS NULL OR d.last_error <> $3)) >= $1
+		     HAVING COUNT(*) FILTER (WHERE d.status = 'failed' AND (d.last_error IS NULL OR d.last_error <> ALL($3::text[]))) >= $1
 		        AND COUNT(*) FILTER (WHERE d.status = 'delivered') = 0
+		     LIMIT $4
 		 )
 		 AND enabled = true
 		 RETURNING id`,
-		AutoDisableThreshold, AutoDisableWindow, LastErrorWebhookDisabled,
+		AutoDisableThreshold, AutoDisableWindow, E2AAttributableLastErrors, DisableSweepMaxPerTick,
 	)
 }
 
@@ -736,14 +791,14 @@ func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyT
 		       AND d.created_at > COALESCE(w2.reenabled_at, '-infinity'::timestamptz)
 		       AND d.created_at > COALESCE(w2.last_delivered_at, '-infinity'::timestamptz)
 		     GROUP BY d.webhook_id
-		     HAVING COUNT(*) FILTER (WHERE d.attempts >= 1 AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3) >= $1
+		     HAVING COUNT(*) FILTER (WHERE d.attempts >= 1 AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> ALL($3::text[])) >= $1
 		        AND COUNT(*) FILTER (WHERE d.status = 'delivered') = 0
 		     LIMIT $4
 		 )
 		 AND enabled = true
 		 AND warn_notified_at IS NULL
 		 RETURNING id`,
-		WarnThreshold, WarnWindow, LastErrorWebhookDisabled, WarnSweepMaxPerTick,
+		WarnThreshold, WarnWindow, E2AAttributableLastErrors, WarnSweepMaxPerTick,
 	)
 }
 
@@ -810,25 +865,38 @@ type WebhookFailureStats struct {
 // the health-notification emails.
 func (s *Store) RecentWebhookFailureStats(ctx context.Context, webhookID string, window time.Duration) (WebhookFailureStats, error) {
 	var st WebhookFailureStats
-	// The snooze cap's synthetic rows (last_error = LastErrorWebhookDisabled)
-	// are excluded from both the count and the quoted error: they are e2a
-	// bookkeeping, not endpoint failures, and quoting "webhook disabled" as
-	// the reason a webhook was disabled would be self-referential nonsense.
+	// Every e2a-attributable row is excluded from both the count and the
+	// quoted error: they are e2a bookkeeping, not endpoint failures. Quoting
+	// "webhook disabled" as the reason a webhook was disabled would be
+	// self-referential nonsense, and quoting "internal error loading
+	// delivery" would blame the customer for our outage.
+	//
+	// The reenabled_at cut is applied here too. Every other evidence query
+	// has it; without it the email's "failed deliveries in the last N days"
+	// counts failures the breaker itself was told to ignore, so the number
+	// matches neither the evidence that tripped it nor the customer's own
+	// dashboard — in the one message whose only asset is being credible.
+	// The re-enable cut is read as a scalar subquery rather than a join: the
+	// outer query aggregates, so a joined row cannot be referenced from the
+	// correlated last_error subquery ("subquery uses ungrouped column").
 	err := s.pool.QueryRow(ctx,
 		`SELECT
-		    COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> '' AND last_error <> $3),
+		    COUNT(*) FILTER (WHERE d.attempts >= 1 AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> ALL($3::text[])),
 		    COALESCE((
-		        SELECT d.last_error
-		        FROM webhook_subscriber_deliveries d
-		        WHERE d.webhook_id = $1
-		          AND d.created_at > now() - $2::interval
-		          AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3
-		        ORDER BY d.last_attempt_at DESC NULLS LAST
+		        SELECT d2.last_error
+		        FROM webhook_subscriber_deliveries d2
+		        WHERE d2.webhook_id = $1
+		          AND d2.created_at > now() - $2::interval
+		          AND d2.created_at > COALESCE((SELECT w2.reenabled_at FROM webhooks w2 WHERE w2.id = $1), '-infinity'::timestamptz)
+		          AND d2.last_error IS NOT NULL AND d2.last_error <> '' AND d2.last_error <> ALL($3::text[])
+		        ORDER BY d2.last_attempt_at DESC NULLS LAST
 		        LIMIT 1
 		    ), '')
-		 FROM webhook_subscriber_deliveries
-		 WHERE webhook_id = $1 AND created_at > now() - $2::interval`,
-		webhookID, window, LastErrorWebhookDisabled,
+		 FROM webhook_subscriber_deliveries d
+		 WHERE d.webhook_id = $1
+		   AND d.created_at > now() - $2::interval
+		   AND d.created_at > COALESCE((SELECT w.reenabled_at FROM webhooks w WHERE w.id = $1), '-infinity'::timestamptz)`,
+		webhookID, window, E2AAttributableLastErrors,
 	).Scan(&st.FailedAttempts, &st.LastError)
 	if err != nil {
 		return WebhookFailureStats{}, fmt.Errorf("webhook failure stats: %w", err)
