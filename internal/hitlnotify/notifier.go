@@ -64,6 +64,9 @@ type Notifier struct {
 	// behaviour of pointing Reply-To back at the sender address.
 	replyTo   string
 	publicURL string
+	// dkim, when wired via WithDKIM, signs for the From-header domain.
+	// nil (the zero-config self-host path) sends unsigned.
+	dkim outbound.DKIMKeyLookup
 }
 
 // New returns a Notifier that sends mail through relay using the given
@@ -74,8 +77,9 @@ type Notifier struct {
 // fromAddress and replyTo are notifications.from_address / .reply_to. Setting
 // fromAddress to the same value here and in webhooknotify is what
 // consolidates both senders into one identity; leaving it unset keeps them
-// distinct and separately filterable. Resolution mirrors webhooknotify.New so
-// the two packages cannot drift.
+// distinct and separately filterable. Resolution deliberately mirrors
+// webhooknotify.New line for line; it is a copy rather than a shared helper,
+// so changing one means changing the other.
 func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
 	addr := strings.TrimSpace(fromAddress)
 	if addr == "" {
@@ -94,6 +98,15 @@ func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken
 		replyTo:     strings.TrimSpace(replyTo),
 		publicURL:   strings.TrimRight(publicURL, "/"),
 	}
+}
+
+// WithDKIM wires per-domain DKIM signing, mirroring webhooknotify. The relay
+// itself never signs and an upstream provider only signs identities it
+// manages, so a custom notifications.from_address domain is signed here or
+// not at all. nil-safe and fail-open via outbound.SignWithDKIM.
+func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
+	n.dkim = lookup
+	return n
 }
 
 // NotifyPendingApproval composes and sends the notification email for a held
@@ -194,6 +207,22 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 	// assigned id (no dedup, but no injection either).
 	if !strings.ContainsAny(msgIDHeader, "\r\n") {
 		message = append([]byte("Message-ID: "+msgIDHeader+"\r\n"), message...)
+	}
+
+	// DKIM-sign for the From-header domain AFTER the Message-ID prepend, so the
+	// signature covers the final header set.
+	//
+	// Required for parity with webhooknotify once from_address is configurable:
+	// the SMTP relay never signs, and an upstream provider only signs identities
+	// IT manages, so a custom from_address domain (BYODKIM — e2a holds the key)
+	// is signed here or not at all. Without this, an operator who set
+	// notifications.from_address would get signed webhook-health mail and
+	// UNSIGNED approval mail — leaving the most time-sensitive email the
+	// platform sends on a single SPF leg, and so quarantined the moment anyone
+	// forwards it. Fail-open via outbound.SignWithDKIM: no lookup, no stored key
+	// for the domain, or a signing failure all send unsigned, exactly as before.
+	if signed, ok := outbound.SignWithDKIM(n.dkim, message, n.fromDomain); ok {
+		message = signed
 	}
 
 	// SendOnce, not Send: this runs inside a River job, so River (not the relay's

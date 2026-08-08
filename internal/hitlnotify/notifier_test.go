@@ -7,6 +7,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -387,5 +388,87 @@ func TestNotifierHonoursConfiguredFromAddress(t *testing.T) {
 	}
 	if strings.Contains(data, "Message-ID: <") && !strings.Contains(data, "@mail.test>") {
 		t.Errorf("Message-ID domain should follow the configured From, got:\n%s", firstHeaders(data))
+	}
+}
+
+// fakeDKIMLookup is a DKIMKeyLookup test double.
+type fakeDKIMLookup struct {
+	get func(ctx context.Context, domain string) (string, []byte, error)
+}
+
+func (f *fakeDKIMLookup) GetDKIMKeyInternal(ctx context.Context, domain string) (string, []byte, error) {
+	return f.get(ctx, domain)
+}
+
+// Parity with webhooknotify. The relay never DKIM-signs on e2a's behalf for a
+// custom notifications.from_address domain (BYODKIM: e2a holds the key), so
+// the notifier must sign in-process. Without this, an operator who configured
+// from_address would get signed webhook-health mail and UNSIGNED approval
+// mail — leaving the most time-sensitive email the platform sends on an SPF
+// leg alone, and so quarantined the moment anyone forwards it.
+func TestNotifierSignsWithDKIMForConfiguredFromDomain(t *testing.T) {
+	keypair, err := dkim.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := &fakeDKIMLookup{get: func(_ context.Context, domain string) (string, []byte, error) {
+		if domain != "corp.example" {
+			t.Fatalf("DKIM lookup domain = %q, want the From-header domain corp.example", domain)
+		}
+		return keypair.Selector, keypair.PrivateKeyDER, nil
+	}}
+
+	smtpAddr, smtpDone := testutil.FakeSMTPServer(t)
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
+		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
+	})
+	signer := approvaltoken.NewSigner(notifySecret)
+	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "approvals@corp.example", "", publicURL).WithDKIM(lookup)
+
+	agent, msg := setupPendingMessage(t, store, "dkim")
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+		t.Fatalf("NotifyPendingApproval: %v", err)
+	}
+	msgs := smtpDone()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 SMTP message, got %d", len(msgs))
+	}
+	data := string(msgs[0].Data)
+
+	if !strings.Contains(data, "DKIM-Signature:") {
+		t.Fatalf("approval mail sent UNSIGNED from a custom from_address domain:\n%s", firstHeaders(data))
+	}
+	if !strings.Contains(data, "d=corp.example") {
+		t.Errorf("DKIM-Signature must be for the From-header domain (d=corp.example):\n%s", firstHeaders(data))
+	}
+}
+
+// The zero-config self-host path: no key, or no lookup wired at all, must
+// send unsigned rather than fail.
+func TestNotifierSendsUnsignedWithoutDKIMKey(t *testing.T) {
+	lookup := &fakeDKIMLookup{get: func(_ context.Context, _ string) (string, []byte, error) {
+		return "", nil, nil // no key stored
+	}}
+	smtpAddr, smtpDone := testutil.FakeSMTPServer(t)
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
+		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
+	})
+	signer := approvaltoken.NewSigner(notifySecret)
+	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "", publicURL).WithDKIM(lookup)
+
+	agent, msg := setupPendingMessage(t, store, "nodkim")
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+		t.Fatalf("must succeed unsigned: %v", err)
+	}
+	msgs := smtpDone()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 SMTP message, got %d", len(msgs))
+	}
+	if strings.Contains(string(msgs[0].Data), "DKIM-Signature:") {
+		t.Errorf("unexpected DKIM-Signature without a stored key")
 	}
 }
