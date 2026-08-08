@@ -148,7 +148,10 @@ type Metrics interface {
 
 	// WebhookTerminal records terminal delivery outcomes after the terminal
 	// database transition succeeds. outcome ∈ {delivered, e2a_failure,
-	// endpoint_failure, excluded}; scope ∈ {initial, replay, test, unknown}.
+	// endpoint_failure, excluded, webhook_disabled}; scope ∈ {initial,
+	// replay, test, unknown}. webhook_disabled = the delivery exhausted the
+	// disabled-webhook snooze budget (MaxDisabledSnoozes) and was written
+	// terminally failed ("webhook disabled").
 	// The hosted SLO uses initial + unknown and excludes endpoint_failure:
 	// customer endpoint behavior must not burn e2a's error budget.
 	WebhookTerminal(outcome, scope string, count int)

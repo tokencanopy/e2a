@@ -745,3 +745,72 @@ provisioning:
 		t.Errorf("expected error to mention provisioning secret, got: %v", err)
 	}
 }
+
+func TestNotificationsFromAddress(t *testing.T) {
+	t.Run("env override", func(t *testing.T) {
+		t.Setenv("E2A_NOTIFICATIONS_FROM_ADDRESS", "support@notify.example")
+		t.Setenv("E2A_NOTIFICATIONS_REPLY_TO", "replies@notify.example")
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte("{}\n"), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Notifications.FromAddress != "support@notify.example" {
+			t.Errorf("Notifications.FromAddress = %q, want env override", cfg.Notifications.FromAddress)
+		}
+		if cfg.Notifications.ReplyTo != "replies@notify.example" {
+			t.Errorf("Notifications.ReplyTo = %q, want env override", cfg.Notifications.ReplyTo)
+		}
+	})
+
+	t.Run("default empty", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte("{}\n"), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Notifications.FromAddress != "" {
+			t.Errorf("Notifications.FromAddress = %q, want empty default (fallback local part on from_domain)", cfg.Notifications.FromAddress)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("empty from_address must validate: %v", err)
+		}
+	})
+
+	t.Run("validate rejects a non-address", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte("{}\n"), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		cfg.Notifications.FromAddress = "not-an-address"
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate accepted a malformed notifications.from_address")
+		}
+		cfg.Notifications.FromAddress = "Support <support@notify.example>"
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate must require a BARE address (no display name)")
+		}
+		cfg.Notifications.FromAddress = "support@notify.example"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate rejected a valid bare address: %v", err)
+		}
+		cfg.Notifications.ReplyTo = "not-an-address"
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate accepted a malformed notifications.reply_to")
+		}
+		cfg.Notifications.ReplyTo = "replies@notify.example"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate rejected a valid bare reply_to: %v", err)
+		}
+	})
+}

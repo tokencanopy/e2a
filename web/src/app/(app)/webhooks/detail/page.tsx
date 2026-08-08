@@ -9,7 +9,7 @@
 // app contains no dynamic segments — /webhooks/[id] would not build. This
 // matches /inboxes/messages?email= and /inboxes/settings?email=.
 
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
@@ -19,7 +19,9 @@ import { ApiError, getWebhook } from "../../../components/onboarding/api";
 import {
   classifyWebhookHealth,
   describeScope,
+  describeWebhookToggleError,
   HEALTH_LABEL,
+  type WebhookView,
 } from "../../../../lib/webhooks";
 import { webhookKey } from "../../../../lib/swrKeys";
 import { DeliveriesFeed } from "./DeliveriesFeed";
@@ -45,6 +47,7 @@ function WebhookDetailContent({ id }: { id: string }) {
     data: webhook,
     error,
     isLoading,
+    mutate,
   } = useSWR(id ? webhookKey(id) : null, () => getWebhook(id));
 
   if (!id) {
@@ -167,22 +170,99 @@ function WebhookDetailContent({ id }: { id: string }) {
       </section>
 
       {health.kind === "auto_disabled" ? (
-        <div
-          className="rounded-[var(--r-lg)] border p-4 mt-4 text-[13px]"
-          style={{
-            background: "var(--danger-bg)",
-            borderColor: "var(--danger)",
-            color: "var(--danger-strong)",
-          }}
-        >
-          <strong>Delivery paused.</strong> e2a disabled this webhook after
-          repeated delivery failures. Fix the endpoint, then re-enable it
-          through the API after the five-minute cooldown.
-        </div>
+        <AutoDisabledBanner webhook={webhook} onChanged={() => mutate()} />
       ) : null}
 
       <DeliveriesFeed webhookId={webhook.id} />
     </PageShell>
+  );
+}
+
+// AutoDisabledBanner is the recovery surface for an auto-disabled webhook:
+// it names the concrete failure (auto_disabled_reason) and carries a real
+// Re-enable button — the dashboard must never tell the user to go use the
+// API. A 409 webhook_cooldown renders as expected-state copy, never a raw
+// error, and the page refetches after any outcome-changing PATCH rather
+// than trusting local state (re-enable is the action most likely to run
+// against a stale page).
+function AutoDisabledBanner({
+  webhook,
+  onChanged,
+}: {
+  webhook: Pick<WebhookView, "id" | "auto_disabled_reason">;
+  onChanged: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+
+  const reenable = async () => {
+    setPending(true);
+    setError("");
+    try {
+      const res = await fetch(`/v1/webhooks/${encodeURIComponent(webhook.id)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setError(describeWebhookToggleError(res.status, text));
+        return;
+      }
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div
+      className="rounded-[var(--r-lg)] border p-4 mt-4 text-[13px]"
+      style={{
+        background: "var(--danger-bg)",
+        borderColor: "var(--danger)",
+        color: "var(--danger-strong)",
+      }}
+    >
+      <strong>Delivery paused.</strong> e2a disabled this webhook after
+      repeated delivery failures
+      {webhook.auto_disabled_reason ? (
+        <>
+          {" "}
+          (most recent error:{" "}
+          <code
+            className="font-mono text-[12px] px-1 py-0.5"
+            style={{
+              background: "var(--bg-panel)",
+              color: "var(--fg)",
+              borderRadius: "var(--r-sm)",
+            }}
+          >
+            {webhook.auto_disabled_reason}
+          </code>
+          )
+        </>
+      ) : null}
+      . Fix the endpoint, then re-enable it here.
+      <div className="mt-3 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={reenable}
+          disabled={pending}
+          className="px-3 py-1.5 text-[12px] font-medium transition disabled:opacity-50"
+          style={{
+            background: "var(--danger)",
+            color: "#fff",
+            borderRadius: "var(--r-sm)",
+          }}
+        >
+          {pending ? "Re-enabling…" : "Re-enable webhook"}
+        </button>
+        {error && <span>{error}</span>}
+      </div>
+    </div>
   );
 }
 

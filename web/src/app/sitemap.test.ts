@@ -2,6 +2,10 @@
 // env vars at module load (Next.js inlines them at build time). Each scenario
 // therefore re-imports the module tree fresh.
 
+// Module marker: keeps the top-level ENV_KEY file-scoped (two test files
+// declare the same const name; script-scope files would collide as globals).
+export {};
+
 const ENV_KEY = "NEXT_PUBLIC_PRICING_PATH";
 
 function loadSitemap(): () => Array<{ url: string; priority?: number }> {

@@ -15,6 +15,10 @@ import { HttpFile } from '../http/http.js';
 
 export class CreateWebhookResponse {
     'autoDisabledAt'?: Date;
+    /**
+    * Why e2a auto-disabled this webhook — the delivery failure observed when the breaker tripped (e.g. \"HTTP 404\"). Open set: treat as a short human-readable string and tolerate unknown values. Present only while the webhook is auto-disabled; cleared on re-enable.
+    */
+    'autoDisabledReason'?: string;
     'createdAt': Date;
     'description': string;
     'enabled': boolean;
@@ -38,6 +42,12 @@ export class CreateWebhookResponse {
             "baseName": "auto_disabled_at",
             "type": "Date",
             "format": "date-time"
+        },
+        {
+            "name": "autoDisabledReason",
+            "baseName": "auto_disabled_reason",
+            "type": "string",
+            "format": ""
         },
         {
             "name": "createdAt",

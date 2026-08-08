@@ -47,6 +47,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
 	"github.com/tokencanopy/e2a/internal/webhookdelivery"
+	"github.com/tokencanopy/e2a/internal/webhooknotify"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 	"github.com/tokencanopy/e2a/internal/ws"
 	"github.com/tokencanopy/e2a/migrations"
@@ -329,6 +330,21 @@ func main() {
 		registrars = append(registrars, notifyJobs)
 	}
 
+	// Webhook health notifications on River (docs/design/
+	// 2026-08-08-webhook-health-notifications.md): the maintenance sweep
+	// enqueues webhook_notify jobs (warning / disabled) in the same tx as the
+	// state transition; the NotifyWorker sends the email. Same two-phase
+	// wiring as hitlnotify. Gated on the relay from_domain alone — unlike
+	// HITL magic links, these emails degrade gracefully without a public URL
+	// (generic dashboard copy instead of a link). When unconfigured, no jobs
+	// register and the sweep transitions state without notifications
+	// (pre-feature behavior).
+	var webhookNotifyJobs *webhooknotify.Jobs
+	if cfg.OutboundSMTP.FromDomain != "" {
+		webhookNotifyJobs = webhooknotify.NewJobs(store)
+		registrars = append(registrars, webhookNotifyJobs)
+	}
+
 	var senderMgr *senderidentity.Manager
 	if region := cfg.SenderIdentity.SESRegion; region != "" {
 		provider, perr := senderidentity.NewSESProviderFromConfig(ctx, region)
@@ -367,10 +383,18 @@ func main() {
 		registrars = append(registrars, fanoutJobs)
 	}
 
-	// Webhook janitor (auto-disable failing webhooks + clear expired prev secrets)
-	// as a River periodic on QueueMaintenance — replaces the hand-rolled 5-min
-	// ticker. Reuses AutoDisableWorker.Tick as the sweep body.
-	webhookMaint := webhookdelivery.NewMaintenanceJobs(webhook.NewAutoDisableWorker(store))
+	// Webhook janitor (auto-disable failing webhooks + warn on attempt-level
+	// failure bursts + clear expired prev secrets) as a River periodic on
+	// QueueMaintenance — replaces the hand-rolled 5-min ticker. Reuses
+	// AutoDisableWorker.Tick as the sweep body. The notifier seam is wired
+	// here (nil-safe) so each disable/warn transition enqueues its health
+	// email atomically; the shared client reaches the Jobs via SetEnqueuer
+	// below, well before the first tick (RunOnStart:false ⇒ +5min).
+	webhookSweep := webhook.NewAutoDisableWorker(store)
+	if webhookNotifyJobs != nil {
+		webhookSweep.SetNotifier(webhookNotifyJobs)
+	}
+	webhookMaint := webhookdelivery.NewMaintenanceJobs(webhookSweep)
 	registrars = append(registrars, webhookMaint)
 
 	// HITL TTL expiration sweep as a River periodic on QueueMaintenance — replaces
@@ -500,6 +524,14 @@ func main() {
 			}
 			log.Printf("[hitl-notify] engine=river")
 		}
+		// Webhook health notifications: wire the shared client into the sweep's
+		// enqueuer. No reconciler — the sweep only enqueues on a state
+		// transition it commits in the same tx, so there is nothing to
+		// re-drive at startup (a transition without its job cannot exist).
+		if webhookNotifyJobs != nil {
+			webhookNotifyJobs.SetEnqueuer(jobsClient)
+			log.Printf("[webhook-notify] engine=river")
+		}
 		// Stop is driven from the shutdown sequence under the shared deadline.
 		if serr := jobsClient.Start(ctx); serr != nil {
 			log.Fatalf("jobs: start shared river client: %v", serr)
@@ -568,13 +600,32 @@ func main() {
 		// unreachable in practice — kept as a defensive guard against future drift.
 		log.Printf("[hitl] notifier disabled: notification job pipeline not registered")
 	} else {
-		notifier := hitlnotify.New(store, smtpRelay, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.HTTP.PublicURL)
+		notifier := hitlnotify.New(store, smtpRelay, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
 		// Late-bind the concrete Deliverer onto the registered NotifyWorker (which
 		// has been running since jobsClient.Start; jobs enqueued before this bind
 		// simply retry) and give the hold path its accept-tx enqueuer. The HTTP
 		// server isn't accepting requests yet, so no hold can miss the enqueuer.
 		notifyJobs.SetDeliverer(notifier)
 		api.SetNotifyEnqueuer(notifyJobs)
+	}
+
+	// Webhook health-notification sender. Same late-bind as the HITL notifier:
+	// jobs enqueued before this point simply retry against the nil-deliverer
+	// guard. The from-address is notifications.from_address when set (hosted:
+	// a replyable support address), else the fixed no-reply local part on the
+	// relay from_domain — configuration, never a constant, because a hardcoded
+	// operator address would break every self-host (they don't own it).
+	// The notifier DKIM-signs in-process for the From-header domain (same
+	// store-backed key lookup the outbound Sender uses): the relay never
+	// signs, and an upstream like SES only signs identities it manages, so
+	// a BYODKIM custom from-address domain is signed here or not at all.
+	// Fail-open — no stored key (self-host default) sends unsigned.
+	if webhookNotifyJobs != nil {
+		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
+		webhookNotifyJobs.SetDeliverer(whNotifier)
+		log.Printf("[webhook-notify] enabled (from=%s)", whNotifier.FromAddress())
+	} else {
+		log.Printf("[webhook-notify] disabled: outbound_smtp.from_domain is not set")
 	}
 
 	// OAuth 2.1 / fosite-backed authorization server. Needs the same

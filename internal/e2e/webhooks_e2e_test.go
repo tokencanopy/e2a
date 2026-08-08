@@ -649,7 +649,7 @@ func TestWebhooksE2E_AutoDisableAfterFailures(t *testing.T) {
 		}
 	}
 
-	n, err := ts.Store.AutoDisableFailingWebhooks(ctx)
+	n, err := ts.Store.AutoDisableFailingWebhooks(ctx, nil)
 	if err != nil {
 		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
 	}
@@ -665,6 +665,37 @@ func TestWebhooksE2E_AutoDisableAfterFailures(t *testing.T) {
 	}
 	if after.AutoDisabledAt == nil {
 		t.Errorf("auto_disabled_at not set")
+	}
+	if after.AutoDisableReason != "HTTP 503" {
+		t.Errorf("AutoDisableReason = %q, want the most recent terminal error (HTTP 503)", after.AutoDisableReason)
+	}
+
+	// The reason must reach the API view (additive optional field): the
+	// first question a user asks about an auto-disabled endpoint is WHY.
+	owner, err := ts.Store.GetUserByID(ctx, agent.UserID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	ownerKey, err := ts.Store.CreateAPIKey(ctx, owner.ID, "autodis-view", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	status, body := authedJSON(t, "GET", ts.HTTPServer.URL+"/v1/webhooks/"+wh.ID, ownerKey.PlaintextKey, "")
+	if status != 200 {
+		t.Fatalf("GET webhook status=%d body=%s", status, body)
+	}
+	var view struct {
+		Enabled            bool   `json:"enabled"`
+		AutoDisabledReason string `json:"auto_disabled_reason"`
+	}
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatalf("unmarshal webhook view: %v", err)
+	}
+	if view.Enabled {
+		t.Errorf("API view still shows enabled")
+	}
+	if view.AutoDisabledReason != "HTTP 503" {
+		t.Errorf("auto_disabled_reason on the wire = %q, want HTTP 503", view.AutoDisabledReason)
 	}
 }
 

@@ -766,3 +766,74 @@ func TestDeliverWorker_Metrics_TerminalScopeInitialAndReplay(t *testing.T) {
 		})
 	}
 }
+
+// --- Disabled-delivery snooze cap (design 2026-08-08-webhook-health-notifications, Part 5) ---
+
+// TestDeliverWorker_DisabledSnoozeUnderCapKeepsSnoozing pins the boundary
+// from below: at MaxDisabledSnoozes-1 recorded snoozes the job snoozes one
+// more time and the row stays pending/untouched.
+func TestDeliverWorker_DisabledSnoozeUnderCapKeepsSnoozing(t *testing.T) {
+	id, sub, _, wh := seed(t, "wd-snooze-under")
+	wh.Enabled = false
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	j := job(id, 1)
+	j.Metadata = []byte(fmt.Sprintf(`{"snoozes":%d}`, webhookdelivery.MaxDisabledSnoozes-1))
+	if err := w.Work(context.Background(), j); err == nil {
+		t.Fatal("under the cap the worker must still snooze (non-nil snooze error), got nil")
+	}
+	d := statusOf(t, sub, id)
+	if d.Status != "pending" || d.Attempts != 0 {
+		t.Errorf("under-cap delivery mutated: status=%q attempts=%d, want pending/0", d.Status, d.Attempts)
+	}
+	if len(fm.terminal) != 0 {
+		t.Errorf("terminal metrics = %v, want none under the cap", fm.terminal)
+	}
+}
+
+// TestDeliverWorker_DisabledSnoozeCapWritesTerminalFailed pins the boundary
+// at the cap: once the job has been snoozed MaxDisabledSnoozes times, the
+// delivery reaches a truthful terminal state instead of waking hourly until
+// its 90-day expiry (SC3/G4). last_error deliberately says the delivery
+// stopped because of endpoint STATE, not a transport error.
+func TestDeliverWorker_DisabledSnoozeCapWritesTerminalFailed(t *testing.T) {
+	id, sub, _, wh := seed(t, "wd-snooze-cap")
+	wh.Enabled = false
+	fm := &fakeMetrics{}
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{wh: wh}).WithMetrics(fm)
+	j := job(id, 1)
+	j.Metadata = []byte(fmt.Sprintf(`{"snoozes":%d}`, webhookdelivery.MaxDisabledSnoozes))
+	if err := w.Work(context.Background(), j); err != nil {
+		t.Fatalf("Work at the snooze cap should complete the job (nil), got: %v", err)
+	}
+	d := statusOf(t, sub, id)
+	if d.Status != "failed" {
+		t.Fatalf("status = %q, want failed (terminal at the snooze cap)", d.Status)
+	}
+	if d.LastError != "webhook disabled" {
+		t.Errorf("last_error = %q, want %q", d.LastError, "webhook disabled")
+	}
+	if len(fm.terminal) != 1 || fm.terminal[0].outcome != "webhook_disabled" {
+		t.Errorf("terminal metrics = %v, want one webhook_disabled", fm.terminal)
+	}
+}
+
+// TestDeliverWorker_DisabledSnoozeCapNeverClobbersDeliveredRow: a row that
+// reached 'delivered' by any path must not be flipped to failed by a stale
+// capped job waking up against it.
+func TestDeliverWorker_DisabledSnoozeCapNeverClobbersDeliveredRow(t *testing.T) {
+	id, sub, _, wh := seed(t, "wd-snooze-clobber")
+	if changed, err := sub.MarkDeliveredIfPending(context.Background(), id, 200); err != nil || !changed {
+		t.Fatalf("MarkDeliveredIfPending: changed=%v err=%v", changed, err)
+	}
+	wh.Enabled = false
+	w := webhookdelivery.NewDeliverWorker(sub, fakeDeliverer{out: webhook.DeliveryOutcome{Success: true}}, fakeWebhooks{wh: wh})
+	j := job(id, 1)
+	j.Metadata = []byte(fmt.Sprintf(`{"snoozes":%d}`, webhookdelivery.MaxDisabledSnoozes))
+	if err := w.Work(context.Background(), j); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if d := statusOf(t, sub, id); d.Status != "delivered" {
+		t.Errorf("status = %q, want delivered preserved", d.Status)
+	}
+}
