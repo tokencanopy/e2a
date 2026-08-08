@@ -25,6 +25,12 @@ export const accountUnreadKey = "account-unread";
 // too — see invalidateAgents / invalidateDomains below.
 export const limitsKey = "limits";
 
+// Account-wide delivery metrics (GET /v1/metrics), read by the Metrics page.
+// Keyed by the window so switching 7d/30d/90d caches separately instead of
+// showing the previous range's numbers under the new range's label.
+export const metricsKey = (days: number, groupByAgent: boolean) =>
+  ["metrics", days, groupByAgent] as const;
+
 // Trash views (soft-deleted resources, restorable ~30 days).
 // deletedAgentsKey backs the account-wide /trash page
 // (GET /v1/agents?deleted=true); agentTrashKey backs the per-inbox
