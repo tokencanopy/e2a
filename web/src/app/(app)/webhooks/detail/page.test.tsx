@@ -94,7 +94,7 @@ describe("webhook detail page", () => {
     expect(screen.queryByText("all agents")).not.toBeInTheDocument();
   });
 
-  it("renders auto-disabled as danger with recovery guidance", async () => {
+  it("renders auto-disabled as danger with an in-page recovery path", async () => {
     searchParams = new URLSearchParams("id=wh_1");
     respond({
       webhook: () =>
@@ -102,6 +102,7 @@ describe("webhook detail page", () => {
           ...webhook,
           enabled: false,
           auto_disabled_at: "2026-07-27T11:00:00Z",
+          auto_disabled_reason: "HTTP 404",
         }),
     });
 
@@ -116,12 +117,95 @@ describe("webhook detail page", () => {
     expect(
       screen.getByText(/disabled this webhook after repeated delivery failures/i),
     ).toBeInTheDocument();
+    // The concrete failure reason is the first question a user asks.
+    expect(screen.getByText("HTTP 404")).toBeInTheDocument();
+    // The recovery is a real button, not a pointer at the API.
     expect(
-      screen
-        .getByText(/disabled this webhook after repeated delivery failures/i)
-        .closest("div"),
-    ).toHaveStyle({ background: "var(--danger-bg)" });
-    expect(screen.getByText(/five-minute cooldown/i)).toBeInTheDocument();
+      screen.getByRole("button", { name: /re-enable webhook/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/through the API/i)).not.toBeInTheDocument();
+  });
+
+  it("re-enables from the banner and refetches server state", async () => {
+    searchParams = new URLSearchParams("id=wh_1");
+    const disabled = {
+      ...webhook,
+      enabled: false,
+      auto_disabled_at: "2026-07-27T11:00:00Z",
+      auto_disabled_reason: "HTTP 404",
+    };
+    let reenabled = false;
+    mockFetch.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.includes("/deliveries")) {
+        return okJson({ items: [], next_cursor: null });
+      }
+      if (init?.method === "PATCH") {
+        expect(url).toContain("/v1/webhooks/wh_1");
+        expect(JSON.parse(init.body ?? "{}")).toEqual({ enabled: true });
+        reenabled = true;
+        return okJson({ ...webhook, enabled: true });
+      }
+      // GET: before the PATCH the row is auto-disabled; after it, healthy.
+      return okJson(reenabled ? webhook : disabled);
+    });
+
+    render(<WebhookDetailPage />);
+    const btn = await screen.findByRole("button", { name: /re-enable webhook/i });
+    fireEvent.click(btn);
+
+    // The page must re-read server state (no optimistic trust): the banner
+    // disappears because the refetched row is enabled again.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /re-enable webhook/i }),
+      ).not.toBeInTheDocument();
+    });
+    expect(reenabled).toBe(true);
+  });
+
+  // 409 webhook_cooldown is expected product state, not breakage — it must
+  // render as words, never as a raw error envelope. The OpenAPI description
+  // says SDKs do not auto-retry this code; the UI doesn't either.
+  it("renders the re-enable cooldown as friendly copy, not a raw error", async () => {
+    searchParams = new URLSearchParams("id=wh_1");
+    const disabled = {
+      ...webhook,
+      enabled: false,
+      auto_disabled_at: "2026-07-27T11:00:00Z",
+    };
+    mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes("/deliveries")) {
+        return okJson({ items: [], next_cursor: null });
+      }
+      if (init?.method === "PATCH") {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                error: {
+                  code: "webhook_cooldown",
+                  message:
+                    "webhook was auto-disabled within the last 5 minutes; wait before re-enabling",
+                },
+              }),
+            ),
+        });
+      }
+      return okJson(disabled);
+    });
+
+    render(<WebhookDetailPage />);
+    const btn = await screen.findByRole("button", { name: /re-enable webhook/i });
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/auto-disabled moments ago/i),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/webhook_cooldown/)).not.toBeInTheDocument();
   });
 
   // The id comes from a user-editable query string, and delivery rows outlive

@@ -459,3 +459,95 @@ describe("Webhooks page", () => {
     });
   });
 });
+
+// Enable/disable from the row: the mutation half of G3 — display was already
+// handled by classifyWebhookHealth.
+describe("Webhooks page — enable/disable toggle", () => {
+  const base = {
+    id: "wh_toggle0001",
+    url: "https://app.example.com/inbox",
+    description: "",
+    events: ["email.received"],
+    enabled: true,
+    created_at: "2026-04-15T10:00:00Z",
+  };
+
+  it("disables an enabled webhook via PATCH and refetches", async () => {
+    let patched: unknown = null;
+    let enabled = true;
+    global.fetch = makeFetchMock({
+      "GET /v1/webhooks": () =>
+        jsonResp({ items: [{ ...base, enabled }] }),
+      [`PATCH /v1/webhooks/${encodeURIComponent(base.id)}`]: (init) => {
+        patched = JSON.parse(String(init?.body ?? "{}"));
+        enabled = false;
+        return jsonResp({ ...base, enabled: false });
+      },
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    const btn = await screen.findByRole("button", { name: /^disable$/i });
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(patched).toEqual({ enabled: false });
+    });
+    // Refetched server state now shows the row disabled → the action reads
+    // Enable (a plain user disable, not auto-disabled → no Re-enable label).
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^enable$/i })).toBeInTheDocument();
+    });
+  });
+
+  it("labels the action Re-enable when e2a auto-disabled the endpoint", async () => {
+    global.fetch = makeFetchMock({
+      "GET /v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...base,
+              enabled: false,
+              auto_disabled_at: "2026-07-20T00:00:00Z",
+              auto_disabled_reason: "HTTP 404",
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    expect(
+      await screen.findByRole("button", { name: /^re-enable$/i }),
+    ).toBeInTheDocument();
+  });
+
+  // The cooldown 409 is expected state — render words, never the raw envelope.
+  it("renders webhook_cooldown as friendly copy", async () => {
+    global.fetch = makeFetchMock({
+      "GET /v1/webhooks": () =>
+        jsonResp({
+          items: [
+            { ...base, enabled: false, auto_disabled_at: "2026-07-20T00:00:00Z" },
+          ],
+        }),
+      [`PATCH /v1/webhooks/${encodeURIComponent(base.id)}`]: () =>
+        errResp(
+          JSON.stringify({
+            error: {
+              code: "webhook_cooldown",
+              message:
+                "webhook was auto-disabled within the last 5 minutes; wait before re-enabling",
+            },
+          }),
+          409,
+        ),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /^re-enable$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/auto-disabled moments ago/i)).toBeInTheDocument();
+    });
+    expect(document.body.textContent).not.toContain("webhook_cooldown");
+  });
+});

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
@@ -55,6 +56,7 @@ type Config struct {
 	Trash            TrashConfig            `yaml:"trash"`
 	Metrics          MetricsConfig          `yaml:"metrics"`
 	OutboundFooter   OutboundFooterConfig   `yaml:"outbound_footer"`
+	Notifications    NotificationsConfig    `yaml:"notifications"`
 	Env              string                 `yaml:"env"` // "development" or "production"
 	// SharedDomain enables slug-based agent registration. When set
 	// (e.g. "agents.example.com"), users can register agents with just a
@@ -227,6 +229,31 @@ type OutboundSMTPConfig struct {
 	// derives it from a standard SES Host (email-smtp.<region>.amazonaws.com);
 	// set it explicitly for non-standard endpoints (e.g. VPC endpoints).
 	MessageIDDomain string `yaml:"message_id_domain"`
+}
+
+// NotificationsConfig carries settings for the platform's operational
+// notification emails (currently the webhook health warning/disabled
+// alerts).
+type NotificationsConfig struct {
+	// FromAddress is the sender address for operational notification
+	// emails. Optional. When empty, notifications fall back to a fixed
+	// no-reply local part on outbound_smtp.from_domain (the hitlnotify
+	// pattern), so self-hosted deployments work with zero configuration.
+	// The value MUST be an address the deployment's sending identity is
+	// allowed to send as. Deliberately configuration, never a constant: a
+	// hardcoded operator address would make every self-host try to send
+	// as an identity it does not own. Override with
+	// E2A_NOTIFICATIONS_FROM_ADDRESS.
+	FromAddress string `yaml:"from_address"`
+	// ReplyTo, when set, adds a Reply-To header to those emails. Use it
+	// when the sending domain (from_address / from_domain) is relay-only
+	// with no mailbox behind it, so replies land in a real support inbox
+	// on another domain — the same From-on-the-relay-domain +
+	// Reply-To-at-the-real-inbox pattern the product's shared-domain
+	// sends already use. Optional: empty emits NO Reply-To header
+	// (replies follow From), the sane default when from_address is
+	// itself a real mailbox. Override with E2A_NOTIFICATIONS_REPLY_TO.
+	ReplyTo string `yaml:"reply_to"`
 }
 
 // InboundConfig selects the inbound processing model (inbound-message-pipeline-
@@ -477,6 +504,12 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OUTBOUND_SMTP_MESSAGE_ID_DOMAIN"); v != "" {
 		cfg.OutboundSMTP.MessageIDDomain = v
 	}
+	if v := os.Getenv("E2A_NOTIFICATIONS_FROM_ADDRESS"); v != "" {
+		cfg.Notifications.FromAddress = v
+	}
+	if v := os.Getenv("E2A_NOTIFICATIONS_REPLY_TO"); v != "" {
+		cfg.Notifications.ReplyTo = v
+	}
 	if v := os.Getenv("E2A_METRICS_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Metrics.Enabled = b
@@ -646,6 +679,18 @@ func (c *Config) Validate() error {
 		}
 		if c.SendingRamp.RampDays < 1 {
 			return fmt.Errorf("config: sending_ramp.ramp_days must be at least 1")
+		}
+	}
+	if v := c.Notifications.FromAddress; v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil || addr.Address != v {
+			return fmt.Errorf("config: notifications.from_address must be a bare email address (got %q)", v)
+		}
+	}
+	if v := c.Notifications.ReplyTo; v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil || addr.Address != v {
+			return fmt.Errorf("config: notifications.reply_to must be a bare email address (got %q)", v)
 		}
 	}
 	return nil

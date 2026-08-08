@@ -453,7 +453,13 @@ describe("doctor", () => {
     it("fails webhook.config when a webhook was auto-disabled", async () => {
       const client = fakeClient();
       client.webhooks.list = vi.fn(() =>
-        pager([makeWebhook({ enabled: false, autoDisabledAt: new Date("2026-07-20T00:00:00Z") })]),
+        pager([
+          makeWebhook({
+            enabled: false,
+            autoDisabledAt: new Date("2026-07-20T00:00:00Z"),
+            autoDisabledReason: "HTTP 404",
+          }),
+        ]),
       );
       mockCreateClient.mockReturnValue(client);
       const { runDoctor } = await import("../commands/doctor.js");
@@ -462,6 +468,9 @@ describe("doctor", () => {
       const c = check(report, "webhook.config");
       expect(c.status).toBe("fail");
       expect(c.reason_code).toBe("webhook_auto_disabled");
+      // The concrete failure the breaker observed rides along as evidence —
+      // the first question anyone debugging this asks.
+      expect(c.evidence).toMatchObject({ auto_disabled_reason: "HTTP 404" });
       expect(report.exit_code).toBe(9);
     });
   });

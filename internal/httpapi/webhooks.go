@@ -58,11 +58,14 @@ type WebhookView struct {
 	URL             string             `json:"url"`
 	Description     string             `json:"description"`
 	Events          []string           `json:"events" nullable:"false" doc:"The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."`
-	Filters         WebhookFiltersView `json:"filters"`
-	Enabled         bool               `json:"enabled"`
-	AutoDisabledAt  *time.Time         `json:"auto_disabled_at,omitempty" format:"date-time"`
-	CreatedAt       time.Time          `json:"created_at" format:"date-time"`
-	LastDeliveredAt *time.Time         `json:"last_delivered_at,omitempty" format:"date-time"`
+	Filters        WebhookFiltersView `json:"filters"`
+	Enabled        bool               `json:"enabled"`
+	AutoDisabledAt *time.Time         `json:"auto_disabled_at,omitempty" format:"date-time"`
+	// AutoDisabledReason is additive and optional (backward compatible):
+	// present only while the webhook is auto-disabled.
+	AutoDisabledReason string     `json:"auto_disabled_reason,omitempty" doc:"Why e2a auto-disabled this webhook — the delivery failure observed when the breaker tripped (e.g. \"HTTP 404\"). Open set: treat as a short human-readable string and tolerate unknown values. Present only while the webhook is auto-disabled; cleared on re-enable."`
+	CreatedAt          time.Time  `json:"created_at" format:"date-time"`
+	LastDeliveredAt    *time.Time `json:"last_delivered_at,omitempty" format:"date-time"`
 }
 
 // CreateWebhookResponse is WebhookView plus the one-time signing secret (WH-3),
@@ -84,8 +87,9 @@ func webhookView(wh *identity.Webhook) WebhookView {
 			ConversationIDs: wh.Filters.ConversationIDs,
 			Labels:          wh.Filters.Labels,
 		},
-		Enabled:   wh.Enabled,
-		CreatedAt: wh.CreatedAt.UTC(),
+		Enabled:            wh.Enabled,
+		AutoDisabledReason: wh.AutoDisableReason,
+		CreatedAt:          wh.CreatedAt.UTC(),
 	}
 	v.AutoDisabledAt = utcPtr(wh.AutoDisabledAt)
 	v.LastDeliveredAt = utcPtr(wh.LastDeliveredAt)

@@ -1,0 +1,26 @@
+-- 098_wsd_created_at_idx.sql
+-- e2a:no-transaction
+--
+-- Range index backing the webhook maintenance sweeps (identity.
+-- AutoDisableFailingWebhooks + WarnFailingWebhooks): both run every 5
+-- minutes and aggregate webhook_subscriber_deliveries over a trailing
+-- window (`created_at > now() - interval`, 72h / 24h) GROUP BY webhook_id,
+-- inside a lock-holding transaction. No existing index serves a bare
+-- created_at range — idx_wsd_webhook_created (025) leads on webhook_id,
+-- idx_wsd_pending_with_job (080) is a partial on pending rows — so each
+-- sweep seq-scans the whole ~30-day, delivery-volume-scaled table twice
+-- per tick. The indexed range is only the trailing window (<= 72h of
+-- rows), so the bitmap scan it enables is small.
+--
+-- CREATE INDEX CONCURRENTLY so the build does not take a write lock on
+-- the prod-sized table; the e2a:no-transaction directive skips the BeginTx
+-- wrapper (Postgres rejects CONCURRENTLY inside a transaction block).
+--
+-- OPS NOTE — invalid-index recovery (same caveat as 080): an interrupted
+-- CONCURRENTLY build leaves an INVALID index of this name, and the re-run's
+-- IF NOT EXISTS then skips the rebuild. Recover manually:
+--     DROP INDEX CONCURRENTLY IF EXISTS idx_wsd_created_at;
+-- then re-run this statement. Check validity with:
+--     SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_wsd_created_at'::regclass;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wsd_created_at
+    ON webhook_subscriber_deliveries (created_at);

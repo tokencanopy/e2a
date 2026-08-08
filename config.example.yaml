@@ -116,6 +116,27 @@ outbound_smtp:
   # explicitly only for non-standard endpoints.
   # message_id_domain: "us-east-2.amazonses.com"
 
+# Platform notification emails (webhook health alerts: an early warning
+# when a webhook's deliveries start failing, and a notice when e2a
+# auto-disables one).
+notifications:
+  # Sender address for those emails. Optional — when empty they send from
+  # a fixed no-reply local part on outbound_smtp.from_domain, so
+  # self-hosted deployments need no configuration here. If set, it must
+  # be an address your upstream is authorized to send as. If e2a holds a
+  # DKIM key for the address's domain (a domain registered with this
+  # server), each notification is DKIM-signed in-process for that domain;
+  # with no stored key it is sent unsigned.
+  # from_address: "support@send.your-company.example"
+  #
+  # Optional Reply-To for those emails. Set it when the sending domain is
+  # relay-only (no mailbox behind from_address) so replies land in a real
+  # support inbox — the same From-on-the-relay-domain + Reply-To pattern
+  # shared-domain agent sends use. Leave unset when from_address is
+  # itself a real mailbox: no Reply-To header is emitted and replies
+  # follow From.
+  # reply_to: "support@your-company.example"
+
 # Outbound delivery is always asynchronous and at-least-once. The send API
 # durably persists the message and enqueues a River job in one transaction,
 # returning status=accepted. A background worker submits it to the relay and
