@@ -1,6 +1,10 @@
 // site.ts reads NEXT_PUBLIC_* at module load (Next.js inlines them at build
 // time), so each scenario sets the env var and re-imports the module fresh.
 
+// Module marker: keeps the top-level ENV_KEY file-scoped (two test files
+// declare the same const name; script-scope files would collide as globals).
+export {};
+
 const ENV_KEY = "NEXT_PUBLIC_E2A_SIGN_IN_URL";
 
 function loadSite(): typeof import("./site") {
