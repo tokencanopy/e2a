@@ -3059,7 +3059,9 @@ scenarios:
           body_contains:
             - buckets
           # Buckets are gap-filled across the default 30-day window, so the
-          # count is stable regardless of how much traffic the account has.
+          # count does not depend on how much traffic the account has. It is 31
+          # because a 30-day window starting mid-day spans 31 UTC days; only a
+          # request landing exactly on UTC midnight would see 30.
           body_match:
             "buckets.length": 31
 

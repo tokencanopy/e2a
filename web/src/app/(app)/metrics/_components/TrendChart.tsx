@@ -130,10 +130,13 @@ export function TrendChart({ points }: { points: TrendPoint[] }) {
       <svg viewBox={`0 0 ${W} ${VOL_H}`} className="w-full" role="img" aria-label="Messages accepted by day">
         {points.map((p, i) => {
           const barW = Math.max(plotW / points.length - 2, 1);
+          // Clamp so the first and last bars stay inside the viewBox instead
+          // of being clipped by half their width at the edges.
+          const barX = Math.min(Math.max(x(i) - barW / 2, PAD.left), W - PAD.right - barW);
           return (
             <rect
               key={p.day}
-              x={x(i) - barW / 2}
+              x={barX}
               y={yVol(p.accepted)}
               width={barW}
               height={Math.max(VOL_H - 4 - yVol(p.accepted), p.accepted > 0 ? 1 : 0)}

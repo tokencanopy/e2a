@@ -22,7 +22,7 @@ export class MetricsRatesView {
     */
     'complaintRate': number | null;
     /**
-    * delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure.
+    * delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.
     */
     'deliveredRate': number | null;
     /**

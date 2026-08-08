@@ -40,7 +40,7 @@ type MetricsSummaryView struct {
 	BouncedUndetermined int64 `json:"bounced_undetermined" doc:"Bounces the provider did not classify. Kept separate rather than folded into soft, which would understate hard-bounce risk."`
 	Complained          int64 `json:"complained" doc:"Recipients who reported the message as spam."`
 	Suppressed          int64 `json:"suppressed" doc:"Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses."`
-	Loopback            int64 `json:"loopback" doc:"Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out."`
+	Loopback            int64 `json:"loopback" doc:"Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. Counts mail that REACHED local submission — a self-send stopped earlier by review has no loopback observation and is not counted here. They remain in accepted and submitted, which count what was asked for and what went out."`
 	SendFailed          int64 `json:"send_failed" doc:"Messages that reached a terminal submission failure: provider rejection, local retry exhaustion, or policy cancellation. Break the three apart via counters[]."`
 
 	Received   int64 `json:"received" doc:"Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."`
@@ -63,7 +63,7 @@ type MetricsSummaryView struct {
 // is indistinguishable from a genuine total failure, which is the one reading
 // a caller must never make by accident.
 type MetricsRatesView struct {
-	DeliveredRate        *float64 `json:"delivered_rate" nullable:"true" doc:"delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure."`
+	DeliveredRate        *float64 `json:"delivered_rate" nullable:"true" doc:"delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does."`
 	BounceRate           *float64 `json:"bounce_rate" nullable:"true" doc:"(bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review."`
 	ComplaintRate        *float64 `json:"complaint_rate" nullable:"true" doc:"complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs."`
 	SuppressionBlockRate *float64 `json:"suppression_block_rate" nullable:"true" doc:"suppressed / (accepted − loopback). The share of outward sends that never left e2a."`
@@ -227,10 +227,13 @@ func deriveMetrics(metrics messagelifecycle.AgentMetrics) ([]MetricsCounterView,
 	// bounce — leaving them in the denominator made agent-to-agent traffic,
 	// which is e2a's flagship flow, report a delivery rate near zero.
 	//
-	// Only messages KNOWN to have gone loopback are removed. A message that
-	// was accepted and then suppressed has no submission observation at all
-	// and stays in the denominator, because it was a real attempt to send
-	// outward that did not happen.
+	// Only messages KNOWN to have gone loopback are removed — that is, those
+	// that reached local submission. A send stopped before it went anywhere
+	// (suppressed, review-rejected, cancelled) has no submission observation
+	// at all and stays in the denominator, whether its recipient was local or
+	// remote. That is deliberate and consistent: a rejected external send is
+	// counted the same way, so destination never changes how a stopped send
+	// is treated.
 	externalAccepted := summary.Accepted - summary.Loopback
 	externalSubmitted := summary.Submitted - summary.Loopback
 	rates := MetricsRatesView{
