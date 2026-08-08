@@ -298,7 +298,10 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 			// in the meantime; a failed write returns the error so River
 			// retries rather than completing the job over an ambiguous row.
 			w.emitAttempt("exhausted", "none", -1) // no POST happened — no duration sample
-			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook disabled", 0)
+			// identity.LastErrorWebhookDisabled, not a literal: the breaker,
+			// warn pass, and email stats key on this exact string to EXCLUDE
+			// these synthetic rows from failure evidence.
+			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, identity.LastErrorWebhookDisabled, 0)
 			if merr != nil {
 				return merr
 			}

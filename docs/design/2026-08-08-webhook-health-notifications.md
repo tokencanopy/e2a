@@ -391,7 +391,7 @@ that row is already `enabled = false`. That customer needs a manual note; see op
 | Webhook deleted between sweep and send | Worker guard 1 → `nil` |
 | User re-enables before the disable email sends | Guard 2 drops it — no "we disabled your webhook" for a working one |
 | Endpoint recovers after warning enqueued | Guard 4 drops it |
-| Warn and disable both fire in one sweep | Warn pass runs first and its `enabled` predicate excludes rows the disable pass just turned off; only the disable email sends |
+| Warn and disable both fire in one sweep | The DISABLE pass runs first, so the warn pass's `enabled` predicate excludes the rows it just turned off; only the disable email sends (worker guard 3 backstops warn jobs from earlier sweeps) |
 | Flapping endpoint (fails, recovers, fails) | `warn_notified_at` cleared on success → warns again. Bounded by `WarnThreshold` within `WarnWindow` |
 | SMTP outage during a mass disable | `QueueNotify` isolates it; connection errors snooze; customer outbound delivery unaffected |
 | Two server replicas sweep concurrently | The `UPDATE … WHERE enabled = true … RETURNING` is atomic; only one tx observes the transition |
@@ -561,3 +561,51 @@ decisions, so the doc describes what actually shipped:
   final `support@send.e2a.dev` sender this has a real identity to align
   to: `send.e2a.dev` is the deployment's actual sending domain, so when a
   key exists the signature is DMARC-aligned with From.
+
+## Adversarial-review fixes (2026-08-08, post-implementation)
+
+An adversarial review of the implementation surfaced one blocker and three
+should-fixes, all applied:
+
+- **The breaker must not eat its own output, and re-enable resets the
+  evidence window (blocker).** Two coupled defects: (1) the snooze cap's
+  synthetic terminal rows (`last_error = "webhook disabled"`) sat inside
+  the 72h breaker window for up to 48h and satisfied its HAVING clause —
+  a user who manually disabled a webhook for >24h and then re-enabled it
+  would be auto-disabled within one sweep with the self-referential
+  reason "webhook disabled"; (2) after a genuine auto-disable, the >=10
+  failed rows that caused it remained in the window, so following the
+  feature's own instruction ("fix the endpoint, then re-enable") re-tripped
+  the breaker and mailed a false alert within 5 minutes on any low-traffic
+  webhook. Fixes: the marker string is now the shared constant
+  `identity.LastErrorWebhookDisabled` and is excluded from the breaker
+  count, the warn count, the captured reason, and the email failure stats;
+  and migration 097 adds `webhooks.reenabled_at`, stamped on every
+  enabled=true PATCH — both sweeps only count delivery rows created after
+  it, so an explicit re-enable genuinely resets the evidence window while
+  fresh post-re-enable failures still trip normally. All four properties
+  are DB-tested.
+- **Sweep query cost.** Migration 098 adds `idx_wsd_created_at`
+  (CONCURRENTLY) so the two per-5-minute windowed aggregates stop
+  seq-scanning the 30-day delivery table. The design's own pre-merge
+  checkpoint; an `EXPLAIN` against prod-sized data remains an ops
+  follow-up.
+- **Systemic-failure mail guard.** The warn pass is capped at
+  `identity.WarnSweepMaxPerTick` (100, tunable) stamps+enqueues per tick,
+  so an e2a-side egress failure cannot mass-mail the whole customer base
+  copy blaming their endpoints in one sweep; the backlog drains across
+  subsequent sweeps.
+- **`last_error` is now genuinely sanitized.** The delivery worker's
+  transport errors previously stored raw `err.Error()` (leaking e.g. DNS
+  resolver addresses). They now map to a fixed customer-safe vocabulary
+  ("request timed out", "DNS resolution failed", "TLS handshake failed",
+  "connection failed", and a no-IP-echoed dial-guard label); raw detail
+  goes to the process log only. This makes the sanitization claim the
+  reason/email path relies on true at the capture point.
+
+Accepted residuals from the same review: a borderline warning can race a
+concurrent recovery (self-corrects on the next success); the snooze-cap
+attempt metric can double-count if its terminal write fails and retries
+(consistent with the existing final-attempt paths); the disabled email's
+failure count uses attempt-level failures while the breaker counts
+terminal ones (deliberate — it matches the warn condition's evidence).

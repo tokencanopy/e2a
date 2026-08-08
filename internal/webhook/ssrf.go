@@ -1,10 +1,19 @@
 package webhook
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
 )
+
+// ErrDisallowedWebhookIP marks a dial-guard rejection (the URL resolved to
+// a private/loopback/link-local address). Sentinel so transportErrorLabel
+// can classify it into its customer-facing vocabulary without string
+// matching; the wrapping error carries the concrete IP for process logs
+// only — the customer-facing string never echoes it (a DNS-rebinding probe
+// would otherwise learn internal addressing from the delivery history).
+var ErrDisallowedWebhookIP = errors.New("resolved to disallowed IP")
 
 // IsDisallowedWebhookIP reports whether ip is in a range a webhook must never
 // reach (loopback, RFC-1918 private, link-local incl. the cloud metadata
@@ -45,7 +54,7 @@ func guardedDialControl(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("webhook dial: unparseable resolved address %q", host)
 	}
 	if IsDisallowedWebhookIP(ip) {
-		return fmt.Errorf("webhook dial blocked: resolved to disallowed IP %s", ip)
+		return fmt.Errorf("webhook dial blocked (%s): %w", ip, ErrDisallowedWebhookIP)
 	}
 	return nil
 }

@@ -6,7 +6,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -94,6 +96,36 @@ func NewSubscriberDeliverer(requireHTTPS bool, internalSinkURL string) *Subscrib
 	return d
 }
 
+// transportErrorLabel maps an HTTP-client transport error to one of a
+// small set of customer-safe strings. The classification order matters:
+// timeout first (a DNS lookup can time out — "timed out" is the more
+// actionable fact), then DNS, then TLS, then the generic connection label.
+func transportErrorLabel(err error) string {
+	if errors.Is(err, ErrDisallowedWebhookIP) {
+		// Deliberately does not echo the IP: it is the second line of the
+		// SSRF defense, and the resolved address may be internal.
+		return "delivery blocked: URL resolved to a disallowed IP"
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "request timed out"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "DNS resolution failed"
+	}
+	// crypto/tls error types are various (RecordHeaderError,
+	// CertificateVerificationError, alert values…); they consistently
+	// render with a "tls:" or "x509:" prefix somewhere in the chain.
+	if s := err.Error(); strings.Contains(s, "tls:") || strings.Contains(s, "x509:") {
+		return "TLS handshake failed"
+	}
+	return "connection failed"
+}
+
 // DeliveryOutcome is what the deliverer returns to the caller for
 // status accounting. statusCode is 0 when there was no HTTP response
 // (connection error, timeout, DNS failure).
@@ -150,7 +182,16 @@ func (d *SubscriberDeliverer) Deliver(ctx context.Context, url string, body []by
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return DeliveryOutcome{Success: false, Error: err.Error()}
+		// NEVER store raw err.Error(): last_error is customer-facing (the
+		// delivery-history API, auto_disable_reason, the health emails), and
+		// Go transport errors embed internal detail — DNS failures carry the
+		// resolver address ("lookup x on 127.0.0.11:53"), and with
+		// ProxyFromEnvironment a configured proxy's address would appear in
+		// dial errors. Map to a small fixed vocabulary; the raw detail goes
+		// to the process log only.
+		label := transportErrorLabel(err)
+		log.Printf("[webhook-deliver] transport error (stored as %q): %v", label, err)
+		return DeliveryOutcome{Success: false, Error: label}
 	}
 	defer resp.Body.Close()
 

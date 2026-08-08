@@ -71,7 +71,13 @@ type Webhook struct {
 	// warn sweep in the same transaction as the notification enqueue,
 	// cleared by a successful delivery so a recovered webhook re-arms.
 	// Internal bookkeeping — not exposed on the API view.
-	WarnNotifiedAt  *time.Time `json:"-"`
+	WarnNotifiedAt *time.Time `json:"-"`
+	// ReenabledAt records the last PATCH that set enabled=true. The
+	// breaker and warn sweeps only count delivery rows created after it,
+	// so "fix the endpoint, then re-enable" actually resets the evidence
+	// window instead of re-tripping on stale failures within one sweep.
+	// Internal bookkeeping — not exposed on the API view.
+	ReenabledAt     *time.Time `json:"-"`
 	CreatedAt       time.Time  `json:"created_at"`
 	LastDeliveredAt *time.Time `json:"last_delivered_at,omitempty"`
 }
@@ -206,7 +212,7 @@ const webhookColumns = `id, user_id, url, description, events, filters,
 	        signing_secret, COALESCE(signing_secret_prev, ''),
 	        signing_secret_prev_expires_at,
 	        enabled, auto_disabled_at, COALESCE(auto_disable_reason, ''),
-	        warn_notified_at, created_at, last_delivered_at`
+	        warn_notified_at, reenabled_at, created_at, last_delivered_at`
 
 // scanWebhook materializes one webhookColumns row. ErrNoRows is left for the
 // caller to translate, since "no row" means not-found on a read and
@@ -219,7 +225,7 @@ func scanWebhook(row pgx.Row) (*Webhook, error) {
 		&w.SigningSecret, &w.SigningSecretPrev,
 		&w.SigningSecretPrevExpiresAt,
 		&w.Enabled, &w.AutoDisabledAt, &w.AutoDisableReason,
-		&w.WarnNotifiedAt, &w.CreatedAt, &w.LastDeliveredAt,
+		&w.WarnNotifiedAt, &w.ReenabledAt, &w.CreatedAt, &w.LastDeliveredAt,
 	); err != nil {
 		return nil, err
 	}
@@ -460,11 +466,18 @@ func (s *Store) UpdateWebhook(ctx context.Context, webhookID, userID string, u W
 		add("enabled", *u.Enabled)
 		// Re-enabling clears auto_disabled_at so a subsequent fail
 		// burst can re-trip it cleanly — and the captured reason with
-		// it, so a healthy webhook never shows a stale cause.
+		// it, so a healthy webhook never shows a stale cause. It also
+		// stamps reenabled_at: the explicit enable asserts "this
+		// endpoint is fine now", and the breaker/warn sweeps only count
+		// evidence created after it (otherwise the >=threshold failed
+		// rows still in the window would re-disable within one sweep
+		// and mail a false alert — the exact loop the feature's own
+		// "fix, then re-enable" instruction would create).
 		if *u.Enabled {
 			args = append(args, nil)
 			sets = append(sets, fmt.Sprintf("auto_disabled_at = $%d", len(args)))
 			sets = append(sets, "auto_disable_reason = NULL")
+			sets = append(sets, "reenabled_at = now()")
 		}
 	}
 
@@ -553,6 +566,24 @@ const (
 	WarnWindow    = 24 * time.Hour
 )
 
+// LastErrorWebhookDisabled is the synthetic last_error the delivery
+// worker's disabled-snooze cap writes on rows it terminalizes
+// (webhookdelivery uses this constant). These rows are e2a bookkeeping,
+// not endpoint failures, so the breaker, the warn pass, the captured
+// reason, and the email failure stats all EXCLUDE them — otherwise a
+// webhook disabled for >24h would accumulate synthetic "failures" that
+// re-trip the breaker minutes after a re-enable, with the
+// self-referential reason "webhook disabled" mailed to the customer.
+const LastErrorWebhookDisabled = "webhook disabled"
+
+// WarnSweepMaxPerTick bounds how many webhooks one warn pass may stamp +
+// enqueue. A systemic failure on OUR side (egress outage) makes every
+// active webhook satisfy the warn condition at once; an unbounded pass
+// would mass-mail the entire customer base copy blaming THEIR endpoints,
+// inside one lock-holding transaction. The cap drains legitimately over
+// subsequent 5-minute sweeps. TUNABLE.
+const WarnSweepMaxPerTick = 100
+
 // WebhookNotifyTx enqueues one webhook health-notification job inside the
 // sweep's transaction, so the state transition and its notification commit
 // atomically (a row cannot be disabled/warn-stamped without its job, and
@@ -578,6 +609,11 @@ type WebhookNotifyTx func(ctx context.Context, tx pgx.Tx, webhookID string) erro
 // a later pass — that plus the same-tx enqueue is what guarantees
 // exactly one disable notification per transition (SC2 in the design).
 func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyTx) (int, error) {
+	// Evidence rules shared with the warn pass: only rows created inside
+	// the window AND after the last explicit re-enable count (reenabled_at
+	// resets the window — see migration 097), and the snooze cap's
+	// synthetic rows (last_error = LastErrorWebhookDisabled) never count —
+	// the breaker must not eat its own output.
 	return s.sweepWebhooksTx(ctx, notifyTx, "auto-disable",
 		`UPDATE webhooks
 		 SET enabled = false,
@@ -588,21 +624,24 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 		         WHERE d.webhook_id = webhooks.id
 		           AND d.status = 'failed'
 		           AND d.created_at > now() - $2::interval
-		           AND d.last_error IS NOT NULL AND d.last_error <> ''
+		           AND d.created_at > COALESCE(webhooks.reenabled_at, '-infinity'::timestamptz)
+		           AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3
 		         ORDER BY d.last_attempt_at DESC NULLS LAST
 		         LIMIT 1
 		     )
 		 WHERE id IN (
-		     SELECT webhook_id
-		     FROM webhook_subscriber_deliveries
-		     WHERE created_at > now() - $2::interval
-		     GROUP BY webhook_id
-		     HAVING COUNT(*) FILTER (WHERE status = 'failed') >= $1
-		        AND COUNT(*) FILTER (WHERE status = 'delivered') = 0
+		     SELECT d.webhook_id
+		     FROM webhook_subscriber_deliveries d
+		     JOIN webhooks w2 ON w2.id = d.webhook_id
+		     WHERE d.created_at > now() - $2::interval
+		       AND d.created_at > COALESCE(w2.reenabled_at, '-infinity'::timestamptz)
+		     GROUP BY d.webhook_id
+		     HAVING COUNT(*) FILTER (WHERE d.status = 'failed' AND (d.last_error IS NULL OR d.last_error <> $3)) >= $1
+		        AND COUNT(*) FILTER (WHERE d.status = 'delivered') = 0
 		 )
 		 AND enabled = true
 		 RETURNING id`,
-		AutoDisableThreshold, AutoDisableWindow,
+		AutoDisableThreshold, AutoDisableWindow, LastErrorWebhookDisabled,
 	)
 }
 
@@ -620,21 +659,29 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 // then excludes rows that same sweep just disabled, so a burst that
 // crosses both thresholds at once produces only the disable email.
 func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyTx) (int, error) {
+	// Same evidence rules as the disable pass (window + reenabled_at reset
+	// + synthetic-row exclusion), plus the per-tick cap: a systemic e2a-side
+	// egress failure makes EVERY webhook satisfy this condition at once,
+	// and an unbounded pass would mass-mail the customer base inside one
+	// lock-holding transaction. The LIMIT drains over subsequent sweeps.
 	return s.sweepWebhooksTx(ctx, notifyTx, "warn",
 		`UPDATE webhooks
 		 SET warn_notified_at = now()
 		 WHERE id IN (
-		     SELECT webhook_id
-		     FROM webhook_subscriber_deliveries
-		     WHERE created_at > now() - $2::interval
-		     GROUP BY webhook_id
-		     HAVING COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> '') >= $1
-		        AND COUNT(*) FILTER (WHERE status = 'delivered') = 0
+		     SELECT d.webhook_id
+		     FROM webhook_subscriber_deliveries d
+		     JOIN webhooks w2 ON w2.id = d.webhook_id
+		     WHERE d.created_at > now() - $2::interval
+		       AND d.created_at > COALESCE(w2.reenabled_at, '-infinity'::timestamptz)
+		     GROUP BY d.webhook_id
+		     HAVING COUNT(*) FILTER (WHERE d.attempts >= 1 AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3) >= $1
+		        AND COUNT(*) FILTER (WHERE d.status = 'delivered') = 0
+		     LIMIT $4
 		 )
 		 AND enabled = true
 		 AND warn_notified_at IS NULL
 		 RETURNING id`,
-		WarnThreshold, WarnWindow,
+		WarnThreshold, WarnWindow, LastErrorWebhookDisabled, WarnSweepMaxPerTick,
 	)
 }
 
@@ -701,21 +748,25 @@ type WebhookFailureStats struct {
 // the health-notification emails.
 func (s *Store) RecentWebhookFailureStats(ctx context.Context, webhookID string, window time.Duration) (WebhookFailureStats, error) {
 	var st WebhookFailureStats
+	// The snooze cap's synthetic rows (last_error = LastErrorWebhookDisabled)
+	// are excluded from both the count and the quoted error: they are e2a
+	// bookkeeping, not endpoint failures, and quoting "webhook disabled" as
+	// the reason a webhook was disabled would be self-referential nonsense.
 	err := s.pool.QueryRow(ctx,
 		`SELECT
-		    COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> ''),
+		    COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> '' AND last_error <> $3),
 		    COALESCE((
 		        SELECT d.last_error
 		        FROM webhook_subscriber_deliveries d
 		        WHERE d.webhook_id = $1
 		          AND d.created_at > now() - $2::interval
-		          AND d.last_error IS NOT NULL AND d.last_error <> ''
+		          AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3
 		        ORDER BY d.last_attempt_at DESC NULLS LAST
 		        LIMIT 1
 		    ), '')
 		 FROM webhook_subscriber_deliveries
 		 WHERE webhook_id = $1 AND created_at > now() - $2::interval`,
-		webhookID, window,
+		webhookID, window, LastErrorWebhookDisabled,
 	).Scan(&st.FailedAttempts, &st.LastError)
 	if err != nil {
 		return WebhookFailureStats{}, fmt.Errorf("webhook failure stats: %w", err)

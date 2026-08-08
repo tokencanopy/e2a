@@ -372,3 +372,202 @@ func TestUpdateWebhook_ReenableClearsAutoDisableReason(t *testing.T) {
 		t.Errorf("AutoDisableReason = %q, want cleared on re-enable (a healthy webhook must not show a stale cause)", updated.AutoDisableReason)
 	}
 }
+
+// --- B1 regression suite: the breaker must not eat its own output, and
+// re-enable must reset the evidence window (adversarial review, 2026-08-08).
+
+// The snooze cap writes terminal rows with last_error='webhook disabled'.
+// Those are e2a-synthetic bookkeeping, not endpoint failures: if the breaker
+// counted them, a user who manually disabled an endpoint for >24h and then
+// re-enabled it would be auto-disabled again within one sweep, with the
+// self-referential reason "webhook disabled" mailed to them.
+func TestAutoDisableFailingWebhooks_IgnoresSnoozeCapSyntheticRows(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-synthetic@example.com", "Owner", "google-wh-synthetic")
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/wh", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	for i := 0; i < identity.AutoDisableThreshold+2; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 1, $3, now())`,
+			fmt.Sprintf("whd_syn_%d_%s", i, wh.ID), wh.ID, identity.LastErrorWebhookDisabled,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	rec := &notifyRecorder{}
+	n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 || len(rec.ids) != 0 {
+		t.Errorf("sweep disabled %d / enqueued %v on synthetic snooze-cap rows — the breaker must ignore its own output", n, rec.ids)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if !after.Enabled {
+		t.Errorf("webhook disabled by synthetic rows")
+	}
+}
+
+// Mixed genuine + synthetic: still trips on the genuine failures, and the
+// captured reason is the genuine error — never the marker string.
+func TestAutoDisableFailingWebhooks_ReasonNeverTheSyntheticMarker(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-syn-mixed@example.com", "Owner", "google-wh-syn-mixed")
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/wh", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	for i := 0; i < identity.AutoDisableThreshold; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 404', now() - interval '1 hour')`,
+			fmt.Sprintf("whd_mix_g_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed genuine: %v", err)
+		}
+	}
+	// A synthetic row NEWER than every genuine one — the naive "most recent
+	// last_error" would pick it.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO webhook_subscriber_deliveries
+		    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+		 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 1, $3, now())`,
+		"whd_mix_s_"+wh.ID, wh.ID, identity.LastErrorWebhookDisabled,
+	); err != nil {
+		t.Fatalf("seed synthetic: %v", err)
+	}
+
+	if n, err := store.AutoDisableFailingWebhooks(ctx, nil); err != nil || n != 1 {
+		t.Fatalf("sweep: n=%d err=%v, want 1 (genuine failures still trip)", n, err)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.AutoDisableReason != "HTTP 404" {
+		t.Errorf("AutoDisableReason = %q, want the genuine HTTP 404 — never the synthetic marker", after.AutoDisableReason)
+	}
+}
+
+// The feature's own recovery instruction is "fix the endpoint, then
+// re-enable". Re-enabling must therefore RESET the evidence window: the
+// >=10 genuine failed rows that caused the disable are still inside the
+// 72h window, and without the reset the next sweep re-disables within 5
+// minutes and mails a false "we disabled your webhook" — a loop for any
+// low-traffic webhook.
+func TestAutoDisableFailingWebhooks_ReenableResetsEvidenceWindow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-reenable-window@example.com", "Owner", "google-wh-reenable-window")
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/wh", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	for i := 0; i < identity.AutoDisableThreshold; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 404', now())`,
+			fmt.Sprintf("whd_rw2_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	if n, err := store.AutoDisableFailingWebhooks(ctx, nil); err != nil || n != 1 {
+		t.Fatalf("first sweep: n=%d err=%v, want 1", n, err)
+	}
+
+	// Past the cooldown, the user fixes the endpoint and re-enables.
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhooks SET auto_disabled_at = now() - interval '10 minutes' WHERE id = $1`, wh.ID,
+	); err != nil {
+		t.Fatalf("backdate cooldown: %v", err)
+	}
+	enabled := true
+	if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &enabled}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	// The next sweep must NOT re-trip on the pre-re-enable evidence.
+	rec := &notifyRecorder{}
+	if n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue); err != nil || n != 0 || len(rec.ids) != 0 {
+		t.Fatalf("post-re-enable sweep: n=%d enqueued=%v err=%v — re-enable must reset the evidence window", n, rec.ids, err)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if !after.Enabled {
+		t.Errorf("webhook re-disabled from stale evidence")
+	}
+
+	// New failures AFTER the re-enable still count: the breaker is reset,
+	// not lobotomized.
+	for i := 0; i < identity.AutoDisableThreshold; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 500', now())`,
+			fmt.Sprintf("whd_rw3_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed fresh: %v", err)
+		}
+	}
+	if n, err := store.AutoDisableFailingWebhooks(ctx, nil); err != nil || n != 1 {
+		t.Errorf("fresh-failure sweep: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// Same two properties for the warn pass: synthetic rows don't warn, and
+// re-enable resets the warn evidence window.
+func TestWarnFailingWebhooks_SyntheticAndReenable(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-warn-b1@example.com", "Owner", "google-wh-warn-b1")
+
+	t.Run("ignores snooze-cap synthetic rows", func(t *testing.T) {
+		wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/warn-syn", "", []string{"email.received"}, identity.WebhookFilters{})
+		for i := 0; i < identity.WarnThreshold; i++ {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO webhook_subscriber_deliveries
+				    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+				 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 1, $3, now())`,
+				fmt.Sprintf("whd_wsyn_%d_%s", i, wh.ID), wh.ID, identity.LastErrorWebhookDisabled,
+			); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+		rec := &notifyRecorder{}
+		if n, err := store.WarnFailingWebhooks(ctx, rec.enqueue); err != nil || n != 0 {
+			t.Errorf("warned %d (err %v) on synthetic rows, want 0", n, err)
+		}
+	})
+
+	t.Run("re-enable resets the warn window", func(t *testing.T) {
+		wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/warn-reen", "", []string{"email.received"}, identity.WebhookFilters{})
+		for i := 0; i < identity.WarnThreshold; i++ {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO webhook_subscriber_deliveries
+				    (id, webhook_id, event_type, event_payload, status, attempts, last_error, last_attempt_at)
+				 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'pending', 1, 'HTTP 404', now())`,
+				fmt.Sprintf("whd_wreen_%d_%s", i, wh.ID), wh.ID,
+			); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+		// User toggles the webhook (disable + re-enable): the explicit
+		// re-enable asserts "this endpoint is fine now" and resets evidence.
+		off, on := false, true
+		if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &off}); err != nil {
+			t.Fatalf("disable: %v", err)
+		}
+		if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &on}); err != nil {
+			t.Fatalf("re-enable: %v", err)
+		}
+		rec := &notifyRecorder{}
+		if n, err := store.WarnFailingWebhooks(ctx, rec.enqueue); err != nil || n != 0 {
+			t.Errorf("warned %d (err %v) on pre-re-enable evidence, want 0", n, err)
+		}
+	})
+}
