@@ -24,5 +24,9 @@
   {"name": "missing value", "q": "name:", "error": "parse: expected a value"},
   {"name": "unterminated string", "q": "name:\"abc", "error": "parse: unterminated string"},
   {"name": "not without ws", "q": "NOT(name:a)", "error": "parse: NOT must be followed by whitespace"},
-  {"name": "keyword value needs quotes", "q": "name:NOT", "error": "parse: expected a value"}
+  {"name": "keyword value needs quotes", "q": "name:NOT", "error": "parse: expected a value"},
+  {"name": "double negation rejected", "q": "NOT NOT name:a", "error": "parse: negation does not nest"},
+  {"name": "minus negation nested rejected", "q": "-NOT name:a", "error": "parse: negation does not nest"},
+  {"name": "unquoted negative value rejected", "q": "price>=-5", "error": "parse: quote the value"},
+  {"name": "quoted negative value parses", "q": "price=\"-5\"", "ast": "(price = -5)", "sql": "(p.price = $1)", "args": [-5]}
 ]
