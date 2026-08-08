@@ -141,6 +141,7 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate agent metrics")
 	}
 
+	counters, summary, rates := deriveMetrics(metrics)
 	view := AgentMetricsView{
 		AgentEmail:                agent.Email,
 		Start:                     start.UTC(),
@@ -148,15 +149,26 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 		MessagesInWindow:          metrics.MessagesInWindow,
 		MessagesWithLifecycle:     metrics.MessagesWithLifecycle,
 		ReconstructedObservations: metrics.ReconstructedObservations,
-		Counters:                  make([]MetricsCounterView, 0, len(metrics.Counts)),
+		Summary:                   summary,
+		Rates:                     rates,
+		Counters:                  counters,
 	}
+	return &agentMetricsOutput{Body: view}, nil
+}
+
+// deriveMetrics turns one aggregate into the wire counters, summary, and
+// rates. Shared by the per-agent and account operations so the two can never
+// disagree about a denominator — the entire point of computing rates on the
+// server instead of letting each client divide.
+func deriveMetrics(metrics messagelifecycle.AgentMetrics) ([]MetricsCounterView, MetricsSummaryView, MetricsRatesView) {
+	counters := make([]MetricsCounterView, 0, len(metrics.Counts))
 
 	// byCode is message-grained on purpose: the summary and every rate built
 	// from it must not inflate when the pipeline retries a single message.
 	byCode := make(map[messagelifecycle.ReasonCode]int64, len(metrics.Counts))
 	for _, count := range metrics.Counts {
 		byCode[count.ReasonCode] = count.Messages
-		view.Counters = append(view.Counters, MetricsCounterView{
+		counters = append(counters, MetricsCounterView{
 			ReasonCode:   string(count.ReasonCode),
 			Stage:        string(count.Stage),
 			Outcome:      string(count.Outcome),
@@ -173,7 +185,7 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 		return total
 	}
 
-	view.Summary = MetricsSummaryView{
+	summary := MetricsSummaryView{
 		// Outbound acceptance is acceptance.outbound_api ALONE.
 		// acceptance.local_loopback is an INBOUND code — every writer and both
 		// reconstruction paths emit it only for the arriving copy of a loopback
@@ -206,15 +218,14 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 		ReviewExpiredRejected: sum(messagelifecycle.ReasonReviewExpiredRejected),
 	}
 
-	bounced := view.Summary.BouncedHard + view.Summary.BouncedSoft + view.Summary.BouncedUndetermined
-	view.Rates = MetricsRatesView{
-		DeliveredRate:        ratio(view.Summary.Delivered, view.Summary.Accepted),
-		BounceRate:           ratio(bounced, view.Summary.Submitted),
-		ComplaintRate:        ratio(view.Summary.Complained, view.Summary.Delivered),
-		SuppressionBlockRate: ratio(view.Summary.Suppressed, view.Summary.Accepted),
+	bounced := summary.BouncedHard + summary.BouncedSoft + summary.BouncedUndetermined
+	rates := MetricsRatesView{
+		DeliveredRate:        ratio(summary.Delivered, summary.Accepted),
+		BounceRate:           ratio(bounced, summary.Submitted),
+		ComplaintRate:        ratio(summary.Complained, summary.Delivered),
+		SuppressionBlockRate: ratio(summary.Suppressed, summary.Accepted),
 	}
-
-	return &agentMetricsOutput{Body: view}, nil
+	return counters, summary, rates
 }
 
 // ratio returns nil rather than zero when the denominator is zero, so "no

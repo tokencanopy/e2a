@@ -96,6 +96,36 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 
+  it("account.metrics rolls up every agent and can break down by agent", async () => {
+    const email = `${slug("sdkc-acct")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      await client.messages.send(
+        email,
+        { to: [email], subject: "account metrics", text: "self-send loopback" },
+        { wait: "sent" },
+      );
+
+      // Absolute counts belong to the whole shared account, so assert the
+      // contract instead: totals present, and this agent visible once broken
+      // down. Both must hold no matter what else is on the account.
+      const totals = await client.account.metrics();
+      expect(totals.agentsTruncated).toBe(false);
+      expect(totals.messagesInWindow).toBeGreaterThan(0);
+      expect(totals.summary.accepted).toBeGreaterThan(0);
+      expect(totals.agents ?? []).toHaveLength(0);
+
+      const broken = await client.account.metrics({ groupBy: "agent" });
+      const mine = (broken.agents ?? []).find((a) => a.agentEmail === email);
+      expect(mine, "this agent must appear in the per-agent breakdown").toBeDefined();
+      expect(mine!.summary.accepted).toBeGreaterThan(0);
+      // The per-agent slice must never exceed the account it belongs to.
+      expect(mine!.summary.accepted).toBeLessThanOrEqual(totals.summary.accepted);
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
+
   it("agents.delete with permanent: true removes the agent immediately", async () => {
     const email = `${slug("sdkc-del")}@agents.e2a.dev`;
     await client.agents.create({ email });

@@ -22,6 +22,7 @@ var betaOperationIDs = []string{
 	"deleteEngagement",
 	"deleteImportBatch",
 	"deleteTemplate",
+	"getAccountMetrics",
 	"getAgentMetrics",
 	"getAgentProtection",
 	"getContact",

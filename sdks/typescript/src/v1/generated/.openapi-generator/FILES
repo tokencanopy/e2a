@@ -19,9 +19,11 @@ index.ts
 middleware.ts
 models/APIKeyExportEntry.ts
 models/APIKeyView.ts
+models/AccountMetricsView.ts
 models/AccountUserView.ts
 models/AccountView.ts
 models/AgentIdentity.ts
+models/AgentMetricsGroupView.ts
 models/AgentMetricsView.ts
 models/AgentSuppressionAddedData.ts
 models/AgentSuppressionView.ts

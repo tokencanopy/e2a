@@ -116,10 +116,12 @@ func BuildDeps(p Params) httpapi.Deps {
 	}
 	var listMessageLifecycle httpapi.MessageLifecycleLister
 	var countAgentMetrics httpapi.AgentMetricsCounter
+	var countAccountMetrics httpapi.AccountMetricsCounter
 	if p.Pool != nil {
 		lifecycleStore := messagelifecycle.NewStore(p.Pool)
 		listMessageLifecycle = lifecycleStore.ListForMessage
 		countAgentMetrics = lifecycleStore.CountByReasonCode
+		countAccountMetrics = lifecycleStore.CountByReasonCodeForAccount
 	}
 	deps := httpapi.Deps{
 		Authenticator:          p.API.AuthenticateUser,
@@ -134,6 +136,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		ListMessages:           p.Store.GetMessagesByAgent,
 		ListMessageLifecycle:   listMessageLifecycle,
 		CountAgentMetrics:      countAgentMetrics,
+		CountAccountMetrics:    countAccountMetrics,
 		ModifyMessageLabels:    p.Store.ModifyMessageLabels,
 
 		ListConversations: p.Store.ListConversationsByAgent,

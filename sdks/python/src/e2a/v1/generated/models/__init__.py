@@ -15,9 +15,11 @@
 # import models into model package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView
+from e2a.v1.generated.models.account_metrics_view import AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.account_view import AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity
+from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupView
 from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView

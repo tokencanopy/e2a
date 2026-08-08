@@ -1,8 +1,10 @@
 export * from '../models/APIKeyExportEntry.js';
 export * from '../models/APIKeyView.js';
+export * from '../models/AccountMetricsView.js';
 export * from '../models/AccountUserView.js';
 export * from '../models/AccountView.js';
 export * from '../models/AgentIdentity.js';
+export * from '../models/AgentMetricsGroupView.js';
 export * from '../models/AgentMetricsView.js';
 export * from '../models/AgentSuppressionAddedData.js';
 export * from '../models/AgentSuppressionView.js';
@@ -163,9 +165,11 @@ export * from '../models/WebhookView.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
@@ -366,9 +370,11 @@ let enumsMap: Set<string> = new Set<string>([
 let typeMap: {[index: string]: any} = {
     "APIKeyExportEntry": APIKeyExportEntry,
     "APIKeyView": APIKeyView,
+    "AccountMetricsView": AccountMetricsView,
     "AccountUserView": AccountUserView,
     "AccountView": AccountView,
     "AgentIdentity": AgentIdentity,
+    "AgentMetricsGroupView": AgentMetricsGroupView,
     "AgentMetricsView": AgentMetricsView,
     "AgentSuppressionAddedData": AgentSuppressionAddedData,
     "AgentSuppressionView": AgentSuppressionView,

@@ -46,7 +46,7 @@ is currently 43 GA operations and 29 beta operations:
 | Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
-| Agent delivery metrics | **beta** | `getAgentMetrics` |
+| Delivery metrics — per agent and account-wide | **beta** | `getAgentMetrics`, `getAccountMetrics` |
 
 **Beta fields and capabilities on otherwise-GA operations** (property-level
 `x-stability-level: beta` in the spec — or, where only specific *values* of a
@@ -402,7 +402,8 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `deleteEngagement` | `DELETE /v1/agents/{email}/contacts/{address}` | Contacts |
 | `deleteImportBatch` | `DELETE /v1/contacts/imports/{batch_id}` | Contacts |
 | `deleteTemplate` | `DELETE /v1/templates/{id}` | Templates |
-| `getAgentMetrics` | `GET /v1/agents/{email}/metrics` | Agent delivery metrics |
+| `getAccountMetrics` | `GET /v1/metrics` | Delivery metrics |
+| `getAgentMetrics` | `GET /v1/agents/{email}/metrics` | Delivery metrics |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
 | `getContact` | `GET /v1/contacts/{address}` | Contacts |
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |

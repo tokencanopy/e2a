@@ -2959,3 +2959,124 @@ scenarios:
           body_match:
             deleted: true
             domain: metrics-contract.test.dev
+
+  - name: account_metrics_rollup
+    description: >
+      Account-wide counter metrics: the rollup answers with the same shape as
+      the per-agent operation, and group_by=agent lists this scenario's agent in
+      the breakdown. Assertions avoid absolute counts because the rollup spans
+      every agent on the shared test account.
+    setup:
+      - register_domain: acctmetrics-contract.test.dev
+      - verify_domain: acctmetrics-contract.test.dev
+      - register_agent:
+          email: bot@acctmetrics-contract.test.dev
+    steps:
+      # Give this agent exactly one message so it is guaranteed to appear in a
+      # per-agent breakdown. Review keeps the send off any upstream provider.
+      - id: enable_outbound_review
+        action: request
+        method: PUT
+        path: /v1/agents/bot@acctmetrics-contract.test.dev/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+
+      - id: send_held_for_review
+        action: request
+        method: POST
+        path: /v1/agents/bot@acctmetrics-contract.test.dev/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: account metrics contract
+          text: held for review
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+
+      - id: account_totals
+        action: request
+        method: GET
+        path: /v1/metrics
+        expect:
+          status: 200
+          body_contains:
+            - start
+            - end
+            - messages_in_window
+            - messages_with_lifecycle
+            - reconstructed_observations
+            - summary
+            - rates
+            - counters
+            - agents
+            - agents_truncated
+          body_match:
+            agents_truncated: false
+          # The rollup is account-wide; it must never leak a per-agent identity
+          # into the top level the way the per-agent operation does.
+          body_excludes:
+            - agent_email
+
+      - id: account_breakdown_lists_this_agent
+        action: request
+        method: GET
+        path: /v1/metrics?group_by=agent
+        expect:
+          status: 200
+          body_match:
+            agents_truncated: false
+          body_array_contains:
+            agents:
+              agent_email: bot@acctmetrics-contract.test.dev
+
+      - id: reject_window_wider_than_the_cap
+        action: request
+        method: GET
+        path: /v1/metrics?start=2026-01-01T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: reject_inverted_window
+        action: request
+        method: GET
+        path: /v1/metrics?start=2026-07-08T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+    cleanup:
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@acctmetrics-contract.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@acctmetrics-contract.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/acctmetrics-contract.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: acctmetrics-contract.test.dev

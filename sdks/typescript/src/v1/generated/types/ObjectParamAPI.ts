@@ -4,9 +4,11 @@ import type { Middleware } from '../middleware.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
@@ -230,6 +232,30 @@ export interface AccountApiExportAccountRequest {
 export interface AccountApiGetAccountRequest {
 }
 
+export interface AccountApiGetAccountMetricsRequest {
+    /**
+     * Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof AccountApigetAccountMetrics
+     */
+    start?: Date
+    /**
+     * Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof AccountApigetAccountMetrics
+     */
+    end?: Date
+    /**
+     * Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     * Defaults to: undefined
+     * @type &#39;agent&#39;
+     * @memberof AccountApigetAccountMetrics
+     */
+    groupBy?: 'agent'
+}
+
 export interface AccountApiListApiKeysRequest {
     /**
      * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
@@ -381,6 +407,24 @@ export class ObjectAccountApi {
      */
     public getAccount(param: AccountApiGetAccountRequest = {}, options?: ConfigurationOptions): Promise<AccountView> {
         return this.api.getAccount( options).toPromise();
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param param the request object
+     */
+    public getAccountMetricsWithHttpInfo(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
+        return this.api.getAccountMetricsWithHttpInfo(param.start, param.end, param.groupBy,  options).toPromise();
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param param the request object
+     */
+    public getAccountMetrics(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<AccountMetricsView> {
+        return this.api.getAccountMetrics(param.start, param.end, param.groupBy,  options).toPromise();
     }
 
     /**

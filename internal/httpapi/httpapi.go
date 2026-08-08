@@ -142,6 +142,9 @@ type Deps struct {
 	// per-agent counter set behind GET /v1/agents/{email}/metrics. Optional —
 	// nil makes the operation answer 501 rather than an empty, misleading zero.
 	CountAgentMetrics AgentMetricsCounter
+	// CountAccountMetrics is CountAgentMetrics' account-wide sibling behind
+	// GET /v1/metrics. Optional on the same terms — nil answers 501.
+	CountAccountMetrics AccountMetricsCounter
 	// ModifyMessageLabels applies a labels delta to a message scoped to an
 	// agent, returning the post-update set. Mirrors store.ModifyMessageLabels.
 	ModifyMessageLabels func(ctx context.Context, messageID, agentID string, add, remove []string) ([]string, error)
@@ -712,6 +715,7 @@ func (s *Server) registerOperations() {
 	s.registerMessages()
 	s.registerMessageLifecycle()
 	s.registerAgentMetrics()
+	s.registerAccountMetrics()
 	s.registerAttachments()
 	s.registerConversations()
 	s.registerAgentWrites()

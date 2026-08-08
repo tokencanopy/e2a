@@ -32,6 +32,7 @@ import type {
   MessageView,
   PageMessageLifecycleTransition,
   AgentMetricsView,
+  AccountMetricsView,
   AttachmentView,
   MessageSummaryView,
   SendEmailRequest,
@@ -901,6 +902,26 @@ class AccountResource {
   }
   export(): Promise<UserExport> {
     return call(() => this.api.exportAccount());
+  }
+  /**
+   * Beta: counter metrics across every agent this account owns, on the same
+   * cohort-window and denominator contract as `messages.getMetrics()` — so an
+   * account total and the per-agent numbers under it can never disagree about
+   * what a rate means.
+   *
+   * Pass `{ groupBy: "agent" }` for a per-agent breakdown, busiest first. It is
+   * capped at 200 agents and sets `agentsTruncated` when it cuts; the totals
+   * stay complete regardless.
+   *
+   * Account-scoped credentials only — an agent-scoped key reads its own agent
+   * through `messages.getMetrics()` instead.
+   */
+  metrics(
+    params: { start?: Date; end?: Date; groupBy?: "agent" } = {},
+  ): Promise<AccountMetricsView> {
+    return call(() =>
+      this.api.getAccountMetrics(params.start, params.end, params.groupBy),
+    );
   }
   delete(): Promise<DeleteUserDataResult> {
     // Irreversible. The typed .delete() call is the confirmation; the SDK

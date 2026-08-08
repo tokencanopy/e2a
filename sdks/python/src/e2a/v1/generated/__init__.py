@@ -40,9 +40,11 @@ __all__ = [
     "ApiException",
     "APIKeyExportEntry",
     "APIKeyView",
+    "AccountMetricsView",
     "AccountUserView",
     "AccountView",
     "AgentIdentity",
+    "AgentMetricsGroupView",
     "AgentMetricsView",
     "AgentSuppressionAddedData",
     "AgentSuppressionView",
@@ -229,9 +231,11 @@ from e2a.v1.generated.exceptions import ApiException as ApiException
 # import models into sdk package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry as APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView as APIKeyView
+from e2a.v1.generated.models.account_metrics_view import AccountMetricsView as AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView as AccountUserView
 from e2a.v1.generated.models.account_view import AccountView as AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity as AgentIdentity
+from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupView as AgentMetricsGroupView
 from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView as AgentMetricsView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData as AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView as AgentSuppressionView

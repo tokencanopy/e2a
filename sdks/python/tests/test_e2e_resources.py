@@ -260,6 +260,17 @@ async def test_messages_extended_surface_conversations_and_inbound_facade():
             assert metrics.end > metrics.start
             mark_covered("messages.get_metrics")
 
+            # Account rollup: absolute counts span the whole account, so assert
+            # the relationship instead — this agent must appear in the
+            # breakdown and can never exceed the account it belongs to.
+            account_metrics = await client.account.metrics(group_by="agent")
+            assert account_metrics.messages_in_window > 0
+            assert account_metrics.agents_truncated is False
+            mine = [a for a in (account_metrics.agents or []) if a.agent_email == email]
+            assert mine, "this agent must appear in the per-agent breakdown"
+            assert mine[0].summary.accepted <= account_metrics.summary.accepted
+            mark_covered("account.metrics")
+
             labeled = await client.messages.update_labels(email, found.id, {"add_labels": ["cov-test"]})
             assert "cov-test" in labeled.labels
             assert labeled.message_id == found.id

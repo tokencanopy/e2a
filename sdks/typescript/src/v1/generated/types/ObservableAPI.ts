@@ -5,9 +5,11 @@ import { Observable, of, from } from '../rxjsStub.js';
 import {mergeMap, map} from  '../rxjsStub.js';
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
@@ -382,6 +384,44 @@ export class ObservableAccountApi {
      */
     public getAccount(_options?: ConfigurationOptions): Observable<AccountView> {
         return this.getAccountWithHttpInfo(_options).pipe(map((apiResponse: HttpInfo<AccountView>) => apiResponse.data));
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, groupBy?: 'agent', _options?: ConfigurationOptions): Observable<HttpInfo<AccountMetricsView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getAccountMetrics(start, end, groupBy, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getAccountMetricsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: ConfigurationOptions): Observable<AccountMetricsView> {
+        return this.getAccountMetricsWithHttpInfo(start, end, groupBy, _options).pipe(map((apiResponse: HttpInfo<AccountMetricsView>) => apiResponse.data));
     }
 
     /**

@@ -88,6 +88,65 @@ components:
         - scope
         - created_at
       type: object
+    AccountMetricsView:
+      additionalProperties: true
+      properties:
+        agents:
+          description: Per-agent breakdown, busiest first. Empty unless group_by=agent was requested.
+          items:
+            $ref: "#/components/schemas/AgentMetricsGroupView"
+          type:
+            - array
+            - "null"
+        agents_truncated:
+          description: "True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut."
+          type: boolean
+        counters:
+          description: Every reason code observed across the account in the window, ordered by code.
+          items:
+            $ref: "#/components/schemas/MetricsCounterView"
+          type:
+            - array
+            - "null"
+        end:
+          description: Exclusive end of the cohort window.
+          format: date-time
+          type: string
+        messages_in_window:
+          description: Messages created in the window across every agent this account owns.
+          format: int64
+          type: integer
+        messages_with_lifecycle:
+          description: Messages in the window carrying at least one persisted lifecycle observation. Below messages_in_window means part of the window predates the lifecycle ledger, and every counter here undercounts by that difference.
+          format: int64
+          type: integer
+        rates:
+          $ref: "#/components/schemas/MetricsRatesView"
+          description: Account-wide rates, on the same fixed denominators the per-agent operation uses.
+        reconstructed_observations:
+          description: Observations derived from durable message state rather than recorded at the boundary. Included in the counts above; reported separately so the inferred share is visible.
+          format: int64
+          type: integer
+        start:
+          description: Inclusive start of the cohort window.
+          format: date-time
+          type: string
+        summary:
+          $ref: "#/components/schemas/MetricsSummaryView"
+          description: Account-wide counters. Always computed across every agent, never from the possibly-truncated agents array.
+      required:
+        - start
+        - end
+        - messages_in_window
+        - messages_with_lifecycle
+        - reconstructed_observations
+        - summary
+        - rates
+        - counters
+        - agents
+        - agents_truncated
+      type: object
+      x-stability-level: beta
     AccountUserView:
       additionalProperties: true
       properties:
@@ -237,6 +296,41 @@ components:
         - outbound_scan_block_threshold
         - inbound_scan_sensitivity
         - outbound_scan_sensitivity
+      type: object
+      x-stability-level: beta
+    AgentMetricsGroupView:
+      additionalProperties: true
+      properties:
+        agent_email:
+          type: string
+        counters:
+          description: Every reason code this agent produced in the window, ordered by code.
+          items:
+            $ref: "#/components/schemas/MetricsCounterView"
+          type:
+            - array
+            - "null"
+        messages_in_window:
+          format: int64
+          type: integer
+        messages_with_lifecycle:
+          format: int64
+          type: integer
+        rates:
+          $ref: "#/components/schemas/MetricsRatesView"
+        reconstructed_observations:
+          format: int64
+          type: integer
+        summary:
+          $ref: "#/components/schemas/MetricsSummaryView"
+      required:
+        - agent_email
+        - messages_in_window
+        - messages_with_lifecycle
+        - reconstructed_observations
+        - summary
+        - rates
+        - counters
       type: object
       x-stability-level: beta
     AgentMetricsView:
@@ -7863,6 +7957,61 @@ paths:
       summary: Deployment info
       tags:
         - meta
+  /v1/metrics:
+    get:
+      description: "Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable."
+      operationId: getAccountMetrics
+      parameters:
+        - description: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+          explode: false
+          in: query
+          name: start
+          schema:
+            description: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+            format: date-time
+            type: string
+        - description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+          explode: false
+          in: query
+          name: end
+          schema:
+            description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+            format: date-time
+            type: string
+        - description: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+          explode: false
+          in: query
+          name: group_by
+          schema:
+            description: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+            enum:
+              - agent
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountMetricsView"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get account-wide delivery metrics (beta)
+      tags:
+        - account
+      x-stability-level: beta
   /v1/reviews:
     get:
       description: "The review queue: every message held in pending_review across the account's inboxes — outbound drafts awaiting send approval AND inbound messages held by a screening gate. Account-scoped credentials only; agents cannot see (or resolve) holds. Beta: the unified gate/scan review resource is unstable — its shape may change before it is declared stable."

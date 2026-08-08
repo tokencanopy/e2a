@@ -1190,7 +1190,15 @@ const apiKey = process.env.E2A_TEST_API_KEY;
 //                            the account-newest"; races with concurrent suites)
 // Their behavior is covered by the resource-scoped e2e-prod suites; the Go/local
 // runner still covers them against a fresh DB. Skip regardless of seeding.
-const ACCOUNT_GLOBAL = new Set(["agent_crud", "domain_crud", "placeholder_resolution"]);
+// account_metrics_rollup aggregates every agent on the account, so its
+// agents_truncated assertion depends on account-wide state a shared staging
+// target does not control. The Go runner owns it in-process.
+const ACCOUNT_GLOBAL = new Set([
+  "agent_crud",
+  "domain_crud",
+  "placeholder_resolution",
+  "account_metrics_rollup",
+]);
 
 describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
   const scenarios = loadScenarios();
