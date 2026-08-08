@@ -241,7 +241,8 @@ e2a messages lifecycle msg_abc123 --agent bot@acme.com --json   # beta
 ```
 
 `list` flags: `--direction` (`inbound`/`outbound`/`all`), `--since` (inclusive
-ISO timestamp), `--conversation` (alias `--conversation-id`), `--read-status`
+ISO timestamp), `--filter <expr>` (beta boolean filter expression, see
+`docs/api.md`), `--conversation` (alias `--conversation-id`), `--read-status`
 (`unread`/`read`/`all`, default `all`), `--limit`, `--agent`, `--json` (NDJSON
 instead of TSV). `get` flags: `--text` (print parsed body text only),
 `--agent`, `--json` (print the full message as JSON). `lifecycle` (beta) shows
