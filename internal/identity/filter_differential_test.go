@@ -120,6 +120,11 @@ func TestQFilterDifferential(t *testing.T) {
 	allDay := []string{"start", "alice", "alert", "newsletter", "follow", "empty", "literal", "wildcard", "unicode"}
 	allButUrgent := []string{"before", "start", "alert", "newsletter", "follow", "empty", "wildcard", "end", "after"}
 	allButAlice := []string{"before", "start", "alert", "newsletter", "empty", "literal", "wildcard", "unicode", "end", "after"}
+	// subject != "Quarterly report" keeps every non-alice row, including the
+	// empty-subject fixture: LOWER('') != LOWER('Quarterly report') is true.
+	allButSubjectAlice := []string{"before", "start", "alert", "newsletter", "follow", "empty", "literal", "wildcard", "unicode", "end", "after"}
+	// (NOT label:urgent) OR label:q3 = everyone except the urgent-only rows.
+	allButLiteralUnicode := []string{"before", "start", "alice", "alert", "newsletter", "follow", "empty", "wildcard", "end", "after"}
 	allAfterStart := append(append([]string{}, allDay...), "end", "after")
 	allOutsideDay := []string{"before", "end", "after"}
 	queries := []struct {
@@ -127,12 +132,27 @@ func TestQFilterDifferential(t *testing.T) {
 		keys []string
 	}{
 		{q: `label:urgent`, keys: []string{"alice", "literal", "unicode"}},
+		{q: `label:nosuchlabel`, keys: []string{}},
 		{q: `label:urgent OR label:alerts`, keys: []string{"alice", "alert", "literal", "unicode"}},
 		{q: `NOT label:urgent`, keys: allButUrgent},
+		{q: `-label:urgent`, keys: allButUrgent},
+		{q: `label:urgent label:q3`, keys: []string{"alice"}},
+		{q: `label:urgent AND subject:quarterly`, keys: []string{"alice"}},
+		// Documented precedence is NOT > OR > implicit AND > explicit AND:
+		// (subject:alert OR subject:report) AND label:urgent, not
+		// subject:alert OR (subject:report AND label:urgent).
+		{q: `subject:alert OR subject:report label:urgent`, keys: []string{"alice"}},
+		{q: `(from:alice OR from:bob) AND label:urgent`, keys: []string{"alice"}},
+		{q: `from:corp.com NOT label:urgent`, keys: []string{"follow"}},
+		{q: `NOT label:urgent OR label:q3`, keys: allButLiteralUnicode},
 		{q: `from:alice`, keys: []string{"alice", "follow"}},
 		{q: `from:*@corp.com`, keys: []string{"alice", "follow"}},
 		{q: `from = "alice@corp.com"`, keys: []string{"alice", "follow"}},
 		{q: `from != "alice@corp.com"`, keys: allButAlice},
+		{q: `subject:"Quarterly report"`, keys: []string{"alice"}},
+		{q: `subject = "Quarterly report"`, keys: []string{"alice"}},
+		{q: `subject = "quarterly REPORT"`, keys: []string{"alice"}},
+		{q: `subject != "Quarterly report"`, keys: allButSubjectAlice},
 		{q: `subject:100%`, keys: []string{"literal"}},
 		{q: `subject:_now_`, keys: []string{"literal"}},
 		{q: `subject:"\\path"`, keys: []string{"literal"}},

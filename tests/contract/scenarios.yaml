@@ -874,14 +874,18 @@ scenarios:
   - name: messages_list_filter
     description: >
       The beta `filter` query parameter on listMessages narrows results by
-      subject, from, label, and created with boolean composition, ANDs with
-      the flat filters, rejects unknown fields and malformed expressions with
-      invalid_filter, and binds the raw filter into pagination cursors
-      (changed or dropped filter on continuation is invalid_cursor). All
-      setup goes through public requests so every SDK contract runner
-      executes this scenario rather than skipping store-backed setup.
-      Percent-encoding in paths (%20 space, %3E >, %28 paren) is deliberate:
-      it is exactly what a real client must send over the wire.
+      subject, from, label, and created with boolean composition (OR, AND,
+      implicit AND, NOT and its "-" shorthand, parentheses, and the documented
+      NOT > OR > implicit AND > explicit AND precedence), exact ("=", "!=")
+      versus substring (":") matching with wildcard and quoted values, ANDs
+      with the flat filters, rejects unknown fields, malformed expressions,
+      and unsupported operators with invalid_filter, and binds the raw filter
+      into pagination cursors (changed or dropped filter on continuation is
+      invalid_cursor). All setup goes through public requests so every SDK
+      contract runner executes this scenario rather than skipping
+      store-backed setup. Percent-encoding in paths (%20 space, %3D =, %22
+      quote, %28 paren) is deliberate: it is exactly what a real client must
+      send over the wire.
     steps:
       - id: register_domain
         action: request
@@ -996,6 +1000,37 @@ scenarios:
             "items.length": 1
             "items[0].subject": Filter contract AlphaToken
 
+      - id: filter_subject_quoted
+        # Quoted values may contain whitespace; ":" stays a substring match.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:%22contract%20AlphaToken%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_subject_exact
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject%20%3D%20%22Filter%20contract%20BetaToken%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract BetaToken
+
+      - id: filter_subject_not_exact
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject%20%21%3D%20%22Filter%20contract%20AlphaToken%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract BetaToken
+
       - id: filter_from_match
         # Outbound rows send as the agent itself: ILIKE substring on sender.
         action: request
@@ -1015,6 +1050,47 @@ scenarios:
           body_match:
             "items.length": 0
 
+      - id: filter_from_wildcard
+        # "*" matches any sequence in ":" values.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from:*@filter-contract.test.dev
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_from_exact_case_insensitive
+        # "=" is case-insensitive EXACT matching on the sender (%3D, %22 are
+        # the wire encoding a real client must send for = and ").
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from%20%3D%20%22Bot@Filter-Contract.Test.Dev%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
+      - id: filter_from_exact_substring_rejected
+        # Exact match must NOT substring-match: the local part alone is not
+        # the full sender, so "=" finds nothing where ":" would match both.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from%20%3D%20%22bot%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
+      - id: filter_from_not_exact
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=from%20%21%3D%20%22bot@filter-contract.test.dev%22
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
       - id: filter_label
         action: request
         method: GET
@@ -1024,6 +1100,15 @@ scenarios:
           body_match:
             "items.length": 1
             "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_label_no_match
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=label:nosuchtag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
 
       - id: filter_or
         action: request
@@ -1043,6 +1128,72 @@ scenarios:
           body_match:
             "items.length": 1
             "items[0].subject": Filter contract BetaToken
+
+      - id: filter_not_dash_prefix
+        # "-" is the documented shorthand for NOT.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=-label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract BetaToken
+
+      - id: filter_and
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:AlphaToken%20AND%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_and_no_match
+        # BetaToken carries no label, so the AND is empty.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:BetaToken%20AND%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 0
+
+      - id: filter_implicit_and
+        # Whitespace between expressions is the documented implicit AND.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:AlphaToken%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_parens
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=%28subject:AlphaToken%20OR%20subject:BetaToken%29%20AND%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
+
+      - id: filter_precedence_or_before_implicit_and
+        # Documented precedence is NOT > OR > implicit AND > explicit AND, so
+        # this parses as (BetaToken OR AlphaToken) AND label:contracttag — only
+        # AlphaToken carries the label. A naive AND-before-OR reading would
+        # return both messages.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=subject:BetaToken%20OR%20subject:AlphaToken%20label:contracttag
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+            "items[0].subject": Filter contract AlphaToken
 
       - id: filter_and_flat_composition
         # The flat labels filter ANDs with the expression: BetaToken matches
@@ -1088,6 +1239,17 @@ scenarios:
         action: request
         method: GET
         path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=%28subject:AlphaToken
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_filter
+
+      - id: filter_operator_rejected
+        # label only supports ":" — "=" (%3D) is a validation error, not a
+        # silent different meaning.
+        action: request
+        method: GET
+        path: /v1/agents/bot@filter-contract.test.dev/messages?direction=outbound&filter=label%3Dcontracttag
         expect:
           status: 400
           body_match:
