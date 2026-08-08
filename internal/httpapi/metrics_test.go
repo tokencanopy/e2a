@@ -155,6 +155,43 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 	}
 }
 
+// TestAgentMetricsKeepsLoopbackArrivalsOutOfTheSendDenominator.
+//
+// A loopback delivery writes acceptance.outbound_api on the sent message and
+// acceptance.local_loopback on the arriving copy — the latter with direction
+// "inbound", at every writer and both reconstruction paths. Counting it as an
+// accepted SEND inflates the denominator of delivered_rate and
+// suppression_block_rate, so an agent talking to another agent on the same
+// deployment reads as though half its mail vanished.
+func TestAgentMetricsKeepsLoopbackArrivalsOutOfTheSendDenominator(t *testing.T) {
+	srv, _ := newMetricsServer(t, messagelifecycle.AgentMetrics{
+		MessagesInWindow:      2,
+		MessagesWithLifecycle: 2,
+		Counts: []messagelifecycle.ReasonCodeCount{
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 1, 1),
+			metricsCount(messagelifecycle.ReasonAcceptanceLocalLoopback, 1, 1),
+			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 1, 1),
+			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 1, 1),
+		},
+	})
+
+	status, body := metricsGET(t, srv, "agent@example.com", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %#v", status, body)
+	}
+	summary := metricsSection(t, body, "summary")
+	if got := summary["accepted"].(float64); got != 1 {
+		t.Errorf("accepted = %v, want 1: the loopback arrival is not a send", got)
+	}
+	if got := summary["received"].(float64); got != 1 {
+		t.Errorf("received = %v, want 1: the loopback arrival is inbound mail", got)
+	}
+	// One send, one delivery — a full-marks agent must read as exactly 1.0.
+	if got := metricsSection(t, body, "rates")["delivered_rate"].(float64); got != 1 {
+		t.Errorf("delivered_rate = %v, want 1", got)
+	}
+}
+
 // TestAgentMetricsRatesAreNullWithoutTraffic: zero-over-zero must not render
 // as 0.0, which reads identically to a total delivery failure.
 func TestAgentMetricsRatesAreNullWithoutTraffic(t *testing.T) {

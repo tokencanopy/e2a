@@ -26,7 +26,7 @@ class MetricsSummaryView(BaseModel):
     """
     MetricsSummaryView
     """ # noqa: E501
-    accepted: StrictInt = Field(description="Outbound messages e2a accepted from the API or the loopback path. The denominator for delivered_rate and suppression_block_rate.")
+    accepted: StrictInt = Field(description="Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.")
     bounced_hard: StrictInt = Field(description="Permanent bounces. These add the recipient to the suppression list.")
     bounced_soft: StrictInt = Field(description="Transient bounces.")
     bounced_undetermined: StrictInt = Field(description="Bounces the provider did not classify. Kept separate rather than folded into soft, which would understate hard-bounce risk.")
@@ -36,7 +36,7 @@ class MetricsSummaryView(BaseModel):
     dmarc_fail: StrictInt = Field(description="Inbound messages whose DMARC evaluation failed.")
     dmarc_none: StrictInt = Field(description="Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious.")
     dmarc_pass: StrictInt = Field(description="Inbound messages with an aligned DMARC pass.")
-    received: StrictInt = Field(description="Inbound messages accepted over SMTP.")
+    received: StrictInt = Field(description="Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path).")
     review_approved: StrictInt = Field(description="Holds a reviewer explicitly approved.")
     review_expired_approved: StrictInt = Field(description="Holds released by TTL expiry rather than a decision. A rising count means nobody is working the queue.")
     review_expired_rejected: StrictInt = Field(description="Holds dropped by TTL expiry rather than a decision. A rising count means work is being lost.")

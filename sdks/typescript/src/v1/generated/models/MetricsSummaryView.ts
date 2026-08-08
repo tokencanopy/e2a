@@ -14,7 +14,7 @@ import { HttpFile } from '../http/http.js';
 
 export class MetricsSummaryView {
     /**
-    * Outbound messages e2a accepted from the API or the loopback path. The denominator for delivered_rate and suppression_block_rate.
+    * Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.
     */
     'accepted': number;
     /**
@@ -54,7 +54,7 @@ export class MetricsSummaryView {
     */
     'dmarcPass': number;
     /**
-    * Inbound messages accepted over SMTP.
+    * Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path).
     */
     'received': number;
     /**

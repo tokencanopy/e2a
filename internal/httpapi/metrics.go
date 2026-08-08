@@ -32,7 +32,7 @@ type MetricsCounterView struct {
 // (distinct messages, never attempts) so every value shares one denominator
 // basis and no stage can exceed the stage above it because of retries.
 type MetricsSummaryView struct {
-	Accepted            int64 `json:"accepted" doc:"Outbound messages e2a accepted from the API or the loopback path. The denominator for delivered_rate and suppression_block_rate."`
+	Accepted            int64 `json:"accepted" doc:"Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here."`
 	Submitted           int64 `json:"submitted" doc:"Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate."`
 	Delivered           int64 `json:"delivered" doc:"Messages a recipient server accepted. This is recipient-server acceptance, NOT inbox placement — no email provider exposes the latter."`
 	BouncedHard         int64 `json:"bounced_hard" doc:"Permanent bounces. These add the recipient to the suppression list."`
@@ -42,7 +42,7 @@ type MetricsSummaryView struct {
 	Suppressed          int64 `json:"suppressed" doc:"Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses."`
 	SendFailed          int64 `json:"send_failed" doc:"Messages that reached a terminal submission failure: provider rejection, local retry exhaustion, or policy cancellation. Break the three apart via counters[]."`
 
-	Received  int64 `json:"received" doc:"Inbound messages accepted over SMTP."`
+	Received  int64 `json:"received" doc:"Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."`
 	DMARCPass int64 `json:"dmarc_pass" doc:"Inbound messages with an aligned DMARC pass."`
 	DMARCFail int64 `json:"dmarc_fail" doc:"Inbound messages whose DMARC evaluation failed."`
 	DMARCNone int64 `json:"dmarc_none" doc:"Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious."`
@@ -174,7 +174,13 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 	}
 
 	view.Summary = MetricsSummaryView{
-		Accepted:            sum(messagelifecycle.ReasonAcceptanceOutboundAPI, messagelifecycle.ReasonAcceptanceLocalLoopback),
+		// Outbound acceptance is acceptance.outbound_api ALONE.
+		// acceptance.local_loopback is an INBOUND code — every writer and both
+		// reconstruction paths emit it only for the arriving copy of a loopback
+		// delivery. Summing it here mixed an inbound arrival into the outbound
+		// denominator, which understated delivered_rate for any agent sending
+		// to another agent on the same deployment.
+		Accepted:            sum(messagelifecycle.ReasonAcceptanceOutboundAPI),
 		Submitted:           sum(messagelifecycle.ReasonSubmissionUpstreamAccepted, messagelifecycle.ReasonSubmissionLocalLoopbackAccepted),
 		Delivered:           sum(messagelifecycle.ReasonDeliveryRecipientServerAccepted),
 		BouncedHard:         sum(messagelifecycle.ReasonDeliveryPermanentBounce),
@@ -186,7 +192,7 @@ func (s *Server) handleAgentMetrics(ctx context.Context, in *agentMetricsInput) 
 			messagelifecycle.ReasonSubmissionLocalRetriesExhausted,
 			messagelifecycle.ReasonSubmissionCancelled),
 
-		Received:  sum(messagelifecycle.ReasonAcceptanceInboundSMTP),
+		Received:  sum(messagelifecycle.ReasonAcceptanceInboundSMTP, messagelifecycle.ReasonAcceptanceLocalLoopback),
 		DMARCPass: sum(messagelifecycle.ReasonAuthenticationDMARCPass),
 		DMARCFail: sum(messagelifecycle.ReasonAuthenticationDMARCFail),
 		DMARCNone: sum(messagelifecycle.ReasonAuthenticationDMARCNone),
