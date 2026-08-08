@@ -87,6 +87,9 @@ func TestParseErrors(t *testing.T) {
 		{name: "malformed dotted member missing segment", q: `a.:y`, pos: 2},
 		{name: "malformed dotted member duplicate dot", q: `a..b:y`, pos: 2},
 		{name: "NOT missing whitespace", q: `NOT(a:x)`, pos: 0},
+		{name: "double NOT", q: `NOT NOT a:x`, pos: 4},
+		{name: "negation after minus", q: `-NOT a:x`, pos: 1},
+		{name: "unquoted negative value", q: `price>=-5`, pos: 7},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

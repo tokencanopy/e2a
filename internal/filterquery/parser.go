@@ -250,9 +250,18 @@ func (p *parser) parseRestriction() (Node, error) {
 // comparable = member; member = TEXT {DOT TEXT}
 func (p *parser) parseMember() (string, int, error) {
 	t := p.peek()
+	// A leading NOT/"-" here means the negation was doubled or nested
+	// (NOT NOT x, -NOT x): parseTerm already consumed one. Spell out why —
+	// the grammar allows exactly one negation per term.
+	if t.kind == tNot || t.kind == tMinus {
+		return "", 0, &Error{Kind: ErrParse, Pos: t.pos, Msg: fmt.Sprintf("expected a field name or term, got %q — negation does not nest: one NOT or \"-\" per term", t.text)}
+	}
 	if t.kind != tText && t.kind != tString {
 		return "", 0, &Error{Kind: ErrParse, Pos: t.pos, Msg: fmt.Sprintf("expected a field name or term, got %q", t.text)}
 	}
+	// A quoted field name ("name":x) is syntactically accepted; validation
+	// still requires it to resolve exactly to a registered field, and
+	// emission uses the registry's constant column, never the raw text.
 	p.advance()
 	name := t.text
 	for p.peek().kind == tDot {
@@ -269,6 +278,12 @@ func (p *parser) parseMember() (string, int, error) {
 
 func (p *parser) parseValue() (string, bool, error) {
 	t := p.peek()
+	// A leading "-" at a value boundary lexes as the negation operator, so
+	// unquoted negative values (price>=-5) land here. Point at the fix:
+	// quoting makes the minus literal (price="-5").
+	if t.kind == tMinus {
+		return "", false, &Error{Kind: ErrParse, Pos: t.pos, Msg: `expected a value (text or quoted string), got "-" — a leading - reads as negation; quote the value, e.g. field:"-5"`}
+	}
 	if t.kind != tText && t.kind != tString {
 		return "", false, &Error{Kind: ErrParse, Pos: t.pos, Msg: "expected a value (text or quoted string)"}
 	}

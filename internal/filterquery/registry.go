@@ -44,7 +44,11 @@ func (e *EmitCtx) PH(arg any) string {
 }
 
 // Registry is the adopter-supplied field set. Construct once at startup;
-// safe for concurrent use after construction.
+// safe for concurrent use after construction. Note the concurrency guarantee
+// covers the REGISTRY, not a shared AST: Validate coerces Comparison values
+// in place, so a single parsed AST must not be validated (or compiled)
+// concurrently — parse per request. The Expr flow (Parse once, then
+// concurrent Expr.Emit) is immutable and is the supported shared path.
 type Registry struct {
 	fields map[string]FieldSpec
 }
@@ -76,7 +80,9 @@ func (r *Registry) Names() []string {
 
 // Validate checks the AST against the registry and coerces every value in
 // place (Comparison.Value). Bare terms are rejected here — the grammar
-// accepts them, the v1 vocabulary does not.
+// accepts them, the v1 vocabulary does not. Because coercion mutates the
+// nodes, do not Validate the same AST from concurrent goroutines; see the
+// Registry doc comment.
 func (r *Registry) Validate(n Node) error {
 	if r == nil {
 		return &Error{Kind: ErrValidate, Pos: -1, Msg: "filterquery: registry is required"}
