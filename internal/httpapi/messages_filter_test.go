@@ -60,14 +60,14 @@ func messagesFilterURL(serverURL, filter string) string {
 	return serverURL + "/v1/agents/bot@example.com/messages?" + values.Encode()
 }
 
-func filterError(t *testing.T, body map[string]any) map[string]any {
+func filterError(t *testing.T, body map[string]any, code string) map[string]any {
 	t.Helper()
 	errBody, ok := body["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected error envelope, got %v", body)
 	}
-	if errBody["code"] != "invalid_filter" {
-		t.Fatalf("error code = %v, want invalid_filter (body %v)", errBody["code"], body)
+	if errBody["code"] != code {
+		t.Fatalf("error code = %v, want %s (body %v)", errBody["code"], code, body)
 	}
 	return errBody
 }
@@ -87,6 +87,10 @@ func TestFilterParamInvalid(t *testing.T) {
 		filter      string
 		wantInError string
 		wantOK      bool
+		// code defaults to invalid_filter; the blanket well-formed-text rule
+		// (query-string validation ahead of the handler) answers NUL and
+		// malformed UTF-8 with invalid_request before the filter layer runs.
+		code string
 	}{
 		{name: "unknown field", filter: "unknown:thing", wantInError: `unknown field "unknown"`},
 		{name: "attachment filtering deferred", filter: "has:attachment", wantInError: `unknown field "has" — supported fields: created, from, label, subject`},
@@ -94,8 +98,8 @@ func TestFilterParamInvalid(t *testing.T) {
 		{name: "syntax retains column", filter: "label:", wantInError: "(at column 7)"},
 		{name: "ASCII over code point limit", filter: "label:" + strings.Repeat("a", 501), wantInError: "filter too long (max 500 chars)"},
 		{name: "Unicode over code point limit", filter: strings.Repeat("界", 501), wantInError: "filter too long (max 500 chars)"},
-		{name: "NUL is invalid", filter: "subject:\x00", wantInError: "filter must be valid UTF-8 and must not contain NUL"},
-		{name: "malformed UTF-8 is invalid", filter: string([]byte("subject:\xff")), wantInError: "filter must be valid UTF-8 and must not contain NUL"},
+		{name: "NUL is invalid", filter: "subject:\x00", wantInError: "must not contain a NUL", code: "invalid_request"},
+		{name: "malformed UTF-8 is invalid", filter: string([]byte("subject:\xff")), wantInError: "must be valid UTF-8", code: "invalid_request"},
 		{name: "Unicode code point limit accepts bytes over cap", filter: valid500Unicode, wantOK: true},
 	}
 
@@ -112,7 +116,11 @@ func TestFilterParamInvalid(t *testing.T) {
 			if code != 400 {
 				t.Fatalf("status = %d, want 400 (body %v)", code, body)
 			}
-			errBody := filterError(t, body)
+			wantCode := tc.code
+			if wantCode == "" {
+				wantCode = "invalid_filter"
+			}
+			errBody := filterError(t, body, wantCode)
 			message, _ := errBody["message"].(string)
 			if !strings.Contains(message, tc.wantInError) {
 				t.Errorf("error message = %q, want it to contain %q", message, tc.wantInError)
