@@ -146,9 +146,15 @@ function FunnelRow({
   // and the mark carries nothing — but the losses are the whole reason to
   // look. The shortfall segment gets a floor width so a real loss is never
   // invisible, and it is always accompanied by the count on the right.
-  const kept = max > 0 ? (value / max) * 100 : 0;
-  const shortfall = Math.max(0, 100 - kept);
+  // With no baseline there is no shortfall to draw — 100% of nothing is not a
+  // total loss. Computing it anyway painted the whole track red for an account
+  // that simply had not sent, contradicting the tiles, which correctly render
+  // an em dash. Same null-vs-zero rule as the rates, applied to the mark.
+  const hasBaseline = max > 0;
+  const kept = hasBaseline ? (value / max) * 100 : 0;
+  const shortfall = hasBaseline ? Math.max(0, 100 - kept) : 0;
   const shortfallWidth = shortfall > 0 ? Math.max(shortfall, 0.8) : 0;
+  const keptWidth = hasBaseline ? 100 - shortfallWidth : 0;
   return (
     <div className="flex items-center gap-3 py-1.5">
       <div className="flex w-[132px] shrink-0 items-center text-[12px]" style={{ color: "var(--fg-muted)" }}>
@@ -162,7 +168,7 @@ function FunnelRow({
         className="flex h-[10px] min-w-0 flex-1 gap-[2px] overflow-hidden rounded-full"
         style={{ background: "var(--bg-sunken)" }}
       >
-        <div className="h-full rounded-full" style={{ width: `${100 - shortfallWidth}%`, background: "var(--accent)" }} />
+        <div className="h-full rounded-full" style={{ width: `${keptWidth}%`, background: "var(--accent)" }} />
         {shortfallWidth > 0 && (
           <div className="h-full rounded-full" style={{ width: `${shortfallWidth}%`, background: "var(--danger)" }} />
         )}
@@ -290,6 +296,11 @@ export default function MetricsPage() {
           />
 
           <Panel title="Where mail went">
+            {summary.accepted === 0 && (
+              <p className="mb-2 text-[12px]" style={{ color: "var(--fg-subtle)" }}>
+                No outbound mail with a lifecycle record in this window.
+              </p>
+            )}
             <FunnelRow
               label="Accepted"
               help={METRIC_HELP.accepted}

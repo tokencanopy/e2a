@@ -109,6 +109,47 @@ it("renders a null rate as an em dash, never as 0%", async () => {
   expect(screen.getAllByText("—").length).toBeGreaterThan(0);
 });
 
+// Regression: with accepted=0 the funnel had no baseline, so shortfall was
+// computed as 100% and the whole track painted red — zero traffic rendered as
+// total delivery failure, contradicting the tiles' em dash. Hit whenever an
+// account's messages predate the lifecycle ledger.
+it("draws no loss bar when there is no outbound baseline to lose against", async () => {
+  respond(
+    body({
+      messages_in_window: 24,
+      messages_with_lifecycle: 2,
+      summary: summary(),
+      rates: rates(),
+      agents: [],
+      counters: [],
+    }),
+  );
+  const { container } = renderPage();
+
+  await screen.findByText(/22 of 24 messages have no lifecycle record/);
+  expect(screen.getByText("No outbound mail with a lifecycle record in this window.")).toBeInTheDocument();
+
+  const danger = Array.from(container.querySelectorAll<HTMLElement>("div[style*='--danger']"));
+  // No loss segment may be drawn without a baseline.
+  expect(danger).toHaveLength(0);
+});
+
+it("still draws the loss bar when a real baseline exists", async () => {
+  respond(
+    body({
+      summary: summary({ accepted: 100, submitted: 60, delivered: 50 }),
+      rates: rates({ delivered_rate: 0.5 }),
+      agents: [],
+      counters: [],
+    }),
+  );
+  const { container } = renderPage();
+
+  await screen.findByText("50.0%");
+  const danger = Array.from(container.querySelectorAll<HTMLElement>("div[style*='--danger']"));
+  expect(danger.length).toBeGreaterThan(0);
+});
+
 it("shows an empty state instead of a wall of dashes for a new account", async () => {
   respond(body({ messages_in_window: 0, summary: summary(), rates: rates(), agents: [], counters: [] }));
   renderPage();
