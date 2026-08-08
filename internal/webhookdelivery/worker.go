@@ -45,6 +45,18 @@ const MaxDeliveryAttempts = 8
 // rescheduled (no attempt burned) — mirrors the legacy disabledDeferral.
 const disabledSnooze = time.Hour
 
+// MaxDisabledSnoozes caps how many times a delivery may snooze behind a
+// disabled webhook before it is written to a truthful terminal 'failed'
+// ("webhook disabled"). 24 snoozes × the 1h disabledSnooze ≈ 24 hours of
+// grace — a user disabling an endpoint for a maintenance window loses
+// nothing, while a delivery can no longer sit customer-visibly 'pending'
+// (and wake hourly) until its 90-day expiry.
+//
+// TUNABLE: 24 is the design's proposed value, not yet frozen — if "no one
+// disables an endpoint for a whole day", 6-8 is defensible and tightens
+// SC3 (docs/design/2026-08-08-webhook-health-notifications.md, Q2).
+const MaxDisabledSnoozes = 24
+
 // WebhookReader is the narrow webhook-lookup surface the worker needs.
 // *identity.Store satisfies it.
 type WebhookReader interface {
@@ -66,8 +78,8 @@ type Metrics interface {
 
 	// WebhookTerminal records a delivery only after this worker successfully
 	// transitions its row to a terminal state. outcome ∈ {delivered,
-	// e2a_failure, endpoint_failure, excluded}; scope ∈ {initial, replay,
-	// test, unknown}.
+	// e2a_failure, endpoint_failure, excluded, webhook_disabled}; scope ∈
+	// {initial, replay, test, unknown}.
 	WebhookTerminal(outcome, scope string, count int)
 
 	// WebhookDeliveryRescued counts delivery rows the reconciler's dead-job
@@ -276,6 +288,25 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		return river.JobCancel(fmt.Errorf("webhook %s not found: %w", d.WebhookID, err))
 	}
 	if !wh.Enabled {
+		if snoozeCount(job) >= MaxDisabledSnoozes {
+			// The webhook has been disabled for the whole snooze budget —
+			// terminalize instead of waking hourly until the row's 90-day
+			// expiry. last_error is deliberately "webhook disabled": the
+			// delivery stopped because of endpoint STATE, not because the
+			// customer's server misbehaved on an attempt. The conditional
+			// transition can never clobber a row that reached 'delivered'
+			// in the meantime; a failed write returns the error so River
+			// retries rather than completing the job over an ambiguous row.
+			w.emitAttempt("exhausted", "none", -1) // no POST happened — no duration sample
+			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook disabled", 0)
+			if merr != nil {
+				return merr
+			}
+			if transitioned {
+				w.emitTerminal("webhook_disabled", deliveryScope(d))
+			}
+			return nil
+		}
 		// Disabled — reschedule without burning an attempt (matches legacy defer).
 		w.emitAttempt("skipped_disabled", "none", -1) // no POST happened — no duration sample
 		return river.JobSnooze(disabledSnooze)
