@@ -80,12 +80,17 @@ func TestNotifier_DisabledEmailContent(t *testing.T) {
 		"42",                              // failure count
 		"https://app.example.com/webhooks/detail?id=wh_deadbeef", // the re-enable path
 		"cannot be replayed", // honest about forward loss
-		"Reply-To: webhooks-noreply@send.example.com",
 		"Message-ID: <webhook-health-disabled-wh_deadbeef-",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("disabled email missing %q", want)
 		}
+	}
+	// Deliberately NO Reply-To: replies follow From (the hosted deployment
+	// points from_address at a real mailbox); a second address would only
+	// create a way for the two to disagree later.
+	if strings.Contains(msg, "Reply-To:") {
+		t.Errorf("unexpected Reply-To header — replies must follow From")
 	}
 	if !strings.Contains(msg, "Subject: [e2a] webhook disabled: hooks.example.com") {
 		t.Errorf("subject missing/wrong; message headers:\n%s", msg[:min(len(msg), 600)])
@@ -120,8 +125,8 @@ func TestNotifier_WarningEmailContent(t *testing.T) {
 }
 
 // The sender address MUST be configuration: a configured
-// notifications.from_address wins over the fallback, and Reply-To follows
-// it so replies land at the configured (support) address.
+// notifications.from_address wins over the fallback, and replies follow
+// From (no Reply-To), so the configured address is where replies land.
 func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 	relay := &captureRelay{}
 	n := New(okStore(), relay, "send.example.com", "support@corp.example", "")
@@ -137,8 +142,11 @@ func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 		t.Errorf("envelope from = %q, want configured address", relay.from)
 	}
 	msg := string(relay.message)
-	if !strings.Contains(msg, "Reply-To: support@corp.example") {
-		t.Errorf("Reply-To must follow the configured address")
+	if !strings.Contains(msg, "From: e2a <support@corp.example>") {
+		t.Errorf("From header must carry the configured address")
+	}
+	if strings.Contains(msg, "Reply-To:") {
+		t.Errorf("unexpected Reply-To header — replies must follow From")
 	}
 	// Message-ID domain follows the configured address's domain.
 	if !strings.Contains(msg, "@corp.example>") {

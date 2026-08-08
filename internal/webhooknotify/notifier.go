@@ -169,17 +169,19 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) 
 	htmlBody := renderHTML(wh, kind, reason, stats.FailedAttempts, window, dashURL)
 
 	fromHeader := fmt.Sprintf("e2a <%s>", n.fromAddress)
-	// Reply-To is set EXPLICITLY (to the same resolved address) rather than
-	// relying on From, so a future change of sending identity cannot
-	// silently break the reply path.
+	// Deliberately NO Reply-To header: the hosted deployment points
+	// notifications.from_address at a real mailbox, so replies follow From —
+	// a second address would only create a way for the two to disagree
+	// later. (Decision 2026-08-08, superseding the design doc's Reply-To
+	// suggestion.)
 	message, err := outbound.ComposeMultipartMessage(
 		fromHeader, []string{owner.Email}, nil,
 		subject, text, htmlBody,
-		"",            // no reply-to-message-id (fresh notification)
-		nil,           // no references chain
-		n.fromDomain,  // from_domain (Message-ID generation)
-		n.fromAddress, // reply_to
-		"",            // no conversation_id
+		"",           // no reply-to-message-id (fresh notification)
+		nil,          // no references chain
+		n.fromDomain, // from_domain (Message-ID generation)
+		"",           // no reply_to — replies follow From (see above)
+		"",           // no conversation_id
 	)
 	if err != nil {
 		return fmt.Errorf("webhook notify: compose: %w", err)

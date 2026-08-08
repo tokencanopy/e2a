@@ -509,12 +509,24 @@ decisions, so the doc describes what actually shipped:
 - **Constants** are named and marked tunable, values still as proposed
   (unfrozen): `identity.WarnThreshold`/`identity.WarnWindow` (5 / 24h) and
   `webhookdelivery.MaxDisabledSnoozes` (24).
-- **Sender address.** New config `notifications.from_address`
-  (`E2A_NOTIFICATIONS_FROM_ADDRESS`, validated as a bare address); unset
-  falls back to `webhooks-noreply@<outbound_smtp.from_domain>`. `Reply-To`
-  is set explicitly to the resolved address. The notifier is gated on
-  `outbound_smtp.from_domain` alone — without `http.public_url` the emails
-  still send, with generic dashboard copy instead of a link.
+- **Sender address (final decision, resolves Q6 and supersedes Part 4's
+  `support@team.tokencanopy.com` and its Reply-To suggestion).** The hosted
+  From is `support@agents.e2a.dev`, set via ops config — because `e2a.dev`
+  publishes `DMARC p=none` while `team.tokencanopy.com` publishes
+  `p=quarantine` with BYODKIM, and an integration-is-broken alert must not
+  make its own delivery contingent on getting DKIM exactly right; because
+  `agents.e2a.dev` has a real MX and a real "e2a Support" inbox, so replies
+  reach a human whether or not the client honors any reply header; and
+  because it matches the product the recipient integrated. Consequently
+  there is **no `Reply-To` header at all**: with a real mailbox behind
+  From, a second address only creates a way for the two to disagree later.
+  In the OSS repo the address stays pure configuration — the new
+  `notifications.from_address` key (`E2A_NOTIFICATIONS_FROM_ADDRESS`,
+  validated as a bare address), never a constant; unset falls back to
+  `webhooks-noreply@<outbound_smtp.from_domain>` so self-host works with
+  zero configuration. The notifier is gated on `outbound_smtp.from_domain`
+  alone — without `http.public_url` the emails still send, with generic
+  dashboard copy instead of a link.
 - **Message-ID** is deterministic per EPISODE (webhook id + the warn stamp
   / disable timestamp), not per webhook as in hitlnotify — a webhook can
   legitimately warn again after recovering, and a webhook-keyed id would
@@ -537,4 +549,7 @@ decisions, so the doc describes what actually shipped:
   Sender uses — one copy of the logic, no new crypto), applied after the
   Message-ID prepend so the signature covers the final header set.
   Fail-open: no stored key (the zero-config self-host path) sends
-  unsigned, exactly as before.
+  unsigned, exactly as before. With the final `support@agents.e2a.dev`
+  sender (DMARC `p=none`), the signing is defense-in-depth rather than
+  load-bearing — unsigned mail is delivered either way, and a missing key
+  is never an error.
