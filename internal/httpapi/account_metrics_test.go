@@ -229,6 +229,77 @@ func TestAccountMetricsReportsNotImplementedWithoutStore(t *testing.T) {
 	}
 }
 
+func withDailyBuckets(days []messagelifecycle.DayBucket) func(*Deps) {
+	return func(d *Deps) {
+		d.CountAccountDaily = func(context.Context, string, time.Time, time.Time) ([]messagelifecycle.DayBucket, error) {
+			return days, nil
+		}
+	}
+}
+
+// TestAccountMetricsBucketsOnlyWhenAsked: the daily read is a second query, so
+// it must not run for callers that only want totals.
+func TestAccountMetricsBucketsOnlyWhenAsked(t *testing.T) {
+	day := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	buckets := []messagelifecycle.DayBucket{{
+		Day: day,
+		Counts: []messagelifecycle.ReasonCodeCount{
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 10, 10),
+			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 9, 9),
+		},
+	}}
+
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{}, withDailyBuckets(buckets))
+	_, plain := accountMetricsGET(t, srv, "")
+	if got, ok := plain["buckets"].([]any); !ok || len(got) != 0 {
+		t.Errorf("buckets = %#v, want empty without bucket=day", plain["buckets"])
+	}
+
+	_, bucketed := accountMetricsGET(t, srv, "?bucket=day")
+	rows, ok := bucketed["buckets"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("buckets = %#v, want 1 row", bucketed["buckets"])
+	}
+	first := rows[0].(map[string]any)
+	if first["day"] != "2026-08-01T00:00:00Z" {
+		t.Errorf("day = %v, want midnight UTC", first["day"])
+	}
+	// Each bucket carries its own rates, on the same denominators.
+	if got := first["rates"].(map[string]any)["delivered_rate"].(float64); got != 0.9 {
+		t.Errorf("bucket delivered_rate = %v, want 0.9", got)
+	}
+	if got := first["summary"].(map[string]any)["accepted"].(float64); got != 10 {
+		t.Errorf("bucket accepted = %v, want 10", got)
+	}
+}
+
+// A quiet day is present with null rates, never a fabricated 0%.
+func TestAccountMetricsQuietBucketHasNullRates(t *testing.T) {
+	day := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{},
+		withDailyBuckets([]messagelifecycle.DayBucket{{Day: day}}))
+
+	_, body := accountMetricsGET(t, srv, "?bucket=day")
+	first := body["buckets"].([]any)[0].(map[string]any)
+	if rate := first["rates"].(map[string]any)["delivered_rate"]; rate != nil {
+		t.Errorf("quiet day delivered_rate = %#v, want null", rate)
+	}
+	if got := first["summary"].(map[string]any)["accepted"].(float64); got != 0 {
+		t.Errorf("quiet day accepted = %v, want 0", got)
+	}
+}
+
+func TestAccountMetricsRejectsUnknownBucket(t *testing.T) {
+	srv, calls := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{})
+	status, _ := accountMetricsGET(t, srv, "?bucket=hour")
+	if status != http.StatusUnprocessableEntity && status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want a validation rejection", status)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("store was queried for an unknown bucket: %v", *calls)
+	}
+}
+
 func webhookCounts(delivered, pending, rejected, noResponse int64) webhook.DeliveryOutcomeCounts {
 	return webhook.DeliveryOutcomeCounts{
 		Total:            delivered + pending + rejected + noResponse,

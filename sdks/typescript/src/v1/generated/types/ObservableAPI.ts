@@ -82,6 +82,7 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
@@ -393,12 +394,13 @@ export class ObservableAccountApi {
      * Get account-wide delivery metrics (beta)
      * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
      * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
      * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      */
-    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, groupBy?: 'agent', _options?: ConfigurationOptions): Observable<HttpInfo<AccountMetricsView>> {
+    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: ConfigurationOptions): Observable<HttpInfo<AccountMetricsView>> {
         const _config = mergeConfiguration(this.configuration, _options);
 
-        const requestContextPromise = this.requestFactory.getAccountMetrics(start, end, groupBy, _config);
+        const requestContextPromise = this.requestFactory.getAccountMetrics(start, end, bucket, groupBy, _config);
         // build promise chain
         let middlewarePreObservable = from<RequestContext>(requestContextPromise);
         for (const middleware of _config.middleware) {
@@ -420,10 +422,11 @@ export class ObservableAccountApi {
      * Get account-wide delivery metrics (beta)
      * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
      * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
      * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      */
-    public getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: ConfigurationOptions): Observable<AccountMetricsView> {
-        return this.getAccountMetricsWithHttpInfo(start, end, groupBy, _options).pipe(map((apiResponse: HttpInfo<AccountMetricsView>) => apiResponse.data));
+    public getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: ConfigurationOptions): Observable<AccountMetricsView> {
+        return this.getAccountMetricsWithHttpInfo(start, end, bucket, groupBy, _options).pipe(map((apiResponse: HttpInfo<AccountMetricsView>) => apiResponse.data));
     }
 
     /**

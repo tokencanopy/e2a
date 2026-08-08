@@ -1666,6 +1666,7 @@ class AccountApi:
         self,
         start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
         end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        bucket: Annotated[Optional[StrictStr], Field(description="Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.")] = None,
         group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
         _request_timeout: Union[
             None,
@@ -1688,6 +1689,8 @@ class AccountApi:
         :type start: datetime
         :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
         :type end: datetime
+        :param bucket: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+        :type bucket: str
         :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
         :type group_by: str
         :param _request_timeout: timeout setting for this request. If one
@@ -1715,6 +1718,7 @@ class AccountApi:
         _param = self._get_account_metrics_serialize(
             start=start,
             end=end,
+            bucket=bucket,
             group_by=group_by,
             _request_auth=_request_auth,
             _content_type=_content_type,
@@ -1741,6 +1745,7 @@ class AccountApi:
         self,
         start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
         end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        bucket: Annotated[Optional[StrictStr], Field(description="Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.")] = None,
         group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
         _request_timeout: Union[
             None,
@@ -1763,6 +1768,8 @@ class AccountApi:
         :type start: datetime
         :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
         :type end: datetime
+        :param bucket: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+        :type bucket: str
         :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
         :type group_by: str
         :param _request_timeout: timeout setting for this request. If one
@@ -1790,6 +1797,7 @@ class AccountApi:
         _param = self._get_account_metrics_serialize(
             start=start,
             end=end,
+            bucket=bucket,
             group_by=group_by,
             _request_auth=_request_auth,
             _content_type=_content_type,
@@ -1816,6 +1824,7 @@ class AccountApi:
         self,
         start: Annotated[Optional[datetime], Field(description="Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.")] = None,
         end: Annotated[Optional[datetime], Field(description="Exclusive end of the cohort window (RFC 3339). Defaults to now.")] = None,
+        bucket: Annotated[Optional[StrictStr], Field(description="Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.")] = None,
         group_by: Annotated[Optional[StrictStr], Field(description="Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.")] = None,
         _request_timeout: Union[
             None,
@@ -1838,6 +1847,8 @@ class AccountApi:
         :type start: datetime
         :param end: Exclusive end of the cohort window (RFC 3339). Defaults to now.
         :type end: datetime
+        :param bucket: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+        :type bucket: str
         :param group_by: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
         :type group_by: str
         :param _request_timeout: timeout setting for this request. If one
@@ -1865,6 +1876,7 @@ class AccountApi:
         _param = self._get_account_metrics_serialize(
             start=start,
             end=end,
+            bucket=bucket,
             group_by=group_by,
             _request_auth=_request_auth,
             _content_type=_content_type,
@@ -1886,6 +1898,7 @@ class AccountApi:
         self,
         start,
         end,
+        bucket,
         group_by,
         _request_auth,
         _content_type,
@@ -1934,6 +1947,10 @@ class AccountApi:
                 )
             else:
                 _query_params.append(('end', end))
+            
+        if bucket is not None:
+            
+            _query_params.append(('bucket', bucket))
             
         if group_by is not None:
             

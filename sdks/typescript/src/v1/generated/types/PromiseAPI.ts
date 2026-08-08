@@ -81,6 +81,7 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
@@ -317,11 +318,12 @@ export class PromiseAccountApi {
      * Get account-wide delivery metrics (beta)
      * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
      * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
      * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      */
-    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
+    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.getAccountMetricsWithHttpInfo(start, end, groupBy, observableOptions);
+        const result = this.api.getAccountMetricsWithHttpInfo(start, end, bucket, groupBy, observableOptions);
         return result.toPromise();
     }
 
@@ -330,11 +332,12 @@ export class PromiseAccountApi {
      * Get account-wide delivery metrics (beta)
      * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
      * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
      * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      */
-    public getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<AccountMetricsView> {
+    public getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<AccountMetricsView> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.getAccountMetrics(start, end, groupBy, observableOptions);
+        const result = this.api.getAccountMetrics(start, end, bucket, groupBy, observableOptions);
         return result.toPromise();
     }
 

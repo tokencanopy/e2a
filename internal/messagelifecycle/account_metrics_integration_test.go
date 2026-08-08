@@ -192,3 +192,98 @@ func TestAccountMetricsRejectsInvalidWindows(t *testing.T) {
 		})
 	}
 }
+
+// TestCountByDayGapFillsQuietDays: a day with no traffic must come back with
+// zeroes, not vanish. A missing day lets a chart draw a straight line across
+// it, which reads as steady volume rather than none.
+func TestCountByDayGapFillsQuietDays(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	agentID := seedMetricsAgent(t, pool, "bucketgap")
+	ctx := context.Background()
+
+	start := metricsBaseTime.Truncate(24 * time.Hour)
+	// Traffic on day 0 and day 3 only; days 1 and 2 are silent.
+	for _, offset := range []int{0, 3} {
+		id := fmt.Sprintf("msg_bucket_%d", offset)
+		seedMetricsMessage(t, pool, id, agentID, "outbound", start.AddDate(0, 0, offset).Add(6*time.Hour))
+		appendMetricsObservation(t, pool, id, "outbound", "accept",
+			messagelifecycle.ReasonAcceptanceOutboundAPI, start.AddDate(0, 0, offset).Add(6*time.Hour))
+	}
+
+	buckets, err := store.CountByDayForAccount(ctx, "usr_bucketgap", start, start.AddDate(0, 0, 4))
+	if err != nil {
+		t.Fatalf("CountByDayForAccount: %v", err)
+	}
+	if len(buckets) != 4 {
+		t.Fatalf("buckets = %d, want 4 contiguous days", len(buckets))
+	}
+	for i, b := range buckets {
+		wantDay := start.AddDate(0, 0, i)
+		if !b.Day.Equal(wantDay) {
+			t.Errorf("bucket %d day = %s, want %s", i, b.Day, wantDay)
+		}
+		hasTraffic := len(b.Counts) > 0
+		if wantTraffic := i == 0 || i == 3; hasTraffic != wantTraffic {
+			t.Errorf("bucket %d traffic = %v, want %v", i, hasTraffic, wantTraffic)
+		}
+	}
+}
+
+// TestCountByDayBucketsSumToTheWindowTotal: the per-day slices must reconcile
+// with the totals shown above them, or the chart and the tiles disagree.
+func TestCountByDayBucketsSumToTheWindowTotal(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	agentID := seedMetricsAgent(t, pool, "bucketsum")
+	ctx := context.Background()
+
+	start := metricsBaseTime.Truncate(24 * time.Hour)
+	for i := 0; i < 9; i++ {
+		id := fmt.Sprintf("msg_bsum_%d", i)
+		at := start.AddDate(0, 0, i%3).Add(time.Duration(i) * time.Hour)
+		seedMetricsMessage(t, pool, id, agentID, "outbound", at)
+		appendMetricsObservation(t, pool, id, "outbound", "accept", messagelifecycle.ReasonAcceptanceOutboundAPI, at)
+	}
+	end := start.AddDate(0, 0, 3)
+
+	buckets, err := store.CountByDayForAccount(ctx, "usr_bucketsum", start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summed int64
+	for _, b := range buckets {
+		for _, c := range b.Counts {
+			if c.ReasonCode == messagelifecycle.ReasonAcceptanceOutboundAPI {
+				summed += c.Messages
+			}
+		}
+	}
+	totals, err := store.CountByReasonCodeForAccount(ctx, "usr_bucketsum", start, end, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := accountCountsByCode(totals.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages
+	if summed != want {
+		t.Errorf("buckets sum to %d, window total is %d — the chart would contradict the tiles", summed, want)
+	}
+	if want != 9 {
+		t.Errorf("window total = %d, want 9", want)
+	}
+}
+
+func TestCountByDayRejectsInvalidWindows(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	ctx := context.Background()
+	if _, err := store.CountByDayForAccount(ctx, "", metricsBaseTime, metricsBaseTime.Add(time.Hour)); err == nil {
+		t.Error("expected an error for an empty user id")
+	}
+	if _, err := store.CountByDayForAccount(ctx, "usr_x", metricsBaseTime, metricsBaseTime); err == nil {
+		t.Error("expected an error when end == start")
+	}
+	if _, err := store.CountByDayForAccount(ctx, "usr_x", metricsBaseTime,
+		metricsBaseTime.Add(messagelifecycle.MaxMetricsWindow+time.Hour)); err == nil {
+		t.Error("expected an error for a window past the cap")
+	}
+}

@@ -60,6 +60,7 @@ function makeAccountView(over: Record<string, unknown> = {}) {
     agents: [],
     agentsTruncated: false,
     webhooks: makeWebhooks(),
+    buckets: [],
     ...over,
   };
 }
@@ -251,6 +252,33 @@ describe("metrics command", () => {
     mockAccountMetrics.mockResolvedValue(makeAccountView({ webhooks: undefined }));
     await metrics(undefined, {});
     expect(out()).toContain("account totals");
+  });
+
+  it("prints per-day buckets under --by-day, keeping a rateless day distinct", async () => {
+    mockAccountMetrics.mockResolvedValue(
+      makeAccountView({
+        buckets: [
+          { day: new Date("2026-08-01T00:00:00Z"), summary: makeSummary({ accepted: 100, delivered: 98 }), rates: makeRates({ deliveredRate: 0.98 }) },
+          { day: new Date("2026-08-02T00:00:00Z"), summary: makeSummary(), rates: makeRates() },
+        ],
+      }),
+    );
+    await metrics(undefined, { byDay: true });
+    expect(mockAccountMetrics).toHaveBeenCalledWith({
+      start: undefined, end: undefined, groupBy: undefined, bucket: "day",
+    });
+    const text = out();
+    expect(text).toContain("by day (UTC)");
+    expect(text).toContain("2026-08-01");
+    expect(text).toContain("98.0%");
+    // The silent day is present and rateless, not a fabricated 0%.
+    expect(text).toContain("2026-08-02");
+    expect(text).toMatch(/2026-08-02.*n\/a/);
+  });
+
+  it("rejects --by-day alongside an inbox", async () => {
+    await expect(metrics("bot@agents.localhost", { byDay: true })).rejects.toThrow("process.exit");
+    expect(mockGetMetrics).not.toHaveBeenCalled();
   });
 
   it("rejects an inverted window before calling the API", async () => {

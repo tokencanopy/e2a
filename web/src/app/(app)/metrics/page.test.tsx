@@ -72,6 +72,7 @@ function body(over: Record<string, unknown> = {}) {
     ],
     agents_truncated: false,
     webhooks: webhooks(),
+    buckets: [],
     ...over,
   };
 }
@@ -364,4 +365,87 @@ it("marks the page as beta", async () => {
   expect(
     screen.getByText(/definitions may change while this is in beta/),
   ).toBeInTheDocument();
+});
+
+describe("delivery-rate trend", () => {
+  const bucket = (day: string, rate: number | null, accepted: number) => ({
+    day,
+    summary: summary({ accepted, delivered: rate === null ? 0 : Math.round(accepted * rate) }),
+    rates: rates({ delivered_rate: rate }),
+  });
+
+  it("requests daily buckets so the chart has something to draw", async () => {
+    respond(body());
+    renderPage();
+    await screen.findByText("97.8%");
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("bucket=day"))).toBe(true);
+  });
+
+  it("stays hidden until there are at least two days", async () => {
+    respond(body({ buckets: [bucket("2026-08-01T00:00:00Z", 0.97, 100)] }));
+    renderPage();
+    await screen.findByText("97.8%");
+    expect(screen.queryByText("Delivery rate over time")).not.toBeInTheDocument();
+  });
+
+  // A null rate means no sends that day. Plotting it as 0% would draw a crash
+  // that never happened, so the line must break instead.
+  it("breaks the line on a day with no sends rather than plotting zero", async () => {
+    respond(
+      body({
+        buckets: [
+          bucket("2026-08-01T00:00:00Z", 0.98, 100),
+          bucket("2026-08-02T00:00:00Z", 0.97, 110),
+          bucket("2026-08-03T00:00:00Z", null, 0), // silent day
+          bucket("2026-08-04T00:00:00Z", 0.96, 90),
+          bucket("2026-08-05T00:00:00Z", 0.99, 95),
+        ],
+      }),
+    );
+    const { container } = renderPage();
+    await screen.findByText("Delivery rate over time");
+
+    // Two separate runs — never one path interpolated across the gap, which
+    // would imply a rate on a day that had no sends.
+    const paths = Array.from(container.querySelectorAll("path[stroke*='--accent']"));
+    expect(paths).toHaveLength(2);
+    for (const p of paths) {
+      expect(p.getAttribute("d") ?? "").not.toMatch(/M.*M/);
+    }
+  });
+
+  // A day whose neighbours are both silent has no line to sit on, so it must
+  // render as a point rather than disappearing from the chart.
+  it("draws an isolated day as a dot", async () => {
+    respond(
+      body({
+        buckets: [
+          bucket("2026-08-01T00:00:00Z", null, 0),
+          bucket("2026-08-02T00:00:00Z", 0.97, 110),
+          bucket("2026-08-03T00:00:00Z", null, 0),
+        ],
+      }),
+    );
+    const { container } = renderPage();
+    await screen.findByText("Delivery rate over time");
+    expect(container.querySelectorAll("circle[fill*='--accent']").length).toBeGreaterThanOrEqual(1);
+    expect(container.querySelectorAll("path[stroke*='--accent']")).toHaveLength(0);
+  });
+
+  it("labels the axis range so the chart is readable without hovering", async () => {
+    respond(
+      body({
+        buckets: [
+          bucket("2026-08-01T00:00:00Z", 0.98, 100),
+          bucket("2026-08-02T00:00:00Z", 0.96, 120),
+        ],
+      }),
+    );
+    renderPage();
+    await screen.findByText("Delivery rate over time");
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("1 Aug")).toBeInTheDocument();
+    expect(screen.getByText("2 Aug")).toBeInTheDocument();
+  });
 });

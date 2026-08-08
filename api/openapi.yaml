@@ -101,6 +101,13 @@ components:
         agents_truncated:
           description: "True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut."
           type: boolean
+        buckets:
+          description: Per-day breakdown, oldest first. Empty unless bucket=day was requested. Each bucket's counters sum to the window totals above; its rates do not average to the window rate, because a rate of rates is not the rate.
+          items:
+            $ref: "#/components/schemas/MetricsBucketView"
+          type:
+            - array
+            - "null"
         counters:
           description: Every reason code observed across the account in the window, ordered by code.
           items:
@@ -148,6 +155,7 @@ components:
         - agents
         - agents_truncated
         - webhooks
+        - buckets
       type: object
       x-stability-level: beta
     AccountUserView:
@@ -3171,6 +3179,24 @@ components:
         - raw_message
         - attachments
       type: object
+    MetricsBucketView:
+      additionalProperties: true
+      properties:
+        day:
+          description: "Midnight UTC starting this bucket. Buckets are contiguous and gap-filled: a day with no traffic is present with zeroes rather than omitted, so a chart cannot draw a straight line across a quiet day and imply steady volume."
+          format: date-time
+          type: string
+        rates:
+          $ref: "#/components/schemas/MetricsRatesView"
+          description: Rates for this day alone, on the same fixed denominators as the window totals. Null members mean that day had no denominator, which is common on low-volume days and is NOT a zero.
+        summary:
+          $ref: "#/components/schemas/MetricsSummaryView"
+      required:
+        - day
+        - summary
+        - rates
+      type: object
+      x-stability-level: beta
     MetricsCounterView:
       additionalProperties: true
       properties:
@@ -8111,6 +8137,15 @@ paths:
           schema:
             description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
             format: date-time
+            type: string
+        - description: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+          explode: false
+          in: query
+          name: bucket
+          schema:
+            description: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+            enum:
+              - day
             type: string
         - description: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
           explode: false
