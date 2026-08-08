@@ -682,6 +682,46 @@ func (s *Store) sweepWebhooksTx(ctx context.Context, notifyTx WebhookNotifyTx, p
 	return len(ids), nil
 }
 
+// WebhookFailureStats summarizes a webhook's recent delivery failures for
+// the health-notification emails.
+type WebhookFailureStats struct {
+	// FailedAttempts counts delivery rows in the window that recorded a
+	// failed attempt (attempts >= 1 AND a non-empty last_error) — the same
+	// attempt-level signal the warn sweep keys on, so the email's number
+	// matches the condition that triggered it.
+	FailedAttempts int
+	// LastError is the most recent non-empty last_error in the window —
+	// already sanitized to customer-facing strings by the delivery worker
+	// (never internal hosts, IPs, or DB identifiers).
+	LastError string
+}
+
+// RecentWebhookFailureStats reports the failing-delivery summary quoted in
+// the health-notification emails.
+func (s *Store) RecentWebhookFailureStats(ctx context.Context, webhookID string, window time.Duration) (WebhookFailureStats, error) {
+	var st WebhookFailureStats
+	err := s.pool.QueryRow(ctx,
+		`SELECT
+		    COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> ''),
+		    COALESCE((
+		        SELECT d.last_error
+		        FROM webhook_subscriber_deliveries d
+		        WHERE d.webhook_id = $1
+		          AND d.created_at > now() - $2::interval
+		          AND d.last_error IS NOT NULL AND d.last_error <> ''
+		        ORDER BY d.last_attempt_at DESC NULLS LAST
+		        LIMIT 1
+		    ), '')
+		 FROM webhook_subscriber_deliveries
+		 WHERE webhook_id = $1 AND created_at > now() - $2::interval`,
+		webhookID, window,
+	).Scan(&st.FailedAttempts, &st.LastError)
+	if err != nil {
+		return WebhookFailureStats{}, fmt.Errorf("webhook failure stats: %w", err)
+	}
+	return st, nil
+}
+
 // ClearExpiredPrevSecrets nulls signing_secret_prev /
 // signing_secret_prev_expires_at on rows past their grace window.
 // Idempotent. The worker already ignores expired prev secrets at

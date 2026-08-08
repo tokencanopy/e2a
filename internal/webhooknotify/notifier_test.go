@@ -1,0 +1,207 @@
+package webhooknotify
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tokencanopy/e2a/internal/identity"
+)
+
+type stubStore struct {
+	owner    *identity.User
+	ownerErr error
+	stats    identity.WebhookFailureStats
+	statsErr error
+}
+
+func (s *stubStore) GetUserByID(_ context.Context, _ string) (*identity.User, error) {
+	return s.owner, s.ownerErr
+}
+
+func (s *stubStore) RecentWebhookFailureStats(_ context.Context, _ string, _ time.Duration) (identity.WebhookFailureStats, error) {
+	return s.stats, s.statsErr
+}
+
+type captureRelay struct {
+	from    string
+	to      []string
+	message []byte
+	err     error
+}
+
+func (r *captureRelay) SendOnce(from string, to []string, msg []byte) (string, error) {
+	r.from, r.to, r.message = from, to, msg
+	return "queued-id", r.err
+}
+
+func testWebhook() *identity.Webhook {
+	warned := time.Now()
+	disabled := time.Now()
+	return &identity.Webhook{
+		ID:                "wh_deadbeef",
+		UserID:            "user_1",
+		URL:               "https://hooks.example.com/inbox",
+		Enabled:           false,
+		AutoDisabledAt:    &disabled,
+		AutoDisableReason: "HTTP 404",
+		WarnNotifiedAt:    &warned,
+	}
+}
+
+func okStore() *stubStore {
+	return &stubStore{
+		owner: &identity.User{ID: "user_1", Email: "owner@example.com"},
+		stats: identity.WebhookFailureStats{FailedAttempts: 42, LastError: "HTTP 404"},
+	}
+}
+
+func TestNotifier_DisabledEmailContent(t *testing.T) {
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "", "https://app.example.com")
+
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	if out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	if len(relay.to) != 1 || relay.to[0] != "owner@example.com" {
+		t.Errorf("recipients = %v, want the account owner", relay.to)
+	}
+	if relay.from != "webhooks-noreply@send.example.com" {
+		t.Errorf("envelope from = %q, want the fallback local part on from_domain", relay.from)
+	}
+	msg := string(relay.message)
+	for _, want := range []string{
+		"https://hooks.example.com/inbox", // the endpoint
+		"HTTP 404",                        // the concrete reason
+		"42",                              // failure count
+		"https://app.example.com/webhooks/detail?id=wh_deadbeef", // the re-enable path
+		"cannot be replayed", // honest about forward loss
+		"Reply-To: webhooks-noreply@send.example.com",
+		"Message-ID: <webhook-health-disabled-wh_deadbeef-",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("disabled email missing %q", want)
+		}
+	}
+	if !strings.Contains(msg, "Subject: [e2a] webhook disabled: hooks.example.com") {
+		t.Errorf("subject missing/wrong; message headers:\n%s", msg[:min(len(msg), 600)])
+	}
+}
+
+func TestNotifier_WarningEmailContent(t *testing.T) {
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "", "https://app.example.com")
+
+	wh := testWebhook()
+	wh.Enabled = true
+	wh.AutoDisabledAt = nil
+	wh.AutoDisableReason = ""
+	out := n.Deliver(context.Background(), wh, KindWarning)
+	if out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	msg := string(relay.message)
+	for _, want := range []string{
+		"Subject: [e2a] webhook delivery failing: hooks.example.com",
+		"HTTP 404",
+		"disabled automatically", // the warning names the consequence
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning email missing %q", want)
+		}
+	}
+	if strings.Contains(msg, "has disabled") {
+		t.Errorf("warning email must not claim the webhook was disabled")
+	}
+}
+
+// The sender address MUST be configuration: a configured
+// notifications.from_address wins over the fallback, and Reply-To follows
+// it so replies land at the configured (support) address.
+func TestNotifier_ConfiguredFromAddress(t *testing.T) {
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "support@corp.example", "")
+
+	if got := n.FromAddress(); got != "support@corp.example" {
+		t.Fatalf("FromAddress = %q", got)
+	}
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	if out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	if relay.from != "support@corp.example" {
+		t.Errorf("envelope from = %q, want configured address", relay.from)
+	}
+	msg := string(relay.message)
+	if !strings.Contains(msg, "Reply-To: support@corp.example") {
+		t.Errorf("Reply-To must follow the configured address")
+	}
+	// Message-ID domain follows the configured address's domain.
+	if !strings.Contains(msg, "@corp.example>") {
+		t.Errorf("Message-ID should be minted on the sending address's domain")
+	}
+	// Without a public URL the email still sends, with generic dashboard copy.
+	if strings.Contains(msg, "/webhooks/detail?id=") {
+		t.Errorf("no dashboard link expected when public_url is unset")
+	}
+}
+
+func TestNotifier_NoOwnerEmailIsPermanent(t *testing.T) {
+	st := okStore()
+	st.owner = &identity.User{ID: "user_1", Email: ""}
+	n := New(st, &captureRelay{}, "send.example.com", "", "")
+
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	if out.Err == nil {
+		t.Fatal("expected an error for a missing owner email")
+	}
+	if !out.Permanent {
+		t.Errorf("missing owner email must classify Permanent (no retry loop)")
+	}
+}
+
+func TestNotifier_TransientStoreErrorIsRetryable(t *testing.T) {
+	st := okStore()
+	st.statsErr = errors.New("db blip")
+	n := New(st, &captureRelay{}, "send.example.com", "", "")
+
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	if out.Err == nil {
+		t.Fatal("expected an error")
+	}
+	if out.Permanent || out.Outage {
+		t.Errorf("a stats read blip must stay transient, got %+v", out)
+	}
+}
+
+// The reason string is echoed into an HTML body — it must be escaped even
+// though the upstream source is already sanitized (defense in depth).
+func TestNotifier_ReasonIsHTMLEscaped(t *testing.T) {
+	st := okStore()
+	st.stats.LastError = `<script>alert(1)</script>`
+	relay := &captureRelay{}
+	n := New(st, relay, "send.example.com", "", "")
+
+	wh := testWebhook()
+	wh.AutoDisableReason = ""
+	if out := n.Deliver(context.Background(), wh, KindDisabled); out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	// The text/plain part may carry the raw string (harmless in plain
+	// text); the text/html part must escape it. Split at the html part
+	// marker and assert only the entity form appears there.
+	msg := string(relay.message)
+	_, htmlPart, found := strings.Cut(msg, "text/html")
+	if !found {
+		t.Fatalf("no text/html part in composed message")
+	}
+	if strings.Contains(htmlPart, "<script>") {
+		t.Errorf("raw script tag leaked into the HTML part")
+	}
+	if !strings.Contains(htmlPart, "&lt;script&gt;") {
+		t.Errorf("escaped reason not found in the HTML part")
+	}
+}
