@@ -621,7 +621,7 @@ func main() {
 	// a BYODKIM custom from-address domain is signed here or not at all.
 	// Fail-open — no stored key (self-host default) sends unsigned.
 	if webhookNotifyJobs != nil {
-		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.HTTP.PublicURL).WithDKIM(store)
+		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
 		webhookNotifyJobs.SetDeliverer(whNotifier)
 		log.Printf("[webhook-notify] enabled (from=%s)", whNotifier.FromAddress())
 	} else {

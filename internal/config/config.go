@@ -239,13 +239,21 @@ type NotificationsConfig struct {
 	// emails. Optional. When empty, notifications fall back to a fixed
 	// no-reply local part on outbound_smtp.from_domain (the hitlnotify
 	// pattern), so self-hosted deployments work with zero configuration.
-	// Hosted deployments set a replyable support address here — the value
-	// MUST be an address the deployment's sending identity is allowed to
-	// send as. Deliberately configuration, never a constant: a hardcoded
-	// operator address would make every self-host try to send as an
-	// identity it does not own. Override with
+	// The value MUST be an address the deployment's sending identity is
+	// allowed to send as. Deliberately configuration, never a constant: a
+	// hardcoded operator address would make every self-host try to send
+	// as an identity it does not own. Override with
 	// E2A_NOTIFICATIONS_FROM_ADDRESS.
 	FromAddress string `yaml:"from_address"`
+	// ReplyTo, when set, adds a Reply-To header to those emails. Use it
+	// when the sending domain (from_address / from_domain) is relay-only
+	// with no mailbox behind it, so replies land in a real support inbox
+	// on another domain — the same From-on-the-relay-domain +
+	// Reply-To-at-the-real-inbox pattern the product's shared-domain
+	// sends already use. Optional: empty emits NO Reply-To header
+	// (replies follow From), the sane default when from_address is
+	// itself a real mailbox. Override with E2A_NOTIFICATIONS_REPLY_TO.
+	ReplyTo string `yaml:"reply_to"`
 }
 
 // InboundConfig selects the inbound processing model (inbound-message-pipeline-
@@ -499,6 +507,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_NOTIFICATIONS_FROM_ADDRESS"); v != "" {
 		cfg.Notifications.FromAddress = v
 	}
+	if v := os.Getenv("E2A_NOTIFICATIONS_REPLY_TO"); v != "" {
+		cfg.Notifications.ReplyTo = v
+	}
 	if v := os.Getenv("E2A_METRICS_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Metrics.Enabled = b
@@ -674,6 +685,12 @@ func (c *Config) Validate() error {
 		addr, err := mail.ParseAddress(v)
 		if err != nil || addr.Address != v {
 			return fmt.Errorf("config: notifications.from_address must be a bare email address (got %q)", v)
+		}
+	}
+	if v := c.Notifications.ReplyTo; v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil || addr.Address != v {
+			return fmt.Errorf("config: notifications.reply_to must be a bare email address (got %q)", v)
 		}
 	}
 	return nil

@@ -749,6 +749,7 @@ provisioning:
 func TestNotificationsFromAddress(t *testing.T) {
 	t.Run("env override", func(t *testing.T) {
 		t.Setenv("E2A_NOTIFICATIONS_FROM_ADDRESS", "support@notify.example")
+		t.Setenv("E2A_NOTIFICATIONS_REPLY_TO", "replies@notify.example")
 		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(cfgPath, []byte("{}\n"), 0644); err != nil {
 			t.Fatalf("write config: %v", err)
@@ -759,6 +760,9 @@ func TestNotificationsFromAddress(t *testing.T) {
 		}
 		if cfg.Notifications.FromAddress != "support@notify.example" {
 			t.Errorf("Notifications.FromAddress = %q, want env override", cfg.Notifications.FromAddress)
+		}
+		if cfg.Notifications.ReplyTo != "replies@notify.example" {
+			t.Errorf("Notifications.ReplyTo = %q, want env override", cfg.Notifications.ReplyTo)
 		}
 	})
 
@@ -799,6 +803,14 @@ func TestNotificationsFromAddress(t *testing.T) {
 		cfg.Notifications.FromAddress = "support@notify.example"
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate rejected a valid bare address: %v", err)
+		}
+		cfg.Notifications.ReplyTo = "not-an-address"
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate accepted a malformed notifications.reply_to")
+		}
+		cfg.Notifications.ReplyTo = "replies@notify.example"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate rejected a valid bare reply_to: %v", err)
 		}
 	})
 }

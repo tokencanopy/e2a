@@ -62,15 +62,22 @@ type Notifier struct {
 	// fromDomain is the domain part of fromAddress (Message-ID generation
 	// and DKIM signing domain).
 	fromDomain string
-	publicURL  string
+	// replyTo, when non-empty, is emitted as the Reply-To header. On the
+	// hosted service the From domain is relay-only (no mailbox), so
+	// without this header a reply would go nowhere — the same
+	// From-on-relay + Reply-To-at-the-real-inbox pattern shared-domain
+	// sends already use. Empty = no header; replies follow From.
+	replyTo   string
+	publicURL string
 }
 
 // New returns a Notifier. fromDomain is cfg.OutboundSMTP.FromDomain (must
 // be non-empty — the caller gates on it); fromAddress is the optional
 // notifications.from_address config value, empty = fall back to the fixed
-// local part on fromDomain. publicURL builds the dashboard link; empty
-// degrades to generic copy.
-func New(store NotifierStore, r relay, fromDomain, fromAddress, publicURL string) *Notifier {
+// local part on fromDomain; replyTo is the optional
+// notifications.reply_to config value, empty = no Reply-To header.
+// publicURL builds the dashboard link; empty degrades to generic copy.
+func New(store NotifierStore, r relay, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
 	addr := strings.TrimSpace(fromAddress)
 	if addr == "" {
 		addr = fmt.Sprintf("%s@%s", notifyLocalPart, fromDomain)
@@ -84,6 +91,7 @@ func New(store NotifierStore, r relay, fromDomain, fromAddress, publicURL string
 		relay:       r,
 		fromAddress: addr,
 		fromDomain:  msgIDDomain,
+		replyTo:     strings.TrimSpace(replyTo),
 		publicURL:   strings.TrimRight(publicURL, "/"),
 	}
 }
@@ -169,18 +177,20 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) 
 	htmlBody := renderHTML(wh, kind, reason, stats.FailedAttempts, window, dashURL)
 
 	fromHeader := fmt.Sprintf("e2a <%s>", n.fromAddress)
-	// Deliberately NO Reply-To header: the hosted deployment points
-	// notifications.from_address at a real mailbox, so replies follow From —
-	// a second address would only create a way for the two to disagree
-	// later. (Decision 2026-08-08, superseding the design doc's Reply-To
-	// suggestion.)
+	// Reply-To is emitted only when notifications.reply_to is configured.
+	// The hosted service NEEDS it: its From rides the relay-only sending
+	// domain (an SES identity with no mailbox), so replies must be steered
+	// to the real support inbox — the same From-on-relay +
+	// Reply-To-at-the-real-address pattern shared-domain agent sends
+	// already use. A self-host whose from_address is a real mailbox leaves
+	// it unset and replies follow From.
 	message, err := outbound.ComposeMultipartMessage(
 		fromHeader, []string{owner.Email}, nil,
 		subject, text, htmlBody,
 		"",           // no reply-to-message-id (fresh notification)
 		nil,          // no references chain
 		n.fromDomain, // from_domain (Message-ID generation)
-		"",           // no reply_to — replies follow From (see above)
+		n.replyTo,    // reply_to (empty = header omitted, replies follow From)
 		"",           // no conversation_id
 	)
 	if err != nil {

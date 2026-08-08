@@ -61,7 +61,7 @@ func okStore() *stubStore {
 
 func TestNotifier_DisabledEmailContent(t *testing.T) {
 	relay := &captureRelay{}
-	n := New(okStore(), relay, "send.example.com", "", "https://app.example.com")
+	n := New(okStore(), relay, "send.example.com", "", "", "https://app.example.com")
 
 	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
 	if out.Err != nil {
@@ -99,7 +99,7 @@ func TestNotifier_DisabledEmailContent(t *testing.T) {
 
 func TestNotifier_WarningEmailContent(t *testing.T) {
 	relay := &captureRelay{}
-	n := New(okStore(), relay, "send.example.com", "", "https://app.example.com")
+	n := New(okStore(), relay, "send.example.com", "", "", "https://app.example.com")
 
 	wh := testWebhook()
 	wh.Enabled = true
@@ -129,7 +129,7 @@ func TestNotifier_WarningEmailContent(t *testing.T) {
 // From (no Reply-To), so the configured address is where replies land.
 func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 	relay := &captureRelay{}
-	n := New(okStore(), relay, "send.example.com", "support@corp.example", "")
+	n := New(okStore(), relay, "send.example.com", "support@corp.example", "", "")
 
 	if got := n.FromAddress(); got != "support@corp.example" {
 		t.Fatalf("FromAddress = %q", got)
@@ -146,7 +146,7 @@ func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 		t.Errorf("From header must carry the configured address")
 	}
 	if strings.Contains(msg, "Reply-To:") {
-		t.Errorf("unexpected Reply-To header — replies must follow From")
+		t.Errorf("unexpected Reply-To header when notifications.reply_to is unset — replies must follow From")
 	}
 	// Message-ID domain follows the configured address's domain.
 	if !strings.Contains(msg, "@corp.example>") {
@@ -158,10 +158,30 @@ func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 	}
 }
 
+// The hosted pattern: From rides the relay-only sending domain (an SES
+// identity with no mailbox behind it), so notifications.reply_to steers
+// replies to the real support inbox. Reply-To is LOAD-BEARING there —
+// without it a reply goes nowhere.
+func TestNotifier_ConfiguredReplyTo(t *testing.T) {
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "support@send.example.com", "support@agents.example.com", "")
+
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	msg := string(relay.message)
+	if !strings.Contains(msg, "From: e2a <support@send.example.com>") {
+		t.Errorf("From must carry the configured from_address")
+	}
+	if !strings.Contains(msg, "Reply-To: support@agents.example.com") {
+		t.Errorf("Reply-To must carry the configured reply_to address")
+	}
+}
+
 func TestNotifier_NoOwnerEmailIsPermanent(t *testing.T) {
 	st := okStore()
 	st.owner = &identity.User{ID: "user_1", Email: ""}
-	n := New(st, &captureRelay{}, "send.example.com", "", "")
+	n := New(st, &captureRelay{}, "send.example.com", "", "", "")
 
 	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
 	if out.Err == nil {
@@ -175,7 +195,7 @@ func TestNotifier_NoOwnerEmailIsPermanent(t *testing.T) {
 func TestNotifier_TransientStoreErrorIsRetryable(t *testing.T) {
 	st := okStore()
 	st.statsErr = errors.New("db blip")
-	n := New(st, &captureRelay{}, "send.example.com", "", "")
+	n := New(st, &captureRelay{}, "send.example.com", "", "", "")
 
 	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
 	if out.Err == nil {
@@ -213,7 +233,7 @@ func TestNotifier_SignsWithDKIMWhenKeyExists(t *testing.T) {
 		return keypair.Selector, keypair.PrivateKeyDER, nil
 	}}
 	relay := &captureRelay{}
-	n := New(okStore(), relay, "send.example.com", "support@corp.example", "").WithDKIM(lookup)
+	n := New(okStore(), relay, "send.example.com", "support@corp.example", "", "").WithDKIM(lookup)
 
 	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
@@ -233,7 +253,7 @@ func TestNotifier_SendsUnsignedWhenNoDKIMKey(t *testing.T) {
 		return "", nil, nil // no key stored
 	}}
 	relay := &captureRelay{}
-	n := New(okStore(), relay, "send.example.com", "", "").WithDKIM(lookup)
+	n := New(okStore(), relay, "send.example.com", "", "", "").WithDKIM(lookup)
 
 	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
 		t.Fatalf("Deliver must succeed unsigned: %v", out.Err)
@@ -243,7 +263,7 @@ func TestNotifier_SendsUnsignedWhenNoDKIMKey(t *testing.T) {
 	}
 	// And with no lookup wired at all (zero-config self-host).
 	relay2 := &captureRelay{}
-	n2 := New(okStore(), relay2, "send.example.com", "", "")
+	n2 := New(okStore(), relay2, "send.example.com", "", "", "")
 	if out := n2.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
 		t.Fatalf("Deliver must succeed without a DKIM lookup: %v", out.Err)
 	}
@@ -255,7 +275,7 @@ func TestNotifier_ReasonIsHTMLEscaped(t *testing.T) {
 	st := okStore()
 	st.stats.LastError = `<script>alert(1)</script>`
 	relay := &captureRelay{}
-	n := New(st, relay, "send.example.com", "", "")
+	n := New(st, relay, "send.example.com", "", "", "")
 
 	wh := testWebhook()
 	wh.AutoDisableReason = ""

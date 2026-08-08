@@ -510,23 +510,28 @@ decisions, so the doc describes what actually shipped:
   (unfrozen): `identity.WarnThreshold`/`identity.WarnWindow` (5 / 24h) and
   `webhookdelivery.MaxDisabledSnoozes` (24).
 - **Sender address (final decision, resolves Q6 and supersedes Part 4's
-  `support@team.tokencanopy.com` and its Reply-To suggestion).** The hosted
-  From is `support@agents.e2a.dev`, set via ops config — because `e2a.dev`
-  publishes `DMARC p=none` while `team.tokencanopy.com` publishes
-  `p=quarantine` with BYODKIM, and an integration-is-broken alert must not
-  make its own delivery contingent on getting DKIM exactly right; because
-  `agents.e2a.dev` has a real MX and a real "e2a Support" inbox, so replies
-  reach a human whether or not the client honors any reply header; and
-  because it matches the product the recipient integrated. Consequently
-  there is **no `Reply-To` header at all**: with a real mailbox behind
-  From, a second address only creates a way for the two to disagree later.
-  In the OSS repo the address stays pure configuration — the new
-  `notifications.from_address` key (`E2A_NOTIFICATIONS_FROM_ADDRESS`,
-  validated as a bare address), never a constant; unset falls back to
-  `webhooks-noreply@<outbound_smtp.from_domain>` so self-host works with
-  zero configuration. The notifier is gated on `outbound_smtp.from_domain`
-  alone — without `http.public_url` the emails still send, with generic
-  dashboard copy instead of a link.
+  `support@team.tokencanopy.com`).** The hosted pair is
+  `From: support@send.e2a.dev` with `Reply-To: support@agents.e2a.dev`,
+  both set via ops config. Rationale: `agents.e2a.dev` is the shared agent
+  domain and is NOT an SES sending identity (it publishes no SPF and no
+  DMARC), so mail cannot be sent From it — `send.e2a.dev` is the domain
+  with the real sending identity (`v=spf1 include:amazonses.com ~all`,
+  `DMARC p=none`, MAIL FROM at `mail.send.e2a.dev`). This is exactly the
+  `sent_as=relay` pattern shared-domain agent sends already use in
+  production: From rewritten onto the relay domain, Reply-To carrying the
+  real address. **Reply-To is load-bearing on the hosted service** —
+  `send.e2a.dev` has no mailbox, so without it a reply goes nowhere; the
+  `support@agents.e2a.dev` inbox is where replies land. In the OSS repo
+  both stay pure configuration, never constants: `notifications.
+  from_address` and the new `notifications.reply_to`
+  (`E2A_NOTIFICATIONS_FROM_ADDRESS` / `E2A_NOTIFICATIONS_REPLY_TO`, each
+  validated as a bare address). Unset from_address falls back to
+  `webhooks-noreply@<outbound_smtp.from_domain>`; unset reply_to emits NO
+  Reply-To header (replies follow From — the sane self-host default,
+  since a self-hoster's from_address is typically a real mailbox and has
+  no `agents.e2a.dev`). The notifier is gated on
+  `outbound_smtp.from_domain` alone — without `http.public_url` the
+  emails still send, with generic dashboard copy instead of a link.
 - **Message-ID** is deterministic per EPISODE (webhook id + the warn stamp
   / disable timestamp), not per webhook as in hitlnotify — a webhook can
   legitimately warn again after recovering, and a webhook-keyed id would
@@ -549,7 +554,7 @@ decisions, so the doc describes what actually shipped:
   Sender uses — one copy of the logic, no new crypto), applied after the
   Message-ID prepend so the signature covers the final header set.
   Fail-open: no stored key (the zero-config self-host path) sends
-  unsigned, exactly as before. With the final `support@agents.e2a.dev`
-  sender (DMARC `p=none`), the signing is defense-in-depth rather than
-  load-bearing — unsigned mail is delivered either way, and a missing key
-  is never an error.
+  unsigned, exactly as before — a missing key is never an error. With the
+  final `support@send.e2a.dev` sender this has a real identity to align
+  to: `send.e2a.dev` is the deployment's actual sending domain, so when a
+  key exists the signature is DMARC-aligned with From.
