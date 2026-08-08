@@ -26,10 +26,10 @@ class MetricsRatesView(BaseModel):
     """
     MetricsRatesView
     """ # noqa: E501
-    bounce_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="(bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review.")
+    bounce_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="(bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.")
     complaint_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs.")
-    delivered_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest 'did my mail arrive' number.")
-    suppression_block_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="suppressed / accepted. The share of requested sends that never left e2a.")
+    delivered_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure.")
+    suppression_block_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="suppressed / (accepted − loopback). The share of outward sends that never left e2a.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["bounce_rate", "complaint_rate", "delivered_rate", "suppression_block_rate"]
 

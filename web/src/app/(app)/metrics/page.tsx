@@ -326,6 +326,7 @@ export default function MetricsPage() {
               lost={[
                 summary.suppressed > 0 ? `${num(summary.suppressed)} suppressed` : null,
                 summary.send_failed > 0 ? `${num(summary.send_failed)} failed` : null,
+                summary.loopback > 0 ? `${num(summary.loopback)} agent-to-agent` : null,
               ]
                 .filter(Boolean)
                 .join(" · ")}

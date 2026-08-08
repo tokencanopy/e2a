@@ -54,6 +54,10 @@ export class MetricsSummaryView {
     */
     'dmarcPass': number;
     /**
+    * Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out.
+    */
+    'loopback': number;
+    /**
     * Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path).
     */
     'received': number;
@@ -152,6 +156,12 @@ export class MetricsSummaryView {
         {
             "name": "dmarcPass",
             "baseName": "dmarc_pass",
+            "type": "number",
+            "format": "int64"
+        },
+        {
+            "name": "loopback",
+            "baseName": "loopback",
             "type": "number",
             "format": "int64"
         },

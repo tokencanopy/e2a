@@ -14,7 +14,7 @@ import { HttpFile } from '../http/http.js';
 
 export class MetricsRatesView {
     /**
-    * (bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review.
+    * (bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.
     */
     'bounceRate': number | null;
     /**
@@ -22,11 +22,11 @@ export class MetricsRatesView {
     */
     'complaintRate': number | null;
     /**
-    * delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest \'did my mail arrive\' number.
+    * delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure.
     */
     'deliveredRate': number | null;
     /**
-    * suppressed / accepted. The share of requested sends that never left e2a.
+    * suppressed / (accepted − loopback). The share of outward sends that never left e2a.
     */
     'suppressionBlockRate': number | null;
 

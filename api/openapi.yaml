@@ -3212,7 +3212,7 @@ components:
       additionalProperties: true
       properties:
         bounce_rate:
-          description: (bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review.
+          description: (bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.
           format: double
           type:
             - number
@@ -3224,13 +3224,13 @@ components:
             - number
             - "null"
         delivered_rate:
-          description: delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest 'did my mail arrive' number.
+          description: "delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure."
           format: double
           type:
             - number
             - "null"
         suppression_block_rate:
-          description: suppressed / accepted. The share of requested sends that never left e2a.
+          description: suppressed / (accepted − loopback). The share of outward sends that never left e2a.
           format: double
           type:
             - number
@@ -3285,6 +3285,10 @@ components:
           description: Inbound messages with an aligned DMARC pass.
           format: int64
           type: integer
+        loopback:
+          description: "Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out."
+          format: int64
+          type: integer
         received:
           description: "Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."
           format: int64
@@ -3330,6 +3334,7 @@ components:
         - bounced_undetermined
         - complained
         - suppressed
+        - loopback
         - send_failed
         - received
         - dmarc_pass
