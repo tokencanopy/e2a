@@ -46,6 +46,8 @@ import type {
   DeleteApiKeyResult,
   Page,
   PageMessageLifecycleTransition,
+  AgentMetricsView,
+  AccountMetricsView,
   ListMessagesParams,
   ContactView,
   ContactEngagementView,
@@ -393,6 +395,21 @@ export class McpClient {
       messageId,
       params,
     );
+  }
+
+  /** Beta: delivery counters for one agent over a cohort window. */
+  getAgentMetrics(
+    params: { start?: Date; end?: Date } = {},
+    explicitAddress?: string,
+  ): Promise<AgentMetricsView> {
+    return this.sdk.messages.getMetrics(this.resolveAddress(explicitAddress), params);
+  }
+
+  /** Beta: delivery counters across every agent on the account. */
+  getAccountMetrics(
+    params: { start?: Date; end?: Date; groupBy?: "agent" } = {},
+  ): Promise<AccountMetricsView> {
+    return this.sdk.account.metrics(params);
   }
 
   // getAttachment (§6a #5): metadata + a short-lived download_url for one

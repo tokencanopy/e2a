@@ -26,6 +26,11 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "list_messages",
   "get_message",
   "get_message_lifecycle",
+  // An agent reading its OWN delivery counters is the runtime case this whole
+  // surface exists for: bounce and suppression rates are what let an agent
+  // correct its own behavior without a human. The REST handler pins an
+  // agent-scoped credential to its bound agent, so it can never widen this.
+  "get_agent_metrics",
   "get_attachment",
   "get_attachment_data",
   // Soft delete + restore are both per-agent inbox hygiene: the REST handler
@@ -136,6 +141,10 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   "list_agent_suppressions",
   "create_agent_suppression",
   "delete_agent_suppression",
+  // Reading across every agent on the account is account administration; the
+  // handler enforces it with requireAccountUser. An agent-scoped session sees
+  // get_agent_metrics instead, which covers its own inbox.
+  "get_account_metrics",
 ]);
 
 export type Scope = "account" | "agent";
