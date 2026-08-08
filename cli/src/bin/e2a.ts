@@ -21,6 +21,7 @@ import { send, reply } from "../commands/send.js";
 import { messagesList, messagesGet, messagesLifecycle } from "../commands/messages.js";
 import { agentsList, agentsCreate, agentsGet } from "../commands/agents.js";
 import { protectionGet, protectionSet } from "../commands/protection.js";
+import { metrics, METRICS_USAGE } from "../commands/metrics.js";
 import { keysCreate, keysList, keysDelete } from "../commands/keys.js";
 import {
   contactsList, contactsGet, contactsCreate, contactsUpdate, contactsDelete,
@@ -59,6 +60,10 @@ Usage:
   e2a keys create [--agent <inbox>] [--name <n>]   Mint a key; --agent = bound,
                                    least-privilege (plaintext printed once)
   e2a keys list / delete <id>       Inventory / revoke keys (account key)
+  e2a metrics [<email>]             Delivery counters; no inbox = account rollup
+        --start/--end <rfc3339>    Cohort window (default: last 30 days)
+        --by-agent                 Break the account rollup down per inbox
+        --json                     Raw response
   e2a protection get <email>        Show the protection (screening/review) config
   e2a protection set <email>        Flip review posture, only the named knobs
         --outbound-review on|off   off = sends go out unheld (gate=flag, scan=off)
@@ -204,7 +209,7 @@ function hasFlag(args: string[], flag: string): boolean {
 // message id.
 const BOOLEAN_FLAGS = new Set([
   "--json", "--text", "--once", "--dry-run", "--help", "--version",
-  "--clear-name", "--clear-stage",
+  "--clear-name", "--clear-stage", "--by-agent",
 ]);
 
 function getPositionals(args: string[], exactCount?: number, usage?: string): string[] {
@@ -584,6 +589,24 @@ async function main() {
         process.stderr.write("Usage: e2a contacts [list|get|create|update|delete|import|imports delete|outreach]\n");
         process.exit(EXIT.USAGE);
       }
+      break;
+    }
+    case "metrics": {
+      checkFlags(args, ["--start", "--end", "--by-agent", "--json"]);
+      // Zero positionals = the account rollup; one = that inbox. Anything more
+      // is a typo, and guessing which one was meant would silently report the
+      // wrong scope.
+      const positionals = getPositionals(args);
+      if (positionals.length > 1) {
+        process.stderr.write(`${METRICS_USAGE}\n`);
+        process.exit(EXIT.USAGE);
+      }
+      await metrics(positionals[0], {
+        start: getFlagChecked(args, "--start"),
+        end: getFlagChecked(args, "--end"),
+        byAgent: hasFlag(args, "--by-agent"),
+        json: hasFlag(args, "--json"),
+      });
       break;
     }
     case "protection": {
