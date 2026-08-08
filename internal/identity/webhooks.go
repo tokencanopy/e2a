@@ -473,11 +473,40 @@ func (s *Store) UpdateWebhook(ctx context.Context, webhookID, userID string, u W
 		// rows still in the window would re-disable within one sweep
 		// and mail a false alert — the exact loop the feature's own
 		// "fix, then re-enable" instruction would create).
+		// The two evidence markers are stamped ONLY on a real disabled→enabled
+		// transition, never on an enable-an-already-enabled no-op. In an UPDATE's
+		// SET right-hand side a column reference yields the row's OLD value, so
+		// `webhooks.enabled` here is the pre-update state.
+		//
+		// Unconditional stamping breaks in both directions:
+		//
+		//   reenabled_at — any client that reconciles desired state (an IaC loop,
+		//   a health-check script, an MCP agent calling update_webhook(enabled:
+		//   true) each run) would push the evidence window forward on every call.
+		//   Both sweeps only count deliveries created after it, so calling more
+		//   often than evidence accumulates leaves them permanently blind: the
+		//   breaker never trips, no warning fires, and the customer is never told
+		//   their endpoint is dead. It is also reachable on purpose — a 4-minute
+		//   PATCH loop would keep e2a POSTing to an arbitrary URL forever with no
+		//   breaker and no cooldown (the 5-minute cooldown keys on
+		//   auto_disabled_at, which the first re-enable NULLs).
+		//
+		//   warn_notified_at — clearing it on every PATCH would RE-ARM the warning
+		//   each time, so the same reconciler loop would mail the customer a fresh
+		//   "your webhook is failing" email on every sweep. Transition-scoping it
+		//   fixes the missed second episode without opening a mail loop.
 		if *u.Enabled {
 			args = append(args, nil)
 			sets = append(sets, fmt.Sprintf("auto_disabled_at = $%d", len(args)))
 			sets = append(sets, "auto_disable_reason = NULL")
-			sets = append(sets, "reenabled_at = now()")
+			// Cleared on re-enable so a second failure episode warns again.
+			// Its only other reset is a successful delivery — and after a
+			// re-enable onto a still-broken endpoint no delivery ever succeeds,
+			// so without this the customer gets no early warning for episode 2,
+			// only the disable email 30h+ later (or never, on a webhook too
+			// low-traffic to reach 10 terminal failures).
+			sets = append(sets, "warn_notified_at = CASE WHEN webhooks.enabled THEN webhooks.warn_notified_at ELSE NULL END")
+			sets = append(sets, "reenabled_at = CASE WHEN webhooks.enabled THEN webhooks.reenabled_at ELSE now() END")
 		}
 	}
 
@@ -663,7 +692,37 @@ func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyT
 	// + synthetic-row exclusion), plus the per-tick cap: a systemic e2a-side
 	// egress failure makes EVERY webhook satisfy this condition at once,
 	// and an unbounded pass would mass-mail the customer base inside one
-	// lock-holding transaction. The LIMIT drains over subsequent sweeps.
+	// lock-holding transaction.
+	//
+	// Two properties this query has to get right, both of which it got wrong
+	// before and neither of which any test covered:
+	//
+	//  1. Failures are counted only SINCE THE LAST SUCCESS
+	//     (created_at > last_delivered_at), not across the whole window. The
+	//     earlier form paired an unrestricted window with a
+	//     COUNT(delivered) = 0 guard, which meant ANY success in the trailing
+	//     24h suppressed the warning — so a webhook that delivered an hour ago
+	//     and broke five minutes ago could not warn until its last success
+	//     aged out, ~24h later. That is the exact "told a day late" failure
+	//     this feature exists to remove, and it applied to every integration
+	//     that was actually working. The zero-delivered guard is retained as a
+	//     cheap invariant (no delivered row can survive the created_at filter,
+	//     since last_delivered_at is stamped at delivery time) so a stale
+	//     last_delivered_at still fails closed.
+	//
+	//  2. The eligibility filters sit INSIDE the subquery, so the LIMIT caps
+	//     rows we might actually warn. Applied only on the outer UPDATE they
+	//     ran after the cap, so the arbitrary (unordered) 100 was drawn from
+	//     every failing webhook including already-warned ones — and those stay
+	//     candidates for as long as they keep failing. Past ~100 simultaneous
+	//     failures the pass warned nobody new, forever and silently (the sweep
+	//     logs only when n > 0). Measured before the fix: 500 already-warned +
+	//     20 never-warned → 3 warned on tick 1, then 0 on every tick after.
+	//
+	// The outer enabled/warn_notified_at predicates are KEPT: they are the
+	// concurrency guard that gives exactly-once-per-transition under
+	// concurrent sweeps (EvalPlanQual re-checks them against the updated
+	// tuple), which the subquery copies cannot provide.
 	return s.sweepWebhooksTx(ctx, notifyTx, "warn",
 		`UPDATE webhooks
 		 SET warn_notified_at = now()
@@ -671,8 +730,11 @@ func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyT
 		     SELECT d.webhook_id
 		     FROM webhook_subscriber_deliveries d
 		     JOIN webhooks w2 ON w2.id = d.webhook_id
+		          AND w2.enabled = true
+		          AND w2.warn_notified_at IS NULL
 		     WHERE d.created_at > now() - $2::interval
 		       AND d.created_at > COALESCE(w2.reenabled_at, '-infinity'::timestamptz)
+		       AND d.created_at > COALESCE(w2.last_delivered_at, '-infinity'::timestamptz)
 		     GROUP BY d.webhook_id
 		     HAVING COUNT(*) FILTER (WHERE d.attempts >= 1 AND d.last_error IS NOT NULL AND d.last_error <> '' AND d.last_error <> $3) >= $1
 		        AND COUNT(*) FILTER (WHERE d.status = 'delivered') = 0

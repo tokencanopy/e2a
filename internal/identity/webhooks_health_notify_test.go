@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
@@ -570,4 +572,276 @@ func TestWarnFailingWebhooks_SyntheticAndReenable(t *testing.T) {
 			t.Errorf("warned %d (err %v) on pre-re-enable evidence, want 0", n, err)
 		}
 	})
+}
+
+// --- Regression tests for the four blockers found in review of #852. ---
+//
+// Each of these failed before its fix and none had any coverage, which is why
+// the defects survived implementation, self-review, and a full green suite.
+
+// seedFailedDeliveries inserts n attempt-level failures for a webhook, stamped
+// at `age` before now so a test can order them against a success.
+func seedFailedDeliveries(t *testing.T, pool *pgxpool.Pool, ctx context.Context, webhookID, prefix string, n int, age time.Duration) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at, last_attempt_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'pending', 1, 'HTTP 404', now() - $3::interval, now() - $3::interval)`,
+			fmt.Sprintf("whd_%s_%d_%s", prefix, i, webhookID), webhookID, age.String(),
+		); err != nil {
+			t.Fatalf("seed failures: %v", err)
+		}
+	}
+}
+
+// BLOCKER 1. A webhook that was delivering fine and then breaks must warn on
+// the next sweep. The original guard counted ANY success in the trailing 24h,
+// so a success an hour before the breakage suppressed the warning for ~24h —
+// i.e. for every integration that was actually working, which is the entire
+// population this feature exists to protect.
+func TestWarnFailingWebhooks_WarnsAfterARecentSuccess(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-warn-recent@example.com", "Owner", "google-wh-warn-recent")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/warn-recent", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	// It delivered successfully an hour ago — exactly as a real delivery does.
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhooks SET last_delivered_at = now() - interval '1 hour' WHERE id = $1`, wh.ID); err != nil {
+		t.Fatalf("seed success: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO webhook_subscriber_deliveries
+		    (id, webhook_id, event_type, event_payload, status, attempts, created_at)
+		 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'delivered', 1, now() - interval '2 hours')`,
+		"whd_warn_recent_ok_"+wh.ID, wh.ID,
+	); err != nil {
+		t.Fatalf("seed delivered row: %v", err)
+	}
+
+	// Then it broke five minutes ago.
+	seedFailedDeliveries(t, pool, ctx, wh.ID, "warn_recent", identity.WarnThreshold, 5*time.Minute)
+
+	rec := &notifyRecorder{}
+	n, err := store.WarnFailingWebhooks(ctx, rec.enqueue)
+	if err != nil {
+		t.Fatalf("WarnFailingWebhooks: %v", err)
+	}
+	if n != 1 || len(rec.ids) != 1 || rec.ids[0] != wh.ID {
+		t.Fatalf("warned %d ids=%v — want 1 and [%s]: a webhook that succeeded an hour ago and has been failing for five minutes MUST warn now, not in 24h", n, rec.ids, wh.ID)
+	}
+}
+
+// BLOCKER 1 (converse). Failures that predate the last success are stale
+// evidence and must not warn — this is the "noisy but still working" case the
+// zero-delivered guard existed to protect, which the fix must preserve.
+func TestWarnFailingWebhooks_IgnoresFailuresBeforeTheLastSuccess(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-warn-stale@example.com", "Owner", "google-wh-warn-stale")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/warn-stale", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	// Failures three hours ago, then a success one hour ago: recovered.
+	seedFailedDeliveries(t, pool, ctx, wh.ID, "warn_stale", identity.WarnThreshold+3, 3*time.Hour)
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhooks SET last_delivered_at = now() - interval '1 hour' WHERE id = $1`, wh.ID); err != nil {
+		t.Fatalf("seed success: %v", err)
+	}
+
+	rec := &notifyRecorder{}
+	if n, err := store.WarnFailingWebhooks(ctx, rec.enqueue); err != nil || n != 0 {
+		t.Errorf("warned %d (err %v) — want 0: every failure predates the last success, so the endpoint is working", n, err)
+	}
+}
+
+// BLOCKER 2. The per-tick cap sat inside the candidate subquery while the
+// eligibility filters sat outside it, so the cap truncated a set full of
+// already-warned webhooks. Past ~WarnSweepMaxPerTick simultaneous failures the
+// pass warned nobody new, forever, and silently.
+func TestWarnFailingWebhooks_CapDrainsAcrossTicks(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-warn-cap@example.com", "Owner", "google-wh-warn-cap")
+
+	const extra = 5
+	const perUser = 25 // stay under the per-user webhook cap
+	total := identity.WarnSweepMaxPerTick + extra
+	ids := make(map[string]bool, total)
+	owner := user
+	for i := 0; i < total; i++ {
+		if i > 0 && i%perUser == 0 {
+			owner, _ = store.CreateOrGetUser(ctx,
+				fmt.Sprintf("wh-warn-cap-%d@example.com", i), "Owner",
+				fmt.Sprintf("google-wh-warn-cap-%d", i))
+		}
+		wh, err := store.CreateWebhook(ctx, owner.ID, fmt.Sprintf("https://example.com/cap-%d", i), "", []string{"email.received"}, identity.WebhookFilters{})
+		if err != nil {
+			t.Fatalf("create webhook %d: %v", i, err)
+		}
+		ids[wh.ID] = true
+		seedFailedDeliveries(t, pool, ctx, wh.ID, fmt.Sprintf("cap%d", i), identity.WarnThreshold, time.Minute)
+	}
+
+	warned := map[string]bool{}
+	for tick := 1; tick <= 3; tick++ {
+		rec := &notifyRecorder{}
+		n, err := store.WarnFailingWebhooks(ctx, rec.enqueue)
+		if err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		if n > identity.WarnSweepMaxPerTick {
+			t.Fatalf("tick %d warned %d — exceeds the per-tick cap of %d", tick, n, identity.WarnSweepMaxPerTick)
+		}
+		for _, id := range rec.ids {
+			if warned[id] {
+				t.Errorf("tick %d re-warned %s — dedupe broken", tick, id)
+			}
+			warned[id] = true
+		}
+		if len(warned) == total {
+			break
+		}
+	}
+
+	if len(warned) != total {
+		t.Fatalf("warned %d of %d webhooks after three ticks — the cap does not drain, so genuinely-broken endpoints are never warned", len(warned), total)
+	}
+}
+
+// BLOCKER 3. Re-enabling cleared the disable evidence but left
+// warn_notified_at set. Its only other reset is a successful delivery — which
+// never happens on a still-broken endpoint — so the second failure episode got
+// no early warning at all.
+func TestUpdateWebhook_ReenableClearsWarnMarkerSoEpisodeTwoWarns(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-warn-ep2@example.com", "Owner", "google-wh-warn-ep2")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/episode-two", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	// Episode 1: warn fires.
+	seedFailedDeliveries(t, pool, ctx, wh.ID, "ep1", identity.WarnThreshold, time.Minute)
+	rec1 := &notifyRecorder{}
+	if n, err := store.WarnFailingWebhooks(ctx, rec1.enqueue); err != nil || n != 1 {
+		t.Fatalf("episode 1 warn: n=%d err=%v — want 1", n, err)
+	}
+
+	// The breaker disables it, then the user "fixes" the endpoint and re-enables.
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhooks SET enabled = false, auto_disabled_at = now() - interval '10 minutes' WHERE id = $1`, wh.ID); err != nil {
+		t.Fatalf("simulate disable: %v", err)
+	}
+	yes := true
+	if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &yes}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.WarnNotifiedAt != nil {
+		t.Fatalf("warn_notified_at survived the re-enable — episode 2 can never warn")
+	}
+
+	// Episode 2: the fix did not work. Fresh failures must warn again.
+	seedFailedDeliveries(t, pool, ctx, wh.ID, "ep2", identity.WarnThreshold, 0)
+	rec2 := &notifyRecorder{}
+	n, err := store.WarnFailingWebhooks(ctx, rec2.enqueue)
+	if err != nil {
+		t.Fatalf("episode 2 warn: %v", err)
+	}
+	if n != 1 || len(rec2.ids) != 1 || rec2.ids[0] != wh.ID {
+		t.Fatalf("episode 2 warned %d ids=%v — want 1 and [%s]", n, rec2.ids, wh.ID)
+	}
+}
+
+// BLOCKER 4. reenabled_at was stamped on EVERY enabled:true PATCH rather than
+// on a real disabled→enabled transition, so an idempotent reconciler kept
+// pushing the evidence window forward and the breaker could never trip. This
+// was remotely reachable through the public API.
+func TestUpdateWebhook_EnableNoOpDoesNotResetTheEvidenceWindow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-noop@example.com", "Owner", "google-wh-noop")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/noop-patch", "", []string{"email.received"}, identity.WebhookFilters{})
+
+	// Evidence accumulates while the endpoint is broken.
+	for i := 0; i < identity.AutoDisableThreshold; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 404', now() - interval '1 hour')`,
+			fmt.Sprintf("whd_noop_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// A reconciliation loop asserts the desired state on an ALREADY-enabled
+	// webhook. This must not count as a re-enable.
+	yes := true
+	for i := 0; i < 3; i++ {
+		if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &yes}); err != nil {
+			t.Fatalf("no-op enable PATCH %d: %v", i, err)
+		}
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.ReenabledAt != nil {
+		t.Errorf("reenabled_at stamped by a no-op enable PATCH — an idempotent client can blind both sweeps indefinitely")
+	}
+
+	// The breaker must still see the evidence and fire.
+	rec := &notifyRecorder{}
+	n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue)
+	if err != nil {
+		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
+	}
+	if n != 1 || len(rec.ids) != 1 || rec.ids[0] != wh.ID {
+		t.Fatalf("disabled %d ids=%v — want 1 and [%s]: repeated enable:true PATCHes must not defeat the breaker", n, rec.ids, wh.ID)
+	}
+}
+
+// BLOCKER 4 (converse). A genuine disabled→enabled transition must still reset
+// the window, or the stale failures re-disable the webhook within one sweep.
+func TestUpdateWebhook_RealReenableStillResetsTheEvidenceWindow(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, _ := store.CreateOrGetUser(ctx, "wh-realreenable@example.com", "Owner", "google-wh-realreenable")
+
+	wh, _ := store.CreateWebhook(ctx, user.ID, "https://example.com/real-reenable", "", []string{"email.received"}, identity.WebhookFilters{})
+	for i := 0; i < identity.AutoDisableThreshold; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO webhook_subscriber_deliveries
+			    (id, webhook_id, event_type, event_payload, status, attempts, last_error, created_at)
+			 VALUES ($1, $2, 'email.received', '{}'::jsonb, 'failed', 8, 'HTTP 404', now() - interval '1 hour')`,
+			fmt.Sprintf("whd_rr_%d_%s", i, wh.ID), wh.ID,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE webhooks SET enabled = false, auto_disabled_at = now() - interval '10 minutes' WHERE id = $1`, wh.ID); err != nil {
+		t.Fatalf("simulate disable: %v", err)
+	}
+
+	yes := true
+	if _, err := store.UpdateWebhook(ctx, wh.ID, user.ID, identity.WebhookUpdate{Enabled: &yes}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	after, _ := store.GetWebhookByID(ctx, wh.ID, user.ID)
+	if after.ReenabledAt == nil {
+		t.Fatalf("reenabled_at not stamped on a real disabled→enabled transition")
+	}
+
+	rec := &notifyRecorder{}
+	if n, err := store.AutoDisableFailingWebhooks(ctx, rec.enqueue); err != nil || n != 0 {
+		t.Errorf("disabled %d (err %v) — want 0: pre-re-enable failures are stale evidence and must not immediately re-disable", n, err)
+	}
 }
