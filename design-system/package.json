@@ -33,16 +33,16 @@
     "react-dom": ">=18"
   },
   "devDependencies": {
-    "@storybook/react": "^10.5.5",
-    "@storybook/react-vite": "^10.5.5",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^6.0.4",
+    "@storybook/react": "^10.5.6",
+    "@storybook/react-vite": "^10.5.6",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "storybook": "^10.5.0",
     "tsup": "^8.3.5",
     "typescript": "^7.0.2",
-    "vite": "^8.1.4"
+    "vite": "^8.2.0"
   }
 }
