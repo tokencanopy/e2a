@@ -37,7 +37,7 @@ func newNotifier(t *testing.T) (
 		FromDomain: notifyFromDomain,
 	})
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, publicURL)
+	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "", publicURL)
 	return n, store, signer, smtpDone
 }
 
@@ -93,7 +93,7 @@ func TestNotifierSendsEmailToOwner(t *testing.T) {
 	sent := msgs[0]
 
 	// From / To envelope
-	if want := "hitl-noreply@" + notifyFromDomain; sent.From != want {
+	if want := "approvals@" + notifyFromDomain; sent.From != want {
 		t.Errorf("envelope from = %q, want %q", sent.From, want)
 	}
 	if sent.To != "owner-send-email@reviewer.test" {
@@ -138,7 +138,7 @@ func TestNotifierSendsEmailToOwner(t *testing.T) {
 		t.Error("missing Subject header")
 	}
 	// Reply-To points back at the platform, not the agent
-	if !strings.Contains(data, "Reply-To: hitl-noreply@"+notifyFromDomain) {
+	if !strings.Contains(data, "Reply-To: approvals@"+notifyFromDomain) {
 		t.Errorf("Reply-To header should be platform sender, got:\n%s", data)
 	}
 }
@@ -299,4 +299,93 @@ func extractToken(t *testing.T, data, prefix string) string {
 		end = len(rest)
 	}
 	return rest[:end]
+}
+
+// A configured notifications.reply_to must reach the wire, and the From must
+// not advertise a noreply identity while doing so. Before this, Reply-To was
+// hardcoded to the sender on the platform relay domain — which has no mailbox,
+// so a reviewer who hit Reply was talking to the bounce endpoint. Approvals are
+// time-boxed and a reviewer who cannot sign in has only the magic links, so
+// that silent dead end was the worst place to have one.
+func TestNotifierUsesConfiguredReplyTo(t *testing.T) {
+	smtpAddr, smtpDone := testutil.FakeSMTPServer(t)
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
+		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
+	})
+	signer := approvaltoken.NewSigner(notifySecret)
+	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "support@inbox.test", publicURL)
+
+	agent, msg := setupPendingMessage(t, store, "replyto")
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+		t.Fatalf("NotifyPendingApproval: %v", err)
+	}
+	msgs := smtpDone()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 SMTP message, got %d", len(msgs))
+	}
+	data := string(msgs[0].Data)
+
+	if !strings.Contains(data, "Reply-To: support@inbox.test") {
+		t.Errorf("configured reply_to missing from headers:\n%s", firstHeaders(data))
+	}
+	if strings.Contains(data, "Reply-To: approvals@"+notifyFromDomain) {
+		t.Errorf("reply_to was configured but Reply-To still points at the sender")
+	}
+	// The From stays the sender identity; only Reply-To moves.
+	if want := "From: e2a <approvals@" + notifyFromDomain + ">"; !strings.Contains(data, want) {
+		t.Errorf("From changed unexpectedly, want %q in:\n%s", want, firstHeaders(data))
+	}
+	if strings.Contains(data, "noreply") {
+		t.Errorf("a replyable notification must not carry a noreply identity:\n%s", firstHeaders(data))
+	}
+}
+
+// firstHeaders trims a composed message to its header block for readable
+// failure output.
+func firstHeaders(data string) string {
+	if i := strings.Index(data, "\r\n\r\n"); i > 0 {
+		return data[:i]
+	}
+	if len(data) > 600 {
+		return data[:600]
+	}
+	return data
+}
+
+// Setting notifications.from_address consolidates both notification senders
+// into one identity. Verify it overrides the package default here too, and
+// that the Message-ID domain follows the configured address rather than
+// claiming the relay domain the From no longer uses.
+func TestNotifierHonoursConfiguredFromAddress(t *testing.T) {
+	smtpAddr, smtpDone := testutil.FakeSMTPServer(t)
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
+		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
+	})
+	signer := approvaltoken.NewSigner(notifySecret)
+	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "alerts@mail.test", "", publicURL)
+
+	agent, msg := setupPendingMessage(t, store, "fromaddr")
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+		t.Fatalf("NotifyPendingApproval: %v", err)
+	}
+	msgs := smtpDone()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 SMTP message, got %d", len(msgs))
+	}
+	sent := msgs[0]
+	data := string(sent.Data)
+
+	if sent.From != "alerts@mail.test" {
+		t.Errorf("envelope from = %q, want the configured address", sent.From)
+	}
+	if !strings.Contains(data, "From: e2a <alerts@mail.test>") {
+		t.Errorf("From header ignored the configured address:\n%s", firstHeaders(data))
+	}
+	if strings.Contains(data, "Message-ID: <") && !strings.Contains(data, "@mail.test>") {
+		t.Errorf("Message-ID domain should follow the configured From, got:\n%s", firstHeaders(data))
+	}
 }

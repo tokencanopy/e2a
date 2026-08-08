@@ -34,7 +34,7 @@ func TestEndToEnd_AcceptTxThroughRiverToSMTP(t *testing.T) {
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: "notify.test",
 	})
 	signer := approvaltoken.NewSigner("hitl-notify-e2e-secret")
-	notifier := hitlnotify.New(store, relay, signer, "notify.test", "https://app.example.test")
+	notifier := hitlnotify.New(store, relay, signer, "notify.test", "", "", "https://app.example.test")
 
 	// Seed a verified HITL agent + owner.
 	user, err := store.CreateOrGetUser(ctx, "owner-e2e@reviewer.test", "Owner", "google-notify-e2e")

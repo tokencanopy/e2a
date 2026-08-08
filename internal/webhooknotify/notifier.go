@@ -18,11 +18,18 @@ import (
 // when notifications.from_address is not configured: the email then sends
 // from <notifyLocalPart>@<outbound_smtp.from_domain>, exactly the
 // hitlnotify pattern, so self-host works with zero configuration. Hosted
-// deployments set notifications.from_address to a replyable support
-// address instead — the address is CONFIGURATION, never a constant,
-// because a hardcoded operator address would make every self-host try to
-// send as an identity it does not own.
-const notifyLocalPart = "webhooks-noreply"
+// deployments can set notifications.from_address instead — the address is
+// CONFIGURATION, never a constant, because a hardcoded operator address
+// would make every self-host try to send as an identity it does not own.
+//
+// Deliberately distinct from hitlnotify's default so the two notification
+// kinds stay separately filterable. Setting notifications.from_address
+// collapses them into one identity; leaving it unset keeps them apart.
+//
+// Not "webhooks-noreply": this email invites a reply whenever
+// notifications.reply_to is configured, and a From that reads "noreply"
+// contradicts that in the most visible field in the client.
+const notifyLocalPart = "webhooks"
 
 // maxReasonLen bounds the failure-reason string echoed into the email.
 // The source (webhook_subscriber_deliveries.last_error) is already

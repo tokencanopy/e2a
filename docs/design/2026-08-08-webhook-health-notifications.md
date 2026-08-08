@@ -97,7 +97,7 @@ This design copies that structure rather than inventing one. Concretely reusable
 - `jobs.QueueNotify` already exists (`internal/jobs/queues.go:28`) with a small pool,
   deliberately isolated so notification backlog can't starve customer outbound delivery.
 - `store.GetUserByID(ctx, agent.UserID)` → `owner.Email` for addressing.
-- A fixed no-reply local part so clients thread the mail (HITL uses `hitl-noreply`).
+- A fixed local part so clients thread the mail (HITL uses `approvals`; this package uses `webhooks` — deliberately distinct so the two kinds stay separately filterable).
 
 ### The sweep is not currently transactional
 
@@ -529,7 +529,7 @@ decisions, so the doc describes what actually shipped:
   from_address` and the new `notifications.reply_to`
   (`E2A_NOTIFICATIONS_FROM_ADDRESS` / `E2A_NOTIFICATIONS_REPLY_TO`, each
   validated as a bare address). Unset from_address falls back to
-  `webhooks-noreply@<outbound_smtp.from_domain>`; unset reply_to emits NO
+  `webhooks@<outbound_smtp.from_domain>`; unset reply_to emits NO
   Reply-To header (replies follow From — the sane self-host default,
   since a self-hoster's from_address is typically a real mailbox and has
   no `agents.e2a.dev`). The notifier is gated on
