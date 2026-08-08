@@ -101,6 +101,21 @@ You can either use the hosted instance or self-host.
 - **Email-triggered workflows** — turn inbound mail into structured events: order confirmations, forms, support tickets, notifications, and receipts rendered server-side from templates, with `conversation_id` correlated back to your app's state.
 - **Autopilot with human oversight** — an agent drafts outbound mail (newsletters, outreach, reports) and holds each send for one-click approval via magic-link email or the review queue, with automatic expiry policy if no one reviews in time.
 
+### Working examples
+
+**[e2a-runbooks](https://github.com/tokencanopy/e2a-runbooks)** builds several of the above as small, complete, runnable projects — one per agent framework, each demonstrating a different use case and a different part of this API:
+
+| Example | Framework | What it shows |
+| --- | --- | --- |
+| Support agent | [Mastra](https://mastra.ai) | Threading, memory, and the outbound approval gate |
+| Receptionist | [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) | `forward` to a desk allowlist, `update_labels` |
+| AI SRE | [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) | Authentication as a gate; a no-tools agent that can't touch prod |
+| Contract review | [LangChain](https://docs.langchain.com) | Attachments — including the `data`-vs-`download_url` split |
+| Escalation desk | [CrewAI](https://docs.crewai.com) | Several agent identities; cross-identity `conversation_id` |
+| Scheduling secretary | [Pydantic AI](https://ai.pydantic.dev) | Multi-turn state rebuilt from `conversations`, no database |
+
+They are examples to copy from rather than services to deploy — each says what it simplifies. For the smallest possible signed-webhook reference instead, see the [in-repo minimal examples](examples/agent-framework-webhooks/README.md).
+
 ## How it works
 
 ```
