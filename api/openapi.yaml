@@ -134,6 +134,8 @@ components:
         summary:
           $ref: "#/components/schemas/MetricsSummaryView"
           description: Account-wide counters. Always computed across every agent, never from the possibly-truncated agents array.
+        webhooks:
+          $ref: "#/components/schemas/WebhookMetricsView"
       required:
         - start
         - end
@@ -145,6 +147,7 @@ components:
         - counters
         - agents
         - agents_truncated
+        - webhooks
       type: object
       x-stability-level: beta
     AccountUserView:
@@ -4926,6 +4929,53 @@ components:
         - next_retry_at
         - created_at
       type: object
+    WebhookEndpointMetricsView:
+      additionalProperties: true
+      properties:
+        delivered:
+          format: int64
+          type: integer
+        deliveries:
+          format: int64
+          type: integer
+        endpoint_rejected:
+          format: int64
+          type: integer
+        last_status_code:
+          description: Most recent HTTP status this endpoint returned in the window; null when it never answered. A constant 401 or 405 names the fix directly.
+          format: int32
+          type:
+            - integer
+            - "null"
+        no_response:
+          format: int64
+          type: integer
+        pending:
+          format: int64
+          type: integer
+        success_rate:
+          description: delivered / (delivered + failed). Null when nothing has settled yet.
+          format: double
+          type:
+            - number
+            - "null"
+        url_host:
+          description: The endpoint's host. Only the host is reported — a webhook URL can carry a shared secret in its path or query string, which a metrics payload must not echo back.
+          type: string
+        webhook_id:
+          type: string
+      required:
+        - webhook_id
+        - url_host
+        - deliveries
+        - delivered
+        - pending
+        - endpoint_rejected
+        - no_response
+        - success_rate
+        - last_status_code
+      type: object
+      x-stability-level: beta
     WebhookFiltersRequest:
       additionalProperties: false
       properties:
@@ -4958,6 +5008,59 @@ components:
             type: string
           type: array
       type: object
+    WebhookMetricsView:
+      additionalProperties: true
+      properties:
+        delivered:
+          format: int64
+          type: integer
+        deliveries:
+          description: Delivery rows in the window. The grain is one row per (event, subscriber) pair, so an account with three matching webhooks produces three rows for one message — this legitimately exceeds message counts and does not mean duplicated mail.
+          format: int64
+          type: integer
+        endpoint_rejected:
+          description: The endpoint answered with a non-2xx. Unambiguously the subscriber's own response — check last_status_code per endpoint.
+          format: int64
+          type: integer
+        endpoints:
+          description: Per-endpoint breakdown, busiest first.
+          items:
+            $ref: "#/components/schemas/WebhookEndpointMetricsView"
+          type:
+            - array
+            - "null"
+        endpoints_truncated:
+          description: "True when more endpoints have traffic than are listed (cap: 50). The totals above stay complete."
+          type: boolean
+        no_response:
+          description: "No HTTP response was ever received: connect, DNS or TLS failure, a blocked URL, or a delivery that expired while pending. Predominantly an unreachable endpoint, but it can include rare e2a-side failures, so it is not a clean fault split."
+          format: int64
+          type: integer
+        pending:
+          description: Deliveries still retrying. Excluded from success_rate's denominator because they have not settled.
+          format: int64
+          type: integer
+        success_rate:
+          description: delivered / (delivered + endpoint_rejected + no_response). Null — never 0 — when nothing has settled.
+          format: double
+          type:
+            - number
+            - "null"
+        window_exceeds_retention:
+          description: True when the window reaches past the 30-day delivery-retention horizon. Older rows are pruned, so the counts understate that stretch — a drop here is a retention boundary, not a delivery collapse.
+          type: boolean
+      required:
+        - deliveries
+        - delivered
+        - pending
+        - endpoint_rejected
+        - no_response
+        - success_rate
+        - window_exceeds_retention
+        - endpoints
+        - endpoints_truncated
+      type: object
+      x-stability-level: beta
     WebhookView:
       additionalProperties: true
       properties:

@@ -159,8 +159,10 @@ export * from '../models/ValidateTemplateResponse.js';
 export * from '../models/ValidationErrorDetails.js';
 export * from '../models/VerifyDomainView.js';
 export * from '../models/WebhookDeliveryView.js';
+export * from '../models/WebhookEndpointMetricsView.js';
 export * from '../models/WebhookFiltersRequest.js';
 export * from '../models/WebhookFiltersView.js';
+export * from '../models/WebhookMetricsView.js';
 export * from '../models/WebhookView.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
@@ -323,8 +325,10 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
+import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 
 /* tslint:disable:no-unused-variable */
@@ -528,8 +532,10 @@ let typeMap: {[index: string]: any} = {
     "ValidationErrorDetails": ValidationErrorDetails,
     "VerifyDomainView": VerifyDomainView,
     "WebhookDeliveryView": WebhookDeliveryView,
+    "WebhookEndpointMetricsView": WebhookEndpointMetricsView,
     "WebhookFiltersRequest": WebhookFiltersRequest,
     "WebhookFiltersView": WebhookFiltersView,
+    "WebhookMetricsView": WebhookMetricsView,
     "WebhookView": WebhookView,
 }
 

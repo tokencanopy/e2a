@@ -159,8 +159,10 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
+import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 
 import { ObservableAccountApi } from "./ObservableAPI.js";

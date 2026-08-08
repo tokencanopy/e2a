@@ -7,6 +7,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/webhook"
 )
 
 const accountMetricsBetaDoc = "Beta: account metrics may change before it is declared stable."
@@ -14,6 +15,41 @@ const accountMetricsBetaDoc = "Beta: account metrics may change before it is dec
 // AccountMetricsCounter aggregates persisted lifecycle observations across an
 // account. Mirrors messagelifecycle.Store.CountByReasonCodeForAccount.
 type AccountMetricsCounter func(ctx context.Context, userID string, start, end time.Time, groupByAgent bool) (messagelifecycle.AccountMetrics, error)
+
+// WebhookDeliveryCounter aggregates subscriber-delivery outcomes for an
+// account. Mirrors webhook.SubscriberStore.CountDeliveriesForAccount.
+type WebhookDeliveryCounter func(ctx context.Context, userID string, start, end time.Time) (webhook.AccountDeliveryMetrics, error)
+
+// WebhookEndpointMetricsView is one subscriber endpoint's delivery slice.
+type WebhookEndpointMetricsView struct {
+	WebhookID        string   `json:"webhook_id"`
+	URLHost          string   `json:"url_host" doc:"The endpoint's host. Only the host is reported — a webhook URL can carry a shared secret in its path or query string, which a metrics payload must not echo back."`
+	Deliveries       int64    `json:"deliveries"`
+	Delivered        int64    `json:"delivered"`
+	Pending          int64    `json:"pending"`
+	EndpointRejected int64    `json:"endpoint_rejected"`
+	NoResponse       int64    `json:"no_response"`
+	SuccessRate      *float64 `json:"success_rate" nullable:"true" doc:"delivered / (delivered + failed). Null when nothing has settled yet."`
+	LastStatusCode   *int32   `json:"last_status_code" nullable:"true" doc:"Most recent HTTP status this endpoint returned in the window; null when it never answered. A constant 401 or 405 names the fix directly."`
+}
+
+// WebhookMetricsView is the account's webhook delivery health — the "did my
+// code actually receive it" half, which email delivery counters cannot answer.
+type WebhookMetricsView struct {
+	Deliveries int64 `json:"deliveries" doc:"Delivery rows in the window. The grain is one row per (event, subscriber) pair, so an account with three matching webhooks produces three rows for one message — this legitimately exceeds message counts and does not mean duplicated mail."`
+	Delivered  int64 `json:"delivered"`
+	Pending    int64 `json:"pending" doc:"Deliveries still retrying. Excluded from success_rate's denominator because they have not settled."`
+
+	EndpointRejected int64 `json:"endpoint_rejected" doc:"The endpoint answered with a non-2xx. Unambiguously the subscriber's own response — check last_status_code per endpoint."`
+	NoResponse       int64 `json:"no_response" doc:"No HTTP response was ever received: connect, DNS or TLS failure, a blocked URL, or a delivery that expired while pending. Predominantly an unreachable endpoint, but it can include rare e2a-side failures, so it is not a clean fault split."`
+
+	SuccessRate *float64 `json:"success_rate" nullable:"true" doc:"delivered / (delivered + endpoint_rejected + no_response). Null — never 0 — when nothing has settled."`
+
+	WindowExceedsRetention bool `json:"window_exceeds_retention" doc:"True when the window reaches past the 30-day delivery-retention horizon. Older rows are pruned, so the counts understate that stretch — a drop here is a retention boundary, not a delivery collapse."`
+
+	Endpoints          []WebhookEndpointMetricsView `json:"endpoints" doc:"Per-endpoint breakdown, busiest first."`
+	EndpointsTruncated bool                         `json:"endpoints_truncated" doc:"True when more endpoints have traffic than are listed (cap: 50). The totals above stay complete."`
+}
 
 // AgentMetricsGroupView is one agent's slice of an account aggregate.
 type AgentMetricsGroupView struct {
@@ -42,6 +78,13 @@ type AccountMetricsView struct {
 
 	Agents          []AgentMetricsGroupView `json:"agents" doc:"Per-agent breakdown, busiest first. Empty unless group_by=agent was requested."`
 	AgentsTruncated bool                    `json:"agents_truncated" doc:"True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut."`
+
+	// Webhooks answers a different question from every counter above it —
+	// "did my code receive the event", not "did the mail reach the
+	// recipient" — and comes from a different fact table with a different
+	// grain and a shorter retention. It is deliberately its own block rather
+	// than more fields on summary, so neither can be mistaken for the other.
+	Webhooks WebhookMetricsView `json:"webhooks"`
 }
 
 type accountMetricsInput struct {
@@ -104,6 +147,17 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate account metrics")
 	}
 
+	// Webhook delivery is a separate, optional dependency: a deployment
+	// without it still answers with email counters and a zeroed webhook block
+	// rather than failing the whole read.
+	var deliveries webhook.AccountDeliveryMetrics
+	if s.deps.CountWebhookDeliveries != nil {
+		deliveries, err = s.deps.CountWebhookDeliveries(ctx, user.ID, start.UTC(), end.UTC())
+		if err != nil {
+			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate webhook delivery metrics")
+		}
+	}
+
 	counters, summary, rates := deriveMetrics(metrics.Totals)
 	view := AccountMetricsView{
 		Start:                     start.UTC(),
@@ -116,6 +170,7 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		Counters:                  counters,
 		AgentsTruncated:           metrics.AgentsTruncated,
 		Agents:                    make([]AgentMetricsGroupView, 0, len(metrics.Agents)),
+		Webhooks:                  webhookMetricsView(deliveries),
 	}
 	for _, group := range metrics.Agents {
 		groupCounters, groupSummary, groupRates := deriveMetrics(group.Metrics)
@@ -130,4 +185,37 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		})
 	}
 	return &accountMetricsOutput{Body: view}, nil
+}
+
+// webhookMetricsView shapes the delivery aggregate for the wire.
+//
+// success_rate excludes still-pending deliveries from its denominator: a
+// delivery mid-retry has not failed, and counting it as one would make a
+// healthy endpoint look broken during a transient blip.
+func webhookMetricsView(m webhook.AccountDeliveryMetrics) WebhookMetricsView {
+	view := WebhookMetricsView{
+		Deliveries:             m.Totals.Total,
+		Delivered:              m.Totals.Delivered,
+		Pending:                m.Totals.Pending,
+		EndpointRejected:       m.Totals.EndpointRejected,
+		NoResponse:             m.Totals.NoResponse,
+		SuccessRate:            ratio(m.Totals.Delivered, m.Totals.Delivered+m.Totals.Failed()),
+		WindowExceedsRetention: m.WindowExceedsRetention,
+		EndpointsTruncated:     m.EndpointsTruncated,
+		Endpoints:              make([]WebhookEndpointMetricsView, 0, len(m.Endpoints)),
+	}
+	for _, e := range m.Endpoints {
+		view.Endpoints = append(view.Endpoints, WebhookEndpointMetricsView{
+			WebhookID:        e.WebhookID,
+			URLHost:          e.URLHost,
+			Deliveries:       e.Counts.Total,
+			Delivered:        e.Counts.Delivered,
+			Pending:          e.Counts.Pending,
+			EndpointRejected: e.Counts.EndpointRejected,
+			NoResponse:       e.Counts.NoResponse,
+			SuccessRate:      ratio(e.Counts.Delivered, e.Counts.Delivered+e.Counts.Failed()),
+			LastStatusCode:   e.LastStatusCode,
+		})
+	}
+	return view
 }

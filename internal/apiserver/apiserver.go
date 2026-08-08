@@ -117,7 +117,9 @@ func BuildDeps(p Params) httpapi.Deps {
 	var listMessageLifecycle httpapi.MessageLifecycleLister
 	var countAgentMetrics httpapi.AgentMetricsCounter
 	var countAccountMetrics httpapi.AccountMetricsCounter
+	var countWebhookDeliveries httpapi.WebhookDeliveryCounter
 	if p.Pool != nil {
+		countWebhookDeliveries = webhook.NewSubscriberStore(p.Pool).CountDeliveriesForAccount
 		lifecycleStore := messagelifecycle.NewStore(p.Pool)
 		listMessageLifecycle = lifecycleStore.ListForMessage
 		countAgentMetrics = lifecycleStore.CountByReasonCode
@@ -137,6 +139,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		ListMessageLifecycle:   listMessageLifecycle,
 		CountAgentMetrics:      countAgentMetrics,
 		CountAccountMetrics:    countAccountMetrics,
+		CountWebhookDeliveries: countWebhookDeliveries,
 		ModifyMessageLabels:    p.Store.ModifyMessageLabels,
 
 		ListConversations: p.Store.ListConversationsByAgent,

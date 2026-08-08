@@ -179,8 +179,10 @@ models/ValidateTemplateResponse.ts
 models/ValidationErrorDetails.ts
 models/VerifyDomainView.ts
 models/WebhookDeliveryView.ts
+models/WebhookEndpointMetricsView.ts
 models/WebhookFiltersRequest.ts
 models/WebhookFiltersView.ts
+models/WebhookMetricsView.ts
 models/WebhookView.ts
 models/all.ts
 rxjsStub.ts

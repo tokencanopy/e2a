@@ -14,6 +14,7 @@ import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { MetricsCounterView } from '../models/MetricsCounterView.js';
 import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { HttpFile } from '../http/http.js';
 
 export class AccountMetricsView {
@@ -57,6 +58,7 @@ export class AccountMetricsView {
     * Account-wide counters. Always computed across every agent, never from the possibly-truncated agents array.
     */
     'summary': MetricsSummaryView;
+    'webhooks': WebhookMetricsView;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -121,6 +123,12 @@ export class AccountMetricsView {
             "name": "summary",
             "baseName": "summary",
             "type": "MetricsSummaryView",
+            "format": ""
+        },
+        {
+            "name": "webhooks",
+            "baseName": "webhooks",
+            "type": "WebhookMetricsView",
             "format": ""
         }    ];
 

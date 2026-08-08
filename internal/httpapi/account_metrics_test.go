@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/webhook"
 )
 
 func newAccountMetricsServer(t *testing.T, metrics messagelifecycle.AccountMetrics, mutate ...func(*Deps)) (*Server, *[]string) {
@@ -225,5 +226,113 @@ func TestAccountMetricsReportsNotImplementedWithoutStore(t *testing.T) {
 	status, body := accountMetricsGET(t, srv, "")
 	if status != http.StatusNotImplemented {
 		t.Fatalf("status = %d, body = %#v", status, body)
+	}
+}
+
+func webhookCounts(delivered, pending, rejected, noResponse int64) webhook.DeliveryOutcomeCounts {
+	return webhook.DeliveryOutcomeCounts{
+		Total:            delivered + pending + rejected + noResponse,
+		Delivered:        delivered,
+		Pending:          pending,
+		EndpointRejected: rejected,
+		NoResponse:       noResponse,
+	}
+}
+
+func withWebhookMetrics(m webhook.AccountDeliveryMetrics) func(*Deps) {
+	return func(d *Deps) {
+		d.CountWebhookDeliveries = func(context.Context, string, time.Time, time.Time) (webhook.AccountDeliveryMetrics, error) {
+			return m, nil
+		}
+	}
+}
+
+// TestAccountMetricsReportsWebhookDeliveryHealth: the "did my code receive it"
+// half. It answers a different question from the email counters, from a
+// different table, so it lives in its own block rather than on summary.
+func TestAccountMetricsReportsWebhookDeliveryHealth(t *testing.T) {
+	status := int32(405)
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{},
+		withWebhookMetrics(webhook.AccountDeliveryMetrics{
+			Totals: webhookCounts(96, 2, 3, 1),
+			Endpoints: []webhook.EndpointDeliveryMetrics{{
+				WebhookID:      "wh_1",
+				URLHost:        "hooks.example.test",
+				Counts:         webhookCounts(96, 2, 3, 1),
+				LastStatusCode: &status,
+			}},
+		}))
+
+	code, body := accountMetricsGET(t, srv, "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, body = %#v", code, body)
+	}
+	hooks := metricsSection(t, body, "webhooks")
+	if hooks["deliveries"].(float64) != 102 {
+		t.Errorf("deliveries = %v, want 102", hooks["deliveries"])
+	}
+	if hooks["endpoint_rejected"].(float64) != 3 || hooks["no_response"].(float64) != 1 {
+		t.Errorf("failure split = %v / %v, want 3 / 1", hooks["endpoint_rejected"], hooks["no_response"])
+	}
+	// Pending is excluded from the denominator: a delivery mid-retry has not
+	// failed, and counting it as one makes a healthy endpoint look broken.
+	if got := hooks["success_rate"].(float64); got != 0.96 {
+		t.Errorf("success_rate = %v, want 0.96 (96 / 100 settled)", got)
+	}
+	endpoints := hooks["endpoints"].([]any)
+	if len(endpoints) != 1 {
+		t.Fatalf("endpoints = %#v, want 1", hooks["endpoints"])
+	}
+	first := endpoints[0].(map[string]any)
+	if first["url_host"] != "hooks.example.test" {
+		t.Errorf("url_host = %v", first["url_host"])
+	}
+	if first["last_status_code"].(float64) != 405 {
+		t.Errorf("last_status_code = %v, want 405", first["last_status_code"])
+	}
+}
+
+// A zero denominator must stay null here too, for the same reason it does on
+// the email rates: 0%% reads as total failure rather than "nothing happened".
+func TestAccountMetricsWebhookRateIsNullWithoutTraffic(t *testing.T) {
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{},
+		withWebhookMetrics(webhook.AccountDeliveryMetrics{}))
+
+	_, body := accountMetricsGET(t, srv, "")
+	hooks := metricsSection(t, body, "webhooks")
+	if value, present := hooks["success_rate"]; !present || value != nil {
+		t.Errorf("success_rate = %#v, want null", hooks["success_rate"])
+	}
+	if hooks["endpoints"] == nil {
+		t.Error("endpoints must be an empty array, not null")
+	}
+}
+
+// Retention differs from the email counters: delivery rows are pruned at 30
+// days, so a wider window must say so rather than look like a volume collapse.
+func TestAccountMetricsFlagsWebhookRetentionHorizon(t *testing.T) {
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{},
+		withWebhookMetrics(webhook.AccountDeliveryMetrics{
+			Totals:                 webhookCounts(10, 0, 0, 0),
+			WindowExceedsRetention: true,
+		}))
+
+	_, body := accountMetricsGET(t, srv, "")
+	if metricsSection(t, body, "webhooks")["window_exceeds_retention"] != true {
+		t.Error("window_exceeds_retention must survive to the wire")
+	}
+}
+
+// A deployment without the subscriber store still serves email counters.
+func TestAccountMetricsToleratesMissingWebhookStore(t *testing.T) {
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{
+		Totals: messagelifecycle.AgentMetrics{MessagesInWindow: 5},
+	})
+	code, body := accountMetricsGET(t, srv, "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, body = %#v", code, body)
+	}
+	if metricsSection(t, body, "webhooks")["deliveries"].(float64) != 0 {
+		t.Error("a missing webhook store must yield a zeroed block, not an error")
 	}
 }

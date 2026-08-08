@@ -24,6 +24,7 @@ from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupVi
 from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView
 from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView
 from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView
+from e2a.v1.generated.models.webhook_metrics_view import WebhookMetricsView
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -41,8 +42,9 @@ class AccountMetricsView(BaseModel):
     reconstructed_observations: StrictInt = Field(description="Observations derived from durable message state rather than recorded at the boundary. Included in the counts above; reported separately so the inferred share is visible.")
     start: datetime = Field(description="Inclusive start of the cohort window.")
     summary: MetricsSummaryView = Field(description="Account-wide counters. Always computed across every agent, never from the possibly-truncated agents array.")
+    webhooks: WebhookMetricsView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agents", "agents_truncated", "counters", "end", "messages_in_window", "messages_with_lifecycle", "rates", "reconstructed_observations", "start", "summary"]
+    __properties: ClassVar[List[str]] = ["agents", "agents_truncated", "counters", "end", "messages_in_window", "messages_with_lifecycle", "rates", "reconstructed_observations", "start", "summary", "webhooks"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -105,6 +107,9 @@ class AccountMetricsView(BaseModel):
         # override the default output from pydantic by calling `to_dict()` of summary
         if self.summary:
             _dict['summary'] = self.summary.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of webhooks
+        if self.webhooks:
+            _dict['webhooks'] = self.webhooks.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -141,7 +146,8 @@ class AccountMetricsView(BaseModel):
             "rates": MetricsRatesView.from_dict(obj["rates"]) if obj.get("rates") is not None else None,
             "reconstructed_observations": obj.get("reconstructed_observations"),
             "start": obj.get("start"),
-            "summary": MetricsSummaryView.from_dict(obj["summary"]) if obj.get("summary") is not None else None
+            "summary": MetricsSummaryView.from_dict(obj["summary"]) if obj.get("summary") is not None else None,
+            "webhooks": WebhookMetricsView.from_dict(obj["webhooks"]) if obj.get("webhooks") is not None else None
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

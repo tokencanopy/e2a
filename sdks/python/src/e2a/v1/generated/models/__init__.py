@@ -174,7 +174,9 @@ from e2a.v1.generated.models.validate_template_response import ValidateTemplateR
 from e2a.v1.generated.models.validation_error_details import ValidationErrorDetails
 from e2a.v1.generated.models.verify_domain_view import VerifyDomainView
 from e2a.v1.generated.models.webhook_delivery_view import WebhookDeliveryView
+from e2a.v1.generated.models.webhook_endpoint_metrics_view import WebhookEndpointMetricsView
 from e2a.v1.generated.models.webhook_filters_request import WebhookFiltersRequest
 from e2a.v1.generated.models.webhook_filters_view import WebhookFiltersView
+from e2a.v1.generated.models.webhook_metrics_view import WebhookMetricsView
 from e2a.v1.generated.models.webhook_view import WebhookView
 
