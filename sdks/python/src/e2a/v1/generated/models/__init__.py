@@ -18,6 +18,7 @@ from e2a.v1.generated.models.api_key_view import APIKeyView
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.account_view import AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity
+from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView
 from e2a.v1.generated.models.agent_view import AgentView
@@ -92,6 +93,9 @@ from e2a.v1.generated.models.message_lifecycle_transition import MessageLifecycl
 from e2a.v1.generated.models.message_parsed_view import MessageParsedView
 from e2a.v1.generated.models.message_summary_view import MessageSummaryView
 from e2a.v1.generated.models.message_view import MessageView
+from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView
+from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView
+from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView
 from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView

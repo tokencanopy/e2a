@@ -60,6 +60,7 @@ from .generated.models import (
     AccountView,
     AttachmentView,
     MessageSummaryView,
+    AgentMetricsView,
     PageMessageLifecycleTransition,
     MessageView,
     RedeliverEventRequest,
@@ -552,6 +553,36 @@ class MessagesResource:
                 message_id,
                 cursor=cursor,
                 limit=limit,
+                _headers=h,
+            )
+        )
+
+    async def get_metrics(
+        self,
+        email: str,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+    ) -> AgentMetricsView:
+        """Beta: counter metrics for one agent over a cohort window.
+
+        Messages belong to the window by their own creation time, not by when
+        each observation landed, so a rate never mixes numerator and
+        denominator from different populations. Bounce and complaint feedback
+        keeps arriving for up to 72 hours, so treat the most recent days as
+        provisional.
+
+        Every field of ``rates`` is ``None`` — never ``0`` — when its
+        denominator is zero, so "no traffic" stays distinguishable from
+        "everything failed".
+
+        Defaults to the last 30 days; the window may not exceed 92 days.
+        """
+        return await self._c._read(
+            lambda h: self._api.get_agent_metrics(
+                email,
+                start=start,
+                end=end,
                 _headers=h,
             )
         )

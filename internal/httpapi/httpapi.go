@@ -138,6 +138,10 @@ type Deps struct {
 	GetMessage           MessageGetter
 	ListMessages         MessageLister
 	ListMessageLifecycle MessageLifecycleLister
+	// CountAgentMetrics aggregates persisted lifecycle observations into the
+	// per-agent counter set behind GET /v1/agents/{email}/metrics. Optional —
+	// nil makes the operation answer 501 rather than an empty, misleading zero.
+	CountAgentMetrics AgentMetricsCounter
 	// ModifyMessageLabels applies a labels delta to a message scoped to an
 	// agent, returning the post-update set. Mirrors store.ModifyMessageLabels.
 	ModifyMessageLabels func(ctx context.Context, messageID, agentID string, add, remove []string) ([]string, error)
@@ -707,6 +711,7 @@ func (s *Server) registerOperations() {
 	s.registerAgents()
 	s.registerMessages()
 	s.registerMessageLifecycle()
+	s.registerAgentMetrics()
 	s.registerAttachments()
 	s.registerConversations()
 	s.registerAgentWrites()

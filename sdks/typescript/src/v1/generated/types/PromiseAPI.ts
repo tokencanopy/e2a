@@ -7,6 +7,7 @@ import { APIKeyView } from '../models/APIKeyView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -78,6 +79,9 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsCounterView } from '../models/MetricsCounterView.js';
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -1341,6 +1345,32 @@ export class PromiseMessagesApi {
     public forwardMessage(email: string, id: string, forwardRequest: ForwardRequest, idempotencyKey?: string, wait?: string, _options?: PromiseConfigurationOptions): Promise<SendResultView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.forwardMessage(email, id, forwardRequest, idempotencyKey, wait, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetricsWithHttpInfo(email: string, start?: Date, end?: Date, _options?: PromiseConfigurationOptions): Promise<HttpInfo<AgentMetricsView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAgentMetricsWithHttpInfo(email, start, end, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetrics(email: string, start?: Date, end?: Date, _options?: PromiseConfigurationOptions): Promise<AgentMetricsView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAgentMetrics(email, start, end, observableOptions);
         return result.toPromise();
     }
 

@@ -239,6 +239,55 @@ components:
         - outbound_scan_sensitivity
       type: object
       x-stability-level: beta
+    AgentMetricsView:
+      additionalProperties: true
+      properties:
+        agent_email:
+          description: The agent these metrics describe.
+          type: string
+        counters:
+          description: Every reason code observed in the window, ordered by code. Codes with no observations are omitted rather than reported as zero.
+          items:
+            $ref: "#/components/schemas/MetricsCounterView"
+          type:
+            - array
+            - "null"
+        end:
+          description: Exclusive end of the cohort window.
+          format: date-time
+          type: string
+        messages_in_window:
+          description: Messages created in the window, from the message table itself.
+          format: int64
+          type: integer
+        messages_with_lifecycle:
+          description: Messages in the window carrying at least one persisted lifecycle observation. Below messages_in_window means part of the window predates the lifecycle ledger, and every counter here undercounts by that difference.
+          format: int64
+          type: integer
+        rates:
+          $ref: "#/components/schemas/MetricsRatesView"
+        reconstructed_observations:
+          description: Observations in the window derived from durable message state rather than recorded at the boundary. Included in the counts above; reported separately so the inferred share is visible.
+          format: int64
+          type: integer
+        start:
+          description: Inclusive start of the cohort window.
+          format: date-time
+          type: string
+        summary:
+          $ref: "#/components/schemas/MetricsSummaryView"
+      required:
+        - agent_email
+        - start
+        - end
+        - messages_in_window
+        - messages_with_lifecycle
+        - reconstructed_observations
+        - summary
+        - rates
+        - counters
+      type: object
+      x-stability-level: beta
     AgentSuppressionAddedData:
       additionalProperties: true
       properties:
@@ -3022,6 +3071,173 @@ components:
         - raw_message
         - attachments
       type: object
+    MetricsCounterView:
+      additionalProperties: true
+      properties:
+        messages:
+          description: Distinct messages carrying at least one observation of this code. This is the grain funnel arithmetic uses.
+          format: int64
+          type: integer
+        observations:
+          description: Ledger rows. Retryable codes are recorded once per attempt, so this exceeds messages whenever the pipeline retried.
+          format: int64
+          type: integer
+        outcome:
+          description: What e2a observed at that stage.
+          type: string
+        reason_code:
+          description: Canonical lifecycle reason code.
+          type: string
+        retryable:
+          description: Whether this observation describes a condition the pipeline retries.
+          type: boolean
+        stage:
+          description: Lifecycle stage the observation was made at.
+          type: string
+      required:
+        - reason_code
+        - stage
+        - outcome
+        - retryable
+        - observations
+        - messages
+      type: object
+      x-stability-level: beta
+    MetricsRatesView:
+      additionalProperties: true
+      properties:
+        bounce_rate:
+          description: (bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review.
+          format: double
+          type:
+            - number
+            - "null"
+        complaint_rate:
+          description: complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs.
+          format: double
+          type:
+            - number
+            - "null"
+        delivered_rate:
+          description: delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest 'did my mail arrive' number.
+          format: double
+          type:
+            - number
+            - "null"
+        suppression_block_rate:
+          description: suppressed / accepted. The share of requested sends that never left e2a.
+          format: double
+          type:
+            - number
+            - "null"
+      required:
+        - delivered_rate
+        - bounce_rate
+        - complaint_rate
+        - suppression_block_rate
+      type: object
+      x-stability-level: beta
+    MetricsSummaryView:
+      additionalProperties: true
+      properties:
+        accepted:
+          description: Outbound messages e2a accepted from the API or the loopback path. The denominator for delivered_rate and suppression_block_rate.
+          format: int64
+          type: integer
+        bounced_hard:
+          description: Permanent bounces. These add the recipient to the suppression list.
+          format: int64
+          type: integer
+        bounced_soft:
+          description: Transient bounces.
+          format: int64
+          type: integer
+        bounced_undetermined:
+          description: Bounces the provider did not classify. Kept separate rather than folded into soft, which would understate hard-bounce risk.
+          format: int64
+          type: integer
+        complained:
+          description: Recipients who reported the message as spam.
+          format: int64
+          type: integer
+        delivered:
+          description: Messages a recipient server accepted. This is recipient-server acceptance, NOT inbox placement — no email provider exposes the latter.
+          format: int64
+          type: integer
+        dmarc_error:
+          description: Inbound messages whose DMARC evaluation could not be completed (temporary or permanent resolver error).
+          format: int64
+          type: integer
+        dmarc_fail:
+          description: Inbound messages whose DMARC evaluation failed.
+          format: int64
+          type: integer
+        dmarc_none:
+          description: Inbound messages whose sender publishes no DMARC policy. Common, and not itself suspicious.
+          format: int64
+          type: integer
+        dmarc_pass:
+          description: Inbound messages with an aligned DMARC pass.
+          format: int64
+          type: integer
+        received:
+          description: Inbound messages accepted over SMTP.
+          format: int64
+          type: integer
+        review_approved:
+          description: Holds a reviewer explicitly approved.
+          format: int64
+          type: integer
+        review_expired_approved:
+          description: Holds released by TTL expiry rather than a decision. A rising count means nobody is working the queue.
+          format: int64
+          type: integer
+        review_expired_rejected:
+          description: Holds dropped by TTL expiry rather than a decision. A rising count means work is being lost.
+          format: int64
+          type: integer
+        review_held:
+          description: Messages placed on a human-in-the-loop review hold.
+          format: int64
+          type: integer
+        review_rejected:
+          description: Holds a reviewer explicitly rejected.
+          format: int64
+          type: integer
+        send_failed:
+          description: "Messages that reached a terminal submission failure: provider rejection, local retry exhaustion, or policy cancellation. Break the three apart via counters[]."
+          format: int64
+          type: integer
+        submitted:
+          description: Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate.
+          format: int64
+          type: integer
+        suppressed:
+          description: Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses.
+          format: int64
+          type: integer
+      required:
+        - accepted
+        - submitted
+        - delivered
+        - bounced_hard
+        - bounced_soft
+        - bounced_undetermined
+        - complained
+        - suppressed
+        - send_failed
+        - received
+        - dmarc_pass
+        - dmarc_fail
+        - dmarc_none
+        - dmarc_error
+        - review_held
+        - review_approved
+        - review_rejected
+        - review_expired_approved
+        - review_expired_rejected
+      type: object
+      x-stability-level: beta
     OAuthConnectionEntry:
       additionalProperties: true
       properties:
@@ -6545,6 +6761,57 @@ paths:
       summary: Restore a message from the trash
       tags:
         - messages
+  /v1/agents/{email}/metrics:
+    get:
+      description: "Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable."
+      operationId: getAgentMetrics
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - description: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+          explode: false
+          in: query
+          name: start
+          schema:
+            description: Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+            format: date-time
+            type: string
+        - description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+          explode: false
+          in: query
+          name: end
+          schema:
+            description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
+            format: date-time
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMetricsView"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get an agent's delivery metrics (beta)
+      tags:
+        - messages
+      x-stability-level: beta
   /v1/agents/{email}/protection:
     get:
       description: "Read the agent's protection posture — inbound/outbound trust gate, content-scan sensitivity, and hold-queue mechanism. Account scope only: an agent-scoped credential cannot read its own protection config. Beta: the agent protection config is unstable — its shape may change before it is declared stable."

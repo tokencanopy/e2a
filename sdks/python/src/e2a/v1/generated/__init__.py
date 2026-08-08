@@ -43,6 +43,7 @@ __all__ = [
     "AccountUserView",
     "AccountView",
     "AgentIdentity",
+    "AgentMetricsView",
     "AgentSuppressionAddedData",
     "AgentSuppressionView",
     "AgentView",
@@ -117,6 +118,9 @@ __all__ = [
     "MessageParsedView",
     "MessageSummaryView",
     "MessageView",
+    "MetricsCounterView",
+    "MetricsRatesView",
+    "MetricsSummaryView",
     "OAuthConnectionEntry",
     "PageAPIKeyView",
     "PageAgentSuppressionView",
@@ -228,6 +232,7 @@ from e2a.v1.generated.models.api_key_view import APIKeyView as APIKeyView
 from e2a.v1.generated.models.account_user_view import AccountUserView as AccountUserView
 from e2a.v1.generated.models.account_view import AccountView as AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity as AgentIdentity
+from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView as AgentMetricsView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData as AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView as AgentSuppressionView
 from e2a.v1.generated.models.agent_view import AgentView as AgentView
@@ -302,6 +307,9 @@ from e2a.v1.generated.models.message_lifecycle_transition import MessageLifecycl
 from e2a.v1.generated.models.message_parsed_view import MessageParsedView as MessageParsedView
 from e2a.v1.generated.models.message_summary_view import MessageSummaryView as MessageSummaryView
 from e2a.v1.generated.models.message_view import MessageView as MessageView
+from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView as MetricsCounterView
+from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView as MetricsRatesView
+from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView as MetricsSummaryView
 from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry as OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView as PageAPIKeyView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView as PageAgentSuppressionView

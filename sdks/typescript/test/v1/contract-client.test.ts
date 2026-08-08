@@ -52,6 +52,50 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 
+  it("messages.getMetrics reports null rates before traffic and counts after", async () => {
+    const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      // A brand-new agent has no traffic. Every rate must come back null, not
+      // 0 — a zero here would read as total delivery failure on a dashboard.
+      const before = await client.messages.getMetrics(email);
+      expect(before.agentEmail).toBe(email);
+      expect(before.messagesInWindow).toBe(0);
+      expect(before.counters).toEqual([]);
+      expect(before.summary.accepted).toBe(0);
+      expect(before.rates.deliveredRate).toBeNull();
+      expect(before.rates.bounceRate).toBeNull();
+      expect(before.rates.complaintRate).toBeNull();
+      expect(before.rates.suppressionBlockRate).toBeNull();
+
+      // The loopback self-send is the contract server's deterministic terminal
+      // path, so the counters below cannot race an async worker.
+      await client.messages.send(
+        email,
+        { to: [email], subject: "metrics contract", text: "self-send loopback" },
+        { wait: "sent" },
+      );
+
+      const after = await client.messages.getMetrics(email);
+      expect(after.messagesInWindow).toBeGreaterThan(0);
+      expect(after.messagesWithLifecycle).toBeGreaterThan(0);
+      expect(after.summary.accepted).toBeGreaterThan(0);
+      expect(after.counters ?? []).not.toHaveLength(0);
+      // Now that a denominator exists the rate is a real number, not null.
+      expect(typeof after.rates.deliveredRate).toBe("number");
+
+      // An explicit window is echoed back verbatim, so a caller can tell which
+      // cohort a number describes rather than inferring it from wall clock.
+      const start = new Date("2026-07-01T00:00:00Z");
+      const end = new Date("2026-07-08T00:00:00Z");
+      const windowed = await client.messages.getMetrics(email, { start, end });
+      expect(windowed.start.toISOString()).toBe(start.toISOString());
+      expect(windowed.end.toISOString()).toBe(end.toISOString());
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
+
   it("agents.delete with permanent: true removes the agent immediately", async () => {
     const email = `${slug("sdkc-del")}@agents.e2a.dev`;
     await client.agents.create({ email });

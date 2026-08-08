@@ -3,6 +3,7 @@ export * from '../models/APIKeyView.js';
 export * from '../models/AccountUserView.js';
 export * from '../models/AccountView.js';
 export * from '../models/AgentIdentity.js';
+export * from '../models/AgentMetricsView.js';
 export * from '../models/AgentSuppressionAddedData.js';
 export * from '../models/AgentSuppressionView.js';
 export * from '../models/AgentView.js';
@@ -77,6 +78,9 @@ export * from '../models/MessageLifecycleTransition.js';
 export * from '../models/MessageParsedView.js';
 export * from '../models/MessageSummaryView.js';
 export * from '../models/MessageView.js';
+export * from '../models/MetricsCounterView.js';
+export * from '../models/MetricsRatesView.js';
+export * from '../models/MetricsSummaryView.js';
 export * from '../models/OAuthConnectionEntry.js';
 export * from '../models/PageAPIKeyView.js';
 export * from '../models/PageAgentSuppressionView.js';
@@ -162,6 +166,7 @@ import { APIKeyView } from '../models/APIKeyView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -235,6 +240,9 @@ import { MessageLifecycleTransition , MessageLifecycleTransitionDirectionEnum   
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsCounterView } from '../models/MetricsCounterView.js';
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -361,6 +369,7 @@ let typeMap: {[index: string]: any} = {
     "AccountUserView": AccountUserView,
     "AccountView": AccountView,
     "AgentIdentity": AgentIdentity,
+    "AgentMetricsView": AgentMetricsView,
     "AgentSuppressionAddedData": AgentSuppressionAddedData,
     "AgentSuppressionView": AgentSuppressionView,
     "AgentView": AgentView,
@@ -434,6 +443,9 @@ let typeMap: {[index: string]: any} = {
     "MessageParsedView": MessageParsedView,
     "MessageSummaryView": MessageSummaryView,
     "MessageView": MessageView,
+    "MetricsCounterView": MetricsCounterView,
+    "MetricsRatesView": MetricsRatesView,
+    "MetricsSummaryView": MetricsSummaryView,
     "OAuthConnectionEntry": OAuthConnectionEntry,
     "PageAPIKeyView": PageAPIKeyView,
     "PageAgentSuppressionView": PageAgentSuppressionView,

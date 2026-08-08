@@ -31,6 +31,7 @@ import type {
   ProtectionConfigRequest,
   MessageView,
   PageMessageLifecycleTransition,
+  AgentMetricsView,
   AttachmentView,
   MessageSummaryView,
   SendEmailRequest,
@@ -409,6 +410,26 @@ class MessagesResource {
     return call(() =>
       this.api.getMessageLifecycle(email, messageId, params.cursor, params.limit),
     );
+  }
+  /**
+   * Beta: counter metrics for one agent over a cohort window, aggregated from
+   * the message lifecycle ledger.
+   *
+   * Messages belong to the window by their own creation time, not by when each
+   * observation landed, so a rate never mixes numerator and denominator from
+   * different populations. Bounce and complaint feedback keeps arriving for up
+   * to 72 hours, so treat the most recent days as provisional.
+   *
+   * Each entry in `rates` is null — never 0 — when its denominator is zero, so
+   * "no traffic" stays distinguishable from "everything failed".
+   *
+   * Defaults to the last 30 days; the window may not exceed 92 days.
+   */
+  getMetrics(
+    email: string,
+    params: { start?: Date; end?: Date } = {},
+  ): Promise<AgentMetricsView> {
+    return call(() => this.api.getAgentMetrics(email, params.start, params.end));
   }
   /**
    * Move a message to the trash. Reversible via `restore()` until the trash

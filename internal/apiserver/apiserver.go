@@ -115,8 +115,11 @@ func BuildDeps(p Params) httpapi.Deps {
 		rampSnapshot = sendramp.NewStore(p.Pool).Snapshot
 	}
 	var listMessageLifecycle httpapi.MessageLifecycleLister
+	var countAgentMetrics httpapi.AgentMetricsCounter
 	if p.Pool != nil {
-		listMessageLifecycle = messagelifecycle.NewStore(p.Pool).ListForMessage
+		lifecycleStore := messagelifecycle.NewStore(p.Pool)
+		listMessageLifecycle = lifecycleStore.ListForMessage
+		countAgentMetrics = lifecycleStore.CountByReasonCode
 	}
 	deps := httpapi.Deps{
 		Authenticator:          p.API.AuthenticateUser,
@@ -130,6 +133,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		AttachmentStore:        attachmentStore(p),
 		ListMessages:           p.Store.GetMessagesByAgent,
 		ListMessageLifecycle:   listMessageLifecycle,
+		CountAgentMetrics:      countAgentMetrics,
 		ModifyMessageLabels:    p.Store.ModifyMessageLabels,
 
 		ListConversations: p.Store.ListConversationsByAgent,
