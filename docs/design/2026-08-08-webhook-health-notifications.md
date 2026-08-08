@@ -49,6 +49,10 @@ dashboard reading `pending` is worse than no email. They must ship together.
 - **G3.** A user can see and change enabled/disabled state entirely from the dashboard.
 - **G4.** A delivery against a disabled webhook reaches a truthful terminal state in
   bounded time.
+- **G5.** Both emails come from a **replyable support address** rather than a `noreply` —
+  a customer whose integration just broke should be able to hit reply. On the hosted
+  service that is `support@team.tokencanopy.com`; the address is configuration, so
+  self-hosters get a working default instead of the operator's address (Part 4).
 
 ### Measurable success criteria
 
@@ -248,7 +252,46 @@ tolerate unknown values in, consistent with how `webhook_status` is documented o
 `identity.Store`. Must carry no internal hostnames, IPs, or DB identifiers — the delivery
 worker already sanitises `last_error` for this reason.
 
-### Part 4 — cap the disabled-delivery snooze
+### Part 4 — the sender address (config, never a constant)
+
+Both emails send from a **support address**, not a `noreply`. On the hosted service that
+is `support@team.tokencanopy.com`.
+
+**This must not be hardcoded in this repo.** The server is open source and self-hostable;
+a constant here would make every self-host deployment try to send as the hosted operator's
+support address — mail SES would reject outright, since the self-hoster does not own that
+identity. The address is hosted configuration and belongs in the ops repo, matching the
+existing split.
+
+- **OSS side:** a new optional config key, `notifications.from_address`. When unset, fall
+  back to the current `hitlnotify` behavior — a fixed local part on
+  `cfg.OutboundSMTP.FromDomain` — so self-host works with zero configuration.
+- **Ops side:** set it in `config.prod.yaml`, alongside the existing
+  `from_domain: send.e2a.dev`.
+
+Note the notifier's from-domain is a single global today (`cfg.OutboundSMTP.FromDomain`,
+`cmd/e2a/main.go:571`) shared with the product outbound sender, so this is a genuinely new
+knob rather than a value substitution.
+
+**Feasibility is confirmed, not assumed.** `team.tokencanopy.com` is a registered e2a
+domain with `sending_status: verified`, DKIM verified (`e2a202607._domainkey`), a verified
+custom MAIL FROM (`bounce.team.tokencanopy.com` → `feedback-smtp.us-east-2.amazonses.com`),
+and `sending_ramp: exempt`. SES in us-east-2 therefore already holds a sending identity for
+it.
+
+**Replies land somewhere real.** That domain's MX points at `mx.e2a.dev` and a
+`support@team.tokencanopy.com` agent exists, so a customer replying to a webhook-failure
+email arrives in an actual e2a inbox — the service dogfooding itself. Worth setting
+`Reply-To` explicitly rather than relying on `From`, so a future change of sending identity
+does not silently break the reply path.
+
+**One implementation checkpoint:** confirm the server's runtime SES credentials (the scoped
+`e2a-server` IAM user) are permitted to send with this From address — an IAM policy
+condition on `ses:FromAddress` or `ses:FromDisplayName` would block it. Per the repo's
+standing warning, verify against the **server's** credentials, not a laptop's; local creds
+masking a missing container credential has caused a real prod failure before.
+
+### Part 5 — cap the disabled-delivery snooze
 
 ```go
 // worker.go, replacing the unconditional snooze
@@ -408,3 +451,11 @@ inbound and the staging MX round trip works.
 - **Q5. Does `auto_disable_reason` need to survive re-enable?** Re-enabling clears
   `auto_disabled_at`; the reason should probably clear with it, or the UI will show a stale
   cause on a healthy webhook.
+- **Q6. Sender brand: `support@team.tokencanopy.com` vs `support@agents.e2a.dev`.**
+  Specified as the former, and it works. Flagging only because a customer who bought *e2a*
+  receives mail about their e2a webhook from a *tokencanopy.com* address, which can read as
+  unrelated or as phishing — the risk being that the one email telling them their
+  integration is broken is the one they ignore. A `support@agents.e2a.dev` agent already
+  exists ("e2a Support") if brand alignment turns out to matter more than company
+  consolidation. Purely a positioning call; the design works either way since the address
+  is configuration.
