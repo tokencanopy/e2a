@@ -73,6 +73,27 @@ describe("messages commands", () => {
     );
   });
 
+  it("passes filter through verbatim and omits it when unset", async () => {
+    mockList.mockReturnValue(summaries());
+    const { messagesList } = await import("../commands/messages.js");
+
+    await messagesList({ filter: "label:urgent" });
+    expect(mockList).toHaveBeenCalledWith("bot@agents.e2a.dev", {
+      sort: "asc",
+      readStatus: "all",
+      filter: "label:urgent",
+      limit: 100,
+    });
+
+    mockList.mockClear();
+    await messagesList({});
+    expect(mockList).toHaveBeenCalledWith("bot@agents.e2a.dev", {
+      sort: "asc",
+      readStatus: "all",
+      limit: 100,
+    });
+  });
+
   it("sanitizes TSV delimiters out of the sender-controlled From field", async () => {
     mockList.mockReturnValue(
       summaries({

@@ -4,6 +4,13 @@ Date: 2026-07-25
 Status: Approved (design), pre-implementation
 Audience: e2a server, SDK, and MCP maintainers
 
+## Amendment (2026-07-28): public parameter spelling
+
+PR #735 corrects the public message-list boolean-expression parameter from
+`q` to `filter`. The grammar and semantics in this historical design are
+unchanged. References to `q` below document the original proposal only; the
+implemented API, SDKs, CLI, MCP tool, docs, and production E2E use `filter`.
+
 ## Context and goals
 
 `GET /v1/agents/{email}/messages` today filters via flat params: `direction`,
@@ -33,7 +40,7 @@ expression, backed by a small, dependency-free, schema-agnostic Go package
 Postgres SQL.
 
 **Non-goals (v1):** full-text/body search, `to`/`cc` fields, attachment
-name/size filters, bare-term (unqualified) search, custom functions
+presence/name/size filters, bare-term (unqualified) search, custom functions
 (`hasAttachment()`), SDK-side parsing or validation, Spanner/MySQL dialects
 (the `Dialect` interface admits them later), extraction as a standalone OSS
 library (the design only keeps that door open).
@@ -88,8 +95,8 @@ Five files, five stages:
   identifier quoting, case-insensitive-match operator (ILIKE vs LOWER()).
 - e2a's registry lives in `internal/identity` (`messagesFieldRegistry()`):
   maps `label` → `m.labels` ops, `from` → `m.sender` (matching the existing
-  flat `from` filter),
-  `created` → `m.created_at`, `has:attachment` → attachment JSONB length.
+  flat `from` filter), `subject` → `m.subject`, and `created` →
+  `m.created_at`.
 - CI guard: a tiny test asserting `go list -deps ./internal/filterquery`
   contains no `internal/identity` (or any non-stdlib) import.
 
@@ -100,25 +107,33 @@ Five files, five stages:
 | `label` | `:` | `label:urgent` = message carries label. Exclusion via `NOT label:x`. Value must pass the existing label charset rule (`[a-z0-9:_-]+`, ≤64). |
 | `from` | `:` `=` `!=` | `:` = case-insensitive substring (ILIKE) on `m.sender` — identical to the flat `from` filter. `=`/`!=` = case-insensitive exact. |
 | `subject` | `:` `=` `!=` | Same pattern on `subject`. NULL subjects never match `:`/`=` (SQL NULL semantics; document it). |
-| `has` | `:` | Value `attachment` only: `has:attachment`. |
 | `created` | `=` `!=` `<` `<=` `>` `>=` | On `created_at`. Values: RFC3339 or `YYYY-MM-DD`. A date-only value denotes that whole UTC day: `=`/`!=` test membership in that day's `[midnight, next-midnight)` range, `<=` includes the whole day, and `>` begins at the next midnight. Full RFC3339 values are exact. |
 
 Everything else (`to:`, `body:`, bare text, …) parses but fails validation:
-`unknown field 'to' — v1 supports: label, from, subject, has, created`.
+`unknown field 'to' — supported fields: created, from, label, subject`.
+
+Attachment filtering is deliberately deferred. Inbound attachments are
+canonical in the raw MIME message while outbound attachments use
+`attachments_json`, so the existing JSON column cannot implement
+`has:attachment` correctly. Shipping it requires a normalized attachment-count
+field introduced with a blue/green-safe expand/backfill/contract rollout:
+first make every live writer populate a nullable count and run an exact,
+resumable Go backfill with `mailparse.Attachments`; only after old writers are
+gone and the backfill is complete may the query field rely on that count.
 
 `*` inside quoted strings maps to ILIKE `%` for `from:`/`subject:`; literal
 user `%`, `_`, `\` are escaped and the predicate carries `ESCAPE '\'`.
 
 ## Emission pipeline (worked example)
 
-Input: `label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`
+Input: `label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`
 
 AST (precedence: NOT > OR > implicit AND > explicit AND):
 
 ```
 And(
   Or( Has{label,"urgent"},
-      And( Has{from,"alerts"}, Not(Has{has,"attachment"}) ) ),
+      And( Has{from,"alerts"}, Not(Has{subject,"newsletter"}) ) ),
   GreaterEq{created,2026-07-01T00:00:00Z} )
 ```
 
@@ -127,9 +142,9 @@ Emitted (store already bound `$1`=agent_id, `$2..$3` flat filters):
 ```sql
 AND ( ( (m.labels @> $4)
         OR ( (m.sender ILIKE $5 ESCAPE '\')
-             AND NOT (COALESCE(jsonb_array_length(m.attachments_json),0) > 0) ) )
-      AND (m.created_at >= $6) )
--- args += []string{"urgent"}, "%alerts%", 2026-07-01T00:00:00Z
+             AND NOT (m.subject ILIKE $6 ESCAPE '\') ) )
+      AND (m.created_at >= $7) )
+-- args += []string{"urgent"}, "%alerts%", "%newsletter%", 2026-07-01T00:00:00Z
 ```
 
 Rules that make this safe and correct:
@@ -154,7 +169,7 @@ Rules that make this safe and correct:
   existing filter-identity rejection, same as other filters.
 - MCP `list_messages` gains optional `q` (pass-through, same validation).
 - SDKs regenerate from OpenAPI (Python `messages.list(..., q=...)`, TS
-  `{ q }`), CLI `messages list --q`, docs page documenting the grammar.
+  `{ filter }`), CLI `messages list --filter`, docs page documenting the grammar.
 
 ## Error model
 

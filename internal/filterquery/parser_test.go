@@ -27,7 +27,7 @@ func TestParsePrecedence(t *testing.T) {
 		`-a:x`:                     `(not (a : x))`,
 		`a:x AND (b:y OR c:z)`:     `(and (a : x) (or (b : y) (c : z)))`,
 		`(a:x OR b:y) AND NOT c:z`: `(and (or (a : x) (b : y)) (not (c : z)))`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
+		`label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (subject : newsletter)))) (created >= 2026-07-01))`,
 	}
 	for q, want := range cases {
 		if got := parseToString(t, q); got != want {

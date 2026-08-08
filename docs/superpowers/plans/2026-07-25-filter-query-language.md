@@ -1,8 +1,14 @@
-# Filter Query Language (`q`) Implementation Plan
+# Filter Query Language Implementation Plan
+
+> **Amendment (2026-07-28, PR #735):** The public message-list boolean-expression
+> parameter is `filter`, not `q`. The grammar and implementation semantics in this
+> historical plan are unchanged; its remaining `q` references describe the original
+> proposed spelling only. The implemented API, SDKs, CLI, MCP tool, docs, and
+> production E2E use `filter`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a boolean filter query language (`q` param) to `list_messages`, backed by a new dependency-free, schema-agnostic Go package `internal/filterquery` (parse → validate → emit parameterized Postgres SQL).
+**Goal:** Add a boolean filter query language (`filter` param) to `list_messages`, backed by a new dependency-free, schema-agnostic Go package `internal/filterquery` (parse → validate → emit parameterized Postgres SQL).
 
 **Architecture:** Spec: `docs/superpowers/specs/2026-07-25-filter-query-language-design.md`. Hand-rolled recursive-descent parser over the AIP-160 EBNF; validation against an adopter-supplied `FieldRegistry`; emission through a `Dialect` interface. e2a's messages schema lives only in `internal/identity`'s registry. Ships as PR 1 (package only) + PR 2 (API surface + MCP + SDKs + CLI + docs).
 
@@ -25,6 +31,7 @@
 - Hard caps: input ≤ 500 chars (handler), nesting depth ≤ 64, nodes ≤ 512. Violations return positioned errors, never panics.
 - Placeholders are always 1-based `$n`, numbered from a caller-supplied start index; identifiers come only from registry constants; user values are always bound args.
 - DSL semantics MUST match flat params: `from:` = `m.sender ILIKE … ESCAPE '\'` (same as flat `from`), `subject:` = `m.subject ILIKE … ESCAPE '\'` (same as flat `subject_contains`), both via the existing `escapeLikePattern` helper; `*` in values maps to `%` (after escaping literals).
+- Attachment filtering is deferred from v1. Inbound attachments are canonical in raw MIME while outbound attachments use `attachments_json`; an exact `has:attachment` needs a normalized count introduced by a blue/green-safe expand/backfill/contract rollout (nullable field + all writers, exact resumable Go backfill, then query exposure after old writers are gone).
 - `label:` values must match `^[a-z0-9:_-]{1,64}$`; `e2a:` system labels are filterable (read-only on writes, unchanged).
 - DB-backed tests need Postgres: `make docker-up` (pg at localhost:5433), then `go test ./internal/identity/ -run <Test>`.
 - Commit style: `feat(filterquery): …` / `feat(api): …` with trailer `Co-Authored-By: Kimi <noreply@moonshot.ai>`. Commit at every task boundary.
@@ -53,7 +60,7 @@ package filterquery
 import "testing"
 
 func TestLexBasics(t *testing.T) {
-	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT has:attachment)`)
+	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT subject:newsletter)`)
 	if err != nil {
 		t.Fatalf("lex: %v", err)
 	}
@@ -362,7 +369,7 @@ Expected: PASS (6 tests)
 
 ```bash
 git add internal/filterquery/ docs/superpowers/specs/2026-07-25-filter-query-language-design.md
-git commit -m "feat(filterquery): lexer and error type for the q filter language
+git commit -m "feat(filterquery): lexer and error type for the filter language
 
 Also corrects the spec's precedence note (NOT > OR > implicit AND >
 explicit AND, per the AIP-160 EBNF).
@@ -443,7 +450,7 @@ func TestParsePrecedence(t *testing.T) {
 		`-a:x`:                       `(not (a : x))`,
 		`a:x AND (b:y OR c:z)`:       `(and (a : x) (or (b : y) (c : z)))`,
 		`(a:x OR b:y) AND NOT c:z`:   `(and (or (a : x) (b : y)) (not (c : z)))`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (has : attachment)))) (created >= 2026-07-01))`,
+		`label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`: `(and (or (label : urgent) (and (from : alerts) (not (subject : newsletter)))) (created >= 2026-07-01))`,
 	}
 	for q, want := range cases {
 		if got := parseToString(t, q); got != want {
@@ -2056,7 +2063,24 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `filterquery` public API (Tasks 1–4); existing `escapeLikePattern` (identity/store.go).
-- Produces: `MessagesQRegistry() *filterquery.Registry` (lazy singleton); unexported `messagesFieldRegistry()`; value type `createdValue{at time.Time, dayRange bool}`. Task 10's differential tests and Task 11's handler consume these.
+- Produces: `MessagesQRegistry() *filterquery.Registry` (lazy singleton); value type `createdValue{at time.Time, dayRange bool}`. Task 10's differential tests and Task 11's handler consume these.
+
+**Binding corrections and coverage requirements:**
+
+- Imports use the repository module path
+  `github.com/tokencanopy/e2a/internal/filterquery`.
+- Date-only values denote the entire UTC calendar day. Unit tests must cover
+  every operator and its exact arguments: `=` is `[start,end)`, `!=` is
+  outside that range, `<` ends at `start`, `<=` ends at `end`, `>` begins at
+  `end`, and `>=` begins at `start`. In particular,
+  `created<=YYYY-MM-DD` includes that whole day and
+  `created>YYYY-MM-DD` starts at the following midnight.
+- `from:` and `subject:` must preserve the flat-filter behavior exactly:
+  byte-counted 200-byte bound, case-insensitive substring, literal `%`, `_`,
+  and `\` escaping, and `*` translated to the ILIKE wildcard. Add boundary
+  tests for 200/201 bytes and exact tests showing `=`/`!=` do not translate
+  wildcards.
+- Registry unit tests must be parallel-safe and must not mutate global state.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2068,7 +2092,7 @@ import (
 	"testing"
 	"time"
 
-	"e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/filterquery"
 )
 
 func compileQ(t *testing.T, q string, start int) (string, []any) {
@@ -2129,13 +2153,13 @@ func TestSubjectField(t *testing.T) {
 	}
 }
 
-func TestHasAttachment(t *testing.T) {
-	frag, args := compileQ(t, `has:attachment`, 1)
-	if frag != `(COALESCE(jsonb_array_length(m.attachments_json), 0) > 0)` || len(args) != 0 {
-		t.Errorf("frag=%s args=%v", frag, args)
+func TestHasAttachmentIsDeferred(t *testing.T) {
+	_, _, err := filterquery.Compile(`has:attachment`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1)
+	if err == nil {
+		t.Fatal("has:attachment: want unknown-field rejection")
 	}
-	if _, _, err := filterquery.Compile(`has:body`, MessagesQRegistry(), filterquery.PostgresDialect{}, 1); err == nil {
-		t.Error("has:body: want rejection")
+	if got, want := err.Error(), `unknown field "has" — supported fields: created, from, label, subject`; !strings.Contains(got, want) {
+		t.Errorf("error = %q, want substring %q", got, want)
 	}
 }
 
@@ -2187,7 +2211,7 @@ import (
 	"sync"
 	"time"
 
-	"e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/filterquery"
 )
 
 // q-language field registry for the messages table. Semantics MUST match the
@@ -2210,7 +2234,6 @@ func MessagesQRegistry() *filterquery.Registry {
 			labelQField(),
 			fromQField(),
 			subjectQField(),
-			hasQField(),
 			createdQField(),
 		)
 		if err != nil {
@@ -2276,22 +2299,6 @@ func textQField(name, column string, maxLen int) filterquery.FieldSpec {
 func fromQField() filterquery.FieldSpec    { return textQField("from", "m.sender", 200) }
 func subjectQField() filterquery.FieldSpec { return textQField("subject", "m.subject", 200) }
 
-func hasQField() filterquery.FieldSpec {
-	return filterquery.FieldSpec{
-		Name: "has",
-		Ops:  []string{":"},
-		Coerce: func(raw string, quoted bool) (any, error) {
-			if raw != "attachment" {
-				return nil, fmt.Errorf("unsupported has: value %q — v1 supports has:attachment", raw)
-			}
-			return raw, nil
-		},
-		Emit: func(c *filterquery.Comparison, e *filterquery.EmitCtx) (string, error) {
-			return "COALESCE(jsonb_array_length(m.attachments_json), 0) > 0", nil
-		},
-	}
-}
-
 // createdValue carries date-coercion semantics: a date-only input (dayRange)
 // makes "=" mean "that UTC day", not "that exact midnight second".
 type createdValue struct {
@@ -2348,7 +2355,7 @@ Expected: PASS (unit tests need no DB)
 
 ```bash
 git add internal/identity/filter_registry.go internal/identity/filter_registry_test.go
-git commit -m "feat(identity): messages field registry for the q filter language
+git commit -m "feat(identity): messages field registry for the filter language
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
@@ -2363,25 +2370,47 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 
 **Interfaces:**
 - Consumes: `MessagesQRegistry()` (Task 9), `filterquery.Expr`.
-- Produces: `MessageListFilter.QEmit func(startIdx int) (fragment string, args []interface{})` — the handler (Task 11) sets it.
+- Produces: `MessageListFilter.Q *filterquery.Expr` — the handler (Task 11) sets it and the Postgres store emits it at the correct placeholder offset.
+
+**Binding corrections (supersede the illustrative callback/evaluator/Root
+sections below):**
+
+- Pass the validated expression as data (`Q *filterquery.Expr`), not an
+  errorless callback. `GetMessagesByAgent` calls `Q.Emit` with
+  `PostgresDialect{}` after all flat filters, propagates any emission error,
+  and appends its fragment/arguments. Add a store error-path test and a
+  flat-filter composition test that proves placeholder numbering.
+- Do **not** add `Expr.Root()` or any other mutable-AST exposure. The generic
+  package deliberately keeps a validated expression encapsulated; production
+  API must not be widened solely for a test.
+- Replace the AST-sharing "naive evaluator" below with an independent fixture
+  oracle: each query declares expected fixture keys/IDs explicitly. Cover
+  precedence, NOT, labels, case-insensitive exact/substring text matching,
+  escaped `%`/`_`/`\`, `*` wildcard behavior, Unicode, and all
+  date-only boundaries. Include fixtures immediately before the day, exactly
+  at its first midnight, exactly at the following midnight, and after it so
+  `<`, `<=`, `=`, `!=`, `>`, and `>=` cannot share a mistaken boundary.
+- The old Step 2 evaluator and Step 3 `Expr.Root()` snippets are retained only
+  as historical illustration and must not be implemented.
 
 - [ ] **Step 1: Add the filter field and the store splice**
 
 In `MessageListFilter` (store.go ~3661, after `Labels []string`):
 
 ```go
-	// QEmit, when non-nil, emits the validated q-expression predicate with
-	// placeholders numbered from the given 1-based start index. The store
-	// invokes it after the built-in filters so $n numbering stays correct.
-	// Built by the handler from internal/filterquery.Expr.
-	QEmit func(startIdx int) (fragment string, args []interface{})
+	// Q is a parsed and validated q-expression. The Postgres store emits it
+	// after built-in filters so placeholder numbering stays correct.
+	Q *filterquery.Expr
 ```
 
 In `GetMessagesByAgent`, immediately after the `if len(f.Labels) > 0 { … }` block:
 
 ```go
-	if f.QEmit != nil {
-		frag, qargs := f.QEmit(len(args) + 1)
+	if f.Q != nil {
+		frag, qargs, err := f.Q.Emit(filterquery.PostgresDialect{}, len(args)+1)
+		if err != nil {
+			return nil, fmt.Errorf("emit filter: %w", err)
+		}
 		if frag != "" {
 			query += " AND " + frag
 			args = append(args, qargs...)
@@ -2404,8 +2433,8 @@ import (
 	"testing"
 	"time"
 
-	"e2a/internal/filterquery"
-	"e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/filterquery"
+	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
 // Differential testing: for each q expression, the rows returned by the
@@ -2420,7 +2449,6 @@ type fixtureMsg struct {
 	subject     string
 	labels      []string // nil = NULL labels column
 	created     time.Time
-	attachments int
 }
 
 func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
@@ -2429,7 +2457,7 @@ func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
 	day := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	fixtures := []fixtureMsg{
 		{sender: "alice@corp.com", subject: "Quarterly report", labels: []string{"urgent", "q3"}, created: day.Add(1 * time.Hour)},
-		{sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour), attachments: 2},
+		{sender: "bob@alerts.io", subject: "CPU alert", labels: []string{"alerts"}, created: day.Add(2 * time.Hour)},
 		{sender: "carol@news.net", subject: "Weekly digest", labels: []string{"newsletter"}, created: day.Add(3 * time.Hour)},
 		{sender: "ALICE@corp.com", subject: "Follow-up", labels: []string{"follow-up"}, created: day.Add(4 * time.Hour)},
 		{sender: "dave@x.com", subject: "", labels: nil, created: day.Add(5 * time.Hour)},
@@ -2448,12 +2476,6 @@ func seedQFixtures(t *testing.T, store *Store, agentID string) []fixtureMsg {
 		if fx.labels != nil {
 			if _, err := store.pool.Exec(ctx, `UPDATE messages SET labels = $1 WHERE id = $2`, fx.labels, m.ID); err != nil {
 				t.Fatalf("labels %d: %v", i, err)
-			}
-		}
-		if fx.attachments > 0 {
-			att := fmt.Sprintf(`[{"filename":"a.pdf","content_type":"application/pdf","index":0,"size_bytes":10},{"filename":"b.pdf","content_type":"application/pdf","index":1,"size_bytes":10}][:{}]`, fx.attachments)
-			if _, err := store.pool.Exec(ctx, `UPDATE messages SET attachments_json = $1::jsonb WHERE id = $2`, att, m.ID); err != nil {
-				t.Fatalf("attachments %d: %v", i, err)
 			}
 		}
 		if _, err := store.pool.Exec(ctx, `UPDATE messages SET created_at = $1 WHERE id = $2`, fx.created, m.ID); err != nil {
@@ -2557,8 +2579,6 @@ func evalComparison(c *filterquery.Comparison, r fixtureMsg) bool {
 		default:
 			return !strings.EqualFold(r.subject, v)
 		}
-	case "has":
-		return r.attachments > 0
 	case "created":
 		cv := c.Value.(createdValue)
 		at := cv.at
@@ -2606,7 +2626,6 @@ func TestQDifferential(t *testing.T) {
 		`label:urgent OR label:alerts`,
 		`label:urgent AND NOT label:newsletter`,
 		`NOT label:urgent`,
-		`(label:urgent OR label:follow-up) AND NOT has:attachment`,
 		`from:alice`,
 		`from:ALICE`,
 		`from:*@corp.com`,
@@ -2617,11 +2636,10 @@ func TestQDifferential(t *testing.T) {
 		`subject:_now_`,                     // literal underscores
 		`subject:"a*b literal"`,
 		`subject:こんにちは`,
-		`has:attachment`,
 		`created = "2026-07-01"`,            // day range: all but the next-day row
 		`created>=2026-07-02`,
 		`created<2026-07-01T05:00:00Z`,
-		`label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01`,
+		`label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01`,
 	}
 	for _, q := range queries {
 		expr, err := filterquery.Parse(q, MessagesQRegistry())
@@ -2708,8 +2726,27 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 - Test: `internal/httpapi/messages_q_test.go`
 
 **Interfaces:**
-- Consumes: `identity.MessagesQRegistry()` (Task 9), `filterquery.Parse/Expr`, `MessageListFilter.QEmit` (Task 10).
+- Consumes: `identity.MessagesQRegistry()` (Task 9), `filterquery.Parse/Expr`, `MessageListFilter.Q` (Task 10).
 - Produces: public `q` query param on `GET /v1/agents/{email}/messages`; 400 `invalid_filter` contract.
+
+**Binding corrections and coverage requirements:**
+
+- Count the 500-character `q` cap with `utf8.RuneCountInString`, consistent
+  with JSON Schema/OpenAPI character semantics. Test 500 Unicode code points
+  accepted and 501 rejected, in addition to ASCII oversize.
+- Parse once in the handler and pass the resulting `*filterquery.Expr`
+  directly as `MessageListFilter.Q`. Do not preflight emission and do not
+  recreate an errorless callback; Task 10 made the store responsible for
+  dialect emission and error propagation.
+- Pin the exact raw `q` string into pagination cursors and compare it on every
+  continuation. Tests must cover identical replay success, changed `q`
+  rejection as `invalid_cursor`, and adding/removing `q` across pages.
+- Exercise the real HTTP/Huma stack. Invalid syntax, unknown fields, forbidden
+  operators, and length caps return 400 `invalid_filter`; positioned parser
+  errors retain their `(at column N)` text. `has:attachment` must be covered as
+  an unknown field whose diagnostic lists only `created, from, label, subject`.
+  Captured store filters must prove `Q` is non-nil and emits the expected
+  SQL/args, while flat filters remain set for AND composition.
 
 - [ ] **Step 1: Write the failing handler tests**
 
@@ -2721,6 +2758,7 @@ package httpapi
 
 func TestQParamInvalid(t *testing.T) {
 	// q with an unknown field → 400 invalid_filter naming the field
+	// q=has:attachment → 400 and supported fields are exactly created/from/label/subject
 	// q longer than 500 chars → 400 invalid_filter
 	// q with a parse error → 400 with "(at column N)"
 }
@@ -2732,12 +2770,13 @@ func TestQParamCursorPinning(t *testing.T) {
 
 func TestQParamReachesStore(t *testing.T) {
 	// q=label:urgent → stubbed ListMessages receives MessageListFilter with
-	// non-nil QEmit; invoking QEmit(1) yields "(m.labels @> $1)" and
+	// non-nil Q; invoking Q.Emit(PostgresDialect{}, 1) yields
+	// "(m.labels @> $1)" and
 	// []interface{}{[]string{"urgent"}}
 }
 
 func TestQComposesWithFlatParams(t *testing.T) {
-	// q=label:urgent&from=alice → both From="alice" and QEmit set (AND
+	// q=label:urgent&from=alice → both From="alice" and Q set (AND
 	// composition happens in the store, Task 10 covered the SQL)
 }
 ```
@@ -2754,7 +2793,7 @@ Expected: FAIL — `q` not a known query param / QEmit never set.
 In `ListMessagesInput` (messages.go ~368, after `Labels`):
 
 ```go
-	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
+	Q               string   `query:"q" doc:"Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : = != < <= > >= with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR (e.g. 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'). Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars."`
 ```
 
 In `messagesCursor` (~395):
@@ -2766,28 +2805,22 @@ In `messagesCursor` (~395):
 In `handleListMessages`, after the existing filter validation (~line 686, near `normalizeLabelFilter`):
 
 ```go
-	var qEmit func(int) (string, []interface{})
+	var qExpr *filterquery.Expr
 	if in.Q != "" {
-		if len(in.Q) > 500 {
-			return nil, NewError(http.StatusBadRequest, "invalid_filter", "q filter too long (max 500 chars)")
+		if utf8.RuneCountInString(in.Q) > 500 {
+			return nil, NewError(http.StatusBadRequest, "invalid_filter", "filter too long (max 500 chars)")
 		}
 		expr, err := filterquery.Parse(in.Q, identity.MessagesQRegistry())
 		if err != nil {
 			return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
 		}
-		// Preflight: prove the expression emits (defensive — Validate already
-		// guarantees it) so the store closure can ignore the error.
-		if _, _, err := expr.Emit(filterquery.PostgresDialect{}, 1); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_filter", err.Error())
-		}
-		qEmit = func(start int) (string, []interface{}) {
-			frag, args, _ := expr.Emit(filterquery.PostgresDialect{}, start)
-			return frag, args
-		}
+		qExpr = expr
 	}
 ```
 
-Pass `QEmit: qEmit` in the `identity.MessageListFilter{…}` literal (~737), include `Q: in.Q` when encoding the cursor, and add to the cursor-mismatch check (~723) alongside the existing comparisons:
+Pass `Q: qExpr` in the `identity.MessageListFilter{…}` literal (~737), include
+the raw query as `Q: in.Q` when encoding the cursor, and add it to the
+cursor-mismatch check (~723) alongside the existing comparisons:
 
 ```go
 			cur.Q != in.Q ||
@@ -2795,7 +2828,7 @@ Pass `QEmit: qEmit` in the `identity.MessageListFilter{…}` literal (~737), inc
 
 (find the existing `if cur.AgentID != … || … !stringSlicesEqual(cur.Labels, labelsFilter)` block and add the one line; also set `Q: in.Q` on the cursor struct literal that encodes the next cursor.)
 
-Import `"e2a/internal/filterquery"` in messages.go.
+Import `"github.com/tokencanopy/e2a/internal/filterquery"` in messages.go.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2806,7 +2839,7 @@ Expected: PASS
 
 ```bash
 git add internal/httpapi/
-git commit -m "feat(api): q filter param on list_messages with cursor pinning
+git commit -m "feat(api): filter param on list_messages with cursor pinning
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
@@ -2848,6 +2881,11 @@ Co-Authored-By: Kimi <noreply@moonshot.ai>"
 **Interfaces:**
 - Consumes: regenerated TS SDK `ListMessagesParams.q` (Task 14 runs `make generate-sdk`; if the MCP typecheck needs it first, run `make generate-sdk-ts` before this task's implementation step and commit it in Task 14).
 
+**Binding correction:** Zod's plain `.max(500)` counts UTF-16 code units, while
+the HTTP API counts Unicode code points. Use a schema refinement based on
+`Array.from(value).length <= 500` with a clear max-length message. Test both
+ASCII 500/501 and astral-Unicode 500/501 boundaries.
+
 - [ ] **Step 1: Add the schema field + passthrough + test**
 
 In the `list_messages` `inputSchema` (after `labels`, ~line 435):
@@ -2858,7 +2896,7 @@ In the `list_messages` `inputSchema` (after `labels`, ~line 435):
           .max(500)
           .optional()
           .describe(
-            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, has, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT has:attachment) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
+            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
           ),
 ```
 
@@ -2887,14 +2925,14 @@ Expected: PASS
 
 ```bash
 git add mcp/
-git commit -m "feat(mcp): q filter on list_messages
+git commit -m "feat(mcp): filter on list_messages
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```
 
 ---
 
-### Task 14: SDK regen + CLI `--q`
+### Task 14: SDK regen + CLI `--filter`
 
 **Files:**
 - Modify (generated): `sdks/python/src/e2a/v1/generated/**`, `sdks/typescript/src/v1/generated/**`
@@ -2912,7 +2950,7 @@ Expected: `ListMessagesParams` (TS) and the messages API (Python) expose `q`; ch
 
 - [ ] **Step 2: CLI flag**
 
-In `cli/src/commands/messages.ts` usage line, append ` [--q <expr>]`; in the params building for `messages list`, add `q` when the flag is present (follow how `--since` maps into `params`). In `cli/src/__tests__/args.test.ts` add a case asserting `messages list --q "label:urgent"` puts `q: "label:urgent"` into the SDK params.
+In `cli/src/commands/messages.ts` usage line, append ` [--filter <expr>]`; in the params building for `messages list`, add `filter` when the flag is present (follow how `--since` maps into `params`). In `cli/src/__tests__/args.test.ts` add a case asserting `messages list --filter "label:urgent"` puts `filter: "label:urgent"` into the SDK params.
 
 - [ ] **Step 3: Run**
 
@@ -2927,7 +2965,7 @@ Expected: PASS
 
 ```bash
 git add sdks/ cli/
-git commit -m "feat(sdks,cli): q filter param across python/ts SDKs and CLI
+git commit -m "feat(sdks,cli): filter param across python/ts SDKs and CLI
 
 Co-Authored-By: Kimi <noreply@moonshot.ai>"
 ```

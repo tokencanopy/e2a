@@ -46,6 +46,7 @@ import type {
   DeleteApiKeyResult,
   Page,
   PageMessageLifecycleTransition,
+  ListMessagesParams,
   ContactView,
   ContactEngagementView,
   ContactImportResult,
@@ -65,6 +66,13 @@ import type { McpConfig } from "./config.js";
 import type { Scope } from "./tools/tiers.js";
 
 const DEFAULT_LIST_LIMIT = 1000;
+
+// Keep the SDK-owned message-filter contract in one place. MCP adds only the
+// pagination cursor (consumed by AutoPager) and the agent-address selector.
+type McpListMessagesParams = ListMessagesParams & {
+  cursor?: string;
+  explicitAddress?: string;
+};
 
 /** Per-call options for unsafe writes. */
 export interface SendOpts {
@@ -400,23 +408,14 @@ export class McpClient {
 
   // Cursor pagination (§6a #3): returns ONE page + next_cursor. `limit` is the
   // page size; pass a prior response's next_cursor as `cursor` for the next page.
-  listMessages(params: {
-    direction?: "inbound" | "outbound" | "all";
-    readStatus?: "unread" | "read" | "all";
-    sort?: "asc" | "desc";
-    from_?: string;
-    subjectContains?: string;
-    conversationId?: string;
-    since?: string;
-    until?: string;
-    labels?: Array<string>;
-    cursor?: string;
-    limit?: number;
-    deleted?: boolean;
-    explicitAddress?: string;
-  }): Promise<Page<MessageSummaryView>> {
-    const { explicitAddress, cursor, ...rest } = params;
-    return this.sdk.messages.list(this.resolveAddress(explicitAddress), rest).page(cursor);
+  listMessages(params: McpListMessagesParams): Promise<Page<MessageSummaryView>> {
+    const { explicitAddress, cursor, filter, ...rest } = params;
+    return this.sdk.messages
+      .list(this.resolveAddress(explicitAddress), {
+        ...rest,
+        ...(filter !== undefined ? { filter } : {}),
+      })
+      .page(cursor);
   }
 
   restoreMessage(messageId: string, explicitAddress?: string): Promise<MessageView> {

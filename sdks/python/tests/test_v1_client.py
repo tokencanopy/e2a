@@ -949,6 +949,19 @@ async def test_messages_list_threads_cursor(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_messages_list_forwards_filter(httpx_mock):
+    httpx_mock.add_response(json={"items": [], "next_cursor": None})
+    async with _client() as c:
+        await c.messages.list(
+            "bot@test.dev", deleted=True, filter="label:urgent"
+        ).to_list(limit=10)
+    request = httpx_mock.get_requests()[-1]
+    assert request.url.params["filter"] == "label:urgent"
+    assert "q" not in request.url.params
+    assert request.url.params["deleted"] == "true"
+
+
+@pytest.mark.anyio
 async def test_messages_get_lifecycle_uses_read_path_and_parses_contract(httpx_mock):
     httpx_mock.add_response(
         json={

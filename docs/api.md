@@ -56,6 +56,10 @@ stable field are beta, `x-experimental-values` on that field):
   send/reply/forward.
 - **`thread_id`** on message list/detail reads (server-owned, read-only
   email-topology identity).
+- **Message-list boolean filtering** — the `filter` query parameter on
+  `listMessages` (the marker rides on the parameter's inline schema; the
+  field/operator vocabulary may still evolve — see
+  [Message filtering](filtering.md)).
 - **Template references on send** — the `template_id` / `template_alias` /
   `template_data` request fields.
 - **Managed unsubscribe** — the `unsubscribe: {mode: "managed"}` request
@@ -648,8 +652,10 @@ declared stable.
 
 - `GET …/messages` — list inbound + outbound with filters (`direction`,
   `read_status`, `sort`, `from`, `subject_contains`, `conversation_id`, `labels`,
-  `since`, `until`) and cursor pagination. Held outbound drafts appear with
-  `status=pending_review`.
+  `since`, `until`) and cursor pagination. `filter` (beta) adds boolean
+  composition; see
+  [message filtering](filtering.md) for its grammar and v1 fields. Held outbound
+  drafts appear with `status=pending_review`.
   The optional beta `thread_id` on each returned message is a server-owned,
   mailbox-local email-topology identity. It is omitted for legacy messages
   without an assignment. `conversation_id` remains caller-owned application

@@ -21,7 +21,10 @@ import (
 //     422, which catches client-side typos like `body` vs `text`).
 //   - Surfaces exempt from the v1 freeze carry the canonical oasdiff-native
 //     `x-stability-level: beta` marker (operations declare it at registration;
-//     their schemas inherit it here).
+//     their schemas inherit it here). Individual fields on stable schemas are
+//     marked via markProperty, and individual PARAMETERS on stable operations
+//     via markOperationParamSchema (the marker rides on the parameter's
+//     inline schema — huma.Param has no extension slot).
 //   - Event-type fields whose VALUE SET contains beta members carry
 //     `x-experimental-values` listing exactly those members
 //     (webhookpub.ExperimentalEventTypes).
@@ -286,6 +289,15 @@ func (s *Server) applyEvolutionStance() {
 	for _, schema := range []string{"CreateWebhookRequest", "UpdateWebhookRequest", "WebhookView", "CreateWebhookResponse"} {
 		markProperty(schemas, schema, "events", extExperimentalValues, webhookpub.ExperimentalEventTypes)
 	}
+
+	// Parameter-level markers on otherwise-stable operations.
+	//
+	// listMessages is GA, but its `filter` query parameter (the boolean
+	// filter language) is beta: the field/operator vocabulary may still
+	// evolve (e.g. has:attachment) before it is declared stable. huma.Param
+	// has no extension slot, so the marker rides on the parameter's inline
+	// schema — the only extension-capable node an OpenAPI parameter offers.
+	markOperationParamSchema(oapi, "listMessages", "filter", extStabilityLevel, stabilityBeta)
 }
 
 // markSchema stamps an extension on a named component schema, panicking on a
@@ -422,4 +434,32 @@ func markProperty(schemas map[string]*huma.Schema, schema, property, ext string,
 		p.Extensions = map[string]any{}
 	}
 	p.Extensions[ext] = value
+}
+
+// markOperationParamSchema stamps an extension on the inline schema of a
+// named operation's named parameter, panicking on a dangling operation or
+// parameter name so a rename can't silently drop a stability marker.
+func markOperationParamSchema(oapi *huma.OpenAPI, operationID, param, ext string, value any) {
+	found := false
+	forEachOperation(oapi, func(op *huma.Operation) {
+		if op.OperationID != operationID {
+			return
+		}
+		for _, p := range op.Parameters {
+			if p == nil || p.Name != param || p.In != "query" {
+				continue
+			}
+			if p.Schema == nil {
+				panic(fmt.Sprintf("httpapi: stability marker targets schemaless parameter %s.%s", operationID, param))
+			}
+			if p.Schema.Extensions == nil {
+				p.Schema.Extensions = map[string]any{}
+			}
+			p.Schema.Extensions[ext] = value
+			found = true
+		}
+	})
+	if !found {
+		panic(fmt.Sprintf("httpapi: stability marker targets unknown parameter %s.%s", operationID, param))
+	}
 }

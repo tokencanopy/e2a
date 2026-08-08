@@ -3,7 +3,7 @@ package filterquery
 import "testing"
 
 func TestLexBasics(t *testing.T) {
-	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT has:attachment)`)
+	toks, err := lex(`label:urgent OR (from:"alice@x.com" AND NOT subject:newsletter)`)
 	if err != nil {
 		t.Fatalf("lex: %v", err)
 	}

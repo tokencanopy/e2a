@@ -73,6 +73,12 @@ perl -0pi -e 's/\n+\z/\n/' "$DEST/models/event_envelope.py"
 # Keep the expanded agents surface deterministic and diff-check clean.
 perl -pi -e 's/[ \t]+$//' "$DEST/api/agents_api.py"
 
+# The newly appended message filter query block otherwise receives whitespace-
+# only blank lines from OpenAPI Generator. Normalize this exact block without
+# rewriting the historical generated API file.
+perl -0pi -e 's/(        if filter is not None:\n)[ \t]*\n(            _query_params\.append\(\(\x27filter\x27, filter\)\)\n)[ \t]*\n/$1\n$2\n/' \
+  "$DEST/api/messages_api.py"
+
 perl -0pi -e 's/\n+\z/\n/' \
   "$DEST/models/agent_suppression_added_data.py" \
   "$DEST/models/agent_suppression_view.py" \

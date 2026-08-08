@@ -364,6 +364,7 @@ export interface ListMessagesParams {
   limit?: number;
   /** List soft-deleted messages in the trash instead of live messages. */
   deleted?: boolean;
+  filter?: string;
 }
 
 /** Message operations. Scheduled sending through `sendAt` and the resulting
@@ -374,11 +375,22 @@ class MessagesResource {
 
   list(email: string, params: ListMessagesParams = {}): AutoPager<MessageSummaryView> {
     return new AutoPager(async (cursor) => {
-      const page = await call(() =>
-        this.api.listMessages(email, params.direction, params.readStatus, params.sort, params.from_,
-          params.subjectContains, params.conversationId, params.labels, params.since, params.until,
-          cursor, params.limit, params.deleted),
-      );
+      const page = await call(() => this.api.listMessages(
+        email,
+        params.direction,
+        params.readStatus,
+        params.sort,
+        params.from_,
+        params.subjectContains,
+        params.conversationId,
+        params.labels,
+        params.since,
+        params.until,
+        cursor,
+        params.limit,
+        params.deleted,
+        params.filter,
+      ));
       return { items: page.items ?? [], next_cursor: page.nextCursor };
     });
   }

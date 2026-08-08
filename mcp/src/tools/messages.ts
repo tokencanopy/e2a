@@ -436,7 +436,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       title: "List messages (inbox or sent)",
       annotations: { readOnlyHint: true },
       description:
-        "List the agent's messages, newest first by default. Use `direction` to pick the folder: `inbound` (the Inbox — received mail, the default), `outbound` (the Sent folder — mail this agent sent, including held drafts), or `all` (both). Filter received mail by `read_status` (unread/read/all; default unread — applies to inbound only; sent mail has no read-state). **Cursor-paginated:** returns one page in `messages` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page (keep the same filters + sort). Pass `sort: \"asc\"` for FIFO order (oldest first) to drain in arrival order. **Search filters** (`from_`, `subject_contains`, `conversation_id`, `since`, `until`) narrow server-side — use them instead of paging the whole folder. In inbound summaries, `header_from` is the claimed RFC 5322 From address; a non-null `verified_domain` means DMARC passed for that From domain. It does not authenticate the mailbox local part, a person, or message content. Returns summaries only — use `get_message` for the full body and SPF/DKIM/DMARC evidence.",
+        "List the agent's messages, newest first by default. Use `direction` to pick the folder: `inbound` (the Inbox — received mail, the default), `outbound` (the Sent folder — mail this agent sent, including held drafts), or `all` (both). Filter received mail by `read_status` (unread/read/all; default unread — applies to inbound only; sent mail has no read-state). **Cursor-paginated:** returns one page in `messages` plus a `next_cursor` when more remain — pass it back as `cursor` for the next page (keep the same filters + sort). Pass `sort: \"asc\"` for FIFO order (oldest first) to drain in arrival order. **Search filters** (`from_`, `subject_contains`, `conversation_id`, `since`, `until`, `filter` (boolean expression)) narrow server-side — use them instead of paging the whole folder. In inbound summaries, `header_from` is the claimed RFC 5322 From address; a non-null `verified_domain` means DMARC passed for that From domain. It does not authenticate the mailbox local part, a person, or message content. Returns summaries only — use `get_message` for the full body and SPF/DKIM/DMARC evidence.",
       inputSchema: strictInputSchema({
         direction: z
           .enum(["inbound", "outbound", "all"])
@@ -493,6 +493,15 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .boolean()
           .optional()
           .describe("List the message trash instead of live messages."),
+        filter: z
+          .string()
+          .refine((value) => [...value].length <= 500, {
+            message: "filter must contain at most 500 Unicode code points",
+          })
+          .optional()
+          .describe(
+            "Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators : = != < <= > >= with AND/OR/NOT and parentheses; whitespace is implicit AND (binds looser than OR). Example: 'label:urgent OR (from:alerts AND NOT subject:newsletter) created>=2026-07-01'. Composes (AND) with the flat filters (labels, from_, subject_contains, since, until). Invalid expressions are rejected with a positioned invalid_filter error.",
+          ),
         email: emailSelector,
       }),
     },
@@ -515,6 +524,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           ...(args.until !== undefined ? { until: args.until } : {}),
           ...(args.labels !== undefined ? { labels: args.labels } : {}),
           ...(args.deleted !== undefined ? { deleted: args.deleted } : {}),
+          ...(args.filter !== undefined ? { filter: args.filter } : {}),
           ...(args.email !== undefined ? { explicitAddress: args.email } : {}),
         });
         return {

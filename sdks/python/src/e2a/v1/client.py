@@ -501,6 +501,7 @@ class MessagesResource:
         until: Optional[str] = None,
         limit: Optional[int] = None,
         deleted: Optional[bool] = None,
+        filter: Optional[str] = None,
     ) -> AutoPager[MessageSummaryView]:
         # `from` is a Python keyword; the generator is configured (via
         # --name-mappings/--parameter-name-mappings in generate-oag.sh) to expose
@@ -522,6 +523,7 @@ class MessagesResource:
                     cursor=cursor,
                     limit=limit,
                     deleted=deleted,
+                    filter=filter,
                     _headers=h,
                 )
             )
