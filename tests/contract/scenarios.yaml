@@ -24,6 +24,37 @@
 #   ws_read          — read and assert one WebSocket notification
 #   verify_and_retry — verify a domain in the store, then replay an HTTP request
 #
+# Raw-bytes escape hatches (request steps only). YAML is UTF-8 by definition
+# and its \xNN escape denotes a CODEPOINT, so a scenario cannot express a
+# request whose bytes are not well-formed UTF-8 using `body:` or an ordinary
+# header value. These two keys carry base64 instead, and every runner decodes
+# them and puts the bytes on the wire VERBATIM — no JSON encoder, no charset
+# transcoding, no placeholder substitution:
+#   raw_body_base64  — request body bytes, sent as application/json.
+#                      Mutually exclusive with `body:`.
+#   headers_base64   — {Header-Name: base64} request header values.
+#                      Combinable with `body:` or `raw_body_base64`.
+# Use them only when the bytes genuinely cannot be written as text; every
+# other scenario stays readable with `body:`.
+# Both values must be exactly-canonical base64 (standard alphabet, canonical
+# padding, no whitespace) and non-empty; every runner validates the string
+# before decoding, because the three stdlib decoders are permissive in three
+# DIFFERENT places and a typo'd fixture would otherwise put different bytes on
+# the wire in one language while erroring in the others.
+#
+# Response assertions on a `request` step (all optional):
+#   body_contains      — top-level keys that must be present
+#   body_excludes      — top-level keys that must be ABSENT (a property-name
+#                        check, not a text search)
+#   response_excludes  — substrings that must appear NOWHERE in the raw
+#                        response text. Use this — not body_excludes — to prove
+#                        the server does not echo caller input back, since a
+#                        leak lives at a nested path where body_excludes is
+#                        vacuously satisfied.
+#   body_match         — {json.path: value}; an ABSENT path fails, so an
+#                        expected `null` means present-and-null
+#   body_array_contains — {json.path: {field: value}} over an array
+#
 # Optional cleanup blocks contain request steps. Every runner executes them in
 # declaration order after setup/steps, including after failures. Cleanup is
 # best-effort: every request runs, the primary failure wins, and otherwise a
@@ -192,6 +223,130 @@ scenarios:
             deleted: true
             domain: domain-crud.test.dev
 
+  - name: domain_agent_count
+    description: >
+      agent_count agrees between GET /v1/domains/{domain}, GET /v1/domains,
+      and an idempotent re-register via POST /v1/domains for the same domain
+      (#632, #811). The single-resource and claim paths used to omit the count
+      from their SELECTs, so they served Go's zero value as an authoritative
+      `0` — indistinguishable from a domain that really has no agents, on the
+      endpoint get_domain documents as the poll target after verify_domain.
+      Deliberately NOT folded into domain_crud: that scenario asserts
+      account-global collection state, so the TS runner skips it and the pin
+      would not hold across all three runners. Every precondition here is
+      established through public requests and the assertions are
+      resource-scoped (single GET plus a containment check on the list), so
+      this runs everywhere and does not care what else the account holds.
+    steps:
+      - id: register_domain
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: agentcount.test.dev
+        expect:
+          status: 201
+
+      - id: verify_domain
+        action: request
+        method: POST
+        path: /v1/domains/agentcount.test.dev/verify
+        expect:
+          status: 200
+          body_match:
+            verified: true
+
+      # Zero BEFORE any agent exists: pins that a passing agent_count is a real
+      # count and not a constant, so the post-agent assertion below cannot be
+      # satisfied by hardcoding either value.
+      - id: get_empty_domain
+        action: request
+        method: GET
+        path: /v1/domains/agentcount.test.dev
+        expect:
+          status: 200
+          body_match:
+            agent_count: 0
+
+      - id: register_agent
+        action: request
+        method: POST
+        path: /v1/agents
+        body:
+          email: bot@agentcount.test.dev
+        expect:
+          status: 201
+          body_match:
+            email: bot@agentcount.test.dev
+
+      # The #632 regression pin.
+      - id: get_domain_counts_agent
+        action: request
+        method: GET
+        path: /v1/domains/agentcount.test.dev
+        expect:
+          status: 200
+          body_match:
+            agent_count: 1
+
+      # The #811 regression pin: re-registering an owned domain is idempotent
+      # (201, existing row returned), and that row must carry the real count —
+      # the claim path used to leave the field at the Go zero value, serving
+      # the same false 0 that #632 fixed on the GET path.
+      #
+      # `verified` is pinned alongside the count because idempotent means the
+      # EXISTING row, untouched: the read/insert split returns it as-is, but a
+      # future rewrite into `INSERT … ON CONFLICT DO UPDATE` would silently
+      # reset verification on every re-register and agent_count alone would
+      # still pass. The domain is verified two steps above, so this is free.
+      - id: reregister_counts_agent
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: agentcount.test.dev
+        expect:
+          status: 201
+          body_match:
+            agent_count: 1
+            verified: true
+
+      # ...and the list path reports the same number for the same domain.
+      # Containment, not index or length: the account may hold other domains.
+      - id: list_agrees_with_get
+        action: request
+        method: GET
+        path: /v1/domains
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              domain: agentcount.test.dev
+              agent_count: 1
+
+    cleanup:
+      # permanent=true is required, not tidiness: a trashed agent still holds
+      # its address and still blocks the domain delete with domain_has_agents.
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@agentcount.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@agentcount.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/agentcount.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: agentcount.test.dev
+
   - name: read_state_transition
     description: GET /messages/{id} marks unread messages as read
     setup:
@@ -215,6 +370,8 @@ scenarios:
           body_match:
             "items.length": 1
             "items[0].read_status": unread
+        capture:
+          read_thread_id: "items[0].thread_id"
 
       - id: get_detail
         action: request
@@ -234,6 +391,7 @@ scenarios:
             authentication.dmarc.domain: example.com
             authentication.dmarc.policy: reject
             "authentication.dmarc.aligned_by[0]": spf
+            thread_id: "{read_thread_id}"
 
       - id: list_unread_after
         action: request
@@ -452,6 +610,7 @@ scenarios:
           fields_absent:
             - data.body
             - data.raw_message
+            - data.thread_id
             - data.from
             - data.authenticated_from
             - data.auth
@@ -526,6 +685,8 @@ scenarios:
             - status
             - message_id
             - approval_expires_at
+          body_excludes:
+            - thread_id
           body_match:
             status: pending_review
 
@@ -574,6 +735,15 @@ scenarios:
             - message_id
         capture:
           held_id: message_id
+
+      - id: get_held_review
+        action: request
+        method: GET
+        path: /v1/reviews/{held_id}
+        expect:
+          status: 200
+          body_excludes:
+            - thread_id
 
       - id: reject
         # Reject is the account-scoped review-queue operation
@@ -821,6 +991,534 @@ scenarios:
             deleted: true
             domain: suppression-contract.test.dev
 
+  - name: scheduled_send_fields
+    description: >
+      A future send_at is durably accepted as status=scheduled, echoes the
+      normalized scheduled_at instant, and preserves scheduled_at on message
+      detail and list projections. wait=sent must return the scheduled result
+      immediately rather than waiting for the future instant.
+    setup:
+      - register_agent:
+          email: scheduled-contract-{scenario_token}@agents.e2a.dev
+    steps:
+      - id: schedule_send
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages?wait=sent
+        body:
+          to:
+            - recipient@example.net
+          subject: scheduled send conformance
+          text: delivered later
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_excludes:
+            - thread_id
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_message
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_message
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_message
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+          body_excludes:
+            - thread_id
+
+    cleanup:
+      - id: delete_scheduled_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_send_survives_review_hold
+    description: >
+      A future send_at caught by an outbound review hold is preserved, not
+      discarded (#815). The send returns 202 + status=pending_review AND echoes
+      scheduled_at (proving the schedule is persisted on the held draft, not
+      silently dropped). Approving the hold re-arms the schedule: status=scheduled
+      with the same normalized scheduled_at, and the message detail carries it
+      through with delivery_status=accepted.
+    setup:
+      - register_agent:
+          email: sched-hold-{scenario_token}@agents.e2a.dev
+    steps:
+      - id: enable_outbound_review
+        # Empty-allowlist outbound review gate → every recipient is held for review.
+        action: request
+        method: PUT
+        path: /v1/agents/{agent_email}/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+          body_match:
+            outbound.gate.action: review
+
+      - id: schedule_and_hold
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: scheduled and held
+          text: later, if approved
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_contains:
+            - approval_expires_at
+          body_match:
+            status: pending_review
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          held_id: message_id
+
+      - id: approve_rearms_schedule
+        # A review's id IS the held message's id (POST /v1/reviews/{id}/approve).
+        # Approve with no reviewer overrides — send an empty JSON body ({}) so the
+        # request carries a body the operation's schema expects (a bodyless POST
+        # is a 400). All approveRequest fields are optional, so {} = "approve as-is".
+        action: request
+        method: POST
+        path: /v1/reviews/{held_id}/approve
+        body: {}
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+
+      - id: get_after_approve
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{held_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{held_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_sched_hold_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_reply_fields
+    description: >
+      A future send_at on REPLY takes the same scheduled path as send: durably
+      accepted as status=scheduled, echoes the normalized scheduled_at instant,
+      and preserves scheduled_at on message detail and list projections.
+      wait=sent must return the scheduled result immediately rather than
+      waiting for the future instant. The reply target is an injected inbound
+      (a reply/forward parent the agent sent must first reach status=sent,
+      which the contract environment's upstream-less outbound cannot — so the
+      API alone cannot seed one; runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-reply-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: scheduled reply target
+    steps:
+      - id: schedule_reply
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply?wait=sent
+        body:
+          text: scheduled reply conformance
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_reply
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_reply_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_scheduled_reply_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_forward_fields
+    description: >
+      A future send_at on FORWARD takes the same scheduled path as send:
+      durably accepted as status=scheduled, echoes the normalized scheduled_at
+      instant, and preserves scheduled_at on message detail and list
+      projections. wait=sent must return the scheduled result immediately
+      rather than waiting for the future instant. The forward target is an
+      injected inbound (same seeding constraint as scheduled_reply_fields;
+      runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-forward-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: scheduled forward target
+    steps:
+      - id: schedule_forward
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/forward?wait=sent
+        body:
+          to:
+            - recipient@example.net
+          text: scheduled forward conformance
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+            scheduled_at: "{future_rfc3339}"
+        capture:
+          scheduled_message_id: message_id
+
+      - id: get_scheduled_forward
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+      - id: list_scheduled_forward
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
+      - id: trash_scheduled_forward
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: "{scheduled_message_id}"
+
+      - id: restore_forward_before_scheduled_at
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{scheduled_message_id}/restore
+        expect:
+          status: 200
+          body_match:
+            id: "{scheduled_message_id}"
+            delivery_status: accepted
+            scheduled_at: "{future_rfc3339}"
+
+    cleanup:
+      - id: delete_scheduled_forward_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: scheduled_send_at_validation
+    description: >
+      send_at edge validation is identical across send, reply, and forward: a
+      value more than 90 days ahead is a 400 invalid_request that never
+      persists a message, and a value at/before now is treated as an ordinary
+      immediate send (202 accepted, no scheduled_at). The far-future and past
+      literals are deliberately fixed calendar instants — always >90 days out
+      and always in the past for any realistic run date. The reply/forward
+      target is an injected inbound (same seeding constraint as
+      scheduled_reply_fields; runners without store access skip this).
+    setup:
+      - register_agent:
+          email: scheduled-validation-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: validation reply target
+    steps:
+      - id: send_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: over-horizon send
+          text: never persisted
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: reply_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply
+        body:
+          text: over-horizon reply
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: forward_beyond_horizon_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/forward
+        body:
+          to:
+            - recipient@example.net
+          text: over-horizon forward
+          send_at: "2099-01-01T00:00:00Z"
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: past_send_at_is_immediate
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: past send_at sends now
+          text: immediate
+          send_at: "2020-01-01T00:00:00Z"
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+          body_excludes:
+            - scheduled_at
+        capture:
+          immediate_message_id: message_id
+
+      - id: past_send_at_projection_has_no_scheduled_at
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{immediate_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{immediate_message_id}"
+          body_excludes:
+            - scheduled_at
+
+    cleanup:
+      - id: delete_validation_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
+  - name: reply_to_address_list
+    description: >
+      reply_to accepts EITHER a single RFC 5322 address (the historical form)
+      OR an array of addresses (RFC 5322 Reply-To is an address-list). Both
+      shapes are accepted end-to-end; a bad member in the list is rejected at
+      the edge with 400 invalid_request. Proves the send/reply/forward request
+      contract widened compatibly (see the oneOf on reply_to in openapi.yaml).
+      The agent lives on the shared domain (no custom-domain verify_domain
+      setup), so this scenario runs in the Go, TypeScript, and Python contract
+      runners alike instead of being store-seeded and skipped in TS/Python.
+    setup:
+      - register_agent:
+          email: bot-reply-to-{scenario_token}@agents.e2a.dev
+    steps:
+      - id: send_reply_to_array
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: reply_to as an address-list
+          text: replies fan out to several destinations
+          reply_to:
+            - "Support <support@example.com>"
+            - owner@example.com
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+      - id: send_reply_to_single_string
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: reply_to as a single string still works
+          text: backward-compatible single address
+          reply_to: "Support <support@example.com>"
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+      - id: send_reply_to_bad_member_rejected
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: one bad reply_to member rejects the whole request
+          text: should 400
+          reply_to:
+            - ok@example.com
+            - not an address
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+    cleanup:
+      - id: delete_reply_to_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: "{agent_email}"
+
   - name: info_unauthenticated_shape
     description: >
       GET /v1/info is the deployment-discovery endpoint — works
@@ -870,6 +1568,809 @@ scenarios:
         auth_override: none
         expect:
           status: 401
+
+  - name: contacts_crud
+    description: >
+      Contact identity is account-level and keyed by the CANONICAL address.
+      The create here deliberately sends an RFC 5322 mailbox — the shape a
+      spreadsheet export produces — and every later step addresses the same
+      contact by its bare form, so an SDK that forwards the raw input or
+      mangles the encoded path fails here rather than in production.
+    steps:
+      - id: create
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: "A. Partner <Partner@Fund.VC>"
+          display_name: A. Partner
+          metadata:
+            fund: Example Capital
+        expect:
+          status: 201
+          body_contains:
+            - address
+            - source
+          body_match:
+            address: partner@fund.vc
+            display_name: A. Partner
+            source: manual
+
+      - id: duplicate_is_conflict
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: partner@fund.vc
+        expect:
+          status: 409
+
+      - id: get_by_bare_address
+        action: request
+        method: GET
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 200
+          body_match:
+            address: partner@fund.vc
+            display_name: A. Partner
+
+      - id: patch_keeps_metadata
+        action: request
+        method: PATCH
+        path: /v1/contacts/partner@fund.vc
+        body:
+          display_name: Renamed
+        expect:
+          status: 200
+          body_match:
+            display_name: Renamed
+            "metadata.fund": Example Capital
+
+      - id: list
+        action: request
+        method: GET
+        path: /v1/contacts
+        expect:
+          status: 200
+          body_contains:
+            - items
+            - next_cursor
+
+      - id: delete_requires_confirm
+        action: request
+        method: DELETE
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 422
+
+      - id: delete
+        action: request
+        method: DELETE
+        path: /v1/contacts/partner@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: gone
+        action: request
+        method: GET
+        path: /v1/contacts/partner@fund.vc
+        expect:
+          status: 404
+
+  - name: contacts_import
+    description: >
+      Bulk import returns a per-row outcome so one bad line never rejects the
+      upload. The batch mixes a valid row, an unparseable address, and a
+      case-variant duplicate of the first — each must be reported against its
+      own index, which is what lets a caller reconcile a spreadsheet line by
+      line. The reversal then removes only what the batch created.
+    steps:
+      - id: import
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts:
+            - address: "First <First@Imp.VC>"
+              display_name: First
+            - address: not-an-email
+            - address: FIRST@imp.vc
+            - address: "Second <Second@Imp.VC>"
+              display_name: Second
+        capture:
+          batch_id: batch_id
+        expect:
+          status: 200
+          body_contains:
+            - batch_id
+            - results
+          body_match:
+            created: 2
+            failed: 1
+            skipped: 1
+            "results[0].status": created
+            "results[0].address": first@imp.vc
+            "results[1].status": failed
+            "results[2].status": skipped
+            "results[2].code": duplicate_in_batch
+            "results[3].status": created
+            "results[3].address": second@imp.vc
+
+      - id: imported_contact_is_readable
+        action: request
+        method: GET
+        path: /v1/contacts/first@imp.vc
+        expect:
+          status: 200
+          body_match:
+            source: import
+
+      - id: filter_by_source
+        action: request
+        method: GET
+        path: /v1/contacts?source=import
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              address: first@imp.vc
+
+      - id: empty_batch_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts: []
+        expect:
+          status: 422
+
+      - id: null_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts: null
+        expect:
+          status: 422
+
+      - id: missing_contacts_rejected
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body: {}
+        expect:
+          status: 422
+
+      # A contact edited after the import no longer belongs solely to the
+      # batch: reversal must remove the untouched row and keep the edited one,
+      # and the receipt's deleted + retained must account for both.
+      - id: edit_protects_from_reversal
+        action: request
+        method: PATCH
+        path: /v1/contacts/second@imp.vc
+        body:
+          display_name: Second, Edited
+        expect:
+          status: 200
+
+      - id: reverse_batch
+        action: request
+        method: DELETE
+        path: /v1/contacts/imports/{batch_id}?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            contacts_deleted: 1
+            contacts_retained: 1
+
+      - id: untouched_contact_reversed
+        action: request
+        method: GET
+        path: /v1/contacts/first@imp.vc
+        expect:
+          status: 404
+
+      - id: edited_contact_survives
+        action: request
+        method: GET
+        path: /v1/contacts/second@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Second, Edited
+
+    cleanup:
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed first@imp.vc (404 here); after a mid-scenario failure this is
+      # what keeps the scenario self-cleaning for the next run.
+      - id: delete_first_contact_if_reversed
+        action: request
+        method: DELETE
+        path: /v1/contacts/first@imp.vc?confirm=DELETE
+      - action: request
+        method: DELETE
+        path: /v1/contacts/second@imp.vc?confirm=DELETE
+        expect:
+          status: 200
+
+  - name: contacts_import_row_length_isolation
+    description: >
+      Per-row isolation for content-LENGTH violations. The 320-code-point
+      bounds on address and display_name used to be item-level maxLength in
+      the request schema, where one over-long spreadsheet cell rejected the
+      whole upload with 422 and nothing imported. They are now per-row
+      handler checks like every other content rule: the batch answers 200,
+      the offending row alone reports failed with invalid_request, and its
+      valid neighbours import. The over-long display_name row sits BETWEEN
+      two valid rows — exactly the shape the schema bound used to reject
+      wholesale. The reversal then removes what the batch created.
+    steps:
+      - id: import_with_overlong_row
+        action: request
+        method: POST
+        path: /v1/contacts/import
+        body:
+          contacts:
+            - address: iso-one@imp.vc
+              display_name: Iso One
+            - address: iso-long@imp.vc
+              # 336 code points — over the 320 bound this row alone must fail on.
+              display_name: "Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-Much-Too-Long-"
+            - address: iso-two@imp.vc
+              display_name: Iso Two
+        capture:
+          batch_id: batch_id
+        expect:
+          status: 200
+          body_contains:
+            - batch_id
+            - results
+          body_match:
+            created: 2
+            failed: 1
+            skipped: 0
+            "results[0].status": created
+            "results[0].address": iso-one@imp.vc
+            "results[1].status": failed
+            "results[1].code": invalid_request
+            "results[1].address": iso-long@imp.vc
+            "results[2].status": created
+            "results[2].address": iso-two@imp.vc
+
+      - id: first_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-one@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso One
+            source: import
+
+      - id: failed_row_left_no_contact
+        action: request
+        method: GET
+        path: /v1/contacts/iso-long@imp.vc
+        expect:
+          status: 404
+
+      - id: second_neighbour_imported
+        action: request
+        method: GET
+        path: /v1/contacts/iso-two@imp.vc
+        expect:
+          status: 200
+          body_match:
+            display_name: Iso Two
+
+      - id: reverse_batch
+        action: request
+        method: DELETE
+        path: /v1/contacts/imports/{batch_id}?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            contacts_deleted: 2
+            contacts_retained: 0
+
+    cleanup:
+      # Best-effort (no expect): after a passing run the reversal already
+      # removed both rows (404 here); after a mid-scenario failure these are
+      # what keep the scenario self-cleaning for the next run.
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-one@imp.vc?confirm=DELETE
+      - action: request
+        method: DELETE
+        path: /v1/contacts/iso-two@imp.vc?confirm=DELETE
+
+  - name: contact_outreach
+    description: >
+      Per-agent outreach state. Enrolment creates the contact if absent, a
+      partial update leaves the other agent-owned field alone (advancing a
+      stage must not clear the schedule), derived fields are server-owned and
+      rejected on write, and un-enrolling removes the outreach record while
+      the account-level contact survives.
+    setup:
+      - register_domain: outreach.test.dev
+      - verify_domain: outreach.test.dev
+      - register_agent:
+          email: raise@outreach.test.dev
+    steps:
+      - id: enrol
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          stage: touch1
+          next_action_at: "2026-08-01T09:00:00Z"
+        expect:
+          status: 201
+          body_contains:
+            - stage
+            - replied
+            - suppressed
+            - contact
+          body_match:
+            address: investor@fund.vc
+            stage: touch1
+            replied: false
+
+      - id: stage_only_update_keeps_schedule
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          stage: touch2
+        expect:
+          status: 200
+          body_contains:
+            - next_action_at
+          body_match:
+            stage: touch2
+
+      - id: derived_fields_are_server_owned
+        action: request
+        method: PUT
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc
+        body:
+          replied: true
+        expect:
+          status: 422
+
+      - id: outreach_query
+        action: request
+        method: GET
+        path: /v1/agents/raise@outreach.test.dev/contacts?replied=false
+        expect:
+          status: 200
+          body_match:
+            "items[0].address": investor@fund.vc
+            "items[0].stage": touch2
+
+      - id: unenrol
+        action: request
+        method: DELETE
+        path: /v1/agents/raise@outreach.test.dev/contacts/investor@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: contact_survives_unenrolment
+        action: request
+        method: GET
+        path: /v1/contacts/investor@fund.vc
+        expect:
+          status: 200
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/investor@fund.vc?confirm=DELETE
+        expect:
+          status: 200
+
+  - name: cursor_binding_foreign_cursor_rejected
+    description: >
+      Pagination cursors are bound to the exact query that minted them — the
+      collection, its parent path parameters, its filters, and the minting
+      account. Replaying a genuinely minted cursor anywhere else must surface
+      400 invalid_cursor, never a silently mispositioned (typically empty)
+      200 page. The runners share a single test account, so the cross-account
+      replay cannot be staged in this DSL; that axis binds via the MAC key
+      and is deliberately indistinguishable from the forged-cursor case
+      asserted last here — its two-account matrix lives in
+      internal/httpapi/cursor_binding_test.go.
+    steps:
+      # Two contacts so a limit=1 first page yields a real continuation cursor.
+      - id: seed_first
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-a@bind.vc
+        expect:
+          status: 201
+
+      - id: seed_second
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: cursor-b@bind.vc
+        expect:
+          status: 201
+
+      - id: mint
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+        capture:
+          contacts_cursor: next_cursor
+
+      - id: foreign_endpoint_rejected
+        # A real /v1/contacts cursor presented to /v1/agents: pre-binding this
+        # verified (same HMAC secret, same keyset shape) and anchored the
+        # agents query at a meaningless position; now it is a 400.
+        action: request
+        method: GET
+        path: /v1/agents?cursor={contacts_cursor}
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+      - id: own_continuation_still_walks
+        action: request
+        method: GET
+        path: /v1/contacts?limit=1&cursor={contacts_cursor}
+        expect:
+          status: 200
+          body_match:
+            "items.length": 1
+
+      - id: forged_cursor_rejected
+        # The same surface a foreign ACCOUNT's cursor produces: a plain MAC
+        # failure, indistinguishable from tampering.
+        action: request
+        method: GET
+        path: /v1/contacts?cursor=not-a-real-cursor
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_cursor
+
+    cleanup:
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-a@bind.vc?confirm=DELETE
+        expect:
+          status: 200
+      - action: request
+        method: DELETE
+        path: /v1/contacts/cursor-b@bind.vc?confirm=DELETE
+        expect:
+          status: 200
+
+  - name: invalid_utf8_rejected
+    description: >
+      Well-formed-text rule: no client-supplied string may carry an invalid
+      UTF-8 byte sequence, whichever seam it arrives through — raw request
+      body, path param, query param or header. Every arm answers 400
+      invalid_request located at the offending field: never a 5xx, and never a
+      silent U+FFFD substitution (JSON decoders launder invalid bytes into the
+      replacement character before any field-level check can see them, which
+      is why the body arm is enforced on the RAW bytes before decoding).
+
+      The body and header arms cannot be written as YAML scalars: YAML is
+      UTF-8 by definition and its \xFF escape denotes codepoint U+00FF, which
+      encodes to the perfectly VALID two-byte sequence C3 BF. They therefore
+      use raw_body_base64 / headers_base64, which every runner decodes to
+      bytes and transmits verbatim. The path and query arms need no escape
+      hatch — %FF is pure ASCII on the wire.
+
+      Self-cleaning by construction: every request is a rejection, so nothing
+      is ever created and there is nothing to delete. The two probe steps
+      assert exactly that, including for the LAUNDERED address (a + U+FFFD +
+      b) that the pre-fix server persisted with a 201.
+    steps:
+      - id: path_param_rotate_secret_rejected
+        # Was a 500 "failed to rotate webhook secret": the raw byte reached
+        # the store's UPDATE and Postgres refused it (SQLSTATE 22021).
+        action: request
+        method: POST
+        path: /v1/webhooks/%FF/rotate-secret
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": path.id
+            "error.details.fields[0].message": must be valid UTF-8
+          # Whole-response check: the envelope must not echo the offending
+          # input back at ANY depth. Since the envelope is JSON and JSON is
+          # UTF-8, an echo can only arrive laundered, so the absence of the
+          # replacement character is the general form of "nothing leaked".
+          response_excludes: ["\uFFFD"]
+
+      - id: path_param_get_webhook_rejected
+        # The read path masked the same defect as a 404; the blanket rule
+        # makes it the same actionable 400.
+        action: request
+        method: GET
+        path: /v1/webhooks/%FF
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": path.id
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: query_param_rejected
+        action: request
+        method: GET
+        path: /v1/contacts?import_batch_id=%FF
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": query.import_batch_id
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: body_rejected
+        # Decodes to {"address":"a\xFFb@example.com","display_name":"invalid
+        # utf8 body"} with a raw 0xFF byte inside the address. Pre-fix this
+        # answered 201 and stored the address with U+FFFD in place of the
+        # byte — the corruption nothing downstream can ever see.
+        action: request
+        method: POST
+        path: /v1/contacts
+        raw_body_base64: eyJhZGRyZXNzIjoiYf9iQGV4YW1wbGUuY29tIiwiZGlzcGxheV9uYW1lIjoiaW52YWxpZCB1dGY4IGJvZHkifQ==
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": body
+            "error.details.fields[0].message": request body must be valid UTF-8
+          # The envelope must not echo the offending body back. This has to be
+          # the WHOLE-response form: huma's ErrorDetail carries the raw value
+          # at error.details.fields[].value, so a leak would sit nested and a
+          # top-level `body_excludes: [address]` would pass vacuously on an
+          # error envelope that has no top-level `address` key either way.
+          # Named substrings first, then the general laundered-echo check.
+          response_excludes:
+            - "example.com"
+            - "invalid utf8 body"
+            - "\uFFFD"
+
+      - id: laundered_body_address_was_not_created
+        # a + U+FFFD + b @example.com, percent-encoded. This is the address
+        # the pre-fix 201 actually persisted, so a 404 here is the proof that
+        # the rejection left no row.
+        action: request
+        method: GET
+        path: /v1/contacts/a%EF%BF%BDb@example.com
+        expect:
+          status: 404
+          body_match:
+            "error.code": contact_not_found
+
+      - id: header_rejected
+        # Idempotency-Key: k\xFFz (base64 "a/96"). Pre-fix the raw byte
+        # reached the idempotency store and came back as a 500 "idempotency
+        # store error". The BODY here is deliberately valid, so the header is
+        # the only thing that can be rejected.
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: hdr-utf8-{scenario_token}@example.com
+        headers_base64:
+          Idempotency-Key: a/96
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+            "error.details.fields[0].location": header.Idempotency-Key
+            "error.details.fields[0].message": must be valid UTF-8
+          response_excludes: ["\uFFFD"]
+
+      - id: header_rejected_contact_was_not_created
+        action: request
+        method: GET
+        path: /v1/contacts/hdr-utf8-{scenario_token}@example.com
+        expect:
+          status: 404
+          body_match:
+            "error.code": contact_not_found
+
+  - name: account_limits_enforced
+    description: >
+      Plan caps are enforced on the create paths and surface as a 402
+      limit_exceeded envelope carrying the resource, the cap, the plan code and
+      the upgrade URL — the fields an SDK needs to tell a caller WHICH quota
+      stopped them and how to get out of it. The two resources carry DIFFERENT
+      caps (domains 1, agents 2) so a single hardcoded number cannot satisfy
+      both. `current` is asserted too, but note it is NOT independently proven
+      here: at the moment of refusal `current == limit` by definition of the
+      `count >= cap` check, so only an over-cap account (a downgrade) could
+      distinguish them. Tracked separately. Everything here runs as a SECOND, permanently
+      capped account (auth_override with {capped_api_key}) that the contract
+      server seeds at startup with max_domains 1 / max_agents 1. Nothing
+      mutates a cap, so this scenario cannot leak enforcement into the ones
+      that follow — which is the whole reason the caps are a separate account
+      instead of a limits-seeding step: both the TS and Python runners
+      silently ignore setup keys they do not recognize, so a "reset the caps"
+      cleanup that one runner skipped would 402 every later scenario.
+      Until this existed, no limit path in the product was covered by any
+      live-server test in any language (the contract server deliberately set
+      caps to 100000, per the comment in testutil.StartContractServer).
+    steps:
+      # The capped account starts empty, so its single domain slot is free.
+      - id: first_domain_fits_the_cap
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-{scenario_token}.test.dev
+        expect:
+          status: 201
+          body_match:
+            domain: capped-{scenario_token}.test.dev
+
+      # The cap bites, and says so in a machine-readable way: an SDK surfacing
+      # only "402" leaves the caller guessing which of four quotas they hit.
+      - id: second_domain_hits_the_cap
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-2-{scenario_token}.test.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": domains
+            "error.details.limit": 1
+            "error.details.current": 1
+            # The upgrade affordance is the whole point of a 402: without a
+            # plan code and a URL the caller hits a paywall with nowhere to go.
+            # Both are `omitempty`, so dropping them server-side is invisible
+            # unless something asserts them.
+            "error.details.plan_code": contract_capped
+            "error.details.upgrade_url": https://e2a.dev/upgrade
+
+      # The exemption (#811 / #819): a same-owner re-register creates nothing —
+      # the claim returns the existing row — so the CREATE cap must not apply
+      # to it. Pre-fix this 402'd, failing an SDK retry of a request the server
+      # had already satisfied. This step is the reason the account is capped at
+      # exactly 1: the account is provably AT its cap on the line above.
+      - id: reregister_owned_domain_at_cap_is_allowed
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          domain: capped-{scenario_token}.test.dev
+        expect:
+          status: 201
+          body_match:
+            domain: capped-{scenario_token}.test.dev
+
+      # A DIFFERENT resource with a DIFFERENT cap, so a passing suite cannot
+      # come from one quota being wired while the others are not, nor from a
+      # hardcoded "1" anywhere in the envelope. The shared domain needs no
+      # verification, so the agent cap is reachable over pure HTTP in every
+      # runner.
+      - id: first_agent_fits_the_cap
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 201
+          body_match:
+            email: capped-bot-{scenario_token}@agents.e2a.dev
+
+      - id: second_agent_fits_the_cap
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-2-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 201
+
+      - id: third_agent_hits_the_cap
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": agents
+            "error.details.limit": 2
+            "error.details.current": 2
+            "error.details.plan_code": contract_capped
+
+      # The cap is a cap, not a wall: freeing the slot makes the create work
+      # again. Without this, a server that 402'd unconditionally would pass
+      # every assertion above.
+      - id: agent_slot_frees_on_delete
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: agent_create_succeeds_again_after_freeing_a_slot
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {capped_api_key}"
+        body:
+          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 201
+
+    cleanup:
+      # Self-cleaning is load-bearing here, not tidiness: the capped account
+      # has a handful of slots, so anything left behind puts the NEXT run at
+      # its cap on an early step — and a scenario that fails at step one with
+      # "the cap fired on the first create" reads exactly like a product bug.
+      #
+      # EVERY agent the scenario can create is deleted here, including
+      # capped-bot-1, which the happy path already removed in
+      # agent_slot_frees_on_delete: steps stop at the first failure, so a
+      # failure between that create and that delete would otherwise strand it.
+      # These carry no `expect` precisely so an already-deleted agent's 404 is
+      # not itself a cleanup failure.
+      - id: delete_agent_1
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+
+      - id: delete_agent_2
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-2-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+
+      - id: delete_agent_3
+        action: request
+        method: DELETE
+        path: /v1/agents/capped-bot-3-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        auth_override: "Bearer {capped_api_key}"
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/capped-{scenario_token}.test.dev?confirm=DELETE
+        auth_override: "Bearer {capped_api_key}"
 
   - name: messages_list_filter
     description: >

@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -20,8 +22,8 @@ import (
 	"github.com/tokencanopy/e2a/internal/usage"
 )
 
-// The billing hook fires from DeleteUserDataCore (best-effort, BEFORE the
-// cascade). The legacy DELETE /api/v1/users/me route that once reached it was
+// The billing hook fires from DeleteUserDataCore (best-effort, AFTER the
+// cascade commits). The legacy DELETE /api/v1/users/me route that once reached it was
 // removed in the v1 cutover — /v1's deleteAccount now calls the same core —
 // so these tests drive DeleteUserDataCore directly. The /v1 httpapi test for
 // deleteAccount uses a fake DeleteUserData closure and therefore cannot cover
@@ -72,8 +74,8 @@ func expectedHMAC(secret string, body []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestDeleteUser_FiresBillingHook: deletion notifies billing with the user_id
-// body + a matching HMAC signature, then the cascade removes the user.
+// TestDeleteUser_FiresBillingHook: after deletion commits, billing is notified
+// with the user_id body + a matching HMAC signature.
 func TestDeleteUser_FiresBillingHook(t *testing.T) {
 	secret := "test-internal-secret"
 	api, store, rec := setupCoreAPIWithBillingHook(t, secret, http.StatusNoContent)
@@ -128,10 +130,46 @@ func TestDeleteUser_HookFailureDoesNotBlockDeletion(t *testing.T) {
 	called := rec.called
 	rec.mu.Unlock()
 	if !called {
-		t.Errorf("hook should have been attempted before deletion")
+		t.Errorf("hook should have been attempted after deletion")
 	}
 	if _, err := store.GetUserByID(ctx, user.ID); err == nil {
 		t.Errorf("hook failed but user was not deleted; cascade must proceed regardless")
+	}
+}
+
+func TestDeleteUser_SendInProgressDoesNotNotifyBilling(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "billing-send-in-progress")
+	message, err := store.CreateOutboundMessage(ctx, ag.ID,
+		[]string{"recipient@example.com"}, nil, nil, "sending", "send", "smtp", "", "", []byte("raw"))
+	if err != nil {
+		t.Fatalf("CreateOutboundMessage: %v", err)
+	}
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE messages
+			    SET delivery_status = 'sending',
+			        send_claimed_at = now(),
+			        send_job_id = 7001
+			  WHERE id = $1`,
+			message.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("mark sending: %v", err)
+	}
+
+	if _, err := api.DeleteUserDataCore(ctx, user); !errors.Is(err, identity.ErrSendInProgress) {
+		t.Fatalf("DeleteUserDataCore = %v, want ErrSendInProgress", err)
+	}
+	rec.mu.Lock()
+	called := rec.called
+	rec.mu.Unlock()
+	if called {
+		t.Fatal("billing hook was called even though account deletion did not commit")
+	}
+	if _, err := store.GetUserByID(ctx, user.ID); err != nil {
+		t.Fatalf("user missing after send_in_progress conflict: %v", err)
 	}
 }
 

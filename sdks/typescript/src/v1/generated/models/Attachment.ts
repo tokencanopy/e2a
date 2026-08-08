@@ -18,6 +18,9 @@ export class Attachment {
     * Base64-encoded file content. Each attachment must be ≤ 10 MiB decoded; a message may carry at most 10 attachments totaling ≤ 25 MiB decoded.
     */
     'data': string;
+    /**
+    * Attachment filename. Maximum 1024 UTF-8 bytes; longer names are rejected as invalid_attachment.
+    */
     'filename': string;
 
     static readonly discriminator: string | undefined = undefined;

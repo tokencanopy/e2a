@@ -293,20 +293,20 @@ type DomainParam struct {
 }
 
 func (s *Server) registerDomains() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listDomains", Method: http.MethodGet, Path: "/v1/domains",
 		Summary: "List domains", Tags: []string{"domains"},
 		Description: "List the domains owned by the authenticated account, newest first, with cursor pagination.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListDomains)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getDomain", Method: http.MethodGet, Path: "/v1/domains/{domain}",
 		Summary: "Get a domain", Tags: []string{"domains"},
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleGetDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "registerDomain", Method: http.MethodPost, Path: "/v1/domains",
 		Summary: "Register a domain", Tags: []string{"domains"},
 		Security: []map[string][]string{{"bearer": {}}}, DefaultStatus: http.StatusCreated,
@@ -318,14 +318,14 @@ func (s *Server) registerDomains() {
 		},
 	}, s.handleRegisterDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
 		Description: "Deprovisions the domain's sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteDomain)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "verifyDomain", Method: http.MethodPost, Path: "/v1/domains/{domain}/verify",
 		Summary: "Verify a domain", Tags: []string{"domains"},
 		Description: "Probe the domain's published DNS and, when the verification TXT (and inbound MX) are present, mark it verified. Always returns 200 with the per-record diagnostic — branch on the `verified` boolean in the body, not the HTTP status. A not-yet-published record is the normal `verified:false` outcome, not an error.",
@@ -410,7 +410,7 @@ func (s *Server) handleListDomains(ctx context.Context, in *listDomainsInput) (*
 	}
 	// The keyset tiebreak for domains is the domain string (its unique key), so
 	// the cursor's `id` slot carries the after-domain.
-	afterCreatedAt, afterDomain, err := s.decodeKeyset(in.Cursor)
+	afterCreatedAt, afterDomain, err := s.decodeKeyset(user.ID, cursorDomains, in.Cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +435,7 @@ func (s *Server) handleListDomains(ctx context.Context, in *listDomainsInput) (*
 	var nextCursor string
 	if hasMore {
 		last := domains[len(domains)-1]
-		if nextCursor, err = s.encodeKeyset(last.CreatedAt, last.Domain); err != nil {
+		if nextCursor, err = s.encodeKeyset(user.ID, cursorDomains, last.CreatedAt, last.Domain); err != nil {
 			return nil, err
 		}
 	}
@@ -483,7 +483,27 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 	if s.deps.SharedDomain != "" && strings.EqualFold(normalized, s.deps.SharedDomain) {
 		return nil, NewError(http.StatusBadRequest, "reserved_domain", "reserved domain")
 	}
-	if s.deps.EnforceDomainCreate != nil {
+	// The create cap applies to creates. A same-owner claim is idempotent —
+	// ClaimOrCreateDomain returns the existing row untouched — so charging it
+	// against max_domains 402s a caller for re-POSTing a domain they already
+	// hold, naming a resource the request would not have consumed.
+	//
+	// "Already owned" is decided by the same user-scoped lookup GET uses, so
+	// this cannot become a bypass: another account's row is invisible to it
+	// and stays charged (then rejected by the claim as a conflict), and a
+	// parent/child claim is a genuinely new row that no exact-match lookup
+	// finds. Anything other than a clean hit — dep unwired, lookup failed,
+	// nil row — falls through to enforcing, so a limit is never skipped by
+	// accident. The check is deliberately outside the claim transaction: it
+	// is the same non-transactional shape the cap already had, so two racing
+	// creates could still both pass, exactly as before this change.
+	alreadyOwned := false
+	if s.deps.LookupDomain != nil {
+		if existing, lookupErr := s.deps.LookupDomain(ctx, normalized, user.ID); lookupErr == nil && existing != nil {
+			alreadyOwned = true
+		}
+	}
+	if !alreadyOwned && s.deps.EnforceDomainCreate != nil {
 		if err := s.deps.EnforceDomainCreate(ctx, user.ID); err != nil {
 			if env, ok := limitEnvelope(err); ok {
 				return nil, env

@@ -58,7 +58,7 @@ func TestUpdateAgentProtectionRoundTrip(t *testing.T) {
 		HITLExpirationAction:    "approve",
 		SuppressNotifications:   true,
 	}
-	if err := store.UpdateAgentProtection(ctx, agentID, userID, cfg); err != nil {
+	if _, err := store.UpdateAgentProtection(ctx, agentID, userID, cfg); err != nil {
 		t.Fatalf("UpdateAgentProtection: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestUpdateAgentProtectionSensitivityMapping(t *testing.T) {
 			OutboundGatePolicy: "open", OutboundGateAction: "flag", OutboundScanSensitivity: tc.level,
 			HITLTTLSeconds: 604800, HITLExpirationAction: "reject",
 		}
-		if err := store.UpdateAgentProtection(ctx, agentID, userID, cfg); err != nil {
+		if _, err := store.UpdateAgentProtection(ctx, agentID, userID, cfg); err != nil {
 			t.Fatalf("%s: UpdateAgentProtection: %v", tc.level, err)
 		}
 		got, err := store.GetAgentByID(ctx, agentID)
@@ -156,7 +156,7 @@ func TestUpdateAgentProtectionValidation(t *testing.T) {
 		"allowlist over cap":             mut(func(c *identity.ProtectionConfig) { c.InboundAllowlist = makeAllowlist(1001) }),
 	}
 	for name, c := range cases {
-		if err := store.UpdateAgentProtection(ctx, agentID, userID, c); err == nil {
+		if _, err := store.UpdateAgentProtection(ctx, agentID, userID, c); err == nil {
 			t.Errorf("%s: expected validation error, got nil", name)
 		}
 	}
@@ -171,7 +171,7 @@ func TestUpdateAgentProtectionWrongOwner(t *testing.T) {
 		OutboundGatePolicy: "open", OutboundGateAction: "flag", OutboundScanSensitivity: "off",
 		HITLTTLSeconds: 604800, HITLExpirationAction: "reject",
 	}
-	if err := store.UpdateAgentProtection(ctx, agentID, "someone-else", cfg); err == nil {
+	if _, err := store.UpdateAgentProtection(ctx, agentID, "someone-else", cfg); err == nil {
 		t.Fatal("expected error updating protection for non-owner, got nil")
 	}
 }

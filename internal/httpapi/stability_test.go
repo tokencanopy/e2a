@@ -15,21 +15,32 @@ import (
 var betaOperationIDs = []string{
 	"approveReview",
 	"createAgentSuppression",
+	"createContact",
 	"createTemplate",
 	"deleteAgentSuppression",
+	"deleteContact",
+	"deleteEngagement",
+	"deleteImportBatch",
 	"deleteTemplate",
 	"getAgentProtection",
+	"getContact",
+	"getEngagement",
+	"importContacts",
 	"getMessageLifecycle",
 	"getReview",
 	"getStarterTemplate",
 	"getTemplate",
 	"listAgentSuppressions",
+	"listContacts",
+	"listEngagements",
 	"listReviews",
 	"listStarterTemplates",
 	"listTemplates",
 	"putAgentProtection",
 	"rejectReview",
+	"updateContact",
 	"updateTemplate",
+	"upsertEngagement",
 	"validateTemplate",
 }
 
@@ -376,7 +387,7 @@ func TestSpecBetaMarkers(t *testing.T) {
 			t.Errorf("stable parent schema %s must remain unmarked, got %v", name, got)
 		}
 	}
-	for _, name := range []string{"MessageView", "AgentView", "WebhookView", "SendEmailRequest", "ReplyRequest", "ForwardRequest", "SuppressionView", "PageSuppressionView", "DeleteSuppressionResult", "ErrorEnvelope", "DeleteMessageResult"} {
+	for _, name := range []string{"MessageView", "MessageSummaryView", "SendResultView", "AgentView", "WebhookView", "SendEmailRequest", "ReplyRequest", "ForwardRequest", "SuppressionView", "PageSuppressionView", "DeleteSuppressionResult", "ErrorEnvelope", "DeleteMessageResult"} {
 		if got := schemaExt(name, "x-stability"); got != nil {
 			t.Errorf("schema %s is stable and must NOT carry x-stability, got %v", name, got)
 		}

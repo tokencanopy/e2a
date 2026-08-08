@@ -1,16 +1,16 @@
 // Pure threading logic for the dashboard inbox.
 //
-// We group MessageSummary rows by conversation_id. Rows without a
-// conversation_id become single-message synthetic threads. To prevent
-// a malicious or accidental conversation_id from colliding with the
-// synthetic namespace, we prefix BOTH kinds:
-//   - real conv_id → key `conv:<conv_id>`
-//   - synthetic    → key `orphan:<id>`
+// We group new MessageSummary rows by their server-owned thread_id.
+// Legacy rows without thread_id retain the conversation_id/orphan fallback.
+// To prevent values from colliding across namespaces, every kind is prefixed:
+//   - topology thread → key `thr:<thread_id>`
+//   - legacy conv_id  → key `conv:<conv_id>`
+//   - legacy orphan   → key `orphan:<id>`
 // Prefixes are added by this code, never extracted from operator input
 // — even if the SDK caller sends `conversation_id="orphan:foo"`, the
 // resulting thread key is `conv:orphan:foo`, which does not collide
-// with the synthetic key `orphan:foo`. The URL fragment uses these
-// prefixed keys directly.
+// with the synthetic key `orphan:foo`. URL fragments encode the
+// operator-controlled suffix and decode it before key comparison.
 //
 // All inputs are pure: no Date.now() side effects (caller passes `now`),
 // no I/O. That keeps the unit tests deterministic.
@@ -19,13 +19,32 @@ import type { MessageSummary } from "../types";
 
 export type ThreadState = "pending" | "active" | "handed-off" | "closed";
 
+export function encodeThreadFragment(key: string): string {
+  const separator = key.indexOf(":");
+  if (separator < 0) return encodeURIComponent(key);
+  return (
+    key.slice(0, separator + 1) +
+    encodeURIComponent(key.slice(separator + 1))
+  );
+}
+
+export function decodeThreadFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    // Old links may contain an unescaped literal "%". Keep them readable
+    // rather than turning a malformed escape into an empty selection.
+    return fragment;
+  }
+}
+
 export type Counterparty = {
   email: string;
   name: string;
 };
 
 export type Thread = {
-  /** Stable key — `conv:<conv_id>` for grouped threads, `orphan:<id>` for synthetic ones. */
+  /** Stable key — `thr:<thread_id>`, or a legacy `conv:` / `orphan:` fallback. */
   key: string;
   /** Real conversation_id when present; undefined for synthetic threads. */
   conversationId?: string;
@@ -52,7 +71,7 @@ function counterpartyEmail(m: MessageSummary): string {
   return m.to?.[0] ?? m.recipient;
 }
 
-function nameFromEmail(email: string): string {
+export function nameFromEmail(email: string): string {
   const local = email.split("@")[0] || email;
   const parts = local.split(/[._-]+/).filter(Boolean);
   if (parts.length === 0) return email;
@@ -102,9 +121,12 @@ export function groupIntoThreads(
   const buckets = new Map<string, MessageSummary[]>();
 
   for (const m of rows) {
-    const key = m.conversation_id
-      ? `conv:${m.conversation_id}`
-      : `orphan:${m.id}`;
+    const key =
+      m.thread_id != null
+        ? `thr:${m.thread_id}`
+        : m.conversation_id
+          ? `conv:${m.conversation_id}`
+          : `orphan:${m.id}`;
     const bucket = buckets.get(key);
     if (bucket) bucket.push(m);
     else buckets.set(key, [m]);
@@ -168,7 +190,27 @@ export function groupIntoThreads(
   return threads;
 }
 
-export function findThread(threads: Thread[], key: string | null | undefined): Thread | null {
-  if (!key) return threads[0] ?? null;
-  return threads.find((t) => t.key === key) ?? threads[0] ?? null;
+export function findThread(
+  threads: Thread[],
+  key: string | null | undefined,
+): Thread | null {
+  if (!key) return null;
+  const exact = threads.find((thread) => thread.key === key);
+  if (!exact) return null;
+
+  // An old conversation link used to identify every row sharing the workflow
+  // conversation_id. After topology grouping, that value can span several
+  // groups. Even if a legacy null-thread bucket still has the exact conv key,
+  // selecting it would show only one arbitrary slice of the old conversation.
+  if (key.startsWith("conv:")) {
+    const conversationId = key.slice("conv:".length);
+    const matchingGroups = threads.filter((thread) =>
+      thread.messages.some(
+        (message) => message.conversation_id === conversationId,
+      ),
+    );
+    if (matchingGroups.length !== 1) return null;
+  }
+
+  return exact;
 }

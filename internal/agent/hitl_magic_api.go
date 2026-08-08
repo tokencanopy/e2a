@@ -6,6 +6,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -151,6 +152,30 @@ func (a *API) handleRejectMagicLinkPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	reason := strings.TrimSpace(r.FormValue("reason"))
+	// `reason` is the ONLY caller-authored free text on either magic-link
+	// route, and it is persisted verbatim to messages.rejection_reason. Both
+	// /v1 request-content rules therefore apply to it (docs/api.md
+	// "No NUL bytes and no invalid UTF-8 on /v1"), and they have to be
+	// enforced HERE: /v1/approve and /v1/reject are registered on the chi root
+	// outside Huma (internal/httpapi.New), so neither the raw-body format
+	// guard nor the registerOp walk in internal/httpapi/request_content.go
+	// covers them. Without this check a raw 0xFF byte reached the UPDATE, and
+	// Postgres refused it (SQLSTATE 22021) — the reviewer got a 500 and the
+	// review hold never resolved.
+	//
+	// Refusing beats laundering. clampRunes below would silently convert the
+	// invalid bytes to U+FFFD ([]rune substitutes the replacement character),
+	// which is exactly the silent-corruption failure the /v1 rule exists to
+	// end; the ill-formed input would then be stored as mojibake under a 200.
+	// The cost of refusing is nil in practice: a browser form submits UTF-8,
+	// so no real reviewer can produce this — only a hand-crafted request can —
+	// and a 400 keeps a single, exception-free rule across all of /v1.
+	if !isWellFormedText(reason) {
+		writeMagicMessage(w, http.StatusBadRequest, "Cannot reject",
+			"The rejection reason contains invalid text. Remove it, or reject "+
+				"this message from the dashboard.")
+		return
+	}
 	if reason == "" {
 		reason = "magic-link rejection"
 	}
@@ -161,6 +186,23 @@ func (a *API) handleRejectMagicLinkPost(w http.ResponseWriter, r *http.Request) 
 	// identity.MaxRejectReasonLen.
 	reason = clampRunes(reason, identity.MaxRejectReasonLen)
 	a.magicReject(w, r, claims.MessageID, userID, reason)
+}
+
+// isWellFormedText reports whether s satisfies both /v1 request-content rules:
+// no U+0000 and valid UTF-8. Neither can be stored in a Postgres text column,
+// so a string failing either turns a client mistake into a 500 the moment it
+// reaches a write.
+//
+// This is deliberately a local check at the one handler that needs it, not a
+// middleware and not a cross-package helper. A middleware would double-scan
+// every Huma operation (already covered by the two seams) and, worse, cannot
+// read a form value without calling ParseForm and consuming the body out from
+// under the handler. A shared helper would share only this one-line predicate
+// while each raw route still needs its own error rendering — these pages
+// answer in HTML, the WebSocket handshake and the attachment download answer
+// in the JSON envelope — so it would buy an import edge and nothing else.
+func isWellFormedText(s string) bool {
+	return !strings.ContainsRune(s, 0) && utf8.ValidString(s)
 }
 
 // clampRunes truncates s to at most n Unicode code points (runes, matching
@@ -273,8 +315,9 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	if handled {
 		log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s delivery=async",
 			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
-		writeMagicMessage(w, http.StatusOK, "Approved",
-			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))))
+		writeMagicResult(w, http.StatusOK, "Approved",
+			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+			viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 		return
 	}
 
@@ -308,9 +351,10 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s",
 		sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 
-	writeMagicMessage(w, http.StatusOK,
+	writeMagicResult(w, http.StatusOK,
 		"Approved",
-		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))))
+		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+		viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 }
 
 // writeMagicApproveError renders the magic-link HTML error page for an async
@@ -728,17 +772,55 @@ func setMagicHeaders(w http.ResponseWriter, status int) {
 	w.WriteHeader(status)
 }
 
-// writeMagicMessage renders the post-action / error page. Cream surface,
-// inline brand mark up top, big editorial-italic title, ember CTA back
-// to the dashboard.
+// magicCTA is the single call-to-action button at the foot of the result
+// page.
+type magicCTA struct {
+	Label string
+	Href  string
+}
+
+// dashboardCTA is the fallback CTA: every error, reject, and
+// already-resolved page lands the reviewer on the dashboard because there
+// is no one message worth deep-linking to.
+var dashboardCTA = magicCTA{Label: "Open the dashboard", Href: "/dashboard"}
+
+// viewMessageCTA deep-links the canonical inbox and selects the thread that
+// contains the newly approved message. The href is relative on purpose —
+// these pages are served by the same origin as the dashboard, so this works
+// under any public URL. Older messages without a conversation id use the
+// inbox's synthetic orphan thread key.
+func viewMessageCTA(agentEmail, conversationID, messageID string) magicCTA {
+	if agentEmail == "" || messageID == "" {
+		return dashboardCTA
+	}
+	prefix, value := "conv:", conversationID
+	if conversationID == "" {
+		prefix, value = "orphan:", messageID
+	}
+	return magicCTA{
+		Label: "View message",
+		Href: "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" +
+			prefix + url.PathEscape(value),
+	}
+}
+
+// writeMagicMessage renders the post-action / error page with the default
+// dashboard CTA.
 func writeMagicMessage(w http.ResponseWriter, status int, title, body string) {
+	writeMagicResult(w, status, title, body, dashboardCTA)
+}
+
+// writeMagicResult renders the post-action / error page. Cream surface,
+// inline brand mark up top, big editorial-italic title, ember CTA at the
+// foot.
+func writeMagicResult(w http.ResponseWriter, status int, title, body string, cta magicCTA) {
 	setMagicHeaders(w, status)
 	writeLoftHead(w, title)
 	fmt.Fprintf(w, `<div class="result">
 <span class="eyebrow">%s</span>
 <h1>%s</h1>
 <p>%s</p>
-<p><a class="btn btn-primary" href="/dashboard">Open the dashboard</a></p>
+<p><a class="btn btn-primary" href="%s">%s</a></p>
 </div>
 </div>
 </body>
@@ -750,6 +832,8 @@ func writeMagicMessage(w http.ResponseWriter, status int, title, body string) {
 		// path runs html.EscapeString itself before calling us). Don't
 		// double-escape.
 		body,
+		html.EscapeString(cta.Href),
+		html.EscapeString(cta.Label),
 	)
 }
 

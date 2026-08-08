@@ -2,7 +2,7 @@
 
 [Codex CLI](https://github.com/openai/codex) is OpenAI's terminal coding agent (peer to Claude Code). It speaks MCP natively — you declare servers in `~/.codex/config.toml` and Codex connects to them at session start, then surfaces their tools to whatever model you're running.
 
-Unlike the [LangChain](../langchain/), [CrewAI](../crewai/), [Google ADK](../adk/), and [OpenAI Agents SDK](../openai-agents/) examples — which are Python scripts you run — Codex is itself the agent. The "example" here is the TOML you paste into your Codex config to add e2a's MCP tools (60 total; the visible set depends on your key's scope).
+Unlike the [LangChain](../langchain/), [CrewAI](../crewai/), [Google ADK](../adk/), and [OpenAI Agents SDK](../openai-agents/) examples — which are Python scripts you run — Codex is itself the agent. The "example" here is the TOML you paste into your Codex config to add e2a's MCP tools (76 total; the visible set depends on your key's scope).
 
 Codex opens a Streamable HTTP session to the hosted endpoint at `https://api.e2a.dev/mcp` with your API key in the `Authorization: Bearer …` header — no Node toolchain on the host (works on CI runners, dev containers, remote app servers, etc.).
 
@@ -51,7 +51,7 @@ Then in the session:
 > Reply to the latest message politely.
 > Send an email to alice@example.com — subject "test", body "hello from Codex".
 
-If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, ask Codex to pass `agent_email` per tool call.
+If your credential resolves a single agent, the hosted endpoint scopes tools to it server-side. With an account-scoped key and multiple agents, ask Codex to pass `email` per tool call.
 
 ## How it works
 

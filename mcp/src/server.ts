@@ -9,6 +9,8 @@ import { registerEventTools } from "./tools/events.js";
 import { registerTemplateTools } from "./tools/templates.js";
 import { registerApiKeyTools } from "./tools/apikeys.js";
 import { registerLegacyTools } from "./tools/legacy.js";
+import { registerContactTools } from "./tools/contacts.js";
+import { registerSuppressionTools } from "./tools/suppressions.js";
 import { toolNamesForScope } from "./tools/tiers.js";
 import { resolveServerVersion } from "./version.js";
 
@@ -121,6 +123,8 @@ export function buildServer({
   registerEventTools(server, client);
   registerTemplateTools(server, client);
   registerApiKeyTools(server, client);
+  registerContactTools(server, client);
+  registerSuppressionTools(server, client);
   registerLegacyTools(server, client);
   return server;
 }

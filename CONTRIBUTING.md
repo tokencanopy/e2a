@@ -155,7 +155,9 @@ npm run dev    # http://localhost:3000, proxies /api/* to :8080
 ```
 
 Google OAuth credentials are required for sign-in — set
-`E2A_GOOGLE_CLIENT_ID` and `E2A_GOOGLE_CLIENT_SECRET` in `config.yaml`.
+`oauth.google_client_id` and `oauth.google_client_secret` in `config.yaml`
+(or export the `E2A_GOOGLE_CLIENT_ID` / `E2A_GOOGLE_CLIENT_SECRET` env
+overrides).
 For API-only contributions you can skip the dashboard.
 
 ---
@@ -241,10 +243,13 @@ alone don't catch schema drift.
 
 ## Making changes that touch the API
 
-e2a maintains parity across **eight client surfaces** for every API
+e2a maintains parity across **seven client surfaces** for every API
 change: the Go handler, OpenAPI spec, TypeScript SDK (raw + high-level),
-Python SDK sync (raw + high-level), Python SDK async (raw + high-level),
-CLI, MCP server, and the web dashboard. Each surface has its own tests.
+Python SDK (raw + hand-written `AsyncE2AClient`), CLI, MCP server, and the
+web dashboard. Each surface has its own tests. The Python sync client
+(`sync_client.py`) is a background-thread facade over `AsyncE2AClient` that
+mirrors its resources dynamically via `__getattr__`, so it needs no separate
+parity work — only `AsyncE2AClient` is hand-edited.
 
 The `/v1` OpenAPI document at `api/openapi.yaml` is emitted directly
 from the live Huma handlers, and generated SDK code lives in

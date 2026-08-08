@@ -6,12 +6,13 @@ import {
   E2AConnectionError,
   E2AError,
   EventView,
+  MessageSummaryView,
   ValidateTemplateResponse,
 } from "@e2a/sdk/v1";
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
-import { registerMessageTools } from "../src/tools/messages.js";
+import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
 import { registerReviewTools } from "../src/tools/review.js";
@@ -20,6 +21,8 @@ import { registerEventTools } from "../src/tools/events.js";
 import { registerTemplateTools } from "../src/tools/templates.js";
 import { registerApiKeyTools } from "../src/tools/apikeys.js";
 import { registerLegacyTools } from "../src/tools/legacy.js";
+import { registerContactTools } from "../src/tools/contacts.js";
+import { registerSuppressionTools } from "../src/tools/suppressions.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -104,6 +107,47 @@ function makeStubClient(
     })),
     listAgents: vi.fn(async () => ({ items: [{ email: "bot@example.com" }], next_cursor: undefined })),
     restoreAgent: vi.fn(async (addr?: string) => ({ email: addr ?? "bot@example.com" })),
+    listContacts: vi.fn(async () => ({ items: [{ address: "partner@fund.vc", displayName: "A. Partner" }], next_cursor: undefined })),
+    getContact: vi.fn(async (address: string) => ({ address, displayName: "A. Partner" })),
+    getContactWithETag: vi.fn(async (address: string) => ({ data: { address, displayName: "A. Partner" }, etag: '"contact-v1"' })),
+    createContact: vi.fn(async (body: Record<string, unknown>) => body),
+    updateContact: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
+    deleteContact: vi.fn(async (address: string) => ({ deleted: true, address })),
+    importContacts: vi.fn(async () => ({ batchId: "imp_1", created: 1, updated: 0, skipped: 0, failed: 0, results: [] })),
+    deleteContactImport: vi.fn(async (batchId: string) => ({ deleted: true, batchId, contactsDeleted: 1, contactsRetained: 0 })),
+    listOutreach: vi.fn(async () => ({ items: [{ address: "partner@fund.vc", stage: "prospect" }], next_cursor: undefined })),
+    getOutreach: vi.fn(async (address: string) => ({ address, stage: "prospect" })),
+    getOutreachWithETag: vi.fn(async (address: string) => ({ data: { address, stage: "prospect" }, etag: '"outreach-v1"' })),
+    setOutreach: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
+    deleteOutreach: vi.fn(async (address: string) => ({ deleted: true, address })),
+    listSuppressions: vi.fn(async () => ({
+      items: [{
+        address: "gone@example.net",
+        source: "bounce",
+        reason: "smtp; 550 5.1.1 recipient not found",
+        sourceMessageId: "msg_bounce1",
+        createdAt: new Date("2026-07-17T21:12:26.000Z"),
+      }],
+      next_cursor: undefined,
+    })),
+    deleteSuppression: vi.fn(async (address: string) => ({ deleted: true, address })),
+    listAgentSuppressions: vi.fn(async () => ({
+      items: [{
+        agentEmail: "bot@example.com",
+        address: "optout@example.net",
+        source: "unsubscribe",
+        createdAt: new Date("2026-07-20T09:00:00.000Z"),
+      }],
+      next_cursor: undefined,
+    })),
+    createAgentSuppression: vi.fn(async (email: string, body: { address: string; reason?: string }) => ({
+      agentEmail: email,
+      address: body.address,
+      ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      source: "manual",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    })),
+    deleteAgentSuppression: vi.fn(async (_email: string, address: string) => ({ deleted: true, address })),
     listAllAgents: vi.fn(async () => [{ email: "bot@example.com" }]),
     // whoami → client.whoami() returns an AccountView (the authenticated
     // account identity), NOT an agent record. No default-agent resolution.
@@ -175,6 +219,7 @@ function makeStubClient(
     getMessage: vi.fn(async (id: string, _addr?: string) => ({
       id,
       conversationId: "conv_x",
+      threadId: "thr_0123456789abcdef0123456789abcdef",
       headerFrom: "alice@example.com",
       envelopeFrom: "bounce@example.com",
       verifiedDomain: "example.com",
@@ -376,20 +421,31 @@ describe("e2a MCP server", () => {
   });
 
   // The real backend status vocabulary (internal/httpapi/outbound.go
-  // SendResultView) includes "accepted" — the async-outbound success status
-  // that REPLACES "sent" for queue-first delivery. A model that doesn't know
-  // "accepted" is a terminal success can mistake it for an ambiguous/failed
-  // result and re-send without reusing idempotency_key, causing a real
-  // duplicate send. Guard that all three send-shaped tool descriptions
-  // document it as success and tell the model not to retry.
-  it("documents `accepted` as a terminal success status on send/reply/forward (no-retry guard)", async () => {
+  // SendResultView) includes "accepted" and "scheduled" as durable-success
+  // outcomes. A model that mistakes either for an ambiguous/failed result can
+  // re-send without reusing idempotency_key, causing a real duplicate.
+  it("documents durable send outcomes on send/reply/forward (no-retry guard)", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t]));
     for (const name of ["send_message", "reply_to_message", "forward_message"]) {
       const description = byName.get(name)?.description ?? "";
       expect(description, `${name} description`).toContain("accepted");
+      expect(description, `${name} description`).toContain("scheduled");
       expect(description, `${name} description`).toMatch(/do NOT re-send/i);
       expect(description, `${name} description`).toMatch(/pending_review/);
+
+      const properties = (byName.get(name)?.inputSchema as {
+        properties?: Record<string, { description?: string }>;
+      })?.properties ?? {};
+      expect(properties.send_at?.description, `${name}.send_at description`).toMatch(
+        /own address.*400 invalid_request/i,
+      );
+      expect(properties.send_at?.description, `${name}.send_at beta label`).toMatch(
+        /beta:.*may change before.*stable/i,
+      );
+      expect(properties.send_at?.description, `${name}.send_at restore cutoff`).toMatch(
+        /restoring at or after.*leaves the send canceled/i,
+      );
     }
   });
 
@@ -415,6 +471,43 @@ describe("e2a MCP server", () => {
     expect(replyProperties.conversation_id?.description).toMatch(/message_id still preserves/i);
   });
 
+  it("keeps application conversation grouping distinct from email thread topology", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    const forwardProperties = (byName.get("forward_message")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    })?.properties ?? {};
+    expect(forwardProperties.conversation_id?.description).toMatch(
+      /always starts a new email thread/i,
+    );
+    expect(forwardProperties.conversation_id?.description).toMatch(
+      /only groups it with related application activity/i,
+    );
+
+    for (const name of ["list_conversations", "get_conversation"]) {
+      const description = byName.get(name)?.description ?? "";
+      expect(description, `${name} description`).toMatch(/application conversation/i);
+      expect(description, `${name} description`).toMatch(
+        /independent of email thread topology/i,
+      );
+    }
+  });
+
+  it("documents contact.due as a webhook event rather than a local-agent launcher", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const eventsProperties = (byName.get("list_events")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    })?.properties ?? {};
+    const outreachDescription = byName.get("set_outreach_contact")?.description ?? "";
+
+    expect(eventsProperties.type?.description).toContain("`contact.due`");
+    expect(outreachDescription).toMatch(/webhook/i);
+    expect(outreachDescription).toMatch(/deployed (?:agent|runtime)/i);
+    expect(outreachDescription).toMatch(/does not launch.*local coding-agent/i);
+  });
+
   it("documents claimed sender and DMARC trust semantics on list_messages", async () => {
     const { tools } = await client.listTools();
     const tool = tools.find((candidate) => candidate.name === "list_messages");
@@ -434,7 +527,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(60);
+    expect(frozenToolNames).toHaveLength(76);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -462,9 +555,11 @@ describe("e2a MCP server", () => {
     registerEventTools(recorder, stub);
     registerTemplateTools(recorder, stub);
     registerApiKeyTools(recorder, stub);
+    registerContactTools(recorder, stub);
+    registerSuppressionTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(60);
+    expect(names).toHaveLength(76);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -473,25 +568,25 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
-    expect(RUNTIME_TOOLS.size).toBe(16);
-    expect(ADMIN_TOOLS.size).toBe(44);
-    expect(toolNamesForScope("account").size).toBe(60);
+    expect(RUNTIME_TOOLS.size).toBe(20);
+    expect(ADMIN_TOOLS.size).toBe(56);
+    expect(toolNamesForScope("account").size).toBe(76);
   });
 
-  it("account scope exposes all 60 canonical and compatibility tools", async () => {
+  it("account scope exposes all 76 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(60);
+    expect(tools).toHaveLength(76);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
     }
   });
 
-  it("agent scope exposes 14 canonical runtime tools plus two runtime aliases", async () => {
+  it("agent scope exposes runtime inbox and outreach tools", async () => {
     const ag = await connect(makeStubClient({ scope: "agent" }));
     const names = new Set((await ag.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(16);
+    expect(names.size).toBe(20);
     // Runtime tools present: an agent can send and read its own mailbox, but
     // account review discovery and decisions stay with the account owner.
     for (const n of [
@@ -499,6 +594,8 @@ describe("e2a MCP server", () => {
       "get_attachment", "update_message_labels", "list_conversations",
       "get_conversation", "send_message", "reply_to_message", "forward_message",
       "restore_message", "delete_message", "send_email", "get_attachment_data",
+      "list_outreach_contacts", "get_outreach_contact", "set_outreach_contact",
+      "delete_outreach_contact",
     ]) {
       expect(names.has(n), `runtime tool ${n} should be visible to agent scope`).toBe(true);
     }
@@ -523,6 +620,390 @@ describe("e2a MCP server", () => {
     for (const name of REVIEW_ALIASES) {
       expect(names.has(name), `review alias ${name} must be hidden from agent scope`).toBe(false);
     }
+  });
+
+  it("list_outreach_contacts maps the safe follow-up filters and page cursor", async () => {
+    await client.callTool({
+      name: "list_outreach_contacts",
+      arguments: {
+        email: "raise@example.com",
+        replied: false,
+        suppressed: false,
+        next_action_before: "2026-07-28T00:00:00.000Z",
+        last_outbound_before: "2026-07-21T00:00:00.000Z",
+        limit: 25,
+        cursor: "cur_1",
+      },
+    });
+    expect(stub.listOutreach).toHaveBeenCalledWith({
+      replied: false,
+      suppressed: false,
+      nextActionBefore: new Date("2026-07-28T00:00:00.000Z"),
+      lastOutboundBefore: new Date("2026-07-21T00:00:00.000Z"),
+      limit: 25,
+      cursor: "cur_1",
+    }, "raise@example.com");
+  });
+
+  it("list_contacts maps creation-time filters", async () => {
+    await client.callTool({
+      name: "list_contacts",
+      arguments: {
+        created_after: "2026-07-01T00:00:00.000Z",
+        created_before: "2026-08-01T00:00:00.000Z",
+      },
+    });
+    expect(stub.listContacts).toHaveBeenCalledWith({
+      createdAfter: new Date("2026-07-01T00:00:00.000Z"),
+      createdBefore: new Date("2026-08-01T00:00:00.000Z"),
+    });
+  });
+
+  it("contact tools accept any explicit RFC 3339 offset", async () => {
+    // Z, a negative offset, and a positive offset all denote an unambiguous
+    // instant and must validate on every contact timestamp field.
+    for (const stamp of ["2026-07-01T00:00:00Z", "2026-07-01T09:00:00-07:00", "2026-07-01T12:00:00+05:30"]) {
+      const res = await client.callTool({
+        name: "list_contacts",
+        arguments: { created_after: stamp },
+      });
+      expect(res.isError ?? false, `created_after ${stamp}`).toBe(false);
+      expect(stub.listContacts).toHaveBeenCalledWith({ createdAfter: new Date(stamp) });
+    }
+
+    const res = await client.callTool({
+      name: "list_outreach_contacts",
+      arguments: {
+        email: "raise@example.com",
+        next_action_before: "2026-07-28T09:00:00-07:00",
+        last_outbound_before: "2026-07-21T12:00:00+05:30",
+      },
+    });
+    expect(res.isError ?? false).toBe(false);
+    expect(stub.listOutreach).toHaveBeenCalledWith({
+      nextActionBefore: new Date("2026-07-28T09:00:00-07:00"),
+      lastOutboundBefore: new Date("2026-07-21T12:00:00+05:30"),
+    }, "raise@example.com");
+
+    const setRes = await client.callTool({
+      name: "set_outreach_contact",
+      arguments: {
+        email: "raise@example.com",
+        address: "partner@fund.vc",
+        next_action_at: "2026-08-01T09:00:00-07:00",
+      },
+    });
+    expect(setRes.isError ?? false).toBe(false);
+    expect(stub.setOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { nextActionAt: new Date("2026-08-01T09:00:00-07:00") },
+      "raise@example.com",
+      undefined,
+    );
+  });
+
+  it("contact tools reject date-only and offsetless timestamps", async () => {
+    // Without an explicit offset the instant is ambiguous: `new Date()` reads a
+    // bare date-time in LOCAL time and a date-only value as UTC midnight.
+    for (const stamp of ["2026-07-01", "2026-07-01T09:00:00"]) {
+      const res = await client.callTool({
+        name: "list_contacts",
+        arguments: { created_before: stamp },
+      });
+      expect(res.isError, `created_before ${stamp}`).toBe(true);
+
+      const outreachRes = await client.callTool({
+        name: "list_outreach_contacts",
+        arguments: { email: "raise@example.com", next_action_before: stamp },
+      });
+      expect(outreachRes.isError, `next_action_before ${stamp}`).toBe(true);
+
+      const setRes = await client.callTool({
+        name: "set_outreach_contact",
+        arguments: { email: "raise@example.com", address: "partner@fund.vc", next_action_at: stamp },
+      });
+      expect(setRes.isError, `next_action_at ${stamp}`).toBe(true);
+    }
+    expect(stub.listContacts).not.toHaveBeenCalled();
+    expect(stub.listOutreach).not.toHaveBeenCalled();
+    expect(stub.setOutreach).not.toHaveBeenCalled();
+  });
+
+  // ── Suppressions: account-level list/remove + agent-level list/add/remove ──
+
+  it("list_suppressions returns the account block list in the frozen envelope", async () => {
+    const res = await client.callTool({
+      name: "list_suppressions",
+      arguments: { cursor: "cur_1", limit: 50 },
+    });
+    expect(stub.listSuppressions).toHaveBeenCalledWith({ cursor: "cur_1", limit: 50 });
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload.suppressions).toEqual([{
+      address: "gone@example.net",
+      source: "bounce",
+      reason: "smtp; 550 5.1.1 recipient not found",
+      source_message_id: "msg_bounce1",
+      created_at: "2026-07-17T21:12:26.000Z",
+    }]);
+    // Exhausted list → next_cursor OMITTED (frozen MCP envelope contract).
+    expect(payload).not.toHaveProperty("next_cursor");
+  });
+
+  it("suppression deletion schemas require literal boolean confirmation", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["delete_suppression", "delete_agent_suppression"]) {
+      const schema = tools.find((tool) => tool.name === name)?.inputSchema as {
+        required?: string[];
+        properties?: Record<string, { type?: string; const?: unknown }>;
+        additionalProperties?: boolean;
+      } | undefined;
+      expect(schema, `${name} input schema`).toBeDefined();
+      expect(schema?.required).toContain("confirm");
+      expect(schema?.properties?.confirm).toMatchObject({ type: "boolean", const: true });
+      expect(schema?.additionalProperties).toBe(false);
+    }
+  });
+
+  it("delete_suppression requires explicit confirmation", async () => {
+    for (const arguments_ of [
+      { address: "gone@example.net" },
+      { address: "gone@example.net", confirm: false },
+    ]) {
+      const res = await client.callTool({
+        name: "delete_suppression",
+        arguments: arguments_,
+      });
+      expect(res.isError).toBe(true);
+    }
+    expect(stub.deleteSuppression).not.toHaveBeenCalled();
+  });
+
+  it("delete_suppression removes one account-level block when confirmed", async () => {
+    const res = await client.callTool({
+      name: "delete_suppression",
+      arguments: { address: "gone@example.net", confirm: true },
+    });
+    expect(stub.deleteSuppression).toHaveBeenCalledWith("gone@example.net");
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toEqual({ deleted: true, address: "gone@example.net" });
+  });
+
+  it("list_agent_suppressions requires email and forwards pagination", async () => {
+    const missing = await client.callTool({
+      name: "list_agent_suppressions",
+      arguments: {},
+    });
+    expect(missing.isError).toBe(true);
+    expect(stub.listAgentSuppressions).not.toHaveBeenCalled();
+
+    const res = await client.callTool({
+      name: "list_agent_suppressions",
+      arguments: { email: "bot@example.com", cursor: "cur_a", limit: 10 },
+    });
+    expect(stub.listAgentSuppressions).toHaveBeenCalledWith("bot@example.com", { cursor: "cur_a", limit: 10 });
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload.suppressions).toEqual([{
+      agent_email: "bot@example.com",
+      address: "optout@example.net",
+      source: "unsubscribe",
+      created_at: "2026-07-20T09:00:00.000Z",
+    }]);
+    expect(payload).not.toHaveProperty("next_cursor");
+  });
+
+  it("create_agent_suppression adds a manual per-agent block", async () => {
+    const res = await client.callTool({
+      name: "create_agent_suppression",
+      arguments: { email: "bot@example.com", address: "optout@example.net", reason: "asked us to stop" },
+    });
+    expect(stub.createAgentSuppression).toHaveBeenCalledWith(
+      "bot@example.com",
+      { address: "optout@example.net", reason: "asked us to stop" },
+    );
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toMatchObject({
+      agent_email: "bot@example.com",
+      address: "optout@example.net",
+      source: "manual",
+    });
+
+    // Address validity is enforced at the tool boundary, before the client.
+    const bad = await client.callTool({
+      name: "create_agent_suppression",
+      arguments: { email: "bot@example.com", address: "not-an-email" },
+    });
+    expect(bad.isError).toBe(true);
+  });
+
+  it("delete_agent_suppression requires explicit confirmation", async () => {
+    for (const arguments_ of [
+      { email: "bot@example.com", address: "optout@example.net" },
+      { email: "bot@example.com", address: "optout@example.net", confirm: false },
+    ]) {
+      const res = await client.callTool({
+        name: "delete_agent_suppression",
+        arguments: arguments_,
+      });
+      expect(res.isError).toBe(true);
+    }
+    expect(stub.deleteAgentSuppression).not.toHaveBeenCalled();
+  });
+
+  it("delete_agent_suppression removes only the exact agent-recipient block when confirmed", async () => {
+    const res = await client.callTool({
+      name: "delete_agent_suppression",
+      arguments: { email: "bot@example.com", address: "optout@example.net", confirm: true },
+    });
+    expect(stub.deleteAgentSuppression).toHaveBeenCalledWith("bot@example.com", "optout@example.net");
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0]!.text);
+    expect(payload).toEqual({ deleted: true, address: "optout@example.net" });
+  });
+
+  it("create_contact forwards a retry key", async () => {
+    await client.callTool({
+      name: "create_contact",
+      arguments: {
+        address: "partner@fund.vc",
+        display_name: "A. Partner",
+        idempotency_key: "contact:partner",
+      },
+    });
+    expect(stub.createContact).toHaveBeenCalledWith({
+      address: "partner@fund.vc",
+      displayName: "A. Partner",
+    }, "contact:partner");
+  });
+
+  it("maps the remaining contact CRUD and reversal tools", async () => {
+    await client.callTool({
+      name: "get_contact",
+      arguments: { address: "partner@fund.vc" },
+    });
+    expect(stub.getContactWithETag).toHaveBeenCalledWith("partner@fund.vc");
+
+    await client.callTool({
+      name: "update_contact",
+      arguments: {
+        address: "partner@fund.vc",
+        display_name: "",
+        metadata: { fund: "Example" },
+        if_match: '"contact-v1"',
+      },
+    });
+    expect(stub.updateContact).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { displayName: "", metadata: { fund: "Example" } },
+      '"contact-v1"',
+    );
+
+    await client.callTool({
+      name: "delete_contact",
+      arguments: { address: "partner@fund.vc" },
+    });
+    expect(stub.deleteContact).toHaveBeenCalledWith("partner@fund.vc");
+
+    await client.callTool({
+      name: "delete_contact_import",
+      arguments: { batch_id: "imp_1" },
+    });
+    expect(stub.deleteContactImport).toHaveBeenCalledWith("imp_1");
+  });
+
+  it("maps outreach reads and un-enrolment", async () => {
+    await client.callTool({
+      name: "get_outreach_contact",
+      arguments: { email: "raise@example.com", address: "partner@fund.vc" },
+    });
+    expect(stub.getOutreachWithETag).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      "raise@example.com",
+    );
+
+    await client.callTool({
+      name: "delete_outreach_contact",
+      arguments: { email: "raise@example.com", address: "partner@fund.vc" },
+    });
+    expect(stub.deleteOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      "raise@example.com",
+    );
+  });
+
+  it("set_outreach_contact forwards If-Match for a guarded agent loop", async () => {
+    await client.callTool({
+      name: "set_outreach_contact",
+      arguments: {
+        email: "raise@example.com",
+        address: "partner@fund.vc",
+        stage: "touch2",
+        if_match: '"outreach-v1"',
+      },
+    });
+    expect(stub.setOutreach).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { stage: "touch2" },
+      "raise@example.com",
+      '"outreach-v1"',
+    );
+  });
+
+  // An empty if_match is not a validator. Accepting one would send
+  // `If-Match:` with no value, which degraded a guarded write to an
+  // unconditional one before the API started rejecting it — the model would
+  // believe it had held the guard. Omitting the field is how you ask for an
+  // unconditional write.
+  it("rejects an empty if_match on both conditional contact tools", async () => {
+    for (const call of [
+      {
+        name: "update_contact",
+        arguments: { address: "partner@fund.vc", display_name: "X", if_match: "" },
+      },
+      {
+        name: "set_outreach_contact",
+        arguments: {
+          email: "raise@example.com",
+          address: "partner@fund.vc",
+          stage: "touch2",
+          if_match: "",
+        },
+      },
+    ]) {
+      const result = await client.callTool(call);
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain("if_match");
+    }
+    expect(stub.updateContact).not.toHaveBeenCalled();
+    expect(stub.setOutreach).not.toHaveBeenCalled();
+
+    // Omitting it entirely is still a valid unconditional write.
+    await client.callTool({
+      name: "update_contact",
+      arguments: { address: "partner@fund.vc", display_name: "X" },
+    });
+    expect(stub.updateContact).toHaveBeenCalledWith(
+      "partner@fund.vc",
+      { displayName: "X" },
+      undefined,
+    );
+  });
+
+  it("import_contacts maps enrollment without inventing a send action", async () => {
+    await client.callTool({
+      name: "import_contacts",
+      arguments: {
+        contacts: [{ address: "partner@fund.vc", display_name: "A. Partner" }],
+        on_conflict: "skip",
+        agent_email: "raise@example.com",
+        stage: "prospect",
+        idempotency_key: "contacts:upload:sha256",
+      },
+    });
+    expect(stub.importContacts).toHaveBeenCalledWith({
+      contacts: [{ address: "partner@fund.vc", displayName: "A. Partner" }],
+      onConflict: "skip",
+      agentEmail: "raise@example.com",
+      stage: "prospect",
+    }, "contacts:upload:sha256");
   });
 
   it("agent scope cannot call a hidden admin tool (errors + handler never runs)", async () => {
@@ -562,7 +1043,7 @@ describe("e2a MCP server", () => {
   // ── §6a tool annotations (#2) ───────────────────────────────────────
 
   it("every tool carries MCP annotations with the correct hints", async () => {
-    const { tools } = await client.listTools(); // account scope → all 60
+    const { tools } = await client.listTools(); // account scope → full surface
     const byName = new Map(tools.map((t) => [t.name, t.annotations ?? {}]));
 
     // Every tool has an annotations object.
@@ -668,6 +1149,54 @@ describe("e2a MCP server", () => {
       "msg_in",
       ["destination@example.com"],
       { text: "FYI" },
+      {},
+      undefined,
+    );
+  });
+
+  it("send/reply/forward pass RFC 3339 send_at through as the same scheduled instant", async () => {
+    const sendAt = "2026-08-01T09:00:00-07:00";
+    const expected = new Date(sendAt);
+
+    await client.callTool({
+      name: "send_message",
+      arguments: {
+        to: ["alice@example.com"],
+        subject: "Scheduled",
+        text: "Later",
+        send_at: sendAt,
+      },
+    });
+    expect(stub.send).toHaveBeenCalledWith(
+      expect.objectContaining({ sendAt: expected }),
+      {},
+      undefined,
+    );
+
+    await client.callTool({
+      name: "reply_to_message",
+      arguments: { message_id: "msg_in", text: "Later", send_at: sendAt },
+    });
+    expect(stub.reply).toHaveBeenCalledWith(
+      "msg_in",
+      expect.objectContaining({ sendAt: expected }),
+      {},
+      undefined,
+    );
+
+    await client.callTool({
+      name: "forward_message",
+      arguments: {
+        message_id: "msg_in",
+        to: ["destination@example.com"],
+        text: "Later",
+        send_at: sendAt,
+      },
+    });
+    expect(stub.forward).toHaveBeenCalledWith(
+      "msg_in",
+      ["destination@example.com"],
+      expect.objectContaining({ sendAt: expected }),
       {},
       undefined,
     );
@@ -856,12 +1385,12 @@ describe("e2a MCP server", () => {
 
   it("list_messages surfaces next_cursor when more pages remain", async () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      items: [{ messageId: "m1" }],
+      items: [{ id: "m1" }],
       next_cursor: "c_next",
     });
     const res = await client.callTool({ name: "list_messages", arguments: {} });
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
-    expect(payload.messages).toEqual([{ message_id: "m1" }]);
+    expect(payload.messages).toEqual([{ id: "m1" }]);
     expect(payload.next_cursor).toBe("c_next");
   });
 
@@ -869,9 +1398,31 @@ describe("e2a MCP server", () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       items: [{
         id: "m1",
+        direction: "outbound",
         headerFrom: "alice@example.com",
         envelopeFrom: "bounce@example.net",
         verifiedDomain: "example.com",
+        to: ["recipient@example.net"],
+        cc: ["copy@example.net"],
+        replyTo: [],
+        deliveredTo: "bot@example.com",
+        subject: "Status",
+        conversationId: "conv_1",
+        readStatus: "",
+        reviewStatus: "sent",
+        webhookStatus: "delivered",
+        webhookError: "last retry",
+        deliveryStatus: "delivered",
+        deliveryDetail: "250 ok",
+        sentAs: "own_address",
+        scheduledAt: new Date("2026-07-30T12:00:00Z"),
+        flagged: true,
+        flagReason: "test flag",
+        sizeBytes: 123,
+        labels: ["important"],
+        createdAt: new Date("2026-07-30T12:01:00Z"),
+        deletedAt: new Date("2026-07-30T12:02:00Z"),
+        threadId: "thr_0123456789abcdef0123456789abcdef",
       }],
       next_cursor: undefined,
     });
@@ -880,17 +1431,54 @@ describe("e2a MCP server", () => {
     const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
     expect(payload.messages).toEqual([{
       id: "m1",
+      direction: "outbound",
       header_from: "alice@example.com",
       envelope_from: "bounce@example.net",
       verified_domain: "example.com",
+      to: ["recipient@example.net"],
+      cc: ["copy@example.net"],
+      reply_to: [],
+      delivered_to: "bot@example.com",
+      subject: "Status",
+      conversation_id: "conv_1",
+      read_status: "",
+      review_status: "sent",
+      webhook_status: "delivered",
+      webhook_error: "last retry",
+      delivery_status: "delivered",
+      delivery_detail: "250 ok",
+      sent_as: "own_address",
+      scheduled_at: "2026-07-30T12:00:00.000Z",
+      flagged: true,
+      flag_reason: "test flag",
+      size_bytes: 123,
+      labels: ["important"],
+      created_at: "2026-07-30T12:01:00.000Z",
+      deleted_at: "2026-07-30T12:02:00.000Z",
     }]);
     expect(payload.messages[0]).not.toHaveProperty("headerFrom");
     expect(payload.messages[0]).not.toHaveProperty("verifiedDomain");
+    expect(payload.messages[0]).not.toHaveProperty("thread_id");
+    expect(payload.messages[0]).not.toHaveProperty("threadId");
+  });
+
+  it("keeps the MCP message-summary projection in sync with stable SDK fields", () => {
+    const sdkFields = MessageSummaryView.attributeTypeMap
+      .map(({ name }) => name)
+      .filter((name) => name !== "threadId");
+    const projectedFields = Object.keys(
+      messageSummaryViewForTool({} as MessageSummaryView),
+    ).map((name) => {
+      const camel = name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+      return camel;
+    });
+
+    expect(projectedFields.sort()).toEqual(sdkFields.sort());
   });
 
   it("list_messages omits next_cursor on the last page", async () => {
     (stub.listMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      items: [{ messageId: "m1" }],
+      items: [{ id: "m1" }],
       next_cursor: undefined,
     });
     const res = await client.callTool({ name: "list_messages", arguments: {} });
@@ -917,6 +1505,8 @@ describe("e2a MCP server", () => {
     expect(parsed.authentication).toMatchObject({ dmarc: { status: "pass" } });
     expect(parsed).not.toHaveProperty("from_");
     expect(parsed).not.toHaveProperty("from");
+    expect(parsed).not.toHaveProperty("thread_id");
+    expect(parsed).not.toHaveProperty("threadId");
     expect(parsed.text).toBe("hello world");
     // Critical: attachments surfaced as metadata-only (no `data`)
     // — bytes blow the LLM's context if returned here. Same reason
@@ -1234,7 +1824,7 @@ describe("e2a MCP server", () => {
       name: "delete_agent",
       arguments: { email: "bot@example.com", confirm: true },
     });
-    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com");
+    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com", undefined);
     const content = res.content as Array<{ type: string; text: string }>;
     expect(JSON.parse(content[0]!.text)).toEqual({
       deleted: true,
@@ -1248,7 +1838,25 @@ describe("e2a MCP server", () => {
       name: "delete_agent",
       arguments: { confirm: true },
     });
-    expect(stub.deleteAgent).toHaveBeenCalledWith(undefined);
+    expect(stub.deleteAgent).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("delete_agent forwards permanent:true to skip the trash", async () => {
+    await client.callTool({
+      name: "delete_agent",
+      arguments: { email: "bot@example.com", confirm: true, permanent: true },
+    });
+    expect(stub.deleteAgent).toHaveBeenCalledWith("bot@example.com", true);
+  });
+
+  it("delete_agent still requires confirm:true when permanent:true is set", async () => {
+    // `permanent` must never be a way around the confirm gate.
+    const res = await client.callTool({
+      name: "delete_agent",
+      arguments: { email: "bot@example.com", permanent: true },
+    });
+    expect(res.isError).toBe(true);
+    expect(stub.deleteAgent).not.toHaveBeenCalled();
   });
 
   it("list_agents forwards deleted:true for the trash", async () => {

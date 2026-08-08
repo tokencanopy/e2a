@@ -24,6 +24,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
@@ -40,6 +41,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/relay"
 	"github.com/tokencanopy/e2a/internal/senderidentity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
+	"github.com/tokencanopy/e2a/internal/sendrate"
 	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 	"github.com/tokencanopy/e2a/internal/usage"
@@ -224,9 +226,10 @@ func main() {
 	var metrics telemetry.Metrics = telemetry.NewLog()
 	var promBackend *telemetry.Prom
 	if cfg.Metrics.Enabled {
-		promBackend = telemetry.NewProm()
+		promBackend = telemetry.NewProm(cfg.Metrics.Build)
 		metrics = promBackend
 	}
+	store.SetThreadMetrics(metrics)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)
@@ -239,6 +242,11 @@ func main() {
 	// configuration set so SES publishes delivery/bounce/complaint events.
 	// Empty = off (no header, no events).
 	sender.SetSESConfigurationSet(cfg.DeliveryFeedback.SESConfigurationSet)
+	// Outbound branding/disclosure footer (`outbound_footer:` config block):
+	// the CONTENT lives on the sender; the per-send DECISION is stamped on
+	// each request by the agent layer (SetOutboundFooterEnabled below +
+	// account_limits.outbound_footer_enabled). Empty content = inert.
+	sender.SetOutboundFooter(cfg.OutboundFooter.Text, cfg.OutboundFooter.HTML)
 
 	// Sender-identity manager (decision 4 / Slice 4). Only wired when SES is
 	// configured: domain verify enqueues a BYODKIM provision job + reconciler;
@@ -277,12 +285,18 @@ func main() {
 		log.Printf("Outbound sending ramp enabled: %d→%d recipients over %d qualified days", cfg.SendingRamp.StartDaily, cfg.SendingRamp.TargetDaily, cfg.SendingRamp.RampDays)
 	}
 	outboundSendStore := agent.NewOutboundSendStore(store, webhookOutbox, usageTracker)
+	store.SetScheduledSendFinalizer(outboundSendStore)
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
 		agent.NewOutboundDeliverer(sender),
 		pool,
 		outboundRamp,
-	).WithMetrics(metrics)
+	).WithMetrics(metrics).
+		// Fire-time per-agent rate limit (60 submissions/min/agent sliding
+		// window, durable in Postgres): the cross-replica counterpart of the
+		// acceptance-time in-memory limiter, enforced immediately before
+		// provider submission so scheduled-send bursts can't exceed it.
+		WithRateGate(sendrate.NewStore(pool, time.Minute, 60))
 	registrars = append(registrars, outboundJobs)
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
@@ -409,6 +423,14 @@ func main() {
 		oauthPruner = oauthStorage
 	}
 	cleanupJanitor := janitor.New(store, deliveryStore, subscriberStore, webhookOutbox, oauthPruner, idempotencyStore, metrics)
+	// contact.due wake-up: its own River periodic on the maintenance lane, not
+	// part of the janitor. It is a scheduled product event with user-visible
+	// latency, not a prune, so it gets its own interval and metrics.
+	contactDueSweeper := contactdue.NewSweeper(
+		contactdue.NewOutboxPublisher(pool, store, webhookOutbox),
+		metrics,
+	)
+	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
 
 	if len(registrars) > 0 {
@@ -417,6 +439,7 @@ func main() {
 			log.Fatalf("jobs: build shared river client: %v", jerr)
 		}
 		jobsClient = jc
+		store.SetOutboundJobCanceller(jobsClient)
 		if senderMgr != nil {
 			senderMgr.SetEnqueuer(jobsClient)
 			senderEnqueuer = senderMgr
@@ -609,10 +632,28 @@ func main() {
 			MaxDomains:       cfg.Limits.MaxDomains,
 			MaxMessagesMonth: cfg.Limits.MaxMessagesMonth,
 			MaxStorageBytes:  cfg.Limits.MaxStorageBytes,
+			// Row-less fallback for the outbound-footer entitlement — the
+			// `outbound_footer:` block's default_enabled, not `limits:`.
+			OutboundFooterEnabled: cfg.OutboundFooter.DefaultEnabled,
 		},
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
 	api.SetEnforcer(enforcer)
+	// Master switch for the outbound footer; the enforcer above carries the
+	// per-account entitlement + row-less default the decision reads.
+	api.SetOutboundFooterEnabled(cfg.OutboundFooter.Enabled)
+	// The TTL sweep composes held mail at auto-approve time, so it needs the
+	// same per-account footer decision the human-approve funnel resolves —
+	// otherwise an expires-to-approve hold ships unfootered while the identical
+	// human-approved hold does not.
+	hitlWorker.SetOutboundFooterResolver(api.OutboundFooterForAccount)
+	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
+	// month a scheduled send actually fires (accept-time enforcement can't know a
+	// future fire month). Over-cap → refuse terminally; a transient lookup error
+	// fails open so a glitch never drops a legitimate send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
+		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
+	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
@@ -906,4 +947,18 @@ func main() {
 	// River drain is bounded by the same shutdownCtx, so this returns by the
 	// deadline regardless.
 	<-riverDone
+}
+
+// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
+// fire-time concern for scheduled messages. The message is already persisted,
+// so a later storage-cap breach must not cancel it; only the monthly message
+// cap for the month in which it fires is terminal.
+func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if limitErr, ok := limits.IsLimitExceeded(err); ok {
+		return limitErr.Resource == "messages_month", nil
+	}
+	return false, err
 }

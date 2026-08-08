@@ -53,7 +53,9 @@ e2a config set agent_email bot@acme.com   # or export E2A_AGENT_EMAIL
 Without one, those commands exit `2` (usage) rather than picking an inbox for you.
 A default you set this way survives re-login.
 
-Need a least-privilege key bound to a single inbox? Mint one after logging in:
+Need a least-privilege key bound to a single inbox? Mint one after logging in
+(the agent must already exist — create it first with `e2a agents create`,
+below):
 
 ```bash
 e2a keys create --agent bot@acme.com
@@ -155,6 +157,13 @@ e2a agents get bot@acme.com
 
 `list`, `create`, and `get` all accept `--json` (print the raw JSON response).
 
+Creating an address on a custom domain (`bot@acme.com`) requires the domain to
+be registered and verified on your account first (web dashboard, MCP tools, or
+SDK — the CLI has no `domains` command). The deployment's shared domain needs
+no setup, and a bare name expands onto it (`e2a agents create mybot` →
+`mybot@<shared-domain>`). Throughout this README, `bot@acme.com` stands for
+any agent you've created.
+
 ### `e2a keys`
 
 Mint, list, and revoke API keys (requires an account-scoped key).
@@ -192,15 +201,33 @@ e2a send --to alice@example.com --subject "Hi" --body "Plain-text body." \
   --agent bot@acme.com
 e2a send --to alice@example.com --subject "Hi" --html-file body.html \
   --attach report.pdf --conversation-id conv_123 --idempotency-key <uuid>
+e2a send --to alice@example.com --subject "Tomorrow" --body "Later." \
+  --send-at "<future-rfc3339>"
 e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 ```
 
 Common `send`/`reply` flags: `--body` / `--body-file`, `--html-file` (text
 fallback derived if no `--body`), `--attach` (repeatable; max 10 files, 10 MB
-each, 25 MB total), `--reply-to`, `--idempotency-key`, `--agent`, `--json`
+each, 25 MB total), `--reply-to` (repeatable; max 5 addresses), `--send-at`
+(RFC 3339 with an explicit UTC offset, at most 90 days ahead),
+`--idempotency-key`, `--agent`, `--json`
 (print the full send result). `send`-only: `--to` (repeatable), `--subject`,
 `--conversation-id` (alias `--conversation`) — `reply` infers these from the
 message being replied to and rejects them as unknown flags.
+
+`--conversation-id` sets caller-owned application correlation; it does not
+place a fresh send into an existing RFC email thread. Use `reply` with the
+original message ID to preserve `In-Reply-To` / `References`.
+
+Scheduled sending via `--send-at` is **beta and may change before it is
+declared stable**.
+A future schedule exits `0` with `status=scheduled`; it is durably queued, so
+do not retry. Direct self-send cannot be scheduled and returns a permanent
+request error unless a review hold takes precedence (held sends drop the
+schedule). Trashing the message before provider submission starts prevents
+submission (an in-flight submission returns `409 send_in_progress`); restoring it before the
+send time re-arms it, while restoring at or after that time restores the
+message but leaves the send canceled.
 
 ### `e2a messages`
 
@@ -221,6 +248,71 @@ instead of TSV). `get` flags: `--text` (print parsed body text only),
 a message's observed lifecycle transitions; flags: `--cursor` (continue from a
 prior page), `--limit` (page size, 1–100), `--agent`, `--json` (print the
 canonical lifecycle page as JSON).
+
+The conversation filter selects the existing caller-owned
+`conversation_id`, not email topology. On servers that expose it, SDK-shaped
+JSON from message list/get/listen may include optional beta `threadId`,
+a server-owned, read-only mailbox-local identity. Human-readable formats do
+not change, and there is no `threadId` request flag, filter, or thread
+endpoint.
+
+### `e2a contacts` (beta)
+
+Manage account-level contact identity and per-agent outreach state, with
+suppression visibility. Contact identity operations require account scope;
+`outreach` also supports an agent-scoped credential for its bound inbox.
+The whole contacts surface is **beta and may change before it is declared
+stable** — it tracks the beta `/v1/contacts` and `/v1/agents/{email}/contacts`
+API resources.
+
+```bash
+e2a contacts list --source import --limit 50 --json
+e2a contacts get alice@example.com
+e2a contacts create alice@example.com --idempotency-key <uuid>
+e2a contacts update alice@example.com --metadata '{"tier":"gold"}' --if-match <etag>
+e2a contacts delete alice@example.com
+e2a contacts import contacts.csv --agent bot@acme.com --stage new --on-conflict merge
+e2a contacts imports delete <import-batch-id>
+e2a contacts outreach list --agent bot@acme.com --stage new --replied false
+e2a contacts outreach get alice@example.com --agent bot@acme.com
+e2a contacts outreach set alice@example.com --agent bot@acme.com --stage replied --next-action clear
+e2a contacts outreach delete alice@example.com --agent bot@acme.com
+```
+
+`contacts delete` removes the account contact and all of its per-agent outreach
+rows; suppression and consent records survive.
+
+`list`/`outreach list` flags: `--source` (`import`/`manual`/`inbound`),
+`--import-batch`, `--created-after`/`--created-before` (list) or
+`--stage`/`--replied`/`--suppressed`/`--next-action-before`/
+`--last-outbound-before` (outreach list), `--limit`, `--json` (NDJSON instead
+of TSV). `create`/`import` accept `--idempotency-key` to safely replay a
+timed-out request. `update`/`outreach set` accept `--if-match <etag>` to
+reject a stale edit. `import` reads an RFC 4180 CSV (`--email-column`,
+`--name-column`, `--on-conflict merge|skip`, `--dry-run` to preview without
+writing); `imports delete` reverses one import batch.
+
+### `e2a suppressions`
+
+Inspect and manage recipient block lists. Without `--agent`, commands target
+the ACCOUNT-wide list — auto-populated by hard bounces and complaints and
+enforced for every inbox (sends fail with `recipient_suppressed`). With
+`--agent`, they target that inbox's beta unsubscribe/manual blocks. All
+commands require account scope.
+
+```bash
+e2a suppressions list                                   # account-wide list
+e2a suppressions list --agent bot@acme.com --json       # one inbox's blocks
+e2a suppressions add alice@example.com --agent bot@acme.com --reason "asked us to stop"
+e2a suppressions remove alice@example.com               # account-wide
+e2a suppressions remove alice@example.com --agent bot@acme.com
+```
+
+`add` requires `--agent` — manual blocks are per-agent; account entries only
+come from bounces/complaints. `remove` without `--agent` un-suppresses
+account-wide: do that only for addresses known to be deliverable, since
+removing a genuine bouncer hurts sender reputation. `list` supports `--limit`
+and `--json` (NDJSON instead of TSV: address, source, reason, created-at).
 
 ### `e2a listen`
 
@@ -244,7 +336,7 @@ e2a listen --agent bot@acme.com --forward http://localhost:3000/inbound --forwar
 # Emit the full message as JSON (one object per line) for piping:
 e2a listen --agent bot@acme.com --json
 
-# Only messages in one conversation:
+# Only messages with one caller-owned application conversation ID:
 e2a listen --agent bot@acme.com --conversation conv_123
 
 # Exit after the first (matching) message, or TIMEOUT (exit 6) if none arrives

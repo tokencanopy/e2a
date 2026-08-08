@@ -25,7 +25,7 @@ export function registerEventTools(server: McpServer, client: McpClient): void {
           .string()
           .optional()
           .describe(
-            "Exact event type filter. Valid values: `email.received`, `email.sent`, `email.failed`, `email.review_requested`, `email.review_approved`, `email.review_rejected`, `email.blocked`, `email.delivered`, `email.bounced`, `email.complained`, `email.flagged`, `domain.sending_verified`, `domain.sending_failed`, `domain.suppression_added`, `agent.suppression_added`.",
+            "Exact event type filter. Valid values: `email.received`, `email.sent`, `email.failed`, `email.review_requested`, `email.review_approved`, `email.review_rejected`, `email.blocked`, `email.delivered`, `email.bounced`, `email.complained`, `email.flagged`, `domain.sending_verified`, `domain.sending_failed`, `domain.suppression_added`, `agent.suppression_added`, `contact.due`.",
           ),
         agent_email: z.string().optional(),
         conversation_id: z.string().optional(),

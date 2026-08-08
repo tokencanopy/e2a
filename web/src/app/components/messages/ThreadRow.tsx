@@ -8,16 +8,20 @@ import { useState } from "react";
 import { CounterpartyAvatar } from "./CounterpartyAvatar";
 import { MessageStatusChip, deriveStatusChip } from "./MessageStatusChip";
 import { formatRelativeAge } from "../../../lib/relativeTime";
+import { formatScheduledSend } from "../../../lib/scheduledTime";
 import type { Thread } from "./threading";
 
 export function ThreadRow({
   thread,
   active,
   onSelect,
+  historyIncomplete = false,
 }: {
   thread: Thread;
   active: boolean;
   onSelect: (key: string) => void;
+  /** More message pages remain, so this loaded group may gain older members. */
+  historyIncomplete?: boolean;
 }) {
   // Unread = any inbound message still marked unread. v1 carries inbound
   // read state in read_status (delivery_status is outbound-only). Drives
@@ -33,8 +37,10 @@ export function ThreadRow({
           direction: "outbound",
           delivery_status: latest.status,
           review_status: latest.review_status,
+          scheduled_at: latest.scheduled_at,
         })
       : null;
+  const scheduled = latestStatus?.label === "Scheduled";
   const fw = unread ? 600 : 400;
   // Hover highlight via state, not a `hover:bg-*` class: the inline
   // `background` below (active/unread tinting) would otherwise win over a
@@ -92,10 +98,18 @@ export function ThreadRow({
         }}
       >
         {thread.counterparty.name}
-        {thread.msgCount > 1 && (
-          <span style={{ color: "var(--fg-subtle)", fontWeight: 400 }}>
+        {(thread.msgCount > 1 || historyIncomplete) && (
+          <span
+            title={
+              historyIncomplete
+                ? "Older messages may be available"
+                : undefined
+            }
+            style={{ color: "var(--fg-subtle)", fontWeight: 400 }}
+          >
             {" "}
             {thread.msgCount}
+            {historyIncomplete ? "+" : ""}
           </span>
         )}
       </span>
@@ -115,7 +129,20 @@ export function ThreadRow({
           direction="outbound"
           delivery_status={latest.status}
           review_status={latest.review_status}
+          scheduled_at={latest.scheduled_at}
         />
+      )}
+      {scheduled && (
+        <span
+          className="shrink-0"
+          style={{
+            fontSize: 11,
+            color: "var(--fg-subtle)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {formatScheduledSend(latest.scheduled_at)}
+        </span>
       )}
       {pending && !latestStatus?.attention && (
         <span

@@ -28,6 +28,28 @@ export const AGENT_PROMPTS = {
     prompt:
       "Help me connect a custom domain to e2a using https://api.e2a.dev/mcp",
   },
+  contacts: {
+    blurb:
+      "Your coding agent can import contacts, enroll them with an inbox, and work outreach over MCP while it is running.",
+    prompt:
+      "Help me set up e2a contacts and outreach using https://api.e2a.dev/mcp",
+  },
+  // Webhooks are two jobs, not one: register the subscription, and write a
+  // handler that verifies the HMAC signature. The prompt names both so the
+  // agent doesn't stop at a subscription pointing to an unwritten endpoint.
+  // The notice pushes scoping — an unfiltered subscription receives every
+  // inbox's mail, which is easy to create and easy to not notice.
+  webhooks: {
+    blurb:
+      "Registering a webhook and wiring a signature-verifying handler is a one-time setup your coding agent can do end to end — paste this into Claude Code, Cursor, or any agent connected to e2a.",
+    prompt:
+      "Help me set up an e2a webhook using https://api.e2a.dev/mcp — register the subscription, then wire up a handler that verifies the signature with the e2a SDK.",
+    notice: {
+      label: "Only want events from certain inboxes?",
+      instruction:
+        "Scope this webhook to only the inboxes it should receive — an unscoped subscription gets every inbox on the account.",
+    },
+  },
 } as const;
 
 export type AgentPromptCardProps = {
@@ -76,25 +98,28 @@ export function AgentPromptCard({
       className="rounded-[var(--r-lg)] border p-5"
       style={{ background: "var(--bg-panel)", borderColor: "var(--border)" }}
     >
+      {/* Only the heading shares the row with the button. Keeping the blurb
+          inside that flex row forced it to wrap against the button's gutter,
+          so its right edge never lined up with the <pre> and notice below —
+          which span the full card. Lifting it out gives all three blocks the
+          same left AND right edge. */}
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2
-            className="text-[16px] font-semibold"
-            style={{ color: "var(--fg)", margin: 0 }}
-          >
-            Set up with a coding agent
-          </h2>
-          <p
-            className="text-[13px] mt-1 mb-0 leading-[1.6]"
-            style={{ color: "var(--fg-muted)", maxWidth: 640 }}
-          >
-            {blurb}
-          </p>
-        </div>
+        <h2
+          className="text-[16px] font-semibold min-w-0"
+          style={{ color: "var(--fg)", margin: 0 }}
+        >
+          Set up with a coding agent
+        </h2>
         <Button variant="ghost" onClick={onCopy} aria-label="Copy prompt">
           {copied ? "Copied" : "Copy prompt"}
         </Button>
       </div>
+      <p
+        className="text-[13px] mt-1 mb-0 leading-[1.6]"
+        style={{ color: "var(--fg-muted)" }}
+      >
+        {blurb}
+      </p>
       <pre
         className="mt-4 mb-0 whitespace-pre-wrap rounded-[var(--r-md)] border p-3.5 text-[12px] leading-[1.7]"
         style={{

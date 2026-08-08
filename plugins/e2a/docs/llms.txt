@@ -5,9 +5,40 @@
 > verification. Connect
 > over a hosted MCP server (OAuth, no API key), the REST API, or the SDKs.
 
+**The problem e2a solves.** An AI agent that has to reach people, or other
+agents, has no identity of its own on the one channel every organization
+already runs on. Pointing an agent at a human's mailbox borrows that person's
+identity, mixes the agent's mail in with theirs, and leaves the agent no way to
+tell a real sender from a spoofed one. e2a gives the mailbox to the agent: its
+own verified address, on the shared `agents.e2a.dev` domain or on a domain you
+own, with two-way send and receive.
+
+**What is distinctive about e2a:**
+
+- **Sender verification on every inbound message.** e2a evaluates SPF, every
+  DKIM signature, and DMARC — including alignment — before the agent sees a
+  message, and hands the result over as structured evidence rather than raw
+  headers the agent has to parse and trust.
+- **An approval gate before anything is sent.** Opt-in, per agent: an outbound
+  message is accepted but not dispatched (`status: pending_review`) until a
+  person approves it from the dashboard, the API, the MCP tools, or a magic
+  link mailed to them. A hold that expires without a decision can be set to
+  reject rather than send.
+- **Prompt-injection and phishing screening on inbound.** Opt-in content
+  screening flags hidden HTML, Unicode-tag smuggling, and encoded instructions
+  with dependency-free heuristics — and phishing when the optional LLM detector
+  is enabled — then routes each message to allow, review, or block.
+- **No public URL required.** WebSocket streaming, REST polling, and the MCP
+  tools all work from a laptop or from behind a firewall. Webhooks are an
+  option, not a prerequisite, and every webhook delivery is HMAC-signed.
+- **Apache-2.0 and self-hostable.** The whole stack is open source and runs
+  against your own Postgres and outbound relay, with every feature intact. The
+  hosted service at e2a.dev runs that same server image.
+
 ## Start here
 
 - [setup.md](https://e2a.dev/setup.md): What e2a is, how an agent connects (one MCP command), and what it can do. Read this first.
+- [llms-full.txt](https://e2a.dev/llms-full.txt): Every document below, inlined into one file. Fetch this instead if you would rather read the whole corpus in a single request.
 
 ## Connecting & auth
 
@@ -22,7 +53,19 @@
 ## MCP & plugin
 
 - [Agent plugin + skills](https://github.com/tokencanopy/e2a/tree/main/plugins/e2a): The `e2a` plugin bundles the hosted MCP server config and agent guidance for Claude Code, Codex, and Cursor.
+- [MCP overview](https://e2a.dev/mcp): Per-client connection instructions (Claude Code, Codex, Cursor/Windsurf/Claude Desktop, VS Code + Copilot), what the agent can do once connected, and how an agent-owned inbox differs from a mailbox integration.
 - MCP endpoint: `https://api.e2a.dev/mcp` (Streamable HTTP, OAuth 2.1). Add with `claude mcp add --transport http --scope user e2a https://api.e2a.dev/mcp`, then run `/mcp` to authorize (`--scope user` installs it globally; drop it for current-directory only). Per-client config (Cursor, VS Code, Codex, …) is in [setup.md](https://e2a.dev/setup.md).
+
+## Pricing
+
+- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, sender verification, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
+
+## Blog
+
+- [Blog](https://e2a.dev/blog): Tutorials and release notes. The posts below are complete, runnable integrations; the index carries the rest.
+- [Send real email from a Python AI agent in 20 lines](https://e2a.dev/blog/send-email-from-python-agent): Give a Python agent an address, send verified mail, receive replies over webhook or WebSocket, and thread the conversation.
+- [Give your OpenClaw agent an email address (with real-time WebSocket delivery)](https://e2a.dev/blog/email-for-openclaw-agents): Wiring a locally-running agent to a real inbox over WebSocket, with no public URL to host.
+- [Give your Google ADK agent an email inbox (with conversation memory)](https://e2a.dev/blog/email-agent-with-google-adk): HMAC-verified webhooks and multi-turn memory across email replies, binding `conversation_id` to an ADK `session_id`. Full runnable example.
 
 ## Source
 

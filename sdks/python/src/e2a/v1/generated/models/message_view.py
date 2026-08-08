@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 import pprint
+import re  # noqa: F401
 import json
 
 from datetime import datetime
@@ -41,7 +42,7 @@ class MessageView(BaseModel):
     deleted_at: Optional[datetime] = Field(default=None, description="When the message was moved to the trash. Omitted for live messages. A trashed message is restorable until purged — 30 days after deletion by default (deployment-configurable). Live message data is otherwise retained indefinitely.")
     delivered_to: StrictStr = Field(description="The envelope Delivered-To address — this delivery's per-agent target (the mailbox that actually received this row), distinct from the To header (the to array).")
     delivery_detail: Optional[StrictStr] = None
-    delivery_status: Optional[StrictStr] = Field(default=None, description="Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)")
+    delivery_status: Optional[StrictStr] = Field(default=None, description="Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)")
     direction: StrictStr
     envelope_from: Optional[StrictStr] = Field(description="SMTP MAIL FROM address for inbound SMTP delivery; null for outbound messages, a null reverse path, or providerless delivery.")
     flag_reason: Optional[StrictStr] = None
@@ -56,15 +57,17 @@ class MessageView(BaseModel):
     read_status: StrictStr
     reply_to: List[StrictStr] = Field(description="The parsed Reply-To header of an inbound message. Populated for inbound only; always empty for outbound (a Reply-To you SET on a send is a request-side field on the send/reply/forward body and is not echoed back here).")
     review_status: Optional[StrictStr] = Field(default=None, description="Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field.")
+    scheduled_at: Optional[datetime] = Field(default=None, description="Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.")
     sent_as: Optional[StrictStr] = Field(default=None, description="From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.")
     size_bytes: Optional[StrictInt] = Field(default=None, description="RAW MIME byte length of the whole stored message (headers + bodies + encoded attachments as transported). Distinct from attachments[].size_bytes, which is one attachment's DECODED payload size. This value is the dominant term of the account's storage-quota accounting (usage.storage_bytes).")
     subject: StrictStr
+    thread_id: Optional[StrictStr] = Field(default=None, description="Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned.")
     to: List[StrictStr]
     verified_domain: Optional[StrictStr] = Field(description="RFC 5322 Author Domain validated by an aligned DMARC pass. Null for non-pass verdicts and deliveries without inbound SMTP evaluation — this includes dmarc.status=none (sender publishes no DMARC record, common and NOT itself suspicious) as well as dmarc.status=fail (an actual mismatch). Only DMARC ties a passing SPF or DKIM identity back to this header domain; a bare SPF or DKIM pass without DMARC does not. This authenticates the domain, not the address local part, individual sender, or message content.")
     webhook_error: Optional[StrictStr] = None
     webhook_status: Optional[StrictStr] = None
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["attachments", "authentication", "body", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "labels", "parsed", "protection", "raw_message", "read_status", "reply_to", "review_status", "sent_as", "size_bytes", "subject", "to", "verified_domain", "webhook_error", "webhook_status"]
+    __properties: ClassVar[List[str]] = ["attachments", "authentication", "body", "cc", "conversation_id", "created_at", "deleted_at", "delivered_to", "delivery_detail", "delivery_status", "direction", "envelope_from", "flag_reason", "flagged", "header_from", "hold_reason", "id", "labels", "parsed", "protection", "raw_message", "read_status", "reply_to", "review_status", "scheduled_at", "sent_as", "size_bytes", "subject", "thread_id", "to", "verified_domain", "webhook_error", "webhook_status"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -204,9 +207,11 @@ class MessageView(BaseModel):
             "read_status": obj.get("read_status"),
             "reply_to": obj.get("reply_to"),
             "review_status": obj.get("review_status"),
+            "scheduled_at": obj.get("scheduled_at"),
             "sent_as": obj.get("sent_as"),
             "size_bytes": obj.get("size_bytes"),
             "subject": obj.get("subject"),
+            "thread_id": obj.get("thread_id"),
             "to": obj.get("to"),
             "verified_domain": obj.get("verified_domain"),
             "webhook_error": obj.get("webhook_error"),

@@ -64,6 +64,17 @@ const (
 	EventDomainSuppressionAdded = "domain.suppression_added"
 	// Agent-scoped recipient consent. Beta until its payload contract graduates.
 	EventAgentSuppressionAdded = "agent.suppression_added"
+
+	// EventContactDue wakes an agent when an outreach engagement's
+	// next_action_at has passed.
+	//
+	// The `contact.` namespace is deliberate rather than agent.contact_due:
+	// scope prefixes do not scale as namespaces in a per-agent product (nearly
+	// everything here is agent-scoped), and subscribers already narrow by agent
+	// through the agent_ids webhook filter — which frees the namespace to name
+	// the SUBJECT, as email.* and domain.* do. agent.suppression_added is the
+	// exception, justified by its domain.* pair, not the rule.
+	EventContactDue = "contact.due"
 	// Inbound trust policy (decision 10 / Slice 7): an inbound message did not
 	// match the agent's ingestion policy (allowlist/domain). It is delivered but
 	// flagged — operators get a signal, nothing is dropped.
@@ -110,6 +121,7 @@ var AllEventTypes = []string{
 	EventEmailFlagged,
 	EventEmailBlocked,
 	EventEmailReviewRequested,
+	EventContactDue,
 }
 
 // ExperimentalEventTypes is the canonical list of screening + review-hold
@@ -125,6 +137,7 @@ var ExperimentalEventTypes = []string{
 	EventEmailReviewApproved,
 	EventEmailReviewRejected,
 	EventAgentSuppressionAdded,
+	EventContactDue,
 }
 
 // IsValidEventType reports whether name is one of the catalog

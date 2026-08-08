@@ -53,11 +53,9 @@ type Domain struct {
 	// "probed and failed" which is captured by `verified=false` + a
 	// non-null LastCheckedAt.
 	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
-	// AgentCount is computed at read time by ListDomainsByUser and is
-	// not a persisted column. Single-domain LookupDomain leaves it at
-	// the zero value — callers that need the count call the list path
-	// (this column-versus-aggregate split avoids changing every store
-	// signature to thread an agent-counter through).
+	// AgentCount is computed at read time — ListDomainsByUser,
+	// LookupDomain, and ClaimOrCreateDomain's existing-row branch run
+	// the same correlated subquery — and is not a persisted column.
 	AgentCount int `json:"agent_count"`
 	// DKIM keypair fields. The selector + public key
 	// are user-facing — the dashboard shows them so users can copy the
@@ -341,6 +339,14 @@ type Message struct {
 	// is non-null; nil on outbound rows (which never have a verdict).
 	Auth           *emailauth.AuthVerdict `json:"-"`
 	ConversationID string                 `json:"conversation_id,omitempty"`
+	// ThreadID is e2a's mailbox-local materialized email reply topology.
+	// ThreadParentID is the optional directly resolved reply parent and
+	// RFCMessageIDKey is the canonical exact wire anchor. These are internal
+	// storage fields: public projections opt in explicitly, and account export
+	// must not acquire them through Message's JSON representation.
+	ThreadID        string `json:"-"`
+	ThreadParentID  string `json:"-"`
+	RFCMessageIDKey string `json:"-"`
 	// DeliveryStatus is overloaded by direction. On inbound rows it carries
 	// the inbox read/unread status (messages.inbox_status) under this legacy
 	// JSON key. On outbound rows it carries the outbound delivery rollup
@@ -355,8 +361,19 @@ type Message struct {
 	// SentAs is the From identity actually used when the outbound message was
 	// accepted by the relay. Outbound-only; empty on inbound rows. Source:
 	// messages.sent_as.
-	SentAs    string    `json:"sent_as,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	SentAs string `json:"sent_as,omitempty"`
+	// ScheduledAt is the future instant a scheduled outbound send is queued to be
+	// submitted (migration 084). Nil for immediate sends and every inbound row.
+	// The row stays delivery_status='accepted' while scheduled; this timestamp is
+	// the introspection marker (the actual deferral lives on the River job).
+	//
+	// The doc string mirrors MessageView/MessageSummaryView.scheduled_at so the
+	// exported record and the live read views describe one field one way;
+	// stability.go marks it beta on all three, because scheduled sending is a
+	// beta capability wherever it surfaces. It arrived here undocumented and
+	// unmarked, which read as a stable export field it was never meant to be.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."`
+	CreatedAt   time.Time  `json:"created_at"`
 	// ExpiresAt is nil for indefinitely retained messages. It remains on the
 	// model for compatibility with account exports and legacy database rows.
 	ExpiresAt *time.Time `json:"expires_at" nullable:"true" format:"date-time" doc:"Message expiry. Null means the message is retained indefinitely."`
@@ -530,6 +547,32 @@ type Store struct {
 	// Optional: nil ⇒ keys are stored as plaintext DER (dev/test without a
 	// configured signing secret). cmd/e2a always installs it in production.
 	dkimCipher *DKIMCipher
+	// outboundJobCanceller removes the delayed durable send when the owning
+	// message is permanently deleted. Soft deletion deliberately does not use
+	// it: restoring a trashed scheduled message before send_at must re-arm it.
+	outboundJobCanceller OutboundJobCanceller
+	// scheduledSendFinalizer records a late restore as a guarded terminal
+	// failure (or settles authoritative provider-accept evidence as sent) and
+	// publishes the matching terminal webhook in the caller's transaction.
+	scheduledSendFinalizer ScheduledSendFinalizer
+	// threadIdentityMetrics is the narrow, low-cardinality observability
+	// surface for topology resolution and lazy legacy adoption. Optional so
+	// stores in tests and embedded deployments remain inert by default.
+	threadIdentityMetrics ThreadIdentityMetrics
+}
+
+// OutboundJobCanceller is the narrow River cancellation surface identity needs
+// for hard deletes. The caller's transaction makes cancellation atomic with the
+// message/agent/account deletion.
+type OutboundJobCanceller interface {
+	CancelTx(ctx context.Context, tx pgx.Tx, jobID int64) error
+}
+
+// ScheduledSendFinalizer owns the canonical terminal transition for a
+// scheduled send restored after its cutoff. It is implemented by the outbound
+// adapter so identity does not duplicate provider-evidence and webhook logic.
+type ScheduledSendFinalizer interface {
+	FinalizeScheduledCancellationTx(ctx context.Context, tx pgx.Tx, messageID string, jobID int64, occurredAt time.Time) error
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -542,6 +585,85 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // are stored as plaintext DER. cmd/e2a always sets it in production, where
 // Signing.HMACSecret is enforced ≥32 bytes.
 func (s *Store) SetDKIMCipher(c *DKIMCipher) { s.dkimCipher = c }
+
+// SetOutboundJobCanceller wires durable send-job cleanup into irreversible
+// deletion paths. Production and full-stack test composition roots install the
+// shared River client before serving requests.
+func (s *Store) SetOutboundJobCanceller(c OutboundJobCanceller) {
+	s.outboundJobCanceller = c
+}
+
+// SetScheduledSendFinalizer wires the canonical outbound terminal transition
+// used when a scheduled message is restored after its cutoff.
+func (s *Store) SetScheduledSendFinalizer(f ScheduledSendFinalizer) {
+	s.scheduledSendFinalizer = f
+}
+
+// SetThreadMetrics installs the thread-resolution counter sink.
+// Production wires the same telemetry backend used by the janitor gauges.
+func (s *Store) SetThreadMetrics(metrics ThreadIdentityMetrics) {
+	s.threadIdentityMetrics = metrics
+}
+
+func (s *Store) cancelOutboundJobIDsTx(ctx context.Context, tx pgx.Tx, jobIDs []int64) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	if s.outboundJobCanceller == nil {
+		return errors.New("identity: outbound job canceller is not configured")
+	}
+	for _, jobID := range jobIDs {
+		if err := s.outboundJobCanceller.CancelTx(ctx, tx, jobID); err != nil {
+			return fmt.Errorf("cancel outbound job %d: %w", jobID, err)
+		}
+	}
+	return nil
+}
+
+func scanOutboundJobIDs(rows pgx.Rows) ([]int64, error) {
+	defer rows.Close()
+	var jobIDs []int64
+	for rows.Next() {
+		var jobID *int64
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		if jobID != nil {
+			jobIDs = append(jobIDs, *jobID)
+		}
+	}
+	return jobIDs, rows.Err()
+}
+
+type pastDueScheduledJob struct {
+	messageID string
+	jobID     int64
+}
+
+func (s *Store) cancelPastDueScheduledJobsTx(ctx context.Context, tx pgx.Tx, jobs []pastDueScheduledJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	if s.scheduledSendFinalizer == nil {
+		return errors.New("identity: scheduled send finalizer is not configured")
+	}
+	jobIDs := make([]int64, len(jobs))
+	for i := range jobs {
+		jobIDs[i] = jobs[i].jobID
+	}
+	if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, job := range jobs {
+		if err := s.scheduledSendFinalizer.FinalizeScheduledCancellationTx(
+			ctx, tx, job.messageID, job.jobID, now,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // sealDKIM encrypts a DKIM private key for storage when a cipher is configured,
 // else returns the plaintext DER unchanged. domain is bound as AAD.
@@ -743,10 +865,19 @@ func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) 
 	}
 
 	d := &Domain{}
+	// A same-owner re-claim is idempotent and returns this existing row, which
+	// POST /v1/domains serializes through the same view as GET — so AgentCount
+	// must be the real count (same correlated subquery as LookupDomain /
+	// ListDomainsByUser, trashed agents excluded), not the Go zero value
+	// (#811). The INSERT branch below deliberately omits it: a brand-new row
+	// cannot have agents, so its zero is genuinely correct.
 	err = tx.QueryRow(ctx,
-		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, '')
+		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, ''),
+		        (SELECT count(*) FROM agent_identities a
+		           WHERE a.registered_domain = domains.domain AND a.user_id = domains.user_id
+		             AND a.deleted_at IS NULL) AS agent_count
 		 FROM domains WHERE domain = $1`, domain,
-	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus)
+	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx,
 			`INSERT INTO domains (domain, user_id, verified, verification_token, dkim_selector, dkim_public_key, dkim_private_key)
@@ -972,13 +1103,19 @@ func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 }
 
 // LookupDomain returns a domain if it exists and is owned by the given user.
+// AgentCount is populated with the same correlated subquery ListDomainsByUser
+// uses (trashed agents excluded), so the single-resource and list responses
+// agree instead of this path leaving it at the Go zero value.
 func (s *Store) LookupDomain(ctx context.Context, domain, userID string) (*Domain, error) {
 	d := &Domain{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, '')
+		`SELECT domain, user_id, verified, verification_token, created_at, verified_at, is_primary, last_checked_at, COALESCE(dkim_selector, ''), COALESCE(dkim_public_key, ''), sending_status, COALESCE(sending_error, ''), sending_dns_records, sending_last_checked_at, COALESCE(sending_dkim_status, ''), COALESCE(sending_mail_from_status, ''),
+		        (SELECT count(*) FROM agent_identities a
+		           WHERE a.registered_domain = domains.domain AND a.user_id = domains.user_id
+		             AND a.deleted_at IS NULL) AS agent_count
 		 FROM domains WHERE domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
-	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus)
+	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if err != nil {
 		return nil, fmt.Errorf("domain not found")
 	}
@@ -1336,6 +1473,21 @@ func (s *Store) GetAgentByIDAnyState(ctx context.Context, id string) (*AgentIden
 }
 
 func (s *Store) getAgentByID(ctx context.Context, id string, includeDeleted bool) (*AgentIdentity, error) {
+	return loadAgentByID(ctx, s.pool, id, includeDeleted)
+}
+
+// agentRowQuerier is the read half of *pgxpool.Pool and pgx.Tx. It exists so
+// loadAgentByID can serve both the stand-alone getters and the write paths
+// that must re-read the agent INSIDE their own transaction.
+type agentRowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// loadAgentByID is the one agent projection, parameterized by executor. The
+// domain JOIN (domain_verified lives on `domains`, not `agent_identities`) is
+// why the agent write paths cannot answer with a plain UPDATE … RETURNING, and
+// call this inside their own transaction instead.
+func loadAgentByID(ctx context.Context, exec agentRowQuerier, id string, includeDeleted bool) (*AgentIdentity, error) {
 	q := `SELECT a.id, a.registered_domain, a.user_id, a.name, a.public, a.created_at,
 		        a.hitl_ttl_seconds, a.hitl_expiration_action, a.suppress_notifications,
 		        COALESCE(a.inbound_policy, 'open'), a.inbound_allowlist,
@@ -1354,7 +1506,7 @@ func (s *Store) getAgentByID(ctx context.Context, id string, includeDeleted bool
 		q += ` AND a.deleted_at IS NULL`
 	}
 	a := &AgentIdentity{}
-	err := s.pool.QueryRow(ctx, q, id).Scan(&a.ID, &a.RegisteredDomain, &a.UserID, &a.Name, &a.Public, &a.CreatedAt,
+	err := exec.QueryRow(ctx, q, id).Scan(&a.ID, &a.RegisteredDomain, &a.UserID, &a.Name, &a.Public, &a.CreatedAt,
 		&a.HITLTTLSeconds, &a.HITLExpirationAction, &a.SuppressNotifications,
 		&a.InboundPolicy, &a.InboundAllowlist,
 		&a.InboundPolicyAction,
@@ -1468,7 +1620,10 @@ func (s *Store) UpdateAgentHITL(ctx context.Context, agentID, userID string, ttl
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("agent not found or not owned by user")
+		// Sentinel, not a fresh error with the same text: handlers map this
+		// to 404 (a lost race against the caller's own agent) rather than a
+		// 500, and they can only do that if it's matchable with errors.Is.
+		return ErrAgentNotFound
 	}
 	return nil
 }
@@ -1536,24 +1691,48 @@ func ValidateAgentName(name string) error {
 	return nil
 }
 
-// UpdateAgentName sets an agent's display name for an agent owned by userID.
-// The name is a UI label only — the agent's identity is its email. Returns an
-// error if the agent isn't found or not owned.
-func (s *Store) UpdateAgentName(ctx context.Context, agentID, userID, name string) error {
+// UpdateAgentName sets an agent's display name for an agent owned by userID
+// and returns the agent AS WRITTEN. The name is a UI label only — the agent's
+// identity is its email. Returns an error if the agent isn't found or not
+// owned.
+//
+// The read-back happens INSIDE the write's transaction. Reading afterwards
+// from the pool was a torn read: the UPDATE takes the row lock, but once it
+// commits a concurrent rename could land before the re-read and the caller saw
+// the OTHER writer's name echoed back as the result of their own PATCH, while
+// a concurrent trash/delete turned a committed rename into a 500 "failed to
+// reload agent". Same recipe as UpdateEngagementIfUnchanged. The re-read
+// includes trashed rows on purpose: the row it reports is the one this
+// statement wrote, and AgentView carries deleted_at, so a racing trash is
+// reported honestly instead of as a server error.
+func (s *Store) UpdateAgentName(ctx context.Context, agentID, userID, name string) (*AgentIdentity, error) {
 	if err := ValidateAgentName(name); err != nil {
-		return err
+		return nil, err
 	}
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE agent_identities SET name = $3 WHERE id = $1 AND user_id = $2`,
 		agentID, userID, name,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("agent not found or not owned by user")
+		return nil, fmt.Errorf("agent not found or not owned by user")
 	}
-	return nil
+	a, err := loadAgentByID(ctx, tx, agentID, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // Agents are joined with domain verification AND enriched with per-agent stats
@@ -1704,11 +1883,35 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 		if sending {
 			return ErrSendInProgress
 		}
+		jobRows, err := tx.Query(ctx,
+			`SELECT send_job_id
+			   FROM messages
+			  WHERE agent_id = $1
+			    AND direction = 'outbound'
+			    AND delivery_status IN ('accepted', 'sending')
+			    AND send_job_id IS NOT NULL
+			  FOR UPDATE`,
+			agentID)
+		if err != nil {
+			return err
+		}
+		jobIDs, err := scanOutboundJobIDs(jobRows)
+		if err != nil {
+			return err
+		}
+		if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+			return err
+		}
 		msgTag, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, agentID)
 		if err != nil {
 			return err
 		}
 		messagesDeleted = msgTag.RowsAffected()
+		// Operational outreach state dies with a permanent agent deletion.
+		// Suppressions deliberately survive: consent outlives the inbox.
+		if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, agentID); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, agentID)
 		return err
 	})
@@ -1740,8 +1943,16 @@ func (s *Store) SoftDeleteAgent(ctx context.Context, agentID, userID string) err
 // hold cannot silently lapse while the inbox is trashed.
 // Returns ErrNotInTrash when the agent exists but is live, and ErrAgentNotFound
 // when it doesn't exist (or isn't the caller's).
-func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error {
-	return s.WithTx(ctx, func(tx pgx.Tx) error {
+//
+// It returns the restored agent, read INSIDE the restore transaction. Reading
+// afterwards from the pool was a torn read: a concurrent rename could land
+// between the commit and the re-read (the response then showed the other
+// writer's name), and a concurrent re-trash made a committed restore answer
+// 500 "failed to reload agent". The in-transaction read follows the row lock
+// this transaction already holds, so it always describes this restore.
+func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*AgentIdentity, error) {
+	var restored *AgentIdentity
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
 		var deletedAt *time.Time
 		err := tx.QueryRow(ctx,
 			`SELECT deleted_at FROM agent_identities
@@ -1756,21 +1967,92 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) error 
 		if deletedAt == nil {
 			return ErrNotInTrash
 		}
+		rows, err := tx.Query(ctx,
+			`SELECT id, send_job_id, scheduled_at
+			   FROM messages
+			  WHERE agent_id = $1
+			    AND deleted_at IS NULL
+			    AND direction = 'outbound'
+			    AND delivery_status = 'accepted'
+			    AND scheduled_at IS NOT NULL
+			    AND send_job_id IS NOT NULL
+			  FOR UPDATE`,
+			agentID)
+		if err != nil {
+			return err
+		}
+		type lockedSchedule struct {
+			job         pastDueScheduledJob
+			scheduledAt time.Time
+		}
+		var locked []lockedSchedule
+		for rows.Next() {
+			var schedule lockedSchedule
+			if err := rows.Scan(&schedule.job.messageID, &schedule.job.jobID, &schedule.scheduledAt); err != nil {
+				rows.Close()
+				return err
+			}
+			locked = append(locked, schedule)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		var cutoff time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&cutoff); err != nil {
+			return err
+		}
+		var pastDue []pastDueScheduledJob
+		for _, schedule := range locked {
+			if !schedule.scheduledAt.After(cutoff) {
+				pastDue = append(pastDue, schedule.job)
+			}
+		}
+		if err := s.cancelPastDueScheduledJobsTx(ctx, tx, pastDue); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE agent_identities SET deleted_at = NULL WHERE id = $1`, agentID); err != nil {
 			return err
 		}
+		// Past-due outreach remains visible to the agent's pull query, but a
+		// restore must not enqueue every wake-up that accumulated while the
+		// inbox was intentionally inactive. A later reschedule changes
+		// next_action_at and naturally re-arms contact.due.
+		if _, err := tx.Exec(ctx,
+			`UPDATE contact_engagements
+			    SET notified_next_action_at = next_action_at,
+			        updated_at = `+monotonicUpdatedAt("")+`
+			  WHERE user_id = $1
+			    AND agent_id = $2
+			    AND next_action_at IS NOT NULL
+			    AND next_action_at <= now()
+			    AND notified_next_action_at IS DISTINCT FROM next_action_at`,
+			userID, agentID); err != nil {
+			return err
+		}
 		// Give back the trash time to pending holds on the agent's LIVE
 		// messages only. Message retention itself is indefinite.
-		_, err = tx.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`UPDATE messages
 			    SET approval_expires_at = CASE
 			          WHEN status = 'pending_review' AND approval_expires_at IS NOT NULL
 			          THEN approval_expires_at + (now() - $2::timestamptz)
 			          ELSE approval_expires_at END
-			  WHERE agent_id = $1 AND deleted_at IS NULL`, agentID, *deletedAt)
+			  WHERE agent_id = $1 AND deleted_at IS NULL`, agentID, *deletedAt); err != nil {
+			return err
+		}
+		// The LIVE projection: this transaction just cleared deleted_at, so a
+		// row is guaranteed, and finding one still proves the agent is visible
+		// again — the property the handler's post-restore read used to assert.
+		restored, err = loadAgentByID(ctx, tx, agentID, false)
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return restored, nil
 }
 
 // agentPurgeBatch bounds one janitor pass of PurgeDeletedAgents: one agent
@@ -1802,7 +2084,42 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 			if err != nil {
 				return err
 			}
+			jobRows, err := tx.Query(ctx,
+				`SELECT send_job_id
+				   FROM messages
+				  WHERE agent_id = $1
+				    AND direction = 'outbound'
+				    AND delivery_status IN ('accepted', 'sending')
+				    AND send_job_id IS NOT NULL
+				  FOR UPDATE`,
+				id)
+			if err != nil {
+				return err
+			}
+			jobIDs, err := scanOutboundJobIDs(jobRows)
+			if err != nil {
+				return err
+			}
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, id); err != nil {
+				return err
+			}
+			// Outreach state dies with the agent, in the SAME transaction.
+			//
+			// contact_engagements deliberately has no FK to agent_identities (it
+			// mirrors agent_suppressions), so nothing cascades this for us — and
+			// because agent_id IS the agent's email address, anything left behind
+			// would be inherited by a recreated agent at that address. That agent
+			// would wake up holding last campaign's stage and a past-due schedule
+			// and mail investors it never contacted.
+			//
+			// Suppressions are deliberately NOT deleted here: consent has to
+			// survive deletion and recreation. That asymmetry — operational state
+			// dies, consent persists — is the reason this is an explicit delete
+			// rather than a cascade.
+			if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, id); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, id); err != nil {
@@ -1859,13 +2176,34 @@ func NewMessageID() string {
 	return "msg_" + generateID()
 }
 
-// NewConversationID returns a fresh conversation (thread) ID. An outbound send
-// that omits a conversation_id gets one minted here so the message becomes a
-// thread anchor: external replies reference this message's Message-ID, and the
-// relay's In-Reply-To lookup recovers the conversation_id from it. Without an
-// anchor the lookup finds an empty id and the thread fragments (#328).
+// NewConversationID returns a fresh application conversation/grouping ID. An
+// outbound send that omits conversation_id gets one minted here so external
+// replies can recover the grouping from the referenced outbound message.
+// Email reply topology is tracked independently by thread_id and RFC headers.
 func NewConversationID() string {
 	return "conv_" + generateID()
+}
+
+// NewThreadID returns an opaque mailbox-local email thread identifier. The
+// random suffix matches message and conversation IDs: 128 bits rendered as
+// lowercase hexadecimal.
+func NewThreadID() string {
+	return "thr_" + generateID()
+}
+
+// IsValidThreadID reports whether id has the only persisted thread-ID shape
+// emitted by e2a. Thread IDs are server-owned and are never accepted from API
+// callers.
+func IsValidThreadID(id string) bool {
+	if len(id) != len("thr_")+32 || !strings.HasPrefix(id, "thr_") {
+		return false
+	}
+	for _, c := range id[len("thr_"):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CreateInboundMessage stores an inbound message. If id is empty a new
@@ -1877,14 +2215,26 @@ func NewConversationID() string {
 // header list when the agent was Bcc'd). replyTo is the parsed Reply-To:
 // header (empty when absent — never silently falls back to sender).
 func (s *Store) CreateInboundMessage(ctx context.Context, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, s.pool, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, s.pool, assignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 // CreateInboundMessageAuthenticated stores the canonical identity and
 // authentication model. The legacy CreateInboundMessage remains temporarily
 // available while older tests and relay call sites migrate.
 func (s *Store) CreateInboundMessageAuthenticated(ctx context.Context, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, s.pool, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, s.pool, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignment(assignment)
+	}
+	return message, err
 }
 
 // WithTx opens a transaction, runs fn inside it, and commits if fn
@@ -1895,12 +2245,14 @@ func (s *Store) CreateInboundMessageAuthenticated(ctx context.Context, id, agent
 //
 // The relay handler is the primary v1 caller; future trigger sites
 // (slice 4 outbound + HITL) reuse the same helper. Keeps callers from
-// having to import pgxpool directly.
+// having to import pgxpool directly. Store-owned in-memory side effects may
+// register on the wrapped transaction and run only after a successful commit.
 func (s *Store) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+	rawTx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
+	tx := newPostCommitTx(rawTx, nil)
 	defer tx.Rollback(ctx)
 	if err := fn(tx); err != nil {
 		return err
@@ -1917,11 +2269,54 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 // body, executed against either *pgxpool.Pool or pgx.Tx via the
 // messageExecutor interface below.
 func (s *Store) CreateInboundMessageInTx(ctx context.Context, tx pgx.Tx, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, tx, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, authHeaders, authVerdict, flagged, flagReason, toRecipients, cc, replyTo, screening, nil)
+	if err == nil {
+		s.recordThreadAssignmentTx(tx, assignment)
+	}
+	return message, err
 }
 
 func (s *Store) CreateInboundMessageAuthenticatedInTx(ctx context.Context, tx pgx.Tx, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
-	return createInboundMessage(ctx, tx, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.resolutionSource = "no_anchor"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignmentTx(tx, assignment)
+	}
+	return message, err
+}
+
+func (s *Store) CreateInboundMessageAuthenticatedThreadedInTx(ctx context.Context, tx pgx.Tx, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, evidence InboundThreadEvidence) (*Message, error) {
+	assignment, err := s.resolveInboundThreadTx(ctx, tx, agentID, recipient, emailMessageID, auth, evidence)
+	if err != nil {
+		return nil, err
+	}
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignmentTx(tx, assignment)
+	}
+	return message, err
+}
+
+// CreateInboundMessageAuthenticatedTwinInTx creates the Inbox representation
+// of a providerless physical delivery that the platform itself already
+// authenticated (self-send/local loopback). It copies the source outbound
+// thread without making either twin the reply parent of the other.
+func (s *Store) CreateInboundMessageAuthenticatedTwinInTx(ctx context.Context, tx pgx.Tx, sourceMessageID, id, agentID string, auth InboundAuth, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening) (*Message, error) {
+	threadID, err := s.EnsureThreadTx(ctx, tx, agentID, sourceMessageID)
+	if err != nil {
+		return nil, err
+	}
+	assignment := freshInboundMessageThread(emailMessageID)
+	assignment.threadID = threadID
+	assignment.resolutionSource = "self_twin"
+	message, err := createInboundMessage(ctx, tx, assignment, id, agentID, storedInboundSender(auth), recipient, emailMessageID, subject, conversationID, deliveryStatus, rawMessage, nil, nil, flagged, flagReason, toRecipients, cc, replyTo, screening, &auth)
+	if err == nil {
+		s.recordThreadAssignmentTx(tx, assignment)
+	}
+	return message, err
 }
 
 func storedInboundSender(auth InboundAuth) string {
@@ -1938,9 +2333,12 @@ type messageExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
-func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, canonical *InboundAuth) (*Message, error) {
+func createInboundMessage(ctx context.Context, exec messageExecutor, assignment messageThreadAssignment, id, agentID, senderEmail, recipient, emailMessageID, subject, conversationID, deliveryStatus string, rawMessage []byte, authHeaders map[string]string, authVerdict []byte, flagged bool, flagReason string, toRecipients, cc, replyTo []string, screening InboundScreening, canonical *InboundAuth) (*Message, error) {
 	if id == "" {
 		id = NewMessageID()
+	}
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
 	}
 	now := time.Now()
 
@@ -1982,6 +2380,9 @@ func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID
 		RawMessage:        rawMessage,
 		AuthHeaders:       authHeaders,
 		ConversationID:    conversationID,
+		ThreadID:          assignment.threadID,
+		ThreadParentID:    assignment.threadParentID,
+		RFCMessageIDKey:   assignment.rfcMessageIDKey,
 		DeliveryStatus:    deliveryStatus,
 		Flagged:           flagged,
 		FlagReason:        flagReason,
@@ -2004,9 +2405,9 @@ func createInboundMessage(ctx context.Context, exec messageExecutor, id, agentID
 		inboxStatus = &m.DeliveryStatus
 	}
 	_, err := exec.Exec(ctx,
-		`INSERT INTO messages (id, agent_id, direction, sender, header_from, envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, raw_message, auth_headers, auth_verdict, flagged, flag_reason, conversation_id, inbox_status, created_at, expires_at, review_reason, scan_score, scan_action, status, approval_expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
-		m.ID, m.AgentID, m.Direction, m.Sender, nullIfEmptyString(m.HeaderFrom), nullIfEmptyString(m.EnvelopeFrom), nullIfEmptyBytes(authenticationJSON), m.Recipient, m.ToRecipients, m.CC, m.ReplyTo, m.Subject, m.EmailMessageID, m.RawMessage, authHeadersJSON, nullIfEmptyBytes(authVerdict), m.Flagged, nullIfEmptyString(m.FlagReason), m.ConversationID, inboxStatus, m.CreatedAt, m.ExpiresAt, nullIfEmptyString(m.ReviewReason), m.ScanScore, nullIfEmptyString(m.ScanAction), m.Status, m.ApprovalExpiresAt,
+		`INSERT INTO messages (id, agent_id, direction, sender, header_from, envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, raw_message, auth_headers, auth_verdict, flagged, flag_reason, conversation_id, thread_id, thread_parent_id, rfc_message_id_key, inbox_status, created_at, expires_at, review_reason, scan_score, scan_action, status, approval_expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
+		m.ID, m.AgentID, m.Direction, m.Sender, nullIfEmptyString(m.HeaderFrom), nullIfEmptyString(m.EnvelopeFrom), nullIfEmptyBytes(authenticationJSON), m.Recipient, m.ToRecipients, m.CC, m.ReplyTo, m.Subject, m.EmailMessageID, m.RawMessage, authHeadersJSON, nullIfEmptyBytes(authVerdict), m.Flagged, nullIfEmptyString(m.FlagReason), m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), nullIfEmptyString(m.RFCMessageIDKey), inboxStatus, m.CreatedAt, m.ExpiresAt, nullIfEmptyString(m.ReviewReason), m.ScanScore, nullIfEmptyString(m.ScanAction), m.Status, m.ApprovalExpiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -2281,6 +2682,17 @@ func (s *Store) CreateOutboundMessage(ctx context.Context, agentID string, toRec
 // can submit the persisted bytes without re-composing. provider_message_id is
 // empty until the worker records the SES id in MarkOutboundSentTx.
 func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID string, toRecipients, cc, bcc []string, subject, msgType, method, providerMessageID, conversationID string, rawMessage []byte, deliveryStatus, envelopeFrom, sentAs string) (*Message, error) {
+	return s.CreateOutboundMessageThreadedTx(
+		ctx, tx, "", agentID, toRecipients, cc, bcc, subject, msgType, method,
+		providerMessageID, conversationID, rawMessage, deliveryStatus,
+		envelopeFrom, sentAs,
+	)
+}
+
+func (s *Store) createOutboundMessageAssignedTx(ctx context.Context, tx pgx.Tx, assignment messageThreadAssignment, agentID string, toRecipients, cc, bcc []string, subject, msgType, method, providerMessageID, conversationID string, rawMessage []byte, deliveryStatus, envelopeFrom, sentAs string) (*Message, error) {
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
+	}
 	id := "msg_" + generateID()
 	now := time.Now()
 
@@ -2299,6 +2711,9 @@ func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID 
 		Method:            method,
 		ProviderMessageID: providerMessageID,
 		ConversationID:    conversationID,
+		ThreadID:          assignment.threadID,
+		ThreadParentID:    assignment.threadParentID,
+		RFCMessageIDKey:   assignment.rfcMessageIDKey,
 		CreatedAt:         now,
 		ExpiresAt:         nil,
 		ToRecipients:      toRecipients,
@@ -2310,9 +2725,9 @@ func (s *Store) CreateOutboundMessageTx(ctx context.Context, tx pgx.Tx, agentID 
 		SentAs:            sentAs,
 	}
 	_, err := tx.Exec(ctx,
-		`INSERT INTO messages (id, agent_id, direction, recipient, subject, message_type, method, provider_message_id, conversation_id, created_at, expires_at, to_recipients, cc, bcc, status, sender, raw_message, delivery_status, sent_as, envelope_from)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.Type, m.Method, m.ProviderMessageID, m.ConversationID, m.CreatedAt, m.ExpiresAt, m.ToRecipients, m.CC, m.BCC, MessageStatusSent, m.Sender, nullIfEmptyBytes(m.RawMessage), nullIfEmpty(deliveryStatus), nullIfEmpty(sentAs), nullIfEmpty(envelopeFrom),
+		`INSERT INTO messages (id, agent_id, direction, recipient, subject, message_type, method, provider_message_id, conversation_id, thread_id, thread_parent_id, rfc_message_id_key, created_at, expires_at, to_recipients, cc, bcc, status, sender, raw_message, delivery_status, sent_as, envelope_from)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.Type, m.Method, m.ProviderMessageID, m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), nullIfEmptyString(m.RFCMessageIDKey), m.CreatedAt, m.ExpiresAt, m.ToRecipients, m.CC, m.BCC, MessageStatusSent, m.Sender, nullIfEmptyBytes(m.RawMessage), nullIfEmpty(deliveryStatus), nullIfEmpty(sentAs), nullIfEmpty(envelopeFrom),
 	)
 	if err != nil {
 		return nil, err
@@ -2344,6 +2759,16 @@ func (s *Store) StampSendJobIDTx(ctx context.Context, tx pgx.Tx, messageID strin
 		CorrelationIDs: messagelifecycle.SafeCorrelationIDs(map[string]string{"job_id": fmt.Sprint(jobID)}),
 		OccurredAt:     time.Now(),
 	})
+	return err
+}
+
+// StampScheduledAtTx records the future send instant on a scheduled outbound
+// message, WITHIN the accept-tx (mirrors StampSendJobIDTx). Called only when the
+// caller supplied a future send_at; immediate sends never call this, leaving
+// scheduled_at NULL. The corresponding River job is enqueued with the same
+// instant as its ScheduledAt, so the column and the job agree.
+func (s *Store) StampScheduledAtTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) error {
+	_, err := tx.Exec(ctx, `UPDATE messages SET scheduled_at = $2 WHERE id = $1`, messageID, at)
 	return err
 }
 
@@ -2386,7 +2811,15 @@ func (s *Store) CreatePendingOutboundMessageTx(ctx context.Context, tx pgx.Tx, a
 }
 
 func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pgx.Tx, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
-	m, err := createPendingOutboundMessage(ctx, tx, agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
+	return s.CreatePendingOutboundMessageManagedThreadedTx(ctx, tx, "", agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
+}
+
+func (s *Store) CreatePendingOutboundMessageManagedThreadedTx(ctx context.Context, tx pgx.Tx, parentMessageID, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
+	assignment, err := s.outboundThreadAssignmentTx(ctx, tx, agentID, msgType, parentMessageID, "")
+	if err != nil {
+		return nil, err
+	}
+	m, err := createPendingOutboundMessage(ctx, tx, assignment, agentID, toRecipients, cc, bcc, subject, bodyText, bodyHTML, attachmentsJSON, msgType, conversationID, replyToEmailMessageID, replyTo, ttlSeconds, managedUnsubscribe)
 	if err != nil {
 		return nil, err
 	}
@@ -2405,6 +2838,7 @@ func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pg
 		return nil, err
 	}
 	m.LifecycleTransitions = []messagelifecycle.MessageLifecycleTransition{hold}
+	s.recordThreadAssignmentTx(tx, assignment)
 	return m, nil
 }
 
@@ -2412,9 +2846,12 @@ func (s *Store) CreatePendingOutboundMessageManagedTx(ctx context.Context, tx pg
 // creators; exec is satisfied by both *pgxpool.Pool and pgx.Tx (messageExecutor).
 // replyTo, when non-empty, is a caller-supplied Reply-To override persisted on
 // the reply_to column (single element) so it survives the recompose at approval.
-func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
+func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, assignment messageThreadAssignment, agentID string, toRecipients, cc, bcc []string, subject, bodyText, bodyHTML string, attachmentsJSON []byte, msgType, conversationID, replyToEmailMessageID, replyTo string, ttlSeconds int, managedUnsubscribe bool) (*Message, error) {
 	if ttlSeconds <= 0 || ttlSeconds > HITLMaxTTLSeconds {
 		return nil, fmt.Errorf("ttl_seconds must be between 1 and %d", HITLMaxTTLSeconds)
+	}
+	if !IsValidThreadID(assignment.threadID) {
+		return nil, fmt.Errorf("invalid thread assignment")
 	}
 
 	id := "msg_" + generateID()
@@ -2447,6 +2884,8 @@ func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, age
 		EmailMessageID:     replyToEmailMessageID,
 		Type:               msgType,
 		ConversationID:     conversationID,
+		ThreadID:           assignment.threadID,
+		ThreadParentID:     assignment.threadParentID,
 		CreatedAt:          now,
 		ExpiresAt:          nil,
 		ToRecipients:       toRecipients,
@@ -2466,17 +2905,17 @@ func createPendingOutboundMessage(ctx context.Context, exec messageExecutor, age
 	_, err := exec.Exec(ctx,
 		`INSERT INTO messages (
 		    id, agent_id, direction, recipient, subject, email_message_id, message_type,
-		    conversation_id, created_at, expires_at,
+		    conversation_id, thread_id, thread_parent_id, created_at, expires_at,
 		    to_recipients, cc, bcc, reply_to,
 		    status, approval_expires_at,
 		    body_text, body_html, attachments_json, sender, managed_unsubscribe)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7,
-		         $8, $9, $10,
-		         $11, $12, $13, $14,
-		         $15, $16,
-		         $17, $18, $19, $20, $21)`,
+		         $8, $9, $10, $11, $12,
+		         $13, $14, $15, $16,
+		         $17, $18,
+		         $19, $20, $21, $22, $23)`,
 		m.ID, m.AgentID, m.Direction, m.Recipient, m.Subject, m.EmailMessageID, m.Type,
-		m.ConversationID, m.CreatedAt, m.ExpiresAt,
+		m.ConversationID, m.ThreadID, nullIfEmptyString(m.ThreadParentID), m.CreatedAt, m.ExpiresAt,
 		m.ToRecipients, m.CC, m.BCC, replyToArg,
 		m.Status, m.ApprovalExpiresAt,
 		nullIfEmptyString(m.BodyText), nullIfEmptyString(m.BodyHTML), attachmentsArg, m.Sender, m.ManagedUnsubscribe,
@@ -2658,6 +3097,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		method, msgType    *string
 		approvalExpires    *time.Time
 		reviewedAt         *time.Time
+		scheduledAt        *time.Time
 		rejectionReason    *string
 		reviewedByID       *string
 		reviewedByName     *string
@@ -2668,7 +3108,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		        m.method, m.message_type,
 		        m.conversation_id, m.created_at, m.expires_at,
 		        m.to_recipients, m.cc, m.bcc, m.reply_to,
-		        m.status, m.approval_expires_at, m.reviewed_at,
+		        m.status, m.approval_expires_at, m.reviewed_at, m.scheduled_at,
 		        m.rejection_reason, m.edited,
 		        m.body_text, m.body_html, m.attachments_json, m.managed_unsubscribe,
 		        m.reviewed_by_user_id, r.name,
@@ -2685,7 +3125,7 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 		&method, &msgType,
 		&m.ConversationID, &m.CreatedAt, &m.ExpiresAt,
 		&m.ToRecipients, &m.CC, &m.BCC, &m.ReplyTo,
-		&m.Status, &approvalExpires, &reviewedAt,
+		&m.Status, &approvalExpires, &reviewedAt, &scheduledAt,
 		&rejectionReason, &m.Edited,
 		&bodyText, &bodyHTML, &attachments, &m.ManagedUnsubscribe,
 		&reviewedByID, &reviewedByName,
@@ -2705,6 +3145,9 @@ func (s *Store) GetOutboundMessageForUser(ctx context.Context, messageID, userID
 	}
 	if reviewedAt != nil {
 		m.ReviewedAt = reviewedAt
+	}
+	if scheduledAt != nil {
+		m.ScheduledAt = scheduledAt
 	}
 	if rejectionReason != nil {
 		m.RejectionReason = *rejectionReason
@@ -2978,7 +3421,11 @@ func (s *Store) ApproveAndSend(
 		        edited            = $10,
 		        reviewed_at       = now(),
 		        reviewed_by_user_id = $11,
-		        raw_message       = $12::bytea
+		        raw_message       = $12::bytea,
+		        rfc_message_id_key = CASE
+		          WHEN rfc_message_id_key IS NULL AND $13 <> '' THEN $13
+		          ELSE rfc_message_id_key
+		        END
 		  WHERE id = $1`,
 		messageID,
 		MessageStatusSent,
@@ -2995,6 +3442,7 @@ func (s *Store) ApproveAndSend(
 		// accepted draft columns. Empty on the rare already-sent replay path
 		// (send_attempts doesn't cache bytes) -> NULL, best-effort.
 		nullIfEmptyBytes(result.Raw),
+		canonicalRFCMessageIDKey(result.ProviderMessageID),
 	)
 	if err != nil {
 		return nil, err
@@ -3244,7 +3692,11 @@ func (s *Store) ExpireApproveAndSend(
 		        bcc               = $7,
 		        recipient         = $8,
 		        reviewed_at       = now(),
-		        raw_message       = $9::bytea
+		        raw_message       = $9::bytea,
+		        rfc_message_id_key = CASE
+		          WHEN rfc_message_id_key IS NULL AND $10 <> '' THEN $10
+		          ELSE rfc_message_id_key
+		        END
 		  WHERE id = $1`,
 		messageID,
 		MessageStatusReviewExpiredApproved,
@@ -3255,6 +3707,7 @@ func (s *Store) ExpireApproveAndSend(
 		result.BCC,
 		firstOr(result.To, ""),
 		nullIfEmptyBytes(result.Raw),
+		canonicalRFCMessageIDKey(result.ProviderMessageID),
 	)
 	if err != nil {
 		return nil, err
@@ -3310,12 +3763,22 @@ type AcceptedSend struct {
 // must NOT resolve — trashed holds stay pending_review with their clock paused
 // until RestoreAgent shifts approval_expires_at (or the trash purge drops them).
 // Draft body and attachment columns remain retained after approval.
+//
+// Scheduling survives the hold (#815): the CAS RETURNING reads back the draft's
+// own scheduled_at (never modified by this UPDATE, so this is snapshot-safe — not
+// a data-modifying-CTE re-select). When it is still in the future, the send is
+// re-armed via enqueueScheduled (River first-run = scheduled_at) instead of the
+// immediate enqueue, and the returned Message carries ScheduledAt so the caller
+// renders status=scheduled. A scheduled_at that has already passed by approval
+// time falls through to the immediate enqueue — "not before" is satisfied and
+// approval was the last blocker.
 func (s *Store) ApproveAndAccept(
 	ctx context.Context,
 	messageID, reviewedByUserID, targetStatus string,
 	edited bool,
 	acc AcceptedSend,
 	enqueue func(ctx context.Context, tx pgx.Tx, messageID string) (int64, error),
+	enqueueScheduled func(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error),
 	completeIdempotency func(ctx context.Context, tx pgx.Tx, approved *Message) error,
 ) (*Message, error) {
 	var reviewReason messagelifecycle.ReasonCode
@@ -3351,7 +3814,7 @@ func (s *Store) ApproveAndAccept(
 			  WHERE id = $1 AND direction = 'outbound' AND status = 'pending_review'
 			    AND NOT EXISTS (SELECT 1 FROM agent_identities ai
 			                     WHERE ai.id = messages.agent_id AND ai.deleted_at IS NOT NULL)
-			  RETURNING id, agent_id, message_type, subject, to_recipients, cc, bcc, status, edited`,
+			  RETURNING id, agent_id, message_type, subject, to_recipients, cc, bcc, status, edited, scheduled_at`,
 			messageID,
 			targetStatus,
 			acc.To, acc.CC, acc.BCC,
@@ -3363,7 +3826,7 @@ func (s *Store) ApproveAndAccept(
 			nullIfEmptyBytes(acc.Raw),
 			nullIfEmptyString(reviewedByUserID),
 			edited,
-		).Scan(&m.ID, &m.AgentID, &msgType, &m.Subject, &m.ToRecipients, &m.CC, &m.BCC, &m.Status, &m.Edited)
+		).Scan(&m.ID, &m.AgentID, &msgType, &m.Subject, &m.ToRecipients, &m.CC, &m.BCC, &m.Status, &m.Edited, &m.ScheduledAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotPendingApproval
 		}
@@ -3381,7 +3844,19 @@ func (s *Store) ApproveAndAccept(
 			return err
 		}
 		m.LifecycleTransitions = []messagelifecycle.MessageLifecycleTransition{transition}
-		jobID, err := enqueue(ctx, tx, m.ID)
+		// Re-arm a preserved schedule (#815): a held draft's future send_at is
+		// honored by enqueueing the send to run no earlier than scheduled_at. A
+		// scheduled_at already in the past submits immediately (the immediate enqueue
+		// below), exactly like a directly-scheduled row whose instant has arrived —
+		// scheduled_at stays on the row as the historical marker in both cases.
+		// enqueueScheduled may be nil in setups without the scheduled arm wired — fall
+		// back to immediate.
+		var jobID int64
+		if m.ScheduledAt != nil && m.ScheduledAt.After(time.Now()) && enqueueScheduled != nil {
+			jobID, err = enqueueScheduled(ctx, tx, m.ID, *m.ScheduledAt)
+		} else {
+			jobID, err = enqueue(ctx, tx, m.ID)
+		}
 		if err != nil {
 			return err
 		}
@@ -3711,7 +4186,7 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 	var query string
 	var args []interface{}
 
-	baseSelect := `SELECT m.id, m.agent_id, m.direction, m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, COALESCE(m.method, ''), m.conversation_id, COALESCE(m.inbox_status, ''), COALESCE(m.status, ''), COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), COALESCE(octet_length(m.raw_message), 0), m.created_at, m.deleted_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), m.auth_headers
+	baseSelect := `SELECT m.id, m.agent_id, m.direction, m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, COALESCE(m.method, ''), m.conversation_id, COALESCE(m.thread_id, ''), COALESCE(m.inbox_status, ''), COALESCE(m.status, ''), COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), COALESCE(octet_length(m.raw_message), 0), m.created_at, m.deleted_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), m.auth_headers, m.scheduled_at
 		 FROM messages m
 		 LEFT JOIN webhook_deliveries wd ON wd.message_id = m.id
 		 WHERE m.agent_id = $1`
@@ -3851,11 +4326,11 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 		var authHeadersJSON []byte
 		if err := rows.Scan(
 			&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo,
-			&m.Subject, &m.EmailMessageID, &m.Method, &m.ConversationID,
+			&m.Subject, &m.EmailMessageID, &m.Method, &m.ConversationID, &m.ThreadID,
 			&m.InboxStatus, &m.Status, &m.WebhookStatus, &m.WebhookError, &m.SizeBytes,
 			&m.CreatedAt, &m.DeletedAt, &m.Labels,
 			&outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &authVerdict, &m.Flagged, &m.FlagReason,
-			&authHeadersJSON,
+			&authHeadersJSON, &m.ScheduledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -3893,6 +4368,15 @@ func (s *Store) GetMessagesByAgent(ctx context.Context, f MessageListFilter) ([]
 // the dashboard trash can open a deleted message — Gmail's "view message in
 // trash". Callers branch on DeletedAt when trash rows must not qualify.
 func (s *Store) GetMessageWithContent(ctx context.Context, messageID, agentID string) (*Message, error) {
+	return getMessageWithContent(ctx, s.pool, messageID, agentID)
+}
+
+// getMessageWithContent is GetMessageWithContent parameterized by executor, so
+// a write path (RestoreMessage) can produce its own authoritative post-write
+// view from INSIDE its transaction instead of re-reading from the pool after
+// the commit. The CTE is snapshot-safe: its outer SELECT reads the CTE's own
+// RETURNING output (`FROM upd`), never the modified table.
+func getMessageWithContent(ctx context.Context, exec agentRowQuerier, messageID, agentID string) (*Message, error) {
 	m := &Message{}
 	var authHeadersJSON []byte
 	var authentication, authVerdict []byte
@@ -3901,17 +4385,17 @@ func (s *Store) GetMessageWithContent(ctx context.Context, messageID, agentID st
 	// the detail view is a superset of the summary view, so it must carry the
 	// same webhook_status/webhook_error the list exposes. Mirrors the
 	// wd.status/wd.last_error JOIN used by GetMessagesByAgent/GetConversationByID.
-	err := s.pool.QueryRow(ctx,
+	err := exec.QueryRow(ctx,
 		`WITH upd AS (
 		   UPDATE messages SET inbox_status = CASE WHEN inbox_status = 'unread' THEN 'read' ELSE inbox_status END
 		   WHERE id = $1 AND agent_id = $2
 		     AND NOT (direction = 'inbound' AND status IN (`+heldInboundStatuses+`))
-		   RETURNING id, agent_id, direction, sender, COALESCE(header_from, '') AS header_from, COALESCE(envelope_from, '') AS envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, conversation_id, COALESCE(inbox_status, '') AS inbox_status, raw_message, auth_headers, auth_verdict, COALESCE(flagged, false) AS flagged, COALESCE(flag_reason, '') AS flag_reason, created_at, expires_at, deleted_at, labels, COALESCE(delivery_status, '') AS delivery_status, COALESCE(delivery_detail, '') AS delivery_detail, COALESCE(sent_as, '') AS sent_as, COALESCE(body_text, '') AS body_text, COALESCE(body_html, '') AS body_html, COALESCE(status, '') AS status, COALESCE(method, '') AS method
+		   RETURNING id, agent_id, direction, sender, COALESCE(header_from, '') AS header_from, COALESCE(envelope_from, '') AS envelope_from, authentication, recipient, to_recipients, cc, reply_to, subject, email_message_id, conversation_id, COALESCE(thread_id, '') AS thread_id, COALESCE(thread_parent_id, '') AS thread_parent_id, COALESCE(rfc_message_id_key, '') AS rfc_message_id_key, COALESCE(inbox_status, '') AS inbox_status, raw_message, auth_headers, auth_verdict, COALESCE(flagged, false) AS flagged, COALESCE(flag_reason, '') AS flag_reason, created_at, expires_at, deleted_at, labels, COALESCE(delivery_status, '') AS delivery_status, COALESCE(delivery_detail, '') AS delivery_detail, COALESCE(sent_as, '') AS sent_as, COALESCE(body_text, '') AS body_text, COALESCE(body_html, '') AS body_html, COALESCE(status, '') AS status, COALESCE(method, '') AS method, scheduled_at
 		 )
-		 SELECT upd.id, upd.agent_id, upd.direction, upd.sender, upd.header_from, upd.envelope_from, upd.authentication, upd.recipient, upd.to_recipients, upd.cc, upd.reply_to, upd.subject, upd.email_message_id, upd.conversation_id, upd.inbox_status, upd.raw_message, upd.auth_headers, upd.auth_verdict, upd.flagged, upd.flag_reason, upd.created_at, upd.expires_at, upd.deleted_at, upd.labels, upd.delivery_status, upd.delivery_detail, upd.sent_as, upd.body_text, upd.body_html, upd.status, upd.method, COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
+		 SELECT upd.id, upd.agent_id, upd.direction, upd.sender, upd.header_from, upd.envelope_from, upd.authentication, upd.recipient, upd.to_recipients, upd.cc, upd.reply_to, upd.subject, upd.email_message_id, upd.conversation_id, upd.thread_id, upd.thread_parent_id, upd.rfc_message_id_key, upd.inbox_status, upd.raw_message, upd.auth_headers, upd.auth_verdict, upd.flagged, upd.flag_reason, upd.created_at, upd.expires_at, upd.deleted_at, upd.labels, upd.delivery_status, upd.delivery_detail, upd.sent_as, upd.body_text, upd.body_html, upd.status, upd.method, upd.scheduled_at, COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
 		 FROM upd LEFT JOIN webhook_deliveries wd ON wd.message_id = upd.id`,
 		messageID, agentID,
-	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.CreatedAt, &m.ExpiresAt, &m.DeletedAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.Method, &m.WebhookStatus, &m.WebhookError)
+	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.ThreadID, &m.ThreadParentID, &m.RFCMessageIDKey, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.CreatedAt, &m.ExpiresAt, &m.DeletedAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.Method, &m.ScheduledAt, &m.WebhookStatus, &m.WebhookError)
 	if err != nil {
 		return nil, err
 	}
@@ -4032,13 +4516,55 @@ func (s *Store) UpdateMessageDeliveryStatus(ctx context.Context, messageID, agen
 	return err
 }
 
-// expiredDeleteBatch bounds one DELETE statement in the janitor's batched sweeps.
+// expiredDeleteBatch bounds one transaction in the janitor's batched sweeps.
 // messages is prod-sized, so a single unbounded `DELETE ... WHERE expired` would take
 // a long row-lock + emit a huge WAL burst on the first sweep of a backlog. Deleting
-// in ctid-bounded chunks keeps each statement small; the caller's ctx bounds total
+// in bounded chunks keeps each transaction small; the caller's ctx bounds total
 // runtime (a partial sweep resumes next hour — the delete is idempotent). A var (not
 // const) so tests can shrink it to exercise the multi-batch loop cheaply.
 var expiredDeleteBatch int64 = 5000
+
+// threadChildDetachBatch bounds the number of parent-pointer rows rewritten by
+// one statement. DeleteExpiredMessages executes at most one such statement per
+// transaction; a high-fanout parent remains in trash and is resumed by the next
+// transaction until no children point at it. PurgeMessage keeps its stronger
+// message-delete/job-cancellation atomicity by draining multiple bounded
+// statements in its single caller transaction.
+var threadChildDetachBatch int64 = 5000
+
+// detachThreadChildrenBatchTx clears at most limit direct-parent pointers.
+// ORDER BY makes overlapping callers acquire child locks deterministically.
+// Periodic maintenance uses skipLocked so contention is resumed next sweep;
+// explicit purge blocks because a successful synchronous delete cannot leave a
+// surviving child pointing at the removed parent.
+func detachThreadChildrenBatchTx(ctx context.Context, tx pgx.Tx, parentIDs []string, limit int64, skipLocked bool) (int64, error) {
+	if len(parentIDs) == 0 || limit <= 0 {
+		return 0, nil
+	}
+	lockClause := "FOR UPDATE"
+	if skipLocked {
+		lockClause += " SKIP LOCKED"
+	}
+	tag, err := tx.Exec(ctx,
+		`WITH children AS (
+		   SELECT id, thread_parent_id
+		     FROM messages
+		    WHERE thread_parent_id = ANY($1)
+		    ORDER BY thread_parent_id, id
+		    LIMIT $2
+		    `+lockClause+`
+		 )
+		 UPDATE messages AS m
+		    SET thread_parent_id = NULL
+		   FROM children
+		  WHERE m.id = children.id`,
+		parentIDs, limit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
 
 // DeleteExpiredMessages purges message rows whose TrashRetention window has
 // lapsed. Live rows are retained indefinitely. Messages belonging to an agent
@@ -4047,19 +4573,113 @@ var expiredDeleteBatch int64 = 5000
 func (s *Store) DeleteExpiredMessages(ctx context.Context) (int64, error) {
 	var total int64
 	for {
-		tag, err := s.pool.Exec(ctx,
-			`DELETE FROM messages WHERE ctid IN (
-			   SELECT m.ctid FROM messages m
-			    WHERE m.deleted_at IS NOT NULL
-			      AND m.deleted_at <= now() - make_interval(secs => $2)
-			    LIMIT $1)`,
-			expiredDeleteBatch, TrashRetention.Seconds())
+		var selected, detached, deleted int64
+		err := s.WithTx(ctx, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx,
+				`SELECT m.id,
+				        CASE WHEN m.direction = 'outbound'
+				                   AND m.delivery_status IN ('accepted', 'sending')
+				             THEN m.send_job_id END
+				   FROM messages m
+				  WHERE m.deleted_at IS NOT NULL
+				    AND m.deleted_at <= now() - make_interval(secs => $2)
+				  LIMIT $1
+				  FOR UPDATE SKIP LOCKED`,
+				expiredDeleteBatch, TrashRetention.Seconds())
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			messageIDs := make([]string, 0, expiredDeleteBatch)
+			jobIDByMessage := make(map[string]int64)
+			for rows.Next() {
+				var messageID string
+				var jobID *int64
+				if err := rows.Scan(&messageID, &jobID); err != nil {
+					return err
+				}
+				messageIDs = append(messageIDs, messageID)
+				if jobID != nil {
+					jobIDByMessage[messageID] = *jobID
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			rows.Close()
+			if len(messageIDs) == 0 {
+				return nil
+			}
+			selected = int64(len(messageIDs))
+			// A hard-deleted parent cannot remain as a dangling internal pointer
+			// on a surviving child. Only one bounded child batch is detached in
+			// this transaction. Parents with remaining children stay in trash,
+			// so a later transaction (or janitor run) can resume safely.
+			detached, err = detachThreadChildrenBatchTx(
+				ctx, tx, messageIDs, threadChildDetachBatch, true,
+			)
+			if err != nil {
+				return err
+			}
+
+			deletableRows, err := tx.Query(ctx,
+				`SELECT parent.id
+				   FROM messages AS parent
+				  WHERE parent.id = ANY($1)
+				    AND NOT EXISTS (
+				      SELECT 1
+				        FROM messages AS child
+				       WHERE child.thread_parent_id = parent.id
+				    )
+				  ORDER BY parent.id`,
+				messageIDs,
+			)
+			if err != nil {
+				return err
+			}
+			deletableIDs := make([]string, 0, len(messageIDs))
+			deletableJobs := make([]int64, 0, len(jobIDByMessage))
+			for deletableRows.Next() {
+				var messageID string
+				if err := deletableRows.Scan(&messageID); err != nil {
+					deletableRows.Close()
+					return err
+				}
+				deletableIDs = append(deletableIDs, messageID)
+				if jobID, ok := jobIDByMessage[messageID]; ok {
+					deletableJobs = append(deletableJobs, jobID)
+				}
+			}
+			if err := deletableRows.Err(); err != nil {
+				deletableRows.Close()
+				return err
+			}
+			deletableRows.Close()
+			if len(deletableIDs) == 0 {
+				return nil
+			}
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, deletableJobs); err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, `DELETE FROM messages WHERE id = ANY($1)`, deletableIDs)
+			if err != nil {
+				return err
+			}
+			deleted = tag.RowsAffected()
+			return nil
+		})
 		if err != nil {
 			return total, err
 		}
-		n := tag.RowsAffected()
-		total += n
-		if n < expiredDeleteBatch {
+		total += deleted
+		switch {
+		case selected == 0:
+			return total, nil
+		case detached == 0 && deleted == 0:
+			// Every selected row is currently blocked by a surviving child
+			// that SKIP LOCKED could not claim. Leave the parent intact and let
+			// the next periodic sweep resume instead of spinning.
 			return total, nil
 		}
 	}
@@ -4074,8 +4694,12 @@ func (s *Store) SoftDeleteMessage(ctx context.Context, messageID, agentID string
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE messages SET deleted_at = now()
 		  WHERE id = $1 AND agent_id = $2 AND deleted_at IS NULL
-		    AND COALESCE(status, '') <> 'pending_review'`,
-		messageID, agentID,
+		    AND COALESCE(status, '') <> 'pending_review'
+		    AND NOT (
+		      COALESCE(delivery_status, '') = 'sending'
+		      AND COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+		    )`,
+		messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
 	)
 	if err != nil {
 		return err
@@ -4087,22 +4711,63 @@ func (s *Store) SoftDeleteMessage(ctx context.Context, messageID, agentID string
 }
 
 // RestoreMessage brings an indefinitely retained trashed message back to the
-// inbox. Returns ErrNotInTrash when the message exists but is live,
-// ErrMessageNotFound otherwise.
-func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE messages
-		    SET deleted_at = NULL
-		  WHERE id = $1 AND agent_id = $2 AND deleted_at IS NOT NULL`,
-		messageID, agentID,
-	)
-	if err != nil {
+// inbox and returns the restored message. Returns ErrNotInTrash when the
+// message exists but is live, ErrMessageNotFound otherwise.
+//
+// The post-restore view is produced INSIDE the restore transaction. Reading it
+// afterwards from the pool was a torn read: a concurrent re-trash or purge
+// landing in the gap made a committed restore answer 500 "failed to reload
+// message", and any concurrent mutation could describe the message by state
+// this restore never produced. The in-transaction read follows the row lock
+// this transaction already holds. The detail projection still marks an unread
+// inbound message read, exactly as the handler's post-restore read did.
+func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) (*Message, error) {
+	var restored *Message
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		var deletedAt *time.Time
+		var scheduledAt *time.Time
+		var deliveryStatus string
+		var sendJobID *int64
+		err := tx.QueryRow(ctx,
+			`SELECT deleted_at, scheduled_at,
+			        COALESCE(delivery_status, ''), send_job_id
+			   FROM messages
+			  WHERE id = $1 AND agent_id = $2
+			  FOR UPDATE`,
+			messageID, agentID,
+		).Scan(&deletedAt, &scheduledAt, &deliveryStatus, &sendJobID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMessageNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if deletedAt == nil {
+			return ErrNotInTrash
+		}
+		var cutoff time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&cutoff); err != nil {
+			return err
+		}
+		if scheduledAt != nil && !scheduledAt.After(cutoff) &&
+			deliveryStatus == "accepted" && sendJobID != nil {
+			if err := s.cancelPastDueScheduledJobsTx(ctx, tx, []pastDueScheduledJob{{
+				messageID: messageID,
+				jobID:     *sendJobID,
+			}}); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE messages SET deleted_at = NULL WHERE id = $1`, messageID); err != nil {
+			return err
+		}
+		restored, err = getMessageWithContent(ctx, tx, messageID, agentID)
 		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return s.classifyTrashMiss(ctx, messageID, agentID, false)
-	}
-	return nil
+	return restored, nil
 }
 
 // PurgeMessage permanently deletes a message that is already in the trash
@@ -4114,13 +4779,15 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		var deletedAt *time.Time
 		var deliveryStatus string
 		var activeSend bool
+		var sendJobID *int64
 		err := tx.QueryRow(ctx,
 			`SELECT deleted_at, COALESCE(delivery_status, ''),
-			        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+			        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false),
+			        send_job_id
 			   FROM messages
 			  WHERE id = $1 AND agent_id = $2 FOR UPDATE`,
 			messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
-		).Scan(&deletedAt, &deliveryStatus, &activeSend)
+		).Scan(&deletedAt, &deliveryStatus, &activeSend, &sendJobID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrMessageNotFound
 		}
@@ -4132,6 +4799,22 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		}
 		if deletedAt == nil {
 			return ErrNotInTrash
+		}
+		if sendJobID != nil && (deliveryStatus == "accepted" || deliveryStatus == "sending") {
+			if err := s.cancelOutboundJobIDsTx(ctx, tx, []int64{*sendJobID}); err != nil {
+				return err
+			}
+		}
+		for {
+			detached, err := detachThreadChildrenBatchTx(
+				ctx, tx, []string{messageID}, threadChildDetachBatch, false,
+			)
+			if err != nil {
+				return err
+			}
+			if detached < threadChildDetachBatch {
+				break
+			}
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM messages WHERE id = $1`, messageID)
 		return err
@@ -4145,17 +4828,24 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 func (s *Store) classifyTrashMiss(ctx context.Context, messageID, agentID string, softDelete bool) error {
 	var deletedAt *time.Time
 	var status string
+	var deliveryStatus string
+	var activeSend bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT deleted_at, COALESCE(status, '') FROM messages
+		`SELECT deleted_at, COALESCE(status, ''), COALESCE(delivery_status, ''),
+		        COALESCE(send_claimed_at > now() - make_interval(secs => $3), false)
+		   FROM messages
 		  WHERE id = $1 AND agent_id = $2`,
-		messageID, agentID,
-	).Scan(&deletedAt, &status)
+		messageID, agentID, int64(OutboundSendClaimStaleWindow/time.Second),
+	).Scan(&deletedAt, &status, &deliveryStatus, &activeSend)
 	if err != nil {
 		return ErrMessageNotFound
 	}
 	if softDelete {
 		if deletedAt != nil {
 			return nil // already in the trash — idempotent
+		}
+		if deliveryStatus == "sending" && activeSend {
+			return ErrSendInProgress
 		}
 		if status == "pending_review" {
 			return ErrMessageHeld
@@ -4381,7 +5071,7 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 		        m.labels,
 		        COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), m.auth_verdict,
 		        COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''),
-		        COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
+		        COALESCE(wd.status, ''), COALESCE(wd.last_error, ''), m.scheduled_at
 		 FROM messages m
 		 LEFT JOIN webhook_deliveries wd ON wd.message_id = m.id
 		 WHERE m.agent_id = $1
@@ -4415,7 +5105,7 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 			&m.Labels,
 			&outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &authVerdict,
 			&m.Flagged, &m.FlagReason,
-			&m.WebhookStatus, &m.WebhookError,
+			&m.WebhookStatus, &m.WebhookError, &m.ScheduledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -4604,8 +5294,8 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name stri
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+		`SELECT id, email, name, google_subject, created_at, account_class FROM users WHERE id = $1`, id,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
 	if err != nil {
 		return nil, err
 	}
@@ -4649,10 +5339,10 @@ func (s *Store) CreateUserSession(ctx context.Context, userID string) (string, e
 func (s *Store) GetUserSession(ctx context.Context, token string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class
 		 FROM user_sessions s JOIN users u ON s.user_id = u.id
 		 WHERE s.token = $1 AND s.expires_at > now()`, token,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
 	if err != nil {
 		return nil, err
 	}

@@ -27,6 +27,14 @@ type Limits struct {
 	MaxMessagesMonth int    `json:"max_messages_month"`
 	MaxStorageBytes  int64  `json:"max_storage_bytes"`
 	UpgradeURL       string `json:"upgrade_url"`
+	// OutboundFooterEnabled is a feature entitlement, not a cap: whether
+	// outbound mail from this account carries the operator-configured
+	// footer (config `outbound_footer:` block; the feature's master switch
+	// lives there, not here). Like PlanCode, the semantics of who gets the
+	// footer are owned by whatever provisions the row. Excluded from JSON
+	// so the public limits payloads (GET /v1/account, the 402 envelope)
+	// are unchanged.
+	OutboundFooterEnabled bool `json:"-"`
 }
 
 // Defaults is the operator-configured fallback applied when a user has
@@ -38,6 +46,9 @@ type Defaults struct {
 	MaxDomains       int
 	MaxMessagesMonth int
 	MaxStorageBytes  int64
+	// OutboundFooterEnabled is the row-less fallback for the outbound
+	// footer entitlement, wired from `outbound_footer.default_enabled`.
+	OutboundFooterEnabled bool
 }
 
 // Enforcer is the interface that handlers call. Implementations must be

@@ -235,6 +235,12 @@ func (s *Server) applyEvolutionStance() {
 			markProperty(schemas, schema, property, extStabilityLevel, stabilityBeta)
 		}
 	}
+	// Server-owned email thread identity is a beta read projection embedded in
+	// the otherwise-stable shared message schemas. Only message list/detail
+	// handlers populate it; other operations that reuse these schemas omit it.
+	for _, schema := range []string{"MessageSummaryView", "MessageView"} {
+		markProperty(schemas, schema, "thread_id", extStabilityLevel, stabilityBeta)
+	}
 	for _, schema := range []string{"HoldReasonView", "ProtectionFindingView", "ThreatCategoryView"} {
 		markSchema(schemas, schema, extStabilityLevel, stabilityBeta)
 	}
@@ -255,6 +261,22 @@ func (s *Server) applyEvolutionStance() {
 	for _, schema := range []string{"SendEmailRequest", "ReplyRequest", "ForwardRequest"} {
 		markProperty(schemas, schema, "unsubscribe", extStabilityLevel, stabilityBeta)
 	}
+	// Scheduled sending is a beta capability nested inside otherwise-stable
+	// message operations and views. Keep the operations and containing schemas
+	// stable while marking the request/response properties and the scheduled
+	// status discriminator value machine-readably.
+	for _, schema := range []string{"SendEmailRequest", "ReplyRequest", "ForwardRequest"} {
+		markProperty(schemas, schema, "send_at", extStabilityLevel, stabilityBeta)
+	}
+	// "Message" is the account-export record. It gained scheduled_at with the
+	// rest of the family but neither a description nor this marker, so the
+	// export alone presented a beta field as though it were stable. (Its
+	// containing schema is already beta-marked as an export interior record;
+	// the property marker is what survives a future promotion of the record.)
+	for _, schema := range []string{"MessageSummaryView", "MessageView", "SendResultView", "Message"} {
+		markProperty(schemas, schema, "scheduled_at", extStabilityLevel, stabilityBeta)
+	}
+	markProperty(schemas, "SendResultView", "status", extExperimentalValues, []string{"scheduled"})
 	// Message lifecycle is a beta capability embedded as an optional field in
 	// otherwise-stable event payloads. Mark only the property: the existing
 	// event types, payload schemas, envelope, and delivery semantics remain GA.

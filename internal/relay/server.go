@@ -21,6 +21,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -30,6 +31,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/piguard"
+	"github.com/tokencanopy/e2a/internal/rfcmessageid"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 	"github.com/tokencanopy/e2a/internal/ws"
@@ -77,9 +79,16 @@ type Server struct {
 type Metrics interface {
 	// SMTPInbound records the terminal outcome of one SMTP intake decision.
 	// outcome ∈ {accepted, accepted_dedup, tempfail, rejected_unknown_recipient,
-	// rejected_unverified_domain, rejected_quota}; seconds is DATA processing
-	// time (0 for RCPT-stage rejections, which have no DATA phase).
+	// rejected_unverified_domain, rejected_quota, rejected_line_too_long};
+	// seconds is DATA processing time (0 for RCPT-stage rejections, which
+	// have no DATA phase).
 	SMTPInbound(outcome string, seconds float64)
+}
+
+// threadHeaderParseMetrics is optional so existing relay metric adapters keep
+// compiling while richer telemetry backends can observe strict-parser rejects.
+type threadHeaderParseMetrics interface {
+	ThreadHeaderParseFailure(header string)
 }
 
 // AuthenticationChecker evaluates the connection and message identities used
@@ -125,11 +134,18 @@ func (s *Server) SetMetrics(m Metrics) { s.metrics = m }
 
 // recordSMTPInbound is the nil-safe recording seam every intake outcome goes
 // through. Units: exactly one accepted/accepted_dedup/tempfail call per DATA
-// transaction (never per recipient); rejected_* calls are per rejected RCPT
-// command — one transaction can emit several rejections and still accept.
+// transaction (never per recipient); rejected_line_too_long is one per DATA
+// transaction aborted mid-read; the other rejected_* calls are per rejected
+// RCPT command — one transaction can emit several rejections and still accept.
 func (s *Server) recordSMTPInbound(outcome string, seconds float64) {
 	if s.metrics != nil {
 		s.metrics.SMTPInbound(outcome, seconds)
+	}
+}
+
+func (s *Server) recordThreadHeaderParseFailure(header string) {
+	if m, ok := s.metrics.(threadHeaderParseMetrics); ok {
+		m.ThreadHeaderParseFailure(header)
 	}
 }
 
@@ -153,6 +169,19 @@ func NewServer(cfg *config.Config, store *identity.Store, usage usage.UsageTrack
 	smtpSrv.WriteTimeout = 30 * time.Second
 	smtpSrv.MaxMessageBytes = 10 * 1024 * 1024 // 10MB
 	smtpSrv.MaxRecipients = 50
+	// go-smtp defaults MaxLineLength to 2000 bytes, which bounced real
+	// agent mail carrying single-line JSON / unfolded HTML at DATA with
+	// "too long a line in input stream" (prod, 2026-07-18..20: 30 bounces
+	// over three days). 128KiB covers those payloads with wide margin but
+	// is kept deliberately modest rather than raised toward
+	// MaxMessageBytes: the limit bounds ALL lines, including pre-auth SMTP
+	// command lines, so it is per-connection memory an unauthenticated
+	// peer can force. It must also stay at or below the 1MiB header-scan
+	// buffer in internal/emailauth/checker.go, or the DKIM l= guard there
+	// fails open. Since #745 the composer quoted-printable-encodes any
+	// outbound body with a >998-octet line, so this cap guards inbound
+	// mail from third-party MTAs.
+	smtpSrv.MaxLineLength = 1 << 17 // 128KiB
 	smtpSrv.AllowInsecureAuth = !cfg.IsProduction()
 
 	if cfg.SMTP.TLSCert != "" && cfg.SMTP.TLSKey != "" {
@@ -308,6 +337,15 @@ func (s *session) Data(r io.Reader) error {
 	start := time.Now()
 	body, err := io.ReadAll(r)
 	if err != nil {
+		// A line over MaxLineLength surfaces here as go-smtp's ErrTooLongLine
+		// and bounces the transaction with a 554. Record it — the incident
+		// behind the MaxLineLength comment in NewServer was invisible in
+		// metrics precisely because this path returned early. Other read
+		// errors (client drop → io.ErrUnexpectedEOF, MaxMessageBytes →
+		// smtp.ErrDataTooLarge) are deliberately left unrecorded, as before.
+		if errors.Is(err, smtp.ErrTooLongLine) {
+			s.relay.recordSMTPInbound("rejected_line_too_long", time.Since(start).Seconds())
+		}
 		return err
 	}
 
@@ -399,6 +437,9 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// we are in the live session or replaying a persisted intake row.
 	author := emailauth.ParseAuthorIdentity(in.Body)
 	threadInfo := extractThreadInfoWithAuthor(in.Body, author)
+	for _, header := range threadInfo.MalformedThreadHeaders {
+		srv.recordThreadHeaderParseFailure(header)
+	}
 	envelopeFrom := extractEmail(in.EnvelopeFrom)
 	headerFrom := threadInfo.From
 	// SPF/DKIM/DMARC against the TRUE envelope MAIL FROM (RFC 7208), not the From
@@ -554,16 +595,27 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	var inboundMsg *identity.Message
 	err = srv.store.WithTx(ctx, func(tx pgx.Tx) error {
 		var txErr error
-		inboundMsg, txErr = srv.store.CreateInboundMessageAuthenticatedInTx(
+		inboundMsg, txErr = srv.store.CreateInboundMessageAuthenticatedThreadedInTx(
 			ctx, tx, messageID, agent.ID, identity.InboundAuth{HeaderFrom: headerFrom, EnvelopeFrom: envelopeFrom, Authentication: authentication}, rcpt,
 			threadInfo.MessageID, threadInfo.Subject, conversationID,
 			deliveryStatus, body,
 			policyDecision.Flagged, policyDecision.Reason,
 			threadInfo.To, threadInfo.CC, threadInfo.ReplyTo,
 			screenRes.Denorm,
+			identity.InboundThreadEvidence{
+				InReplyTo:            threadInfo.ThreadInReplyTo,
+				References:           threadInfo.ThreadReferences,
+				DeliveryTwinSourceID: threadInfo.E2AMessageID,
+			},
 		)
 		if txErr != nil {
 			return txErr
+		}
+		if agent.UserID != "" && headerFrom != "" && authentication.Passed() && !screenRes.Hold && !screenRes.Blocked() {
+			if _, txErr = srv.store.RecordInboundActivityTx(ctx, tx, agent.UserID, agent.ID,
+				headerFrom, conversationID, inboundMsg.CreatedAt); txErr != nil {
+				return txErr
+			}
 		}
 
 		correlations := messagelifecycle.SafeCorrelationIDs(map[string]string{
@@ -889,15 +941,19 @@ func extractEmail(addr string) string {
 }
 
 type threadInfo struct {
-	MessageID      string
-	Subject        string
-	InReplyTo      string
-	References     []string
-	From           string   // From header (human-readable sender, not SMTP envelope)
-	ReplyTo        []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
-	To             []string // To: header addresses (one row per fan-out target sees the same list)
-	CC             []string // Cc: header addresses
-	ConversationID string   // X-E2A-Conversation-ID header, if present
+	MessageID              string
+	Subject                string
+	InReplyTo              string
+	References             []string
+	From                   string   // From header (human-readable sender, not SMTP envelope)
+	ReplyTo                []string // Reply-To header addresses — empty when absent (RFC 5322 allows multiple)
+	To                     []string // To: header addresses (one row per fan-out target sees the same list)
+	CC                     []string // Cc: header addresses
+	ConversationID         string   // X-E2A-Conversation-ID header, if present
+	E2AMessageID           string   // unsigned delivery correlation candidate; store revalidates
+	ThreadInReplyTo        []identity.RFCMessageIDCandidate
+	ThreadReferences       []identity.RFCMessageIDCandidate
+	MalformedThreadHeaders []string
 }
 
 // extractThreadInfo parses threading headers from a raw RFC 2822 message.
@@ -916,6 +972,15 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 			refs = append(refs, ref)
 		}
 	}
+	threadInReplyTo, inReplyToMalformed := parseThreadCandidates(msg.Header.Get("In-Reply-To"))
+	threadReferences, referencesMalformed := parseThreadCandidates(msg.Header.Get("References"))
+	var malformed []string
+	if inReplyToMalformed {
+		malformed = append(malformed, "in_reply_to")
+	}
+	if referencesMalformed {
+		malformed = append(malformed, "references")
+	}
 	// Use the same single-author parser as DMARC. Ambiguous From fields are not
 	// projected as a sender identity.
 	fromHeader := author.Address
@@ -928,11 +993,33 @@ func extractThreadInfoWithAuthor(body []byte, author emailauth.AuthorIdentity) t
 		// RFC 5322 § 3.6.2 allows multiple addresses in Reply-To. Mirror
 		// the same parser used for To/Cc so display names get stripped
 		// the same way and the field shape is uniform across consumers.
-		ReplyTo:        extractAddressList(msg.Header.Get("Reply-To")),
-		To:             extractAddressList(msg.Header.Get("To")),
-		CC:             extractAddressList(msg.Header.Get("Cc")),
-		ConversationID: msg.Header.Get("X-E2A-Conversation-Id"),
+		ReplyTo:                extractAddressList(msg.Header.Get("Reply-To")),
+		To:                     extractAddressList(msg.Header.Get("To")),
+		CC:                     extractAddressList(msg.Header.Get("Cc")),
+		ConversationID:         msg.Header.Get("X-E2A-Conversation-Id"),
+		E2AMessageID:           strings.TrimSpace(msg.Header.Get(delivery.MessageIDHeader)),
+		ThreadInReplyTo:        threadInReplyTo,
+		ThreadReferences:       threadReferences,
+		MalformedThreadHeaders: malformed,
 	}
+}
+
+func parseThreadCandidates(value string) ([]identity.RFCMessageIDCandidate, bool) {
+	if strings.TrimSpace(value) == "" {
+		return nil, false
+	}
+	tokens, err := rfcmessageid.ParseTokens(value)
+	if err != nil {
+		return nil, true
+	}
+	out := make([]identity.RFCMessageIDCandidate, 0, len(tokens))
+	for _, token := range tokens {
+		out = append(out, identity.RFCMessageIDCandidate{
+			Original:  token.Original,
+			Canonical: token.Canonical,
+		})
+	}
+	return out, false
 }
 
 // decodeMIMEHeader decodes any RFC 2047 encoded-word runs in a header value

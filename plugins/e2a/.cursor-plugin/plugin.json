@@ -1,8 +1,8 @@
 {
   "name": "e2a",
   "displayName": "e2a",
-  "version": "0.5.0",
-  "description": "Authenticated email gateway for AI agents — per-agent inboxes, SPF/DKIM verification, and a queryable, replayable event log. 60 MCP tools over hosted streamable HTTP with OAuth.",
+  "version": "0.6.0",
+  "description": "Authenticated email gateway for AI agents — per-agent inboxes, SPF/DKIM verification, and a queryable, replayable event log. 76 MCP tools over hosted streamable HTTP with OAuth.",
   "author": {
     "name": "TokenCanopy",
     "url": "https://e2a.dev"

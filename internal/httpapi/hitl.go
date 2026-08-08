@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -146,9 +147,18 @@ func (s *Server) approveHeld(ctx context.Context, userID, msgID, agentEmail stri
 func approveResult(sent *identity.Message) (int, SendResultView) {
 	statusCode := http.StatusOK
 	status := "sent"
+	var scheduledAt *time.Time
 	if sent.DeliveryStatus == "accepted" {
 		statusCode = http.StatusAccepted
 		status = "accepted"
+		// A held draft that carried a still-future send_at is re-armed on approval
+		// (#815): report status=scheduled + scheduled_at, matching the direct
+		// scheduled-send response. A schedule that has already passed submits
+		// immediately, so it stays "accepted" with no scheduled_at echoed.
+		if sent.ScheduledAt != nil && sent.ScheduledAt.After(time.Now()) {
+			status = "scheduled"
+			scheduledAt = utcPtr(sent.ScheduledAt)
+		}
 	}
 	providerMessageID := sent.ProviderMessageID
 	if sent.Method == "loopback" {
@@ -158,6 +168,7 @@ func approveResult(sent *identity.Message) (int, SendResultView) {
 	return statusCode, SendResultView{
 		Status: status, MessageID: sent.ID, ProviderMessageID: providerMessageID,
 		SentAs: sent.SentAs, Method: sent.Method, Edited: &edited,
+		ScheduledAt: scheduledAt,
 	}
 }
 

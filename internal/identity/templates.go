@@ -293,21 +293,27 @@ func (s *Store) UpdateTemplate(ctx context.Context, templateID, userID string, u
 	}
 	sets = append(sets, "updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')")
 
+	// RETURNING the full row rather than RETURNING id + a separate
+	// GetTemplateByID. The follow-up read ran on its own snapshot outside this
+	// statement, so a concurrent PATCH could land in between and the caller got
+	// the OTHER writer's template echoed back as the result of their own
+	// update — and a concurrent DELETE turned a committed update into a 404
+	// template_not_found. RETURNING is evaluated on the row this statement
+	// wrote, so the response always describes this write. The not-found and
+	// alias-collision translations are unchanged (scanTemplate maps ErrNoRows
+	// to ErrTemplateNotFound).
 	query := fmt.Sprintf(
-		`UPDATE templates SET %s WHERE id = $1 AND user_id = $2 RETURNING id`,
-		joinComma(sets),
+		`UPDATE templates SET %s WHERE id = $1 AND user_id = $2 RETURNING %s`,
+		joinComma(sets), templateSelectColumns,
 	)
-	var returnedID string
-	if err := s.pool.QueryRow(ctx, query, args...).Scan(&returnedID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrTemplateNotFound
-		}
+	tp, err := scanTemplate(s.pool.QueryRow(ctx, query, args...))
+	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrTemplateAliasTaken
 		}
 		return nil, err
 	}
-	return s.GetTemplateByID(ctx, templateID, userID)
+	return tp, nil
 }
 
 // DeleteTemplate removes a template owned by the user. Deleting a missing

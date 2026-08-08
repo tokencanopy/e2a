@@ -104,13 +104,23 @@ type (
 	AgentDeleter func(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
+	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the
+	// agent as restored. The store reads that row inside the restore's own
+	// transaction, so the response cannot describe a state this restore never
+	// produced — a post-commit re-read raced concurrent renames and re-trashes.
+	AgentRestoreOp func(ctx context.Context, agentID, userID string) (*identity.AgentIdentity, error)
 )
 
 // MessageTrashOp mirrors the store's per-message trash mutations
-// (SoftDeleteMessage / RestoreMessage / PurgeMessage): scoped to
-// (messageID, agentID), returning the sentinel errors ErrMessageHeld /
-// ErrNotInTrash / ErrMessageNotFound for the handler to map.
+// (SoftDeleteMessage / PurgeMessage): scoped to (messageID, agentID),
+// returning the sentinel errors ErrMessageHeld / ErrNotInTrash /
+// ErrMessageNotFound for the handler to map.
 type MessageTrashOp func(ctx context.Context, messageID, agentID string) error
+
+// MessageRestoreOp is MessageTrashOp's returning form, used by RestoreMessage
+// for the same reason AgentRestoreOp exists: the restored view comes from
+// inside the restore transaction rather than a racy re-read afterwards.
+type MessageRestoreOp func(ctx context.Context, messageID, agentID string) (*identity.Message, error)
 
 // Deps are the collaborators the v1 layer needs. Everything is injected so
 // the package has no hidden globals and is straightforward to test.
@@ -142,20 +152,23 @@ type Deps struct {
 	ResolveMX          MXResolver
 	EnforceAgentCreate AgentCreateEnforcer
 	// UpdateAgentName updates an agent's display name (the only mutable field on
-	// the agent PATCH after the screening config moved to /protection).
-	UpdateAgentName func(ctx context.Context, agentID, userID, name string) error
+	// the agent PATCH after the screening config moved to /protection) and
+	// returns the agent as written — read inside the write's transaction, so
+	// the PATCH response describes this write and not a concurrent one.
+	UpdateAgentName func(ctx context.Context, agentID, userID, name string) (*identity.AgentIdentity, error)
 	// UpdateAgentProtection writes the full per-agent protection posture (gate +
-	// scan sensitivity + holds) for the /v1/agents/{email}/protection resource.
-	// Returns a validation error for an invalid posture, which the handler maps
-	// to 400 invalid_request.
-	UpdateAgentProtection func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) error
+	// scan sensitivity + holds) for the /v1/agents/{email}/protection resource
+	// and returns the agent as written, on the same in-transaction contract as
+	// UpdateAgentName. Returns a validation error for an invalid posture, which
+	// the handler maps to 400 invalid_request.
+	UpdateAgentProtection func(ctx context.Context, agentID, userID string, cfg identity.ProtectionConfig) (*identity.AgentIdentity, error)
 	// DeleteAgent is the DEFAULT delete: soft (move to trash, restorable for
 	// identity.TrashRetention, docs/design/trash-soft-delete.md).
 	// PermanentDeleteAgent is the irreversible hard delete behind
 	// ?permanent=true; RestoreAgent brings a trashed agent back.
 	DeleteAgent          AgentTrashOp
 	PermanentDeleteAgent AgentDeleter
-	RestoreAgent         AgentTrashOp
+	RestoreAgent         AgentRestoreOp
 	// GetAgentAnyState loads an agent regardless of trash state (DeletedAt set
 	// when trashed) — the resolution path for restore / permanent delete, which
 	// must find agents the live GetAgent treats as nonexistent.
@@ -167,7 +180,7 @@ type Deps struct {
 	// /v1/agents/{email}/messages/{id}): soft delete, restore, and the
 	// trash-only permanent purge.
 	DeleteMessage  MessageTrashOp
-	RestoreMessage MessageTrashOp
+	RestoreMessage MessageRestoreOp
 	PurgeMessage   MessageTrashOp
 
 	// domains. ListDomains is keyset-paginated on (created_at, domain): the
@@ -282,6 +295,36 @@ type Deps struct {
 	AddAgentSuppression    func(ctx context.Context, userID, agentID, address, reason, source string, onAdded identity.AgentSuppressionTxHook) (identity.AgentSuppression, bool, error)
 	ListAgentSuppressions  func(ctx context.Context, userID, agentID string, limit int, afterCreatedAt time.Time, afterAddress string) ([]identity.AgentSuppression, error)
 	RemoveAgentSuppression func(ctx context.Context, userID, agentID, address string) (bool, error)
+	// Contacts are ACCOUNT-scoped identity for the people this account
+	// corresponds with. Per-agent outreach state lives on a separate
+	// engagement resource, so nothing here is agent-bound. All of these are
+	// reachable only from account-scoped credentials — an agent credential
+	// reading every contact the account owns would be a scope escalation.
+	CreateContact            func(ctx context.Context, userID, address, displayName string, metadata map[string]any, source, importBatchID string) (identity.Contact, error)
+	GetContact               func(ctx context.Context, userID, address string) (identity.Contact, error)
+	ListContacts             func(ctx context.Context, userID string, f identity.ContactFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.Contact, error)
+	UpdateContact            func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any) (identity.Contact, error)
+	UpdateContactIfUnchanged func(ctx context.Context, userID, address string, displayName *string, metadata map[string]any, expectedUpdatedAt time.Time) (identity.Contact, error)
+	DeleteContact            func(ctx context.Context, userID, address string) (bool, error)
+	// Bulk import. ImportContacts applies one batch in a single transaction and
+	// returns a per-row outcome, so a malformed row fails alone rather than
+	// rejecting the upload. SuppressedAddresses lets the handler MARK rows the
+	// account has already blocked without dropping them — the count a user sees
+	// stays honest.
+	ImportContacts            func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, merge bool) ([]identity.ContactImportOutcome, error)
+	ImportContactsWithOptions func(ctx context.Context, userID, batchID string, rows []identity.ContactImportRow, options identity.ContactImportOptions) ([]identity.ContactImportOutcome, error)
+	DeleteImportBatch         func(ctx context.Context, userID, batchID string) (deleted int, retained int, engagementsDeleted int, err error)
+	SuppressedAddresses       func(ctx context.Context, userID string, addresses []string) ([]string, error)
+	EffectiveSuppressions     func(ctx context.Context, userID, agentID string, addresses []string) ([]string, error)
+	// Per-agent outreach state. Unlike the contact capabilities above, these are
+	// reachable by an AGENT-scoped credential acting as itself — the agent runs
+	// its own outreach loop. Consent stays out of reach: suppression is only
+	// ever read through a join here.
+	UpsertEngagement            func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any) (identity.ContactEngagement, bool, error)
+	UpdateEngagementIfUnchanged func(ctx context.Context, userID, agentID, address string, stage *string, nextActionAt **time.Time, metadata map[string]any, expectedUpdatedAt time.Time) (identity.ContactEngagement, error)
+	GetEngagement               func(ctx context.Context, userID, agentID, address string) (identity.ContactEngagement, error)
+	ListEngagements             func(ctx context.Context, userID, agentID string, f identity.EngagementFilter, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ContactEngagement, error)
+	DeleteEngagement            func(ctx context.Context, userID, agentID, address string) (bool, error)
 	// Public managed-unsubscribe capabilities. Resolve accepts only a token hash;
 	// the write capability accepts only the exact scope returned by that lookup,
 	// so the unauthenticated route cannot choose an account, agent, or recipient.
@@ -427,6 +470,15 @@ func New(deps Deps) *Server {
 	root.Use(withRawRequest)
 
 	config := huma.DefaultConfig("e2a API", APIVersion)
+	// Reject bodies that are not valid UTF-8 BEFORE JSON decoding. This must
+	// happen on the raw bytes: encoding/json silently launders invalid UTF-8
+	// into U+FFFD, so a post-decode check can never see it (request_content.go
+	// has the full rule). DefaultConfig registers the JSON format under both
+	// its media type and its content-negotiation suffix; wrap every entry so a
+	// format added later fails loudly here rather than bypassing the guard.
+	for name, format := range config.Formats {
+		config.Formats[name] = requireUTF8Body(format)
+	}
 	// Serve the spec and human docs under the versioned prefix so they sit
 	// beside the operations (api-v1-redesign §1: everything lives under the
 	// api host; here, under /v1).
@@ -493,6 +545,10 @@ func New(deps Deps) *Server {
 	s.suppressRawBodyOctetStream()
 	s.applyEvolutionStance()
 	s.applyResponseHeaderContract()
+	// Last: publish the enforced-but-previously-unexpressed field bounds. It
+	// runs after applyEvolutionStance so the stance pass cannot overwrite the
+	// keywords it adds.
+	s.applyContactMetadataBounds()
 
 	// WebSocket transport — registered directly on chi (not Huma; it's a raw
 	// upgrade, not a JSON operation). First-class /v1 inbound transport.
@@ -557,15 +613,77 @@ func (s *Server) routeNotFound(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// probedMethods is the set of methods allowHeaderValue asks the router about.
+// It is exactly chi v5.3.1's built-in method table (tree.go `methodMap`),
+// including the QUERY method (RFC 10008) that chi routes via Router.Query —
+// no route registers QUERY today, so it is probed for future routes, not for
+// current ones. chi does not export that table, so this list is a mirror
+// rather than a derivation: TestProbedMethodsMatchChiMethodTable discovers
+// chi's real set at runtime and fails if the two ever diverge. Custom methods
+// added via the package-global chi.RegisterMethod are the one thing this
+// cannot track — chi exposes no way to enumerate them from here, so a caller
+// that registers one must extend this list by hand (that test will say so).
+var probedMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodConnect,
+	http.MethodOptions, http.MethodTrace, "QUERY",
+}
+
+// allowHeaderValue derives the Allow header for a 405 response (RFC 9110
+// §15.5.6: an origin server MUST generate Allow on a 405) by asking the router
+// itself which methods route this request's path. chi v5 collects the matched
+// node's method set internally but does not expose it to a custom
+// MethodNotAllowed handler, so this re-runs the match once per method in
+// probedMethods — ten tree lookups on a rare error path. Probing the live
+// routing table keeps the header in lockstep with the routes chi knows about;
+// nothing is hardcoded per route.
+//
+// An empty result is meaningful, not a failure: chi dispatches
+// MethodNotAllowedHandler with no allowed methods when the request method is
+// absent from its table (mux.go routeHTTP), so an unknown method against a
+// nonexistent path lands here with every probe missing. RFC 9110 §10.2.1
+// permits an empty Allow field value to mean "no methods are supported", which
+// is the honest answer there — callers must still set the header.
+func (s *Server) allowHeaderValue(r *http.Request) string {
+	// Mirror chi's own routing-path selection: it routes on RawPath when the
+	// request URI is percent-encoded (see the WS route comment above).
+	//
+	// chi actually consults rctx.RoutePath first and only falls back to
+	// RawPath/Path; RoutePath is populated for requests routed into a
+	// subrouter via Router.Mount. This repo mounts no subrouters, so RoutePath
+	// is always empty here and this mirror is exact — but if a Mount is ever
+	// added, this probe must consult chi.RouteContext(r.Context()).RoutePath
+	// too or it will probe the outer path and derive the wrong method set.
+	routePath := r.URL.RawPath
+	if routePath == "" {
+		routePath = r.URL.Path
+	}
+	var allowed []string
+	for _, method := range probedMethods {
+		if s.Router.Match(chi.NewRouteContext(), method, routePath) {
+			allowed = append(allowed, method)
+		}
+	}
+	return strings.Join(allowed, ", ")
+}
+
 func (s *Server) routeMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	if isV1Path(r.URL.Path) {
+		// Set unconditionally: an empty value is a valid Allow (RFC 9110
+		// §10.2.1) and omitting the header violates §15.5.6.
+		w.Header().Set("Allow", s.allowHeaderValue(r))
 		WriteError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	// Non-/v1 paths belong to the legacy gorilla/mux surface, which emits its
+	// own 405 without an Allow header (gorilla does not hand the allowed-method
+	// set to a MethodNotAllowedHandler). Allow coverage here therefore stops at
+	// the /v1 surface plus /u/{token}; the legacy 405s are a separate fix.
 	if s.deps.Legacy != nil {
 		s.deps.Legacy.ServeHTTP(w, r)
 		return
 	}
+	w.Header().Set("Allow", s.allowHeaderValue(r))
 	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 }
 
@@ -600,6 +718,9 @@ func (s *Server) registerOperations() {
 	s.registerEvents()
 	s.registerAccount()
 	s.registerAgentSuppressions()
+	s.registerContacts()
+	s.registerContactImport()
+	s.registerEngagements()
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()

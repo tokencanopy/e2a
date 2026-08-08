@@ -26,6 +26,7 @@ const mockFetch = jest.fn();
 beforeEach(() => {
   mockFetch.mockReset();
   global.fetch = mockFetch;
+  window.history.replaceState({}, "", "/billing");
 });
 
 // Wraps the page in a fresh SWR provider per test so cached responses
@@ -105,6 +106,25 @@ describe("BillingPage", () => {
     // its tier cards must not render.
     expect(screen.queryByText("Plans")).not.toBeInTheDocument();
     expect(screen.queryByText("Scale")).not.toBeInTheDocument();
+  });
+
+  it("ignores a checkout marker when no billing sidecar is configured", async () => {
+    // Post-checkout reconciliation waits on the sidecar's plan read to
+    // report an active subscription. With no sidecar there is no such
+    // read, so a stray ?status=success must not park the page on a
+    // "finalizing your upgrade" notice that can never resolve — a
+    // self-host install has no checkout to come back from.
+    window.history.replaceState({}, "", "/billing?status=success");
+    stageLimits({
+      plan_code: "default",
+      limits: { max_agents: 1, max_domains: 1, max_messages_month: 1, max_storage_bytes: 1 },
+      usage: { agents: 0, domains: 0, messages_month: 0, storage_bytes: 0 },
+      upgrade_url: "",
+    });
+    renderPage();
+
+    await waitFor(() => screen.getByText(/Default/i));
+    expect(screen.queryByText(/Finalizing your upgrade/i)).not.toBeInTheDocument();
   });
 
   it("renders error state when the API returns non-2xx", async () => {

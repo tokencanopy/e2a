@@ -64,6 +64,12 @@ type Metrics interface {
 	// quantiles toward zero.
 	WebhookAttempt(outcome, statusClass string, seconds float64)
 
+	// WebhookTerminal records a delivery only after this worker successfully
+	// transitions its row to a terminal state. outcome ∈ {delivered,
+	// e2a_failure, endpoint_failure, excluded}; scope ∈ {initial, replay,
+	// test, unknown}.
+	WebhookTerminal(outcome, scope string, count int)
+
 	// WebhookDeliveryRescued counts delivery rows the reconciler's dead-job
 	// arm re-drove (fresh job replacing a terminal/pruned one). A climbing
 	// rate is the poison-row signal.
@@ -128,6 +134,25 @@ func (w *DeliverWorker) emitAttempt(outcome, statusClass string, seconds float64
 	}
 }
 
+func (w *DeliverWorker) emitTerminal(outcome, scope string) {
+	if w.metrics != nil {
+		w.metrics.WebhookTerminal(outcome, scope, 1)
+	}
+}
+
+func deliveryScope(d *webhook.SubscriberDelivery) string {
+	if d == nil {
+		return "unknown"
+	}
+	if d.ReplayID != nil {
+		return "replay"
+	}
+	if d.EventCreatedAt != nil {
+		return "initial"
+	}
+	return "test"
+}
+
 // emitFirstAttemptLatency records the event→first-attempt latency, tolerating
 // an unwired backend.
 func (w *DeliverWorker) emitFirstAttemptLatency(seconds float64) {
@@ -186,8 +211,11 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		// webhook_deleted.
 		if job.Attempt >= MaxDeliveryAttempts {
 			w.emitAttempt("exhausted", "none", -1)
-			if merr := w.subStore.MarkSubscriberFailedIfPending(ctx, job.Args.DeliveryID, job.Attempt, "internal error loading delivery", 0); merr != nil {
+			transitioned, merr := w.subStore.TransitionSubscriberFailedIfPending(ctx, job.Args.DeliveryID, job.Attempt, "internal error loading delivery", 0)
+			if merr != nil {
 				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after row-load error (row stays pending; the reconciler will re-drive it once this job is discarded): %v", job.Args.DeliveryID, merr)
+			} else if transitioned {
+				w.emitTerminal("e2a_failure", "unknown")
 			}
 		}
 		return err
@@ -220,8 +248,11 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 			// error would leak internal hosts/IPs and DB identifiers. The
 			// returned err carries the real detail to River's job-error log.
 			w.emitAttempt("exhausted", "none", -1)
-			if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "internal error resolving webhook", 0); merr != nil {
+			transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "internal error resolving webhook", 0)
+			if merr != nil {
 				log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending; the reconciler will re-drive it once this job is discarded): %v", d.ID, merr)
+			} else if transitioned {
+				w.emitTerminal("e2a_failure", deliveryScope(d))
 			}
 		}
 		return err
@@ -234,8 +265,12 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		// dead job until the reconciler's dead-job rescue re-drives it, an
 		// avoidable extra delivery cycle when the retryable error path settles
 		// it directly.
-		if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook not found", 0); merr != nil {
+		transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, "webhook not found", 0)
+		if merr != nil {
 			return merr
+		}
+		if transitioned {
+			w.emitTerminal("excluded", deliveryScope(d))
 		}
 		w.emitAttempt("webhook_deleted", "none", -1) // no POST happened — no duration sample
 		return river.JobCancel(fmt.Errorf("webhook %s not found: %w", d.WebhookID, err))
@@ -290,7 +325,11 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 	}
 	if out.Success {
 		w.emitAttempt("delivered", statusClassOf(out.StatusCode), dur)
-		return w.subStore.MarkDelivered(ctx, d.ID, out.StatusCode) // nil → River completes the job
+		transitioned, err := w.subStore.MarkDeliveredIfPending(ctx, d.ID, out.StatusCode)
+		if err == nil && transitioned {
+			w.emitTerminal("delivered", deliveryScope(d))
+		}
+		return err // nil → River completes the job
 	}
 
 	if job.Attempt >= MaxDeliveryAttempts {
@@ -303,8 +342,11 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		// retry envelope, ending in another terminal-write window) — logged
 		// CRITICAL because reaching this line at all means the DB was down
 		// across every retry of a single-row UPDATE.
-		if merr := w.markFailedReliably(ctx, d.ID, job.Attempt, out.Error, out.StatusCode); merr != nil {
+		transitioned, merr := w.markFailedReliably(ctx, d.ID, job.Attempt, out.Error, out.StatusCode)
+		if merr != nil {
 			log.Printf("[webhook-deliver] CRITICAL: terminal 'failed' write for delivery %s failed after retries (row stays pending; the reconciler will re-drive it once this job is discarded): %v", d.ID, merr)
+		} else if transitioned {
+			w.emitTerminal("endpoint_failure", deliveryScope(d))
 		}
 		return fmt.Errorf("webhook delivery failed (final attempt %d, status %d): %s", job.Attempt, out.StatusCode, out.Error)
 	}
@@ -323,17 +365,18 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 // dead job_id until the reconciler's dead-job rescue re-drives it — recoverable,
 // but only after another full delivery cycle, so this write still tries hard.
 // Bounded, short backoff so the (rare) failure case adds < ~1s.
-func (w *DeliverWorker) markFailedReliably(ctx context.Context, id string, attempt int, errMsg string, statusCode int) error {
+func (w *DeliverWorker) markFailedReliably(ctx context.Context, id string, attempt int, errMsg string, statusCode int) (bool, error) {
 	var err error
 	for i := 0; i < 3; i++ {
-		if err = w.subStore.MarkSubscriberFailed(ctx, id, attempt, errMsg, statusCode); err == nil {
-			return nil
+		var transitioned bool
+		if transitioned, err = w.subStore.TransitionSubscriberFailedIfPending(ctx, id, attempt, errMsg, statusCode); err == nil {
+			return transitioned, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(time.Duration(i+1) * 150 * time.Millisecond):
 		}
 	}
-	return err
+	return false, err
 }

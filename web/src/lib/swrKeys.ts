@@ -19,6 +19,12 @@ export const domainsKey = "domains";
 export const pendingMessagesKey = "pending-messages";
 export const accountUnreadKey = "account-unread";
 
+// Account plan + entitlements + month-to-date usage (GET /v1/account),
+// read by the Billing page. Inbox count and domain count are two of the
+// four metered dimensions, so agent and domain mutations invalidate this
+// too — see invalidateAgents / invalidateDomains below.
+export const limitsKey = "limits";
+
 // Trash views (soft-deleted resources, restorable ~30 days).
 // deletedAgentsKey backs the account-wide /trash page
 // (GET /v1/agents?deleted=true); agentTrashKey backs the per-inbox
@@ -81,13 +87,35 @@ export const messageDetailKey = (id: string) =>
 export const messageLifecycleKey = (email: string, id: string) =>
   ["message-lifecycle", email, id] as const;
 
+// One webhook subscription (GET /v1/webhooks/{id}), for the detail page.
+export const webhookKey = (id: string) => ["webhook", id] as const;
+
+// The per-webhook delivery log (GET /v1/webhooks/{id}/deliveries). The status
+// slot is part of the key because the server filters server-side: switching
+// the filter is a different query, not a client-side narrowing of one cache
+// entry.
+export const webhookDeliveriesKey = (
+  id: string,
+  status: string,
+  cursor: string,
+) => ["webhook-deliveries", id, status, cursor] as const;
+
 // ── Invalidation helpers ─────────────────────────────────
 
 // After any agent mutation (create/update/delete/test) the agents
 // list — which carries the per-agent enrichment fields the dashboard
 // renders — needs to refetch.
 export function invalidateAgents() {
-  return mutate(agentsKey);
+  return Promise.all([mutate(agentsKey), invalidateLimits()]);
+}
+
+// Account limits carry the metered usage the Billing page renders. It's
+// folded into the agent and domain helpers rather than left for each call
+// site to remember, because a missed call here is invisible: the bars just
+// keep showing a pre-mutation count. Cheap when nothing reads it — SWR
+// only refetches keys that have a live subscriber.
+export function invalidateLimits() {
+  return mutate(limitsKey);
 }
 
 // After approve / reject the user-wide pending list needs to drop
@@ -155,7 +183,7 @@ export function invalidateAgentUnread(email: string) {
 }
 
 export function invalidateDomains() {
-  return mutate(domainsKey);
+  return Promise.all([mutate(domainsKey), invalidateLimits()]);
 }
 
 // After an inbox is trashed / restored / purged, the account-wide trash

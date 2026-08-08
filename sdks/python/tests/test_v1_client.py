@@ -474,6 +474,184 @@ async def test_send_mints_idempotency_key(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_send_serializes_send_at_and_parses_scheduled_result(httpx_mock):
+    send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    httpx_mock.add_response(
+        status_code=202,
+        json={
+            "message_id": "msg_scheduled",
+            "status": "scheduled",
+            "scheduled_at": send_at.isoformat(),
+        },
+    )
+    async with _client() as c:
+        result = await c.messages.send(
+            "bot@test.dev",
+            {
+                "to": ["a@x.com"],
+                "subject": "Scheduled update",
+                "text": "Hello later",
+                "send_at": send_at,
+            },
+        )
+
+    wire_send_at = json.loads(httpx_mock.get_requests()[-1].content)["send_at"]
+    assert datetime.fromisoformat(wire_send_at.replace("Z", "+00:00")) == send_at
+    assert result.status == "scheduled"
+    assert result.scheduled_at == send_at
+
+
+@pytest.mark.anyio
+async def test_send_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form: a bare str reply_to on a dict body is
+    # wrapped into the generated oneOf and reaches the wire as a scalar string,
+    # verbatim (display name preserved).
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.send(
+            "bot@test.dev",
+            {
+                "to": ["a@x.com"],
+                "subject": "Hi",
+                "text": "yo",
+                "reply_to": "Support <support@acme.com>",
+            },
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_send_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form: a list reply_to reaches the wire as a JSON array
+    # so the server can direct replies to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.send(
+            "bot@test.dev",
+            {
+                "to": ["a@x.com"],
+                "subject": "Hi",
+                "text": "yo",
+                "reply_to": ["support@acme.com", "owner@acme.com"],
+            },
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
+async def test_reply_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form works on reply too: a bare str reply_to
+    # is wrapped into the generated oneOf and reaches the wire verbatim.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "thanks", "reply_to": "Support <support@acme.com>"},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_reply_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form works on reply too: a list reply_to reaches the
+    # wire as a JSON array so replies can be directed to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "thanks", "reply_to": ["support@acme.com", "owner@acme.com"]},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
+async def test_forward_reply_to_string_serializes_scalar(httpx_mock):
+    # The historical single-address form works on forward too.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "fyi", "reply_to": "Support <support@acme.com>"},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == "Support <support@acme.com>"
+
+
+@pytest.mark.anyio
+async def test_forward_reply_to_list_serializes_array(httpx_mock):
+    # The new address-list form works on forward too: a list reply_to reaches
+    # the wire as a JSON array so replies can be directed to several destinations.
+    httpx_mock.add_response(json={"message_id": "msg_1", "status": "sent"})
+    async with _client() as c:
+        await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "fyi", "reply_to": ["support@acme.com", "owner@acme.com"]},
+        )
+    wire = json.loads(httpx_mock.get_requests()[-1].content)["reply_to"]
+    assert wire == ["support@acme.com", "owner@acme.com"]
+
+
+@pytest.mark.anyio
+async def test_reply_serializes_send_at_and_parses_scheduled_result(httpx_mock):
+    send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    httpx_mock.add_response(
+        status_code=202,
+        json={
+            "message_id": "msg_scheduled_reply",
+            "status": "scheduled",
+            "scheduled_at": send_at.isoformat(),
+        },
+    )
+    async with _client() as c:
+        result = await c.messages.reply(
+            "bot@test.dev",
+            "msg_1",
+            {"text": "Scheduled reply", "send_at": send_at},
+        )
+
+    req = httpx_mock.get_requests()[-1]
+    assert "/v1/agents/bot%40test.dev/messages/msg_1/reply" in str(req.url)
+    wire_send_at = json.loads(req.content)["send_at"]
+    assert datetime.fromisoformat(wire_send_at.replace("Z", "+00:00")) == send_at
+    assert result.status == "scheduled"
+    assert result.scheduled_at == send_at
+
+
+@pytest.mark.anyio
+async def test_forward_serializes_send_at_and_parses_scheduled_result(httpx_mock):
+    send_at = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
+    httpx_mock.add_response(
+        status_code=202,
+        json={
+            "message_id": "msg_scheduled_forward",
+            "status": "scheduled",
+            "scheduled_at": send_at.isoformat(),
+        },
+    )
+    async with _client() as c:
+        result = await c.messages.forward(
+            "bot@test.dev",
+            "msg_1",
+            {"to": ["a@x.com"], "text": "Scheduled forward", "send_at": send_at},
+        )
+
+    req = httpx_mock.get_requests()[-1]
+    assert "/v1/agents/bot%40test.dev/messages/msg_1/forward" in str(req.url)
+    wire_send_at = json.loads(req.content)["send_at"]
+    assert datetime.fromisoformat(wire_send_at.replace("Z", "+00:00")) == send_at
+    assert result.status == "scheduled"
+    assert result.scheduled_at == send_at
+
+
+@pytest.mark.anyio
 async def test_reviews_approve_hits_reviews_path_no_email(httpx_mock):
     # The review queue is account-scoped + id-addressed: approve(id) must hit
     # /v1/reviews/{id}/approve, NOT the deprecated /v1/agents/{email}/... path.
@@ -955,6 +1133,35 @@ async def test_suppressions_list_threads_cursor(httpx_mock):
     assert "cursor=cur_2" in str(reqs[1].url)
 
 
+@pytest.mark.anyio
+async def test_suppressions_list_forwards_limit(httpx_mock):
+    # The optional page-size param must reach the wire on every page (parity
+    # with account.api_keys.list / agents.list_suppressions and the TS SDK's
+    # account.suppressions.list({ limit })).
+    httpx_mock.add_response(json={"items": [_valid(SuppressionView, address="a@x.com")], "next_cursor": "cur_2"})
+    httpx_mock.add_response(json={"items": [_valid(SuppressionView, address="b@x.com")], "next_cursor": None})
+    async with _client() as c:
+        items = await c.account.suppressions.list(limit=1).to_list(limit=50)
+    assert [s.address for s in items] == ["a@x.com", "b@x.com"]
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) == 2
+    assert "limit=1" in str(reqs[0].url)
+    assert "cursor=cur_2" in str(reqs[1].url) and "limit=1" in str(reqs[1].url)
+
+
+@pytest.mark.anyio
+async def test_suppressions_list_omits_limit_when_unset(httpx_mock):
+    # The other half of the contract: leaving the page size unset must send NO
+    # limit at all, so the server default applies. A wrapper that forwarded the
+    # default as `limit=None` would serialize an empty `limit=` and change the
+    # request for every existing caller.
+    httpx_mock.add_response(json={"items": [_valid(SuppressionView, address="a@x.com")], "next_cursor": None})
+    async with _client() as c:
+        await c.account.suppressions.list().to_list(limit=5)
+    url = str(httpx_mock.get_requests()[-1].url)
+    assert "limit=" not in url, f"no limit must be sent when unset: {url}"
+
+
 # ── pagination: keyset-cursor list endpoints ────────────────────────
 # agents/domains/webhooks/deliveries/api-keys/templates/starters are all
 # keyset-paginated — the AutoPager must thread next_cursor to completion,
@@ -1368,3 +1575,251 @@ async def test_protection_read_modify_write_accepts_view(httpx_mock):
     body = json.loads(put.content)
     assert body["holds"]["on_expiry"] == "reject"  # the mutation survived coercion
     assert body["inbound"]["gate"]["allowlist"] == ["partner@acme.com"]
+
+
+# ── Contacts (beta) ──────────────────────────────────────────────────────────
+# Contacts are account-level identity. The address is the resource key, so these
+# pin that it is URL-encoded on the wire and that the SDK supplies the
+# ?confirm=DELETE guard the raw API requires.
+
+
+@pytest.mark.anyio
+async def test_contacts_get_url_encodes_the_address(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "A. Partner",
+            "metadata": {"fund": "Example Capital"},
+            "source": "import",
+            "import_batch_id": "imp_1",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        contact = await c.contacts.get("partner@fund.vc")
+    assert contact.display_name == "A. Partner"
+    assert contact.import_batch_id == "imp_1"
+    req = httpx_mock.get_requests()[-1]
+    # The @ must not reach the path raw — this is the encoded-routing contract.
+    assert "/v1/contacts/partner%40fund.vc" in str(req.url)
+
+
+@pytest.mark.anyio
+async def test_contacts_create_posts_body_and_returns_canonical_address(httpx_mock):
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "A. Partner",
+            "metadata": {},
+            "source": "manual",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    async with _client() as c:
+        contact = await c.contacts.create(
+            {"address": "A. Partner <Partner@Fund.VC>", "display_name": "A. Partner"},
+            idempotency_key="contact:partner",
+        )
+    assert contact.address == "partner@fund.vc"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "POST"
+    assert req.headers["Idempotency-Key"] == "contact:partner"
+    assert json.loads(req.content)["address"] == "A. Partner <Partner@Fund.VC>"
+
+
+@pytest.mark.anyio
+async def test_contacts_update_sends_only_given_fields(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "address": "partner@fund.vc",
+            "display_name": "Renamed",
+            "metadata": {"fund": "Example Capital"},
+            "source": "import",
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-02T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        contact = await c.contacts.update("partner@fund.vc", {"display_name": "Renamed"})
+    # Metadata survives a name-only patch — omitting the key is what tells the
+    # server to leave the stored value alone.
+    assert contact.metadata == {"fund": "Example Capital"}
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "PATCH"
+    assert json.loads(req.content) == {"display_name": "Renamed"}
+
+
+@pytest.mark.anyio
+async def test_contacts_delete_supplies_confirm_guard(httpx_mock):
+    httpx_mock.add_response(json={"deleted": True, "address": "partner@fund.vc"})
+    async with _client() as c:
+        result = await c.contacts.delete("partner@fund.vc")
+    assert result.deleted is True
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "confirm=DELETE" in str(req.url)
+
+
+@pytest.mark.anyio
+async def test_contacts_import_returns_per_row_results(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "batch_id": "imp_9",
+            "created": 1,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 1,
+            "results": [
+                {"index": 0, "address": "ok@fund.vc", "status": "created", "suppressed": True},
+                {"index": 1, "status": "failed", "code": "invalid_recipient", "message": "bad"},
+            ],
+        }
+    )
+    async with _client() as c:
+        result = await c.contacts.import_(
+            {"contacts": [{"address": "ok@fund.vc"}, {"address": "nope"}]}
+        )
+    assert result.batch_id == "imp_9"
+    # A suppressed row is still reported as created — marked, never dropped.
+    assert result.results[0].status == "created"
+    assert result.results[0].suppressed is True
+    assert result.results[1].code == "invalid_recipient"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "POST"
+    assert "/v1/contacts/import" in str(req.url)
+    assert req.headers["Idempotency-Key"]
+
+
+@pytest.mark.anyio
+async def test_contacts_import_preserves_caller_idempotency_key(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "batch_id": "imp_replay",
+            "created": 0,
+            "updated": 0,
+            "skipped": 1,
+            "failed": 0,
+            "results": [{"index": 0, "address": "ok@fund.vc", "status": "skipped"}],
+        }
+    )
+    async with _client() as c:
+        await c.contacts.import_(
+            {"contacts": [{"address": "ok@fund.vc"}]},
+            idempotency_key="contacts:upload:sha256",
+        )
+    assert httpx_mock.get_requests()[-1].headers["Idempotency-Key"] == "contacts:upload:sha256"
+
+
+@pytest.mark.anyio
+async def test_contacts_delete_import_reverses_a_batch(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "batch_id": "imp_9",
+            "contacts_deleted": 2,
+            "contacts_retained": 0,
+            "engagements_deleted": 1,
+        }
+    )
+    async with _client() as c:
+        result = await c.contacts.delete_import("imp_9")
+    assert result.contacts_deleted == 2
+    assert result.engagements_deleted == 1
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "/v1/contacts/imports/imp_9" in str(req.url)
+    assert "confirm=DELETE" in str(req.url)
+
+
+@pytest.mark.anyio
+async def test_contacts_list_auto_pages(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "items": [
+                {
+                    "address": "a@x.vc", "display_name": "", "metadata": {},
+                    "source": "manual",
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            "next_cursor": "cur_2",
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "items": [
+                {
+                    "address": "b@x.vc", "display_name": "", "metadata": {},
+                    "source": "manual",
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            "next_cursor": None,
+        }
+    )
+    async with _client() as c:
+        items = await c.contacts.list().to_list(limit=50)
+    assert [i.address for i in items] == ["a@x.vc", "b@x.vc"]
+    assert "cursor=cur_2" in str(httpx_mock.get_requests()[-1].url)
+
+
+@pytest.mark.anyio
+async def test_contacts_list_exposes_creation_time_filters(httpx_mock):
+    httpx_mock.add_response(json={"items": [], "next_cursor": None})
+    async with _client() as c:
+        await c.contacts.list(
+            created_after=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            created_before=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        ).to_list(limit=50)
+    url = str(httpx_mock.get_requests()[-1].url)
+    assert "created_after=2026-07-01T00%3A00%3A00" in url
+    assert "created_before=2026-07-31T00%3A00%3A00" in url
+
+
+@pytest.mark.anyio
+async def test_contacts_exposes_etag_and_sends_if_match(httpx_mock):
+    contact = {
+        "address": "partner@fund.vc", "display_name": "A. Partner",
+        "metadata": {}, "source": "manual",
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+    }
+    httpx_mock.add_response(json=contact, headers={"ETag": '"contact-v1"'})
+    httpx_mock.add_response(json={**contact, "display_name": "Renamed"})
+    async with _client() as c:
+        item, etag = await c.contacts.get_with_etag("partner@fund.vc")
+        assert item.address == "partner@fund.vc"
+        assert etag == '"contact-v1"'
+        await c.contacts.update(
+            "partner@fund.vc", {"display_name": "Renamed"}, if_match=etag,
+        )
+    assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"contact-v1"'
+
+
+@pytest.mark.anyio
+async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
+    engagement = {
+        "agent_email": "raise@example.com", "address": "partner@fund.vc",
+        "stage": "touch1", "metadata": {}, "replied": False,
+        "suppressed": False, "outbound_count": 0, "inbound_count": 0,
+        "contact": {"address": "partner@fund.vc", "display_name": "", "metadata": {}},
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+    }
+    httpx_mock.add_response(json=engagement, headers={"ETag": '"outreach-v1"'})
+    httpx_mock.add_response(json={**engagement, "stage": "touch2"})
+    async with _client() as c:
+        item, etag = await c.contacts.get_outreach_with_etag(
+            "raise@example.com", "partner@fund.vc",
+        )
+        assert item.stage == "touch1"
+        await c.contacts.set_outreach(
+            "raise@example.com", "partner@fund.vc",
+            {"stage": "touch2"}, if_match=etag,
+        )
+    assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"outreach-v1"'

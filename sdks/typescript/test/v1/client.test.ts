@@ -343,6 +343,134 @@ describe("E2AClient", () => {
     expect(JSON.parse(lastCall().init.body as string).unsubscribe).toEqual({ mode: "managed" });
   });
 
+  it("messages.send serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Scheduled update",
+      text: "Hello later",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
+  it("messages.send serializes a single-address replyTo as a scalar string", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Hi",
+      text: "Hello",
+      replyTo: "Support <support@acme.com>",
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toBe("Support <support@acme.com>");
+  });
+
+  it("messages.send serializes an array replyTo as a JSON address-list", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    // The array form also exercises the type: replyTo accepts string | string[]
+    // via the generated oneOf union, so this would fail tsc if it didn't.
+    await client.messages.send("sender@example.com", {
+      to: ["recipient@example.net"],
+      subject: "Hi",
+      text: "Hello",
+      replyTo: ["support@acme.com", "owner@acme.com"],
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toEqual([
+      "support@acme.com",
+      "owner@acme.com",
+    ]);
+  });
+
+  it("messages.reply serializes a single-address replyTo as a scalar string", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.reply("sender@example.com", "msg_1", {
+      text: "Thanks",
+      replyTo: "Support <support@acme.com>",
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toBe("Support <support@acme.com>");
+  });
+
+  it("messages.reply serializes an array replyTo as a JSON address-list", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.reply("sender@example.com", "msg_1", {
+      text: "Thanks",
+      replyTo: ["support@acme.com", "owner@acme.com"],
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toEqual([
+      "support@acme.com",
+      "owner@acme.com",
+    ]);
+  });
+
+  it("messages.forward serializes a single-address replyTo as a scalar string", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.forward("sender@example.com", "msg_1", {
+      to: ["recipient@example.net"],
+      text: "FYI",
+      replyTo: "Support <support@acme.com>",
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toBe("Support <support@acme.com>");
+  });
+
+  it("messages.forward serializes an array replyTo as a JSON address-list", async () => {
+    globalThis.fetch = mockFetch(200, { message_id: "msg_rt", status: "sent" });
+    await client.messages.forward("sender@example.com", "msg_1", {
+      to: ["recipient@example.net"],
+      text: "FYI",
+      replyTo: ["support@acme.com", "owner@acme.com"],
+    });
+    expect(JSON.parse(lastCall().init.body as string).reply_to).toEqual([
+      "support@acme.com",
+      "owner@acme.com",
+    ]);
+  });
+
+  it("messages.reply serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled_reply",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.reply("bot@test.dev", "msg_1", {
+      text: "Scheduled reply",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
+  it("messages.forward serializes sendAt and parses the scheduled result", async () => {
+    const sendAt = new Date("2026-08-01T16:00:00.000Z");
+    globalThis.fetch = mockFetch(202, {
+      message_id: "msg_scheduled_forward",
+      status: "scheduled",
+      scheduled_at: sendAt.toISOString(),
+    });
+
+    const result = await client.messages.forward("bot@test.dev", "msg_1", {
+      to: ["recipient@example.net"],
+      text: "Scheduled forward",
+      sendAt,
+    });
+
+    expect(JSON.parse(lastCall().init.body as string).send_at).toBe(sendAt.toISOString());
+    expect(result.status).toBe("scheduled");
+    expect(result.scheduledAt).toEqual(sendAt);
+  });
+
   it("messages.send uses a caller-supplied idempotency key", async () => {
     globalThis.fetch = mockFetch(200, { message_id: "msg_s2", status: "sent" });
     await client.messages.send(
@@ -640,6 +768,7 @@ describe("E2AClient", () => {
     ["agents", () => client.agents.list(), [{ email: "a@x.dev" }, { email: "b@x.dev" }], (r: { email: string }) => r.email],
     ["domains", () => client.domains.list(), [{ domain: "a.dev" }, { domain: "b.dev" }], (r: { domain: string }) => r.domain],
     ["webhooks", () => client.webhooks.list(), [{ id: "wh_1" }, { id: "wh_2" }], (r: { id: string }) => r.id],
+    ["contacts", () => client.contacts.list(), [{ address: "a@x.vc" }, { address: "b@x.vc" }], (r: { address: string }) => r.address],
     ["templates", () => client.templates.list(), [{ id: "t_1", name: "A" }, { id: "t_2", name: "B" }], (r: { id: string }) => r.id],
     ["templates.listStarters", () => client.templates.listStarters(), [{ alias: "welcome" }, { alias: "receipt" }], (r: { alias: string }) => r.alias],
     ["account.apiKeys", () => client.account.apiKeys.list(), [{ id: "key_1" }, { id: "key_2" }], (r: { id: string }) => r.id],
@@ -653,6 +782,214 @@ describe("E2AClient", () => {
     expect(items.map((it) => keyOf(it as never))).toEqual([keyOf(rows[0] as never), keyOf(rows[1] as never)]);
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("cursor=cur_2");
+  });
+
+  // ── Contacts (beta) ─────────────────────────────────────────────
+  // Contacts are account-level identity. The address is the resource key, so
+  // these pin that it is URL-encoded on the wire and that the SDK supplies the
+  // ?confirm=DELETE guard the raw API requires.
+
+  it("contacts.list exposes both creation-time filters", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    const createdAfter = new Date("2026-07-01T00:00:00Z");
+    const createdBefore = new Date("2026-07-31T00:00:00Z");
+    await client.contacts.list({ createdAfter, createdBefore }).toArray({ limit: 50 });
+    const { url } = lastCall();
+    expect(url).toContain("created_after=2026-07-01T00%3A00%3A00.000Z");
+    expect(url).toContain("created_before=2026-07-31T00%3A00%3A00.000Z");
+  });
+
+  it("contacts.get URL-encodes the address in the path", async () => {
+    globalThis.fetch = mockFetch(200, {
+      address: "partner@fund.vc", display_name: "A. Partner",
+      metadata: { fund: "Example Capital" }, source: "import",
+      import_batch_id: "imp_1",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    const c = await client.contacts.get("partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("GET");
+    // The @ must not reach the path raw — this is the encoded-routing contract.
+    expect(url).toContain("/v1/contacts/partner%40fund.vc");
+    expect(c.displayName).toBe("A. Partner");
+    expect(c.importBatchId).toBe("imp_1");
+  });
+
+  it("contacts exposes ETags and sends If-Match on conditional writes", async () => {
+    const wire = {
+      address: "partner@fund.vc", display_name: "A. Partner", metadata: {},
+      source: "manual", created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    };
+    globalThis.fetch = mockFetch(200, wire, { etag: '"contact-v1"' });
+    const versioned = await client.contacts.getWithETag("partner@fund.vc");
+    expect(versioned.data.address).toBe("partner@fund.vc");
+    expect(versioned.etag).toBe('"contact-v1"');
+
+    globalThis.fetch = mockFetch(200, { ...wire, display_name: "Renamed" });
+    await client.contacts.update(
+      "partner@fund.vc",
+      { displayName: "Renamed" },
+      { ifMatch: versioned.etag },
+    );
+    expect(lastCall().headers["If-Match"]).toBe('"contact-v1"');
+  });
+
+  it("outreach exposes ETags and sends If-Match on conditional writes", async () => {
+    const wire = {
+      agent_email: "raise@example.com", address: "partner@fund.vc", stage: "touch1",
+      metadata: {}, replied: false, suppressed: false, outbound_count: 0,
+      inbound_count: 0, contact: { address: "partner@fund.vc", display_name: "", metadata: {} },
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    };
+    globalThis.fetch = mockFetch(200, wire, { etag: '"outreach-v1"' });
+    const versioned = await client.contacts.getOutreachWithETag("raise@example.com", "partner@fund.vc");
+    expect(versioned.etag).toBe('"outreach-v1"');
+
+    globalThis.fetch = mockFetch(200, { ...wire, stage: "touch2" });
+    await client.contacts.setOutreach(
+      "raise@example.com", "partner@fund.vc", { stage: "touch2" },
+      { ifMatch: versioned.etag },
+    );
+    expect(lastCall().headers["If-Match"]).toBe('"outreach-v1"');
+  });
+
+  it("contacts.create POSTs the body and returns the canonicalized address", async () => {
+    globalThis.fetch = mockFetch(201, {
+      address: "partner@fund.vc", display_name: "A. Partner", metadata: {},
+      source: "manual",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    const c = await client.contacts.create(
+      { address: "A. Partner <Partner@Fund.VC>", displayName: "A. Partner" },
+      { idempotencyKey: "contact:partner" },
+    );
+    const { url, init } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe("contact:partner");
+    expect(url).toContain("/v1/contacts");
+    expect(JSON.parse(init.body as string)).toEqual({
+      address: "A. Partner <Partner@Fund.VC>", display_name: "A. Partner",
+    });
+    expect(c.address).toBe("partner@fund.vc");
+  });
+
+  it("contacts.update PATCHes only the fields given, so metadata survives", async () => {
+    globalThis.fetch = mockFetch(200, {
+      address: "partner@fund.vc", display_name: "Renamed",
+      metadata: { fund: "Example Capital" }, source: "import",
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-02T00:00:00Z",
+    });
+    const c = await client.contacts.update("partner@fund.vc", { displayName: "Renamed" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("PATCH");
+    expect(url).toContain("/v1/contacts/partner%40fund.vc");
+    // Only the caller's field reaches the wire — an omitted metadata key is
+    // what makes the server leave the stored value alone.
+    expect(JSON.parse(init.body as string)).toEqual({ display_name: "Renamed" });
+    expect(c.metadata).toEqual({ fund: "Example Capital" });
+  });
+
+  it("contacts.delete supplies confirm=DELETE so callers are not burdened", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true, address: "partner@fund.vc" });
+    const res = await client.contacts.delete("partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.deleted).toBe(true);
+  });
+
+  it("contacts.import returns per-row results including suppressed marking", async () => {
+    globalThis.fetch = mockFetch(200, {
+      batch_id: "imp_9", created: 1, updated: 0, skipped: 0, failed: 1,
+      results: [
+        { index: 0, address: "ok@fund.vc", status: "created", suppressed: true },
+        { index: 1, status: "failed", code: "invalid_recipient", message: "bad" },
+      ],
+    });
+    const res = await client.contacts.import({
+      contacts: [{ address: "ok@fund.vc" }, { address: "nope" }],
+    });
+    const { url, init, headers } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(url).toContain("/v1/contacts/import");
+    expect(headers["Idempotency-Key"]).toBeTruthy();
+    expect(res.batchId).toBe("imp_9");
+    // A suppressed row is still reported as created — marked, never dropped.
+    expect(res.results[0].status).toBe("created");
+    expect(res.results[0].suppressed).toBe(true);
+    expect(res.results[1].code).toBe("invalid_recipient");
+  });
+
+  it("contacts.import preserves a caller key for restart-safe replay", async () => {
+    globalThis.fetch = mockFetch(200, {
+      batch_id: "imp_replay", created: 0, updated: 0, skipped: 1, failed: 0,
+      results: [{ index: 0, address: "ok@fund.vc", status: "skipped" }],
+    });
+    await client.contacts.import(
+      { contacts: [{ address: "ok@fund.vc" }] },
+      { idempotencyKey: "contacts:upload:sha256" },
+    );
+    expect(lastCall().headers["Idempotency-Key"]).toBe("contacts:upload:sha256");
+  });
+
+  it("contacts.deleteImport reverses a batch with the confirm guard", async () => {
+    globalThis.fetch = mockFetch(200, {
+      deleted: true, batch_id: "imp_9", contacts_deleted: 2, contacts_retained: 0,
+    });
+    const res = await client.contacts.deleteImport("imp_9");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("/v1/contacts/imports/imp_9");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.contactsDeleted).toBe(2);
+  });
+
+  it("contacts.outreach builds the follow-up sweep query", async () => {
+    globalThis.fetch = mockFetch(200, { items: [], next_cursor: null });
+    // AutoPager is an async iterable; draining it issues the request.
+    for await (const _ of client.contacts.outreach("raise@example.com", {
+      replied: false,
+      nextActionBefore: new Date("2026-07-29T09:00:00Z"),
+      lastOutboundBefore: new Date("2026-07-24T09:00:00Z"),
+    })) {
+      // no rows in this fixture
+    }
+    const { url } = lastCall();
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts");
+    expect(url).toContain("replied=false");
+    // last_outbound_before is what makes a lost state-write safe — without it a
+    // failed update can send the same person twice.
+    expect(url).toContain("last_outbound_before=");
+    expect(url).toContain("next_action_before=");
+  });
+
+  it("contacts.setOutreach PUTs only the fields given", async () => {
+    globalThis.fetch = mockFetch(200, {
+      agent_email: "raise@example.com", address: "partner@fund.vc",
+      stage: "touch2", next_action_at: null, metadata: {},
+      replied: false, suppressed: false,
+      first_outbound_at: null, last_outbound_at: null, last_inbound_at: null,
+      outbound_count: 0, inbound_count: 0,
+      contact: { address: "partner@fund.vc", display_name: "", metadata: {} },
+      created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z",
+    });
+    await client.contacts.setOutreach("raise@example.com", "partner@fund.vc", { stage: "touch2" });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("PUT");
+    expect(url).toContain("/v1/agents/raise%40example.com/contacts/partner%40fund.vc");
+    // Only the caller's field reaches the wire — omitting next_action_at is
+    // what tells the server to leave the schedule alone.
+    expect(JSON.parse(init.body as string)).toEqual({ stage: "touch2" });
+  });
+
+  it("contacts.deleteOutreach un-enrols with the confirm guard", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true, address: "partner@fund.vc" });
+    const res = await client.contacts.deleteOutreach("raise@example.com", "partner@fund.vc");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("confirm=DELETE");
+    expect(res.deleted).toBe(true);
   });
 
   // ── Templates (beta) ────────────────────────────────────────────

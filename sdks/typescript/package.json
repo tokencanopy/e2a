@@ -1,6 +1,6 @@
 {
   "name": "@e2a/sdk",
-  "version": "5.4.0",
+  "version": "5.6.0",
   "description": "TypeScript SDK for e2a — email for AI agents",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,7 +25,7 @@
     "test:unit": "vitest run test/v1 --exclude '**/contract*.test.ts'",
     "test:coverage": "npm run typecheck && npm run test:unit -- --coverage && npm run test:types",
     "test:types": "tsc -p tsconfig.type-tests.json",
-    "test:contract": "vitest run test/v1/contract.test.ts test/v1/contract-client.test.ts",
+    "test:contract": "vitest run test/v1/contract.test.ts test/v1/contract-client.test.ts test/v1/contract-coverage.test.ts",
     "pretest:live": "rm -rf test/coverage/reports",
     "test:live": "vitest run --no-file-parallelism test/e2e.test.ts test/e2e-*.test.ts",
     "coverage:gate": "node test/coverage/gate.mjs",
@@ -54,7 +54,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^7.0.2",

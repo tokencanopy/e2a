@@ -1,6 +1,6 @@
 {
   "name": "@e2a/cli",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "description": "CLI for e2a — email for AI agents",
   "bin": {
     "e2a": "./dist/bin/e2a.js"
@@ -11,7 +11,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "typecheck": "tsc --project tsconfig.test.json",
+    "test": "npm run typecheck && vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "coverage:gate:cli": "node test/cli-coverage-gate.ts",
@@ -33,7 +34,7 @@
     "@e2a/sdk": "^5.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

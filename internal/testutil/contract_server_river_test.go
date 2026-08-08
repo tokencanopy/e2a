@@ -2,9 +2,15 @@ package testutil
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	contractDBReachabilityTimeout = 10 * time.Second
+	contractDBPreparationTimeout  = 90 * time.Second
 )
 
 func TestContractServerRepeatedStartClearsRiverStateAndPreservesMigrations(t *testing.T) {
@@ -49,27 +55,86 @@ func TestContractServerRepeatedStartClearsRiverStateAndPreservesMigrations(t *te
 	}
 }
 
+func runContractDBPreflight(
+	parent context.Context,
+	reachabilityTimeout time.Duration,
+	preparationTimeout time.Duration,
+	checkReachability func(context.Context) error,
+	prepare func(context.Context) error,
+) error {
+	reachabilityCtx, cancelReachability := context.WithTimeout(parent, reachabilityTimeout)
+	err := checkReachability(reachabilityCtx)
+	cancelReachability()
+	if err != nil {
+		return err
+	}
+
+	preparationCtx, cancelPreparation := context.WithTimeout(parent, preparationTimeout)
+	defer cancelPreparation()
+	return prepare(preparationCtx)
+}
+
+func TestContractDBPreflightGivesPreparationAnIndependentBudget(t *testing.T) {
+	err := runContractDBPreflight(
+		context.Background(),
+		0,
+		time.Minute,
+		func(ctx context.Context) error {
+			if err := ctx.Err(); err != context.DeadlineExceeded {
+				t.Fatalf("reachability context error = %v, want deadline exceeded", err)
+			}
+			return nil
+		},
+		func(ctx context.Context) error {
+			return ctx.Err()
+		},
+	)
+	if err != nil {
+		t.Fatalf("preparation should retain its own timeout budget: %v", err)
+	}
+}
+
 // requireReachableContractTestDB is the test's only skip gate. Once this
 // check succeeds, migration, River reset, and server startup errors are
 // regressions and the caller must fail rather than classifying them as DB
-// unavailability. It must go through OpenPreparedTestDB — a raw ping of the
-// derived per-package URL fails with 3D000 on every cold database (CI's
-// service container is always cold), which would silently skip this
-// regression gate forever instead of self-provisioning like every other
-// harness consumer.
+// unavailability. Reachability probes the configured base database because a
+// raw ping of the derived per-package URL fails with 3D000 on every cold
+// database (CI's service container is always cold). Preparation then goes
+// through OpenPreparedTestDB with its own timeout so self-provisioning,
+// migrations, and truncation do not consume the short reachability budget.
 func requireReachableContractTestDB(t *testing.T) string {
 	t.Helper()
 	dbURL := TestDBURL()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
-	pool, err := OpenPreparedTestDB(ctx, dbURL)
+	var pool *pgxpool.Pool
+	reachable := false
+	err := runContractDBPreflight(
+		context.Background(),
+		contractDBReachabilityTimeout,
+		contractDBPreparationTimeout,
+		func(ctx context.Context) error {
+			probe, err := pgxpool.New(ctx, baseTestDBURL())
+			if err != nil {
+				return err
+			}
+			defer probe.Close()
+			if err := probe.Ping(ctx); err != nil {
+				return err
+			}
+			reachable = true
+			return nil
+		},
+		func(ctx context.Context) error {
+			var err error
+			pool, err = OpenPreparedTestDB(ctx, dbURL)
+			return err
+		},
+	)
 	if err != nil {
-		var prepErr *testDBPreparationError
-		if errors.As(err, &prepErr) {
-			t.Fatalf("prepare contract test database: %v", err)
+		if !reachable {
+			t.Skipf("private test database unavailable: %v", err)
 		}
-		t.Skipf("private test database unavailable: %v", err)
+		t.Fatalf("prepare contract test database: %v", err)
 	}
 	pool.Close()
 	return dbURL

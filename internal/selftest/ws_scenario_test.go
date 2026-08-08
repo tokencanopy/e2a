@@ -25,11 +25,15 @@ import (
 // and DELETE …/messages/{id} (recorded into deleted, so tests can pin the
 // scenario's residue cleanup against the actual response shape).
 type wsStubState struct {
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	deleted   []string
-	closeSeen chan struct{} // closed once the stub reads a normal-closure frame
-	closeOnce sync.Once
+	mu          sync.Mutex
+	conn        *websocket.Conn
+	connReady   chan struct{} // closed once conn is safe for the POST handler
+	readyOnce   sync.Once
+	postStarted chan struct{} // closed once POST /messages enters the handler
+	postOnce    sync.Once
+	deleted     []string
+	closeSeen   chan struct{} // closed once the stub reads a normal-closure frame
+	closeOnce   sync.Once
 }
 
 // noteCloseFrame records that the stub read the client's normal-closure frame.
@@ -69,8 +73,16 @@ func (st *wsStubState) deletedIDs() []string {
 }
 
 func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
+	return wsStubWithRegistrationDelay(t, 0)
+}
+
+func wsStubWithRegistrationDelay(t *testing.T, registrationDelay time.Duration) (*httptest.Server, *wsStubState) {
 	t.Helper()
-	st := &wsStubState{closeSeen: make(chan struct{})}
+	st := &wsStubState{
+		connReady:   make(chan struct{}),
+		postStarted: make(chan struct{}),
+		closeSeen:   make(chan struct{}),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -84,9 +96,19 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 			if err != nil {
 				return
 			}
+			if registrationDelay > 0 {
+				select {
+				case <-st.postStarted:
+				case <-time.After(2 * time.Second):
+					c.Close(websocket.StatusInternalError, "POST did not start")
+					return
+				}
+				time.Sleep(registrationDelay)
+			}
 			st.mu.Lock()
 			st.conn = c
 			st.mu.Unlock()
+			st.readyOnce.Do(func() { close(st.connReady) })
 			// Read loop mirroring the real handler (internal/ws/handler.go:377).
 			// Control frames are only processed while something reads, so a stub
 			// that never reads never answers the client's close frame — and the
@@ -118,6 +140,15 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 			st.mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/messages") && r.Method == http.MethodPost:
+			st.postOnce.Do(func() { close(st.postStarted) })
+			readyCtx, cancelReady := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancelReady()
+			select {
+			case <-st.connReady:
+			case <-readyCtx.Done():
+				http.Error(w, "websocket registration timeout", http.StatusGatewayTimeout)
+				return
+			}
 			raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			var in struct {
 				Subject string `json:"subject"`
@@ -144,7 +175,9 @@ func wsStub(t *testing.T) (*httptest.Server, *wsStubState) {
 }
 
 func TestScenarioWebSocketRoundTrip(t *testing.T) {
-	srv, st := wsStub(t)
+	// Widen the real post-upgrade window: websocket.Accept can flush HTTP 101
+	// before the handler stores the connection, so Dial may return first.
+	srv, st := wsStubWithRegistrationDelay(t, 50*time.Millisecond)
 	defer srv.Close()
 	p := failProbe(srv.URL, "", nil)
 	if r := scenarioWebSocketRoundTrip(context.Background(), p); r.Status != StatusPass {

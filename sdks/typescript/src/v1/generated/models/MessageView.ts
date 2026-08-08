@@ -38,7 +38,7 @@ export class MessageView {
     'deliveredTo': string;
     'deliveryDetail'?: string;
     /**
-    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy \'queued\' is superseded by \'accepted\'.)
+    * Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy \'queued\' is superseded by \'accepted\'.)
     */
     'deliveryStatus'?: string;
     'direction': MessageViewDirectionEnum;
@@ -74,6 +74,10 @@ export class MessageView {
     */
     'reviewStatus'?: string;
     /**
+    * Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled.
+    */
+    'scheduledAt'?: Date;
+    /**
     * From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay.
     */
     'sentAs'?: string;
@@ -82,6 +86,10 @@ export class MessageView {
     */
     'sizeBytes'?: number;
     'subject': string;
+    /**
+    * Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned.
+    */
+    'threadId'?: string;
     'to': Array<string>;
     /**
     * RFC 5322 Author Domain validated by an aligned DMARC pass. Null for non-pass verdicts and deliveries without inbound SMTP evaluation — this includes dmarc.status=none (sender publishes no DMARC record, common and NOT itself suspicious) as well as dmarc.status=fail (an actual mismatch). Only DMARC ties a passing SPF or DKIM identity back to this header domain; a bare SPF or DKIM pass without DMARC does not. This authenticates the domain, not the address local part, individual sender, or message content.
@@ -240,6 +248,12 @@ export class MessageView {
             "format": ""
         },
         {
+            "name": "scheduledAt",
+            "baseName": "scheduled_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
             "name": "sentAs",
             "baseName": "sent_as",
             "type": "string",
@@ -254,6 +268,12 @@ export class MessageView {
         {
             "name": "subject",
             "baseName": "subject",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "threadId",
+            "baseName": "thread_id",
             "type": "string",
             "format": ""
         },

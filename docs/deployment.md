@@ -131,7 +131,7 @@ what its own externally visible API base is (it is the OAuth issuer) — keep
 that in mind if you run a server and point an SDK at a *different* deployment
 from the same environment.
 
-The TypeScript and Python SDKs follow the same pattern: pass `baseUrl` (or `base_url`) once and call `E2AApi.fetchInfo()` if you need the deployment's shared domain in your own code.
+The TypeScript and Python SDKs follow the same pattern: pass `baseUrl` (or `base_url`) once and call `client.info()` (TS `E2AClient`, Python `AsyncE2AClient`) if you need the deployment's shared domain in your own code.
 
 ## Web dashboard deployer
 
@@ -144,6 +144,7 @@ The Next.js dashboard ships as a static export, so its config is inlined at buil
 | `NEXT_PUBLIC_AGENTS_DOMAIN` | Shared mail domain shown in landing-page code samples (e.g. `agents.example.com`). When empty, samples fall back to `your-domain.com`. |
 | `NEXT_PUBLIC_FEEDBACK_EMAIL` | Address shown on the feedback form. Empty hides the "or email us at …" line. |
 | `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` | Google Search Console token. Only emitted into `<head>` when set, so forks don't inherit upstream's property. |
+| `NEXT_PUBLIC_PRICING_PATH` | Site-relative path of the pricing page, when the deployment serves one (the hosted deployment sets `/pricing`). Only used to add the page to the sitemap. Leave empty if there is no pricing route — a sitemap entry that 404s is a crawl-quality problem. |
 | `NEXT_PUBLIC_E2A_SIGN_IN_URL` | Sign-in door for the dashboard's "Sign in" links. Default: `/api/auth/login` (legacy Google OAuth). Set to `/api/auth/oidc/login` to make the generic OIDC door the default — only when the server runs with `E2A_OIDC_ENABLED=true`, otherwise the link 404s. Button copy follows: "Sign in with Google" for the legacy door, provider-neutral "Sign in" otherwise. |
 
 ## MCP HTTP server
@@ -205,4 +206,4 @@ That leaves two real horizontal-scaling caveats:
 
 **User provisioning for an external control plane is opt-in and internal-only.** When `E2A_PROVISIONING_ENABLED=true`, the server exposes `POST /api/internal/users/provision` (not part of the public `/v1` API or the OpenAPI spec) so an operator's external control plane can create e2a users ahead of their first sign-in. The caller sends `{"external_ref", "email", "name"?}` and authenticates with a hex HMAC-SHA256 of the raw request body in `X-E2A-Internal-Signature`, keyed by `E2A_PROVISIONING_SECRET` (env-only, deliberately separate from the limits internal API secret so each can be rotated independently). `external_ref` is the idempotency key — it becomes the row's `google_subject` (`bootstrap:<ref>`), so a replay returns `200` with the same `user_id`; a fresh create returns `201`; a different `external_ref` carrying an email another account already holds returns `409 {"error":"email_conflict"}` and never attaches or merges. Provisioning creates only the user row — no session, API key, or limits row. Disabled (the self-host default), the endpoint 503s.
 
-**Otherwise infra-agnostic.** The Go binary runs on any container host (Docker, Podman, k8s, ECS, Fly, Cloud Run, …). Storage is plain Postgres 14+ — managed (RDS, Cloud SQL, Neon, Supabase) or self-managed. Email goes out via standard SMTP, not a vendor SDK. Attachments live in Postgres rows, so there's no S3/GCS dependency. No queue, no Redis, no separate worker process. Secrets are read from env vars, so any secret manager that injects env at start time works.
+**Otherwise infra-agnostic.** The Go binary runs on any container host (Docker, Podman, k8s, ECS, Fly, Cloud Run, …). Storage is plain Postgres (tested on Postgres 16 — the version exercised by docker-compose and CI) — managed (RDS, Cloud SQL, Neon, Supabase) or self-managed. Email goes out via standard SMTP, not a vendor SDK. Attachments live in Postgres rows, so there's no S3/GCS dependency. No queue, no Redis, no separate worker process. Secrets are read from env vars, so any secret manager that injects env at start time works.

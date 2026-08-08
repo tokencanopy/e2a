@@ -1,5 +1,5 @@
 // Compact "X ago" formatter used by every messaging surface (agent
-// cards, thread rows, bubbles, focus page, etc.). Pure function with
+// cards, thread rows, bubbles, review rows, etc.). Pure function with
 // an injectable `now` for deterministic tests.
 //
 // Output policy:

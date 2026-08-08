@@ -3,8 +3,8 @@
 //
 // The notification is the reviewer's primary touchpoint with HITL — it
 // arrives in the account owner's inbox with a preview of the held
-// message and one-click approve / reject magic links, plus a link back
-// to the dashboard for edit-before-approve.
+// message and a primary link to the consolidated dashboard review,
+// plus signed quick-action links for reviewers who cannot sign in.
 //
 // Delivery is durable, on River: the hold accept-tx enqueues a hitl_notify
 // job (QueueNotify) in the same transaction as the pending_review row, and
@@ -188,15 +188,14 @@ func (n *Notifier) magicURL(path, token string) string {
 }
 
 func (n *Notifier) dashboardURL(messageID string) string {
-	// The dashboard's pending page is a static route that reads the message
-	// id from the ?id= query param (it redirects to /reviews?id=…). A
-	// path-style /dashboard/pending/{id} URL 404s — the static export has no
-	// per-message route.
+	// The consolidated review page reads the held message id from ?id= and
+	// expands the matching row. Keep this direct so notification recipients
+	// do not traverse the legacy /dashboard/pending compatibility redirect.
 	query := "?id=" + url.QueryEscape(messageID)
 	if n.publicURL == "" {
-		return "/dashboard/pending" + query
+		return "/reviews" + query
 	}
-	return n.publicURL + "/dashboard/pending" + query
+	return n.publicURL + "/reviews" + query
 }
 
 func truncate(s string, n int) string {
@@ -210,8 +209,8 @@ func truncate(s string, n int) string {
 }
 
 // The notification deliberately omits the held message's body from the
-// email. The body lives in the database and is shown on the token-gated
-// confirmation page the magic link leads to; keeping it out of the
+// email. The body lives in the database and is shown in the authenticated
+// dashboard or on a signed confirmation page; keeping it out of the
 // email avoids leaking sensitive draft content through the reviewer's
 // mail infrastructure (spam filters, corporate archives, mobile sync,
 // etc.). Reviewers see recipients and subject here — enough to know
@@ -233,12 +232,11 @@ func renderText(msg *identity.Message, agent *identity.AgentIdentity, approveURL
 	if msg.ApprovalExpiresAt != nil {
 		fmt.Fprintf(&b, "Expires: %s\n", msg.ApprovalExpiresAt.UTC().Format(time.RFC1123))
 	}
-	b.WriteString("\nThe full body is not included in this email. Open a link\n")
-	b.WriteString("below to review the message before approving or rejecting.\n\n")
-
-	fmt.Fprintf(&b, "Review and approve:\n  %s\n\n", approveURL)
-	fmt.Fprintf(&b, "Review and reject:\n  %s\n\n", rejectURL)
-	fmt.Fprintf(&b, "Edit before approving (dashboard):\n  %s\n\n", dashboardURL)
+	b.WriteString("\nThe full body is not included in this email.\n\n")
+	fmt.Fprintf(&b, "Review message:\n  %s\n\n", dashboardURL)
+	b.WriteString("Can't sign in? These signed links still open a confirmation page before acting:\n\n")
+	fmt.Fprintf(&b, "Quick approve:\n  %s\n\n", approveURL)
+	fmt.Fprintf(&b, "Quick reject:\n  %s\n\n", rejectURL)
 	fmt.Fprintf(&b, "If no action is taken by the expiration time above, the\n")
 	fmt.Fprintf(&b, "message will be finalized according to the agent's\n")
 	fmt.Fprintf(&b, "configured auto-expiration policy.\n")
@@ -261,8 +259,7 @@ func renderHTML(msg *identity.Message, agent *identity.AgentIdentity, approveURL
 		muted     = "#6E665B" // --fg-muted
 		subtle    = "#9A9082" // --fg-subtle
 		link      = "#8A5214" // --accent-strong (gold spark)
-		success   = "#0F7A4D" // --success (approve)
-		danger    = "#CC2E2E" // --danger (reject)
+		primary   = "#2F4638" // --button-primary
 		onAccent  = "#FFFFFF" // --accent-fg
 	)
 	var b strings.Builder
@@ -293,32 +290,20 @@ func renderHTML(msg *identity.Message, agent *identity.AgentIdentity, approveURL
 	}
 	b.WriteString(`</table>`)
 
-	fmt.Fprintf(&b, `<p style="font-size:13px;color:%s">The message body is not included in this email. Click a button below to review it before deciding.</p>`, muted)
+	fmt.Fprintf(&b, `<p style="font-size:13px;color:%s">The message body is not included in this email. Review it in e2a before deciding.</p>`, muted)
 
-	// Action buttons point at the token-gated confirm pages (GET). The
-	// actual approve/reject side effect only fires when the reviewer
-	// submits the form on that page — this is what keeps mail-client URL
-	// scanners from approving on the reviewer's behalf.
-	//
-	// Each button is a block-level anchor so the two stack vertically and
-	// fill the available width. Inline buttons sitting side-by-side
-	// overflowed and overlapped on narrow mobile viewports (the padded
-	// inline anchors didn't grow line height when they wrapped); stacking
-	// is robust across every width without needing @media queries, which
-	// many mail clients strip.
+	// The authenticated dashboard is the canonical review experience and
+	// therefore the only primary button. The signed links remain available
+	// as secondary no-login shortcuts; each opens a GET confirmation page,
+	// and the actual side effect only fires on POST. That keeps mail-client
+	// URL scanners from approving or rejecting on the reviewer's behalf.
 	const btnStyle = `display:block;background:%s;color:%s;font-weight:500;padding:12px 18px;text-decoration:none;border-radius:6px;text-align:center;font-size:15px`
-	fmt.Fprintf(&b, `<div style="margin-top:16px">`)
 	fmt.Fprintf(&b,
-		`<a href="%s" style="`+btnStyle+`;margin-bottom:10px">Review &amp; approve</a>`,
-		html.EscapeString(approveURL), success, onAccent)
+		`<a href="%s" style="`+btnStyle+`;margin-top:16px">Review message</a>`,
+		html.EscapeString(dashboardURL), primary, onAccent)
 	fmt.Fprintf(&b,
-		`<a href="%s" style="`+btnStyle+`">Review &amp; reject</a>`,
-		html.EscapeString(rejectURL), danger, onAccent)
-	fmt.Fprintf(&b, `</div>`)
-
-	fmt.Fprintf(&b,
-		`<p style="margin-top:16px;font-size:13px;color:%s">Need to edit before approving? <a href="%s" style="color:%s">Review in the dashboard</a>.</p>`,
-		muted, html.EscapeString(dashboardURL), link)
+		`<p style="margin-top:16px;font-size:13px;color:%s">Can&apos;t sign in? <a href="%s" style="color:%s">Quick approve</a> or <a href="%s" style="color:%s">Quick reject</a>. Each signed link asks for confirmation before acting.</p>`,
+		muted, html.EscapeString(approveURL), link, html.EscapeString(rejectURL), link)
 
 	fmt.Fprintf(&b, `<p style="margin-top:24px;font-size:12px;color:%s">If no action is taken before the expiration time, the message will be finalized according to the agent's configured auto-expiration policy.</p>`, subtle)
 	b.WriteString(`</div></body></html>`)

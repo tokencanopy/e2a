@@ -20,6 +20,7 @@ import {
   PromiseAccountApi,
   PromiseReviewsApi,
   PromiseTemplatesApi,
+  PromiseContactsApi,
   PromiseMetaApi,
 } from "./generated/types/PromiseAPI.js";
 import type {
@@ -74,6 +75,16 @@ import type {
   DeploymentInfoView,
   ReviewView,
   TemplateView,
+  ContactView,
+  CreateContactRequest,
+  UpdateContactRequest,
+  DeleteContactResult,
+  ImportContactsRequest,
+  ContactImportResult,
+  DeleteImportBatchResult,
+  ContactEngagementView,
+  UpsertEngagementRequest,
+  DeleteEngagementResult,
   TemplateSummaryView,
   CreateTemplateRequest,
   UpdateTemplateRequest,
@@ -120,11 +131,13 @@ export interface RequestOptions {
 
 /** Per-call options for send/reply/forward. */
 export interface SendOptions extends RequestOptions {
-  /** Optional bounded wait: `wait: "sent"` holds the request server-side until
-   *  the message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then
-   *  returns the observed state; on timeout the result stays `status:
-   *  "accepted"`. Default: no wait. Always branch on the result's `status`,
-   *  not the HTTP code. */
+  /** Optional bounded wait for an immediate send: `wait: "sent"` holds the
+   *  request server-side until the message reaches a terminal-or-held state or
+   *  at most 20 seconds elapse (currently ~15s), then returns the observed
+   *  state; on timeout the result stays `status: "accepted"`. A future
+   *  `sendAt` returns `status: "scheduled"` immediately and does not wait for
+   *  that time. Default: no wait. Always branch on the result's `status`, not
+   *  the HTTP code. */
   wait?: "sent";
 }
 
@@ -193,6 +206,7 @@ export class E2AClient {
   readonly account: AccountResource;
   readonly reviews: ReviewsResource;
   readonly templates: TemplatesResource;
+  readonly contacts: ContactsResource;
   private readonly meta: PromiseMetaApi;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -232,6 +246,7 @@ export class E2AClient {
     this.account = new AccountResource(new PromiseAccountApi(config));
     this.reviews = new ReviewsResource(new PromiseReviewsApi(config));
     this.templates = new TemplatesResource(new PromiseTemplatesApi(config));
+    this.contacts = new ContactsResource(new PromiseContactsApi(config));
     this.meta = new PromiseMetaApi(config);
   }
 
@@ -308,7 +323,11 @@ class AgentsResource {
   delete(email: string, opts: { permanent?: boolean } = {}): Promise<DeleteAgentResult> {
     return call(() => this.api.deleteAgent(email, "DELETE", opts.permanent));
   }
-  /** Restore an agent from the 30-day trash. Account-scoped credentials only. */
+  /**
+   * Restore an agent from the 30-day trash. Scheduled messages restored before
+   * scheduled_at re-arm; at/after scheduled_at they return live as failed with
+   * submission canceled. Account-scoped credentials only.
+   */
   restore(email: string): Promise<AgentView> {
     return call(() => this.api.restoreAgent(email));
   }
@@ -348,6 +367,9 @@ export interface ListMessagesParams {
   filter?: string;
 }
 
+/** Message operations. Scheduled sending through `sendAt` and the resulting
+ * `scheduledAt` / `status: "scheduled"` fields is beta and may change before
+ * it is declared stable. Managed unsubscribe is independently beta. */
 class MessagesResource {
   constructor(private readonly api: PromiseMessagesApi) {}
 
@@ -406,7 +428,11 @@ class MessagesResource {
   delete(email: string, id: string, opts: { permanent?: boolean } = {}): Promise<DeleteMessageResult> {
     return call(() => this.api.deleteMessage(email, id, opts.permanent, "DELETE"));
   }
-  /** Restore a soft-deleted message and resume its retention clock. */
+  /**
+   * Restore a soft-deleted message. A scheduled message restored before
+   * scheduled_at re-arms; at/after scheduled_at it returns live as failed with
+   * submission canceled.
+   */
   restore(email: string, id: string): Promise<MessageView> {
     return call(() => this.api.restoreMessage(email, id));
   }
@@ -521,6 +547,147 @@ class TemplatesResource {
    *  read-only masters — copy one with `create({ fromStarter: alias })`. */
   getStarter(alias: string): Promise<StarterTemplateDetailView> {
     return call(() => this.api.getStarterTemplate(alias));
+  }
+}
+
+class ContactsResource {
+  constructor(private readonly api: PromiseContactsApi) {}
+  /** List the people this account corresponds with, newest first. Optionally
+   *  narrow by provenance, upload, or creation-time window. */
+  list(params: {
+    source?: string;
+    importBatchId?: string;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    limit?: number;
+  } = {}): AutoPager<ContactView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
+    return new AutoPager(async (cursor) => {
+      const page = await call(() =>
+        this.api.listContacts(
+          params.source,
+          params.importBatchId,
+          params.createdAfter,
+          params.createdBefore,
+          cursor,
+          params.limit,
+        ));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+  /** Fetch one contact. `address` may be a bare address or a display-name form
+   *  ("A. Partner <partner@fund.vc>") — both resolve to the same contact. */
+  get(address: string): Promise<ContactView> {
+    return call(() => this.api.getContact(address));
+  }
+  /** Fetch one contact together with the current optimistic-concurrency
+   *  validator. Pass `etag` back as `ifMatch` on update to reject a stale
+   *  editor instead of silently overwriting a newer change. */
+  async getWithETag(address: string): Promise<{ data: ContactView; etag?: string }> {
+    const response = await call(() => this.api.getContactWithHttpInfo(address));
+    return { data: response.data, etag: response.headers.etag ?? response.headers.ETag };
+  }
+  /** Create one contact. The address is canonicalized, so creating the same
+   *  person twice (in any form) is a 409 rather than a duplicate row. */
+  create(body: CreateContactRequest, opts: RequestOptions = {}): Promise<ContactView> {
+    return call(() => this.api.createContact(body, opts.idempotencyKey));
+  }
+  /** Partial update; omitted fields are left unchanged, so editing the name
+   *  never erases metadata. Address and provenance are immutable. */
+  update(
+    address: string,
+    patch: UpdateContactRequest,
+    opts: { ifMatch?: string } = {},
+  ): Promise<ContactView> {
+    return call(() => this.api.updateContact(address, patch, opts.ifMatch));
+  }
+  delete(address: string): Promise<DeleteContactResult> {
+    // The typed .delete() call is itself the confirmation; the SDK supplies the
+    // ?confirm=DELETE guard the raw API requires.
+    return call(() => this.api.deleteContact(address, "DELETE"));
+  }
+  /** Import up to 1000 contacts in one request. Every submitted row gets its own
+   *  result, so one bad line never rejects the upload. Import is inert — it
+   *  records identity and sends nothing. Rows omitting a field keep the stored
+   *  value, so a narrower re-upload does not erase columns it no longer carries. */
+  import(body: ImportContactsRequest, opts: RequestOptions = {}): Promise<ContactImportResult> {
+    return call(() => this.api.importContacts(body, opts.idempotencyKey));
+  }
+  /** Reverse an import, removing untouched contacts and agent enrolments it created. */
+  deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
+    return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
+  }
+
+  // ── Per-agent outreach ────────────────────────────────────────────────────
+  // Engagements are one agent's relationship with a contact. Unlike the
+  // account-level methods above, an agent-scoped credential may drive these for
+  // its own agent — that is the outreach loop.
+
+  /** List the contacts an agent is working, with the reply and delivery facts
+   *  e2a derives from real message activity.
+   *
+   *  For a follow-up sweep pass `replied: false` together with BOTH
+   *  `nextActionBefore` and `lastOutboundBefore`. `lastOutboundAt` is
+   *  server-maintained, so including it drops anyone just contacted even if
+   *  your own state write was lost — omit it and a failed write can send twice. */
+  outreach(
+    email: string,
+    params: {
+      stage?: string;
+      replied?: boolean;
+      suppressed?: boolean;
+      nextActionBefore?: Date;
+      lastOutboundBefore?: Date;
+      limit?: number;
+    } = {},
+  ): AutoPager<ContactEngagementView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
+    return new AutoPager(async (cursor) => {
+      const page = await call(() =>
+        this.api.listEngagements(
+          email,
+          params.stage,
+          params.replied === undefined ? undefined : (params.replied ? "true" : "false"),
+          params.suppressed === undefined ? undefined : (params.suppressed ? "true" : "false"),
+          params.nextActionBefore,
+          params.lastOutboundBefore,
+          cursor,
+          params.limit,
+        ));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+
+  /** Fetch one agent's outreach record for a contact. */
+  getOutreach(email: string, address: string): Promise<ContactEngagementView> {
+    return call(() => this.api.getEngagement(email, address));
+  }
+  /** Fetch one outreach record with its current validator for a guarded
+   *  read-modify-write loop. */
+  async getOutreachWithETag(
+    email: string,
+    address: string,
+  ): Promise<{ data: ContactEngagementView; etag?: string }> {
+    const response = await call(() => this.api.getEngagementWithHttpInfo(email, address));
+    return { data: response.data, etag: response.headers.etag ?? response.headers.ETag };
+  }
+
+  /** Enrol a contact in an agent's outreach, or update the agent-owned fields.
+   *  Omitted fields are left unchanged, so advancing the stage after a send
+   *  does not disturb the schedule. */
+  setOutreach(
+    email: string,
+    address: string,
+    body: UpsertEngagementRequest,
+    opts: { ifMatch?: string } = {},
+  ): Promise<ContactEngagementView> {
+    return call(() => this.api.upsertEngagement(email, address, body, opts.ifMatch));
+  }
+
+  /** Un-enrol a contact from an agent's outreach. The contact itself survives,
+   *  and suppressions are untouched — this is not consent. */
+  deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
+    return call(() => this.api.deleteEngagement(email, address, "DELETE"));
   }
 }
 
@@ -663,9 +830,10 @@ class WebhooksResource {
 
 class SuppressionsResource {
   constructor(private readonly api: PromiseAccountApi) {}
-  list(): AutoPager<SuppressionView> {
+  list(params: { limit?: number } = {}): AutoPager<SuppressionView> {
+    // Cursor-paginated: the AutoPager walks next_cursor to completion.
     return new AutoPager(async (cursor) => {
-      const page = await call(() => this.api.listSuppressions(cursor));
+      const page = await call(() => this.api.listSuppressions(cursor, params.limit));
       return { items: page.items ?? [], next_cursor: page.nextCursor };
     });
   }

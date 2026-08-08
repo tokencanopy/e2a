@@ -121,15 +121,15 @@ Hosts that support OAuth connectors can instead add `https://api.e2a.dev/mcp` as
 
 ## Tools
 
-The server exposes up to **60** tools spanning agents, messages, human-in-the-loop
-approval, attachments, domains, events, webhooks, API keys, and email templates
-(beta).
+The server exposes up to **76** tools spanning agents, messages, human-in-the-loop
+approval, attachments, domains, events, webhooks, API keys, contacts/outreach,
+email templates (beta), and suppressions.
 **The visible set depends on your credential's scope:** an **agent**-scoped
-credential sees the 16 runtime/inbox tools (read, send, reply, restore messages);
-an **account**-scoped credential also sees the 44 admin/setup
-tools (agent/domain/webhook/event/template/API-key management — **and HITL
-review discovery plus approve/reject, which is an account-owner action, never
-agent self-approval**) — all 60.
+credential sees the 20 runtime/inbox tools (read, send, reply, restore
+messages, per-agent outreach); an **account**-scoped credential also sees the
+56 admin/setup tools (agent/domain/webhook/event/template/API-key/contact/
+suppression management — **and HITL review discovery plus approve/reject, which
+is an account-owner action, never agent self-approval**) — all 76.
 Every tool carries MCP annotations (`readOnlyHint`/`destructiveHint`/
 `idempotentHint`) so hosts can auto-approve reads and flag destructive actions.
 The tables below highlight the most commonly used ones — your MCP host's tool list
@@ -156,16 +156,26 @@ shows the set your scope allows, with per-tool descriptions.
 
 ### Messages
 
+Scheduled sending via `send_at` / `scheduled_at` is **beta and may change
+before it is declared stable**.
+
 | Tool | Description |
 | --- | --- |
-| `send_message` | Send a new email. The message is durably queued and returns `status: accepted` (the terminal outcome arrives via webhook/event or a follow-up read). When the agent's outbound policy or content scan holds it for review, it instead returns `status: pending_review`. |
-| `reply_to_message` | Reply to a message — one the agent received (replies to its sender) or one it sent (continues the thread to the original recipients). Preserves In-Reply-To / References for thread continuity. |
+| `send_message` | Send a new email. Immediate queueing returns `status: accepted`; future `send_at` returns `status: scheduled` plus `scheduled_at`; a review hold returns `status: pending_review`. All three are durable success outcomes — do not re-send. |
+| `reply_to_message` | Reply to a message — one the agent received (replies to its sender) or one it sent (continues the thread to the original recipients). Preserves In-Reply-To / References for thread continuity and accepts the same optional `send_at` as `send_message`. |
+| `forward_message` | Forward a message into a new thread, carrying its existing attachments by default. Accepts the same optional `send_at` as `send_message`. |
 | `list_messages` | List mail; pass `deleted:true` to list trash. Filter by `read_status` (unread / read / all) and sender with reserved-word-safe `from_`; cursor-paginated (`cursor` + `limit` in, `next_cursor` out). |
-| `delete_message` | Move a message to the trash (restorable for ~30 days). Requires `confirm: true`. Permanent deletion is deliberately not exposed over MCP — use the REST API/SDK. |
+| `delete_message` | Move a message to the trash (restorable for ~30 days). Requires `confirm: true`. Per-message permanent deletion is deliberately not exposed over MCP — use the REST API/SDK. (Purging a whole inbox is available to account scope via `delete_agent`'s `permanent: true`.) |
 | `restore_message` | Restore a soft-deleted message and resume its retention clock. |
 | `get_message` | Fetch full body, headers, and attachment metadata for one message. |
 | `get_attachment` | Get one attachment's metadata + a short-lived `download_url` (fetch the bytes out of band); `inline: true` returns base64 `data` for small files (≤256 KB). |
 | `update_message_labels` | Add or remove labels on a message. |
+
+MCP message output intentionally omits the REST message-read beta `thread_id`
+field and adds no thread filter or endpoint. `list_conversations` /
+`get_conversation` remain caller-owned `conversation_id` application views,
+not RFC email-thread enumeration. Use `reply_to_message` with the original
+message ID to preserve wire topology.
 
 ### Human-in-the-loop approval
 
@@ -202,6 +212,42 @@ dashboard or the raw API, where a human is in the loop.
 | `list_api_keys` | List the account's API keys — metadata only (secrets are shown once, at creation). |
 | `create_api_key` | Mint a new agent-scoped key bound to an inbox; returns the plaintext key ONCE — store it immediately. |
 | `delete_api_key` | Revoke a key permanently (requires `confirm: true`). |
+
+### Contacts (beta)
+
+The people an account corresponds with (`list_contacts` / `get_contact` /
+`create_contact` / `update_contact` / `delete_contact`, admin/account-scoped)
+and one agent's per-contact outreach state — stage, next action, reply/
+suppression facts (`list_outreach_contacts` / `get_outreach_contact` /
+`set_outreach_contact` / `delete_outreach_contact`, available to account scope
+or an agent-scoped credential for its bound inbox). Import is inert — it
+records identity and enrolls outreach without sending anything.
+
+| Tool | Description |
+| --- | --- |
+| `list_contacts` / `get_contact` | List account contacts (filter by provenance/import batch/creation window) or fetch one by address. |
+| `create_contact` / `update_contact` / `delete_contact` | Create, partially update (`etag`-guarded via `if_match`), or delete a contact's identity and all of its per-agent outreach rows. Deleting a contact does not remove suppressions. |
+| `import_contacts` | Bulk-import contacts from rows, optionally enrolling them into an agent's outreach. |
+| `delete_contact_import` | Reverse an import batch, removing untouched contacts and the enrolments it created. |
+| `list_outreach_contacts` / `get_outreach_contact` | List or fetch the contacts an agent is working, with server-derived reply/delivery facts. |
+| `set_outreach_contact` | Enroll a contact in an agent's outreach, or update the agent-owned fields (stage, next action). |
+| `delete_outreach_contact` | Un-enroll a contact from an agent's outreach; the contact and its suppressions survive. |
+
+### Suppressions
+
+Recipient block lists at two scopes, all admin/account-scoped (the server
+rejects agent-scoped credentials on every one — an agent must not read or edit
+blocklists). The account list is auto-populated by hard bounces and complaints
+and applies to sends from every agent; the agent list (beta) holds
+unsubscribe/manual blocks for one exact sending agent.
+
+| Tool | Description |
+| --- | --- |
+| `list_suppressions` | List the account-wide suppression list (address, source `bounce`/`complaint`/`manual`, reason, source message id). |
+| `delete_suppression` | Un-suppress a recipient account-wide. Requires `confirm: true`; only use it for addresses known to be deliverable — removing a genuine bouncer hurts sender reputation. |
+| `list_agent_suppressions` | List one agent's blocked recipients (`unsubscribe`/`manual`). |
+| `create_agent_suppression` | Idempotently add a manual block for one agent; other agents can still mail the address. |
+| `delete_agent_suppression` | Remove only the exact agent-scoped block. Requires `confirm: true` because the block may represent an unsubscribe. |
 
 ### Templates (beta)
 
@@ -324,9 +370,11 @@ Failed tool calls return `structuredContent` (see [Errors](#errors)):
 branch on `code` / `retryable` / `retry_after_seconds`. Retry only
 `retryable: true` errors with exponential backoff + jitter, ~3 attempts
 max. Never retry 4xx (401 → re-authenticate; 421 → fix the URL).
-`pending_review` on send tools is a success outcome — do not retry it. The
-transport is stateless, so "reconnect" after an interruption is simply
-re-POSTing; MCP clients do this automatically.
+`accepted`, `scheduled`, and `pending_review` on send tools are success outcomes
+— do not retry them. A future `send_at` to the sending agent's own address
+returns `400 invalid_request` when direct loopback applies; review holds take
+precedence and drop the schedule. The transport is stateless, so "reconnect"
+after an interruption is simply re-POSTing; MCP clients do this automatically.
 
 ## Links
 

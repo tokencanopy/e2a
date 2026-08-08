@@ -98,10 +98,17 @@ func (r *SMTPRelay) SendWithEnvelopeContext(ctx context.Context, envelopeFrom st
 // Classify the returned error with IsTransientSMTPError — transient (4xx/throttle)
 // → let River retry; permanent (5xx/validation) → fail the message terminally.
 func (r *SMTPRelay) SendOnce(envelopeFrom string, recipients []string, message []byte) (string, error) {
+	return r.SendOnceContext(context.Background(), envelopeFrom, recipients, message)
+}
+
+// SendOnceContext is SendOnce with caller cancellation propagated into the
+// SMTP dial/command path. River workers use it so remotely cancelling a running
+// job can stop provider I/O promptly.
+func (r *SMTPRelay) SendOnceContext(ctx context.Context, envelopeFrom string, recipients []string, message []byte) (string, error) {
 	if !r.Configured() {
 		return "", fmt.Errorf("outbound SMTP relay not configured")
 	}
-	return r.sendOnceContext(context.Background(), envelopeFrom, recipients, message)
+	return r.sendOnceContext(ctx, envelopeFrom, recipients, message)
 }
 
 // IsTransientSMTPError reports whether err is a retryable SMTP failure (4xx /

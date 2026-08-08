@@ -214,8 +214,10 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	if err := jobs.Migrate(context.Background(), pool); err != nil {
 		t.Fatalf("migrate River schema: %v", err)
 	}
+	outboundSendStore := agent.NewOutboundSendStore(store, outbox, noopUsage)
+	store.SetScheduledSendFinalizer(outboundSendStore)
 	outboundJobs := outboundsend.NewJobs(
-		agent.NewOutboundSendStore(store, outbox, noopUsage),
+		outboundSendStore,
 		agent.NewOutboundDeliverer(sender),
 		pool,
 	)
@@ -223,6 +225,7 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	if err != nil {
 		t.Fatalf("build River client: %v", err)
 	}
+	store.SetOutboundJobCanceller(jobsClient)
 	outboundJobs.SetEnqueuer(jobsClient)
 	// Deferred under WithManualJobs so the test owns when queues start draining.
 	if !o.manualJobs {

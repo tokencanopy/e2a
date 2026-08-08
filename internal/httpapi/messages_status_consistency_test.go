@@ -51,3 +51,48 @@ func TestMessageStatusConsistentAcrossViews_Inbound(t *testing.T) {
 		t.Errorf("inbound status differs: summary=%q detail=%q", summary.Status, detail.Status)
 	}
 }
+
+// scheduled_at must appear on BOTH the list (MessageSummaryView) and detail
+// (MessageView) for the same scheduled outbound row, so the dashboard can
+// distinguish a scheduled send from an ordinary queued one straight from the
+// inbox list — the whole point of exposing it on the list contract.
+func TestScheduledAtConsistentAcrossViews_Outbound(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC().Add(24 * time.Hour)
+	m := identity.Message{
+		ID:             "msg_sched",
+		Direction:      "outbound",
+		DeliveryStatus: "accepted",
+		Status:         "sent",
+		ScheduledAt:    &at,
+		CreatedAt:      time.Unix(1700000000, 0).UTC(),
+	}
+	summary := messageSummaryFromIdentity(m)
+	detail := messageViewFromIdentity(&m)
+	if summary.ScheduledAt == nil || detail.ScheduledAt == nil {
+		t.Fatalf("scheduled_at must appear on both views: summary=%v detail=%v", summary.ScheduledAt, detail.ScheduledAt)
+	}
+	if !summary.ScheduledAt.Equal(at) || !summary.ScheduledAt.Equal(*detail.ScheduledAt) {
+		t.Errorf("scheduled_at differs: summary=%v detail=%v want=%v", summary.ScheduledAt, detail.ScheduledAt, at)
+	}
+}
+
+// An immediate send (nil scheduled_at) and inbound rows must omit scheduled_at
+// on the list view: the pointer stays nil so omitempty drops it from the wire,
+// and the field is set only inside the outbound branch of the constructor.
+func TestScheduledAtOmittedWhenUnset(t *testing.T) {
+	immediate := messageSummaryFromIdentity(identity.Message{
+		ID: "msg_imm", Direction: "outbound", DeliveryStatus: "accepted",
+		CreatedAt: time.Unix(1700000000, 0).UTC(),
+	})
+	if immediate.ScheduledAt != nil {
+		t.Errorf("immediate send must omit scheduled_at, got %v", immediate.ScheduledAt)
+	}
+	at := time.Unix(1700000000, 0).UTC().Add(24 * time.Hour)
+	inbound := messageSummaryFromIdentity(identity.Message{
+		ID: "msg_in", Direction: "inbound", ScheduledAt: &at,
+		CreatedAt: time.Unix(1700000000, 0).UTC(),
+	})
+	if inbound.ScheduledAt != nil {
+		t.Errorf("inbound row must omit scheduled_at, got %v", inbound.ScheduledAt)
+	}
+}

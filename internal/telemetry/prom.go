@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,31 +20,38 @@ import (
 type Prom struct {
 	reg *prometheus.Registry
 
-	httpRequests      *prometheus.CounterVec
-	httpDuration      *prometheus.HistogramVec
-	smtpInbound       *prometheus.CounterVec
-	smtpDuration      prometheus.Histogram
-	outQueueWait      prometheus.Histogram
-	outTerminal       *prometheus.CounterVec
-	outTerminalLat    prometheus.Histogram
-	outAttempts       *prometheus.CounterVec
-	outAttemptDur     prometheus.Histogram
-	whAttempts        *prometheus.CounterVec
-	whAttemptDur      prometheus.Histogram
-	whExpiredPending  prometheus.Counter
-	whFanOutRescued   prometheus.Counter
-	whDeliveryRescued prometheus.Counter
-	whFirstTryLat     prometheus.Histogram
-	wsConnects        prometheus.Counter
-	wsDisconnects     *prometheus.CounterVec
-	wsRejected        *prometheus.CounterVec
-	wsDrained         prometheus.Counter
-	wsSendFailures    prometheus.Counter
-	wsActive          prometheus.Gauge
-	inboundProcess    *prometheus.CounterVec
-	inboundDuration   prometheus.Histogram
-	queueDepth        *prometheus.GaugeVec
-	queueOldestAge    *prometheus.GaugeVec
+	httpRequests       *prometheus.CounterVec
+	httpDuration       *prometheus.HistogramVec
+	smtpInbound        *prometheus.CounterVec
+	smtpDuration       prometheus.Histogram
+	outQueueWait       prometheus.Histogram
+	outTerminal        *prometheus.CounterVec
+	outTerminalLat     prometheus.Histogram
+	outAttempts        *prometheus.CounterVec
+	outAttemptDur      prometheus.Histogram
+	outRateDeferred    prometheus.Counter
+	whAttempts         *prometheus.CounterVec
+	whAttemptDur       prometheus.Histogram
+	whTerminal         *prometheus.CounterVec
+	whExpiredPending   prometheus.Counter
+	whFanOutRescued    prometheus.Counter
+	whDeliveryRescued  prometheus.Counter
+	whFirstTryLat      prometheus.Histogram
+	wsConnects         prometheus.Counter
+	wsDisconnects      *prometheus.CounterVec
+	wsRejected         *prometheus.CounterVec
+	wsDrained          prometheus.Counter
+	wsSendFailures     prometheus.Counter
+	wsActive           prometheus.Gauge
+	inboundProcess     *prometheus.CounterVec
+	inboundDuration    prometheus.Histogram
+	queueDepth         *prometheus.GaugeVec
+	queueOldestAge     *prometheus.GaugeVec
+	threadResolution   *prometheus.CounterVec
+	threadHeaderParse  *prometheus.CounterVec
+	threadNull         *prometheus.GaugeVec
+	threadViolations   *prometheus.GaugeVec
+	threadRelationship *prometheus.GaugeVec
 
 	// legacy outbox instruments (same events the Log backend emits)
 	outboxPublished *prometheus.CounterVec
@@ -53,6 +61,7 @@ type Prom struct {
 	outboxFailures  *prometheus.CounterVec
 	redeliver       *prometheus.CounterVec
 	janitorDeleted  *prometheus.CounterVec
+	contactDue      *prometheus.CounterVec
 	notifyMissed    prometheus.Counter
 	publisherLag    prometheus.Gauge
 
@@ -77,15 +86,18 @@ var (
 	methodSet = set("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 	classSet  = set("1xx", "2xx", "3xx", "4xx", "5xx", "none")
 	smtpSet   = set("accepted", "accepted_dedup", "tempfail",
-		"rejected_unknown_recipient", "rejected_unverified_domain", "rejected_quota")
+		"rejected_unknown_recipient", "rejected_unverified_domain", "rejected_quota",
+		"rejected_line_too_long")
 	outTermSet = set("sent", "failed_suppressed", "failed_provider",
 		"failed_local_retries", "failed_cancelled")
 	outAttemptSet = set("success", "temporary_failure", "permanent_failure")
 	whSet         = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
-	wsReasonSet = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
-	wsRejectSet = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
-	inboundSet  = set("processed", "noop", "failed_recipient_gone",
+	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
+	whScopeSet    = set("initial", "replay", "test", "unknown")
+	wsReasonSet   = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
+	wsRejectSet   = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
+	inboundSet    = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
 	stateSet = set("available", "running", "retryable", "scheduled")
@@ -94,6 +106,22 @@ var (
 	tableSet = set("webhook_events", "webhook_subscriber_deliveries",
 		"webhook_deliveries", "messages", "agent_identities",
 		"user_sessions", "oauth")
+	threadResolutionSet = set(
+		"api_reply", "fresh_send", "forward", "rfc_in_reply_to",
+		"rfc_references", "self_twin", "authenticated_delivery_twin",
+		"lazy_legacy_anchor", "anchor_found_without_thread",
+		"legacy_anchor_unmatched", "ambiguous_anchor", "no_anchor",
+		"cycle_detected",
+	)
+	threadHeaderSet    = set("in_reply_to", "references")
+	threadNullAgeSet   = set("lt_1h", "1h_6h", "6h_24h")
+	threadViolationSet = set(
+		"dangling_parent", "cross_agent_parent", "thread_mismatch",
+		"cycle", "cycle_depth_limit",
+	)
+	threadRelationshipSet = set(
+		"threads_multi_conversation", "conversations_multi_thread",
+	)
 )
 
 func set(vals ...string) map[string]struct{} {
@@ -115,7 +143,7 @@ func enum(allowed map[string]struct{}, v string) string {
 // queue wait can legitimately reach minutes under backlog, so it gets a
 // longer tail.
 var (
-	fastBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30}
+	fastBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, .75, 1, 2, 2.5, 5, 10, 30}
 	waitBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 15, 30, 60, 120, 300, 900, 3600}
 	// longBuckets spans seconds-to-days: outbound acceptance→terminal can
 	// legitimately reach the 72h retry horizon under a provider outage,
@@ -124,8 +152,42 @@ var (
 	longBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400, 259200}
 )
 
-func NewProm() *Prom {
+// NormalizeBuildLabel keeps operator-provided release identifiers safe and
+// bounded for use as a Prometheus label.
+func NormalizeBuildLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	const maxLen = 128
+	var b strings.Builder
+	b.Grow(min(len(value), maxLen))
+	for _, r := range value {
+		if b.Len() >= maxLen {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			strings.ContainsRune("._:+@/-", r):
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
+func NewProm(build string) *Prom {
 	reg := prometheus.NewRegistry()
+	registerer := prometheus.WrapRegistererWith(
+		prometheus.Labels{"build": NormalizeBuildLabel(build)},
+		reg,
+	)
 	p := &Prom{
 		reg:        reg,
 		routesSeen: make(map[string]struct{}),
@@ -160,7 +222,7 @@ func NewProm() *Prom {
 		}, []string{"outcome"}),
 		outTerminalLat: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "e2a_outbound_terminal_latency_seconds",
-			Help:    "Outbound acceptance→terminal latency per message (terminal occurred_at - messages.created_at), observed exactly once per message.",
+			Help:    "Outbound eligibility→terminal latency per message (terminal occurred_at - the submission anchor: the latest of messages.created_at, scheduled_at and reviewed_at), observed exactly once per message.",
 			Buckets: longBuckets,
 		}),
 		outAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -172,6 +234,10 @@ func NewProm() *Prom {
 			Help:    "Upstream submission attempt duration.",
 			Buckets: fastBuckets,
 		}),
+		outRateDeferred: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "e2a_outbound_rate_deferred_total",
+			Help: "Outbound submissions deferred by the per-agent fire-time rate limiter (snoozed, re-fired when the window frees capacity).",
+		}),
 		whAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_webhook_attempts_total",
 			Help: "Webhook delivery attempts, by outcome and endpoint response class.",
@@ -181,6 +247,10 @@ func NewProm() *Prom {
 			Help:    "Webhook delivery attempt duration (HTTP POST to subscriber).",
 			Buckets: fastBuckets,
 		}),
+		whTerminal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_webhook_delivery_terminal_total",
+			Help: "Webhook deliveries reaching a terminal state, split by e2a- versus endpoint-attributable outcome and delivery scope.",
+		}, []string{"outcome", "scope"}),
 		whExpiredPending: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_webhook_deliveries_expired_pending_total",
 			Help: "Delivery rows that hit their retention TTL still pending and were marked failed by the janitor.",
@@ -239,6 +309,26 @@ func NewProm() *Prom {
 			Name: "e2a_queue_oldest_age_seconds",
 			Help: "Age of the oldest runnable (available) job per queue.",
 		}, []string{"queue"}),
+		threadResolution: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_thread_resolution_total",
+			Help: "Mailbox-local thread identity decisions, by bounded resolution source.",
+		}, []string{"source"}),
+		threadHeaderParse: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_thread_header_parse_failures_total",
+			Help: "Inbound RFC threading headers rejected by the strict parser.",
+		}, []string{"header"}),
+		threadNull: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_null_messages",
+			Help: "Recent sampled messages without a materialized thread ID, by age bucket.",
+		}, []string{"age_bucket"}),
+		threadViolations: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_invariant_violations",
+			Help: "Current thread-topology violations found in the bounded audit sample.",
+		}, []string{"kind"}),
+		threadRelationship: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "e2a_thread_relationship_percent",
+			Help: "Sampled mailbox-local thread/conversation relationship percentages.",
+		}, []string{"kind"}),
 
 		outboxPublished: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "e2a_outbox_events_published_total",
@@ -268,6 +358,10 @@ func NewProm() *Prom {
 			Name: "e2a_janitor_rows_deleted_total",
 			Help: "Rows deleted by the cleanup janitor, by table.",
 		}, []string{"table"}),
+		contactDue: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_contact_due_events_total",
+			Help: "contact.due outreach wake-ups, by outcome.",
+		}, []string{"outcome"}),
 		notifyMissed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_notify_missed_total",
 			Help: "Fallback-poll wakeups that LISTEN/NOTIFY missed.",
@@ -278,16 +372,17 @@ func NewProm() *Prom {
 		}),
 	}
 
-	reg.MustRegister(
+	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur,
-		p.whAttempts, p.whAttemptDur, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
+		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
+		p.threadResolution, p.threadHeaderParse, p.threadNull, p.threadViolations, p.threadRelationship,
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
-		p.outboxFailures, p.redeliver, p.janitorDeleted, p.notifyMissed, p.publisherLag,
+		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
 	return p
 }
@@ -328,7 +423,10 @@ func (p *Prom) HTTPRequest(method, route, statusClass string, seconds float64) {
 func (p *Prom) SMTPInbound(outcome string, seconds float64) {
 	o := enum(smtpSet, outcome)
 	p.smtpInbound.WithLabelValues(o).Inc()
-	// RCPT-stage rejections carry no DATA duration; only observe real ones.
+	// Only fully-processed DATA transactions feed the duration histogram
+	// (it backs the 2s latency SLO): RCPT-stage rejections have no DATA
+	// phase, and rejected_line_too_long aborts mid-read, so its elapsed
+	// time is not a processing latency.
 	if o == "accepted" || o == "accepted_dedup" || o == "tempfail" {
 		p.smtpDuration.Observe(seconds)
 	}
@@ -347,12 +445,20 @@ func (p *Prom) OutboundAttempt(outcome string, seconds float64) {
 	p.outAttemptDur.Observe(seconds)
 }
 
+func (p *Prom) OutboundRateDeferred() { p.outRateDeferred.Inc() }
+
 func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	p.whAttempts.WithLabelValues(enum(whSet, outcome), enum(classSet, statusClass)).Inc()
 	// seconds < 0 = "no duration sample" (outcomes with no HTTP POST —
 	// webhook_deleted / skipped_disabled — must not drag quantiles to 0).
 	if seconds >= 0 {
 		p.whAttemptDur.Observe(seconds)
+	}
+}
+
+func (p *Prom) WebhookTerminal(outcome, scope string, count int) {
+	if count > 0 {
+		p.whTerminal.WithLabelValues(enum(whTerminalSet, outcome), enum(whScopeSet, scope)).Add(float64(count))
 	}
 }
 
@@ -410,6 +516,38 @@ func (p *Prom) SetQueueOldestAge(queue string, seconds float64) {
 	p.queueOldestAge.WithLabelValues(enum(queueSet, queue)).Set(seconds)
 }
 
+func (p *Prom) ThreadResolution(source string, count int) {
+	if count > 0 {
+		p.threadResolution.WithLabelValues(enum(threadResolutionSet, source)).Add(float64(count))
+	}
+}
+
+func (p *Prom) ThreadHeaderParseFailure(header string) {
+	p.threadHeaderParse.WithLabelValues(enum(threadHeaderSet, header)).Inc()
+}
+
+func (p *Prom) SetThreadNullMessages(ageBucket string, count int) {
+	p.threadNull.WithLabelValues(enum(threadNullAgeSet, ageBucket)).Set(float64(max(count, 0)))
+}
+
+func (p *Prom) SetThreadInvariantViolations(kind string, count int) {
+	p.threadViolations.WithLabelValues(enum(threadViolationSet, kind)).Set(float64(max(count, 0)))
+}
+
+func (p *Prom) SetThreadRelationshipPercent(kind string, percent float64) {
+	p.threadRelationship.WithLabelValues(enum(threadRelationshipSet, kind)).Set(clampPercent(percent))
+}
+
+func clampPercent(percent float64) float64 {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
 // --- legacy outbox instruments ---
 
 func (p *Prom) OutboxEventsPublished(eventType string) {
@@ -439,6 +577,24 @@ func (p *Prom) RedeliverRequests(scope string) {
 func (p *Prom) JanitorRowsDeleted(table string, count int) {
 	if count > 0 {
 		p.janitorDeleted.WithLabelValues(enum(tableSet, table)).Add(float64(count))
+	}
+}
+
+// ContactDuePublished counts wake-ups that reached the outbox. A sustained
+// zero while engagements are enrolled and scheduled means the sweep is not
+// running, which is silent from the outside — the agent simply never wakes.
+func (p *Prom) ContactDuePublished(count int) {
+	if count > 0 {
+		p.contactDue.WithLabelValues("published").Add(float64(count))
+	}
+}
+
+// ContactDueFailed counts wake-ups whose publish failed. Non-zero means an
+// agent was NOT woken for a schedule that has already been consumed, so the
+// miss will not retry — worth alerting on rather than merely graphing.
+func (p *Prom) ContactDueFailed(count int) {
+	if count > 0 {
+		p.contactDue.WithLabelValues("failed").Add(float64(count))
 	}
 }
 

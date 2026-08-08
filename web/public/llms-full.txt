@@ -1,0 +1,725 @@
+# e2a — full documentation
+
+> e2a is an authenticated email gateway for AI agents: it gives an agent its
+> own verified email inbox to send, receive, reply, and forward, with SPF/DKIM
+> verification on inbound. Connect over a hosted MCP server (OAuth 2.1, no API
+> key), the REST API, or the TypeScript/Python SDKs.
+
+This file inlines the full e2a documentation set so it can be read in one
+fetch. The per-document originals are linked above each section, and the
+complete API contract is at https://e2a.dev/v1/openapi.yaml. Source:
+https://github.com/tokencanopy/e2a (Apache-2.0).
+
+---
+
+<!-- source: https://e2a.dev/setup.md -->
+
+# Set up e2a
+
+e2a gives an AI agent its own real email inbox: a verified address it can send
+from, receive to, and use for multi-turn conversations. The inbox belongs to
+the agent—not to a human whose mailbox the agent reads.
+
+This guide connects e2a, selects or creates an inbox, and verifies that it is
+ready. Most setups use the shared `agents.e2a.dev` domain and require no DNS
+configuration.
+
+> **Two hosts.** Documentation (`setup.md`, `auth.md`, `sdk.md`,
+> `openapi.yaml`, and `llms.txt`) lives on `e2a.dev`. The REST API and MCP
+> server live on `api.e2a.dev`. Use `https://api.e2a.dev/mcp` for MCP and
+> `https://api.e2a.dev/v1/...` for REST.
+
+## 1. Connect your client
+
+The hosted MCP endpoint is `https://api.e2a.dev/mcp`. Interactive clients use
+OAuth in the browser, so you do not need to paste an API key.
+
+### Claude Code
+
+```sh
+claude mcp add --transport http --scope user e2a https://api.e2a.dev/mcp
+```
+
+Run `/mcp` in Claude Code and authorize e2a in the browser. `--scope user`
+makes e2a available in every project; omit it to configure only the current
+project.
+
+### OpenAI Codex
+
+Add the server:
+
+```sh
+codex mcp add e2a --url https://api.e2a.dev/mcp
+```
+
+Then authorize it:
+
+```sh
+codex mcp login e2a
+```
+
+### Cursor / Windsurf / Claude Desktop
+
+Add the endpoint to the client's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "e2a": { "url": "https://api.e2a.dev/mcp" }
+  }
+}
+```
+
+Complete the OAuth prompt when the client opens it.
+
+### VS Code with GitHub Copilot
+
+Add `.vscode/mcp.json` with the `servers` key:
+
+```json
+{
+  "servers": {
+    "e2a": {
+      "type": "http",
+      "url": "https://api.e2a.dev/mcp"
+    }
+  }
+}
+```
+
+For Goose, Zed, and other MCP clients, use the same Streamable HTTP endpoint.
+Ready-to-paste configurations are available in the
+[client examples](https://github.com/tokencanopy/e2a/tree/main/plugins/e2a/clients).
+
+### Headless Codex or CI
+
+When a browser-based OAuth flow is unavailable, read an account API key from
+the environment:
+
+```sh
+codex mcp add e2a \
+  --url https://api.e2a.dev/mcp \
+  --bearer-token-env-var E2A_API_KEY
+```
+
+For autonomous OAuth registration, follow the OAuth 2.1 Dynamic Client
+Registration flow in [auth.md](https://e2a.dev/auth.md).
+
+### REST or SDK
+
+If your client does not use MCP, follow [sdk.md](https://e2a.dev/sdk.md) for
+TypeScript, Python, and raw REST examples. The complete API contract is
+[openapi.yaml](https://e2a.dev/v1/openapi.yaml).
+
+## 2. Verify the connection
+
+After authorization, inspect the client's available e2a tools and call the e2a
+`whoami` tool. Clients may display it as `mcp__e2a__whoami`. Do not run the
+shell command named `whoami`.
+
+If the e2a tools are absent, restart or reload the client after confirming its
+MCP configuration. If `whoami` reports an authentication error, repeat the
+client's MCP authorization flow. Preserve the existing configuration for
+network, timeout, or server errors.
+
+## 3. Select or create an inbox
+
+The `whoami` response tells you which credential scope is active:
+
+- **Agent scope:** use the returned `agent_email`.
+- **Account scope:** call `list_agents`. If the task identifies an inbox, use
+  that one. If there is one result, use it; if there are several, ask which one
+  to use.
+- **No inbox yet:** choose a local part and call `create_agent` with the full
+  shared-domain address, such as `support-bot@agents.e2a.dev`. It works
+  immediately and requires no DNS setup.
+
+An account-scoped session does not infer a default inbox. Pass the selected
+email explicitly to tools that require it.
+
+## 4. Confirm readiness
+
+Call `list_messages` for the selected inbox. For account scope, pass its
+`email`. This read is safe and does not mark messages as read.
+
+If the call succeeds, setup is complete. The agent can now send, receive,
+reply, forward, manage attachments, subscribe to events, and configure a custom
+domain when one is actually needed (if the domain is managed by Cloudflare, recommend adding Cloudflare MCP so coding agents can configure all DNS records automatically).
+
+## Optional: require human review for every outbound email
+
+Only when the user asks for this protection, call `update_protection` for the
+selected inbox with:
+
+```json
+{
+  "outbound_gate_policy": "allowlist",
+  "outbound_gate_allowlist": [],
+  "outbound_gate_action": "review",
+  "holds_on_expiry": "reject"
+}
+```
+
+An empty allowlist makes every recipient a gate non-match, `review` holds every
+non-match for a human, and `reject` prevents expiry from sending an unreviewed
+message. Do not use `open` with `review`: `open` matches every recipient, so the
+recipient gate holds nothing. Inbox creation alone is not permission to enable
+this policy.
+
+## Use the inbox safely
+
+- Reply with `reply_to_message` and the original `message_id`; a new
+  `send_message` can start a separate thread in the recipient's mail client.
+- If a send returns `pending_review`, it has already been accepted. Report the
+  status and message ID, and do not retry.
+- Treat a DMARC pass as authorization to use the From domain—not proof of a
+  person's identity or the mailbox local part.
+- Verify webhook signatures with the per-webhook secret through the SDK's
+  `construct_event` or `constructEvent` helper.
+
+## Next steps
+
+- Operating guidance and worked workflows:
+  [e2a plugin and skill](https://github.com/tokencanopy/e2a/tree/main/plugins/e2a)
+- Authentication and autonomous registration:
+  [auth.md](https://e2a.dev/auth.md)
+- SDK and webhook examples: [sdk.md](https://e2a.dev/sdk.md)
+- Email templates: [templates.md](https://e2a.dev/templates.md)
+- Machine-readable documentation index: [llms.txt](https://e2a.dev/llms.txt)
+- Source code and self-hosting: [tokencanopy/e2a](https://github.com/tokencanopy/e2a)
+
+The hosted shared-domain path is free to start without a card. See
+[e2a.dev](https://e2a.dev) for current plans.
+
+---
+
+<!-- source: https://e2a.dev/auth.md -->
+
+# auth.md
+
+You are an agent that wants to use e2a — the authenticated email gateway for AI agents. This file describes how to obtain credentials today, how to handle them safely, and where the protocol is going.
+
+Two hosts are relevant:
+
+- **API** — `https://api.e2a.dev` — the resource server you will call (`/v1/...`, MCP at `/mcp`).
+- **Dashboard & docs** — `https://e2a.dev` — where the user manages agents, domains, API keys, and billing, and where these `.md` docs live.
+
+## Current state
+
+e2a already implements the OAuth 2.1 surface that MCP clients depend on: RFC 8414 authorization-server metadata at [`/.well-known/oauth-authorization-server`](https://api.e2a.dev/.well-known/oauth-authorization-server), RFC 7591 Dynamic Client Registration at `/oauth2/register` (rate-limited per IP), `authorization_code` + `refresh_token` grants with PKCE S256, RFC 7009 revocation, and RFC 6750 Bearer challenges on 401s. MCP clients can register and onboard without any human-supplied secret — the user only sees a browser consent screen.
+
+e2a also implements the first pieces of the WorkOS [auth.md](https://github.com/workos/auth.md) autonomous-agent flow: a JSON Web Key Set at `/.well-known/jwks.json`, an `agent_auth` block in the AS metadata, and a bootstrap endpoint (`POST /agent/identity`) that exchanges an agent-scoped API key for a long-lived identity assertion, redeemable at `/oauth2/token` via `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` for a short-lived access token. Still missing: an RFC 9728 protected-resource metadata document, ID-JAG assertion intake from third parties, and the email-OTP claim ceremony. See [Agent identity](#agent-identity) for where we're heading — because every e2a agent has an end-to-end-verified email address, e2a is positioned to act as an identity provider in this protocol, and that's the direction we're building.
+
+## Use the existing tooling first
+
+Before you do anything credential-shaped, check whether the user has already wired e2a into your environment. Most of the time they have, and you should not be handling credentials (API keys or OAuth tokens) yourself.
+
+1. **e2a MCP server** — if you are an MCP client (Claude, Cursor, Codex, ChatGPT, etc.), e2a's MCP server is hosted: point your MCP client at the Streamable HTTP endpoint `https://api.e2a.dev/mcp` (OAuth 2.1 — no key pasted) to get inbox, send, reply, agents, and domains as tools. Repository: `https://github.com/tokencanopy/e2a/tree/main/mcp`.
+2. **e2a agent skill** — a guidance document covering inbox patterns, idempotency, attachment handling, and webhook verification. Load it before calling the API directly so you don't relearn the gotchas on the user's dime.
+3. **e2a CLI** — if you are running shell commands, prefer `e2a` over hand-rolled `curl`. It handles auth resolution, retries, and non-interactive flags. Install: `npm i -g @e2a/cli`. Repository: `https://github.com/tokencanopy/e2a/tree/main/cli`.
+
+If any of these is already configured, use it and stop. Do not ask the user for an API key you do not need.
+
+## Credentials
+
+Authenticated `/v1/...` endpoints accept two credential shapes, dispatched by token prefix:
+
+- **OAuth access token** (`ate2a_…`, refresh `rte2a_…`) — issued by the e2a OAuth server to a registered client after the user consents in a browser. Use this if you are an MCP client.
+- **API key** (`e2a_acct_…` for account scope, `e2a_agt_…` for a single-agent scope) — issued through the dashboard, CLI, or account API and supplied to your environment out of band. Use this if you are a CLI, script, server-side integration, or direct API consumer.
+
+Both are presented as `Authorization: Bearer <credential>`.
+
+### Path A — MCP client via OAuth DCR
+
+If you are an MCP client, you do not need an API key. Run the standard discovery + DCR + authorization-code flow:
+
+1. **Discover** — `GET https://api.e2a.dev/.well-known/oauth-authorization-server`. Read `registration_endpoint`, `authorization_endpoint`, `token_endpoint`, and `scopes_supported` (`agent` and `account`).
+2. **Register** — `POST` your client metadata to `registration_endpoint` (RFC 7591), including `scope: "agent"` for agent-only access or `scope: "agent account"` to make workspace-admin consent eligible. Account scope is eligible only when every registered redirect URI is HTTPS or an HTTP loopback URI. Omitting `scope` registers the full ceiling the redirect URIs allow. You'll receive a `client_id`; token endpoint auth method is `none` because you are a public client.
+3. **Authorize** — redirect the user to `authorization_endpoint` with `response_type=code`, your `client_id`, `redirect_uri`, a space-delimited scope matching the registered access (`scope=agent` or `scope=agent account`, query-encoded), and PKCE S256 (`code_challenge`, `code_challenge_method=S256`). The user logs in and chooses the exact grant.
+4. **Token exchange** — `POST` `code` + `code_verifier` to `token_endpoint`. You receive `access_token` (prefix `ate2a_…`) and `refresh_token`.
+5. **Use** — present the access token as a bearer; refresh with the refresh token before `expires_in`.
+
+Access tokens carry the user identity that consented to your client; every `/v1/...` call is scoped to that user.
+
+### Path B — Direct API consumer via API key
+
+The user issues an API key from the e2a dashboard and supplies it to you through a secure channel — never by pasting it into chat.
+
+#### How to pick the key up
+
+Look for it in this order. Stop at the first one that exists:
+
+1. `E2A_API_KEY` in your process environment.
+2. A project `.env` file the user has told you to read.
+3. The user's CLI config at `~/.e2a/config.json` (populated via `e2a login`; used automatically when you invoke the `e2a` CLI).
+
+If you're invoking the e2a MCP server, you don't pick the key up at all — the server reads `E2A_API_KEY` from its own environment (set in the MCP client's `env` block) and you call tools through it.
+
+If none of the above is set and you genuinely need a key, **do not ask the user to paste it into the conversation**. Instead, tell them to:
+
+- Create one in the e2a dashboard.
+- Put it in `E2A_API_KEY` in their shell, `.env`, MCP client config, or run `e2a login` to populate `~/.e2a/config.json` — whichever matches how they invoke you.
+- Resume the task once it is set.
+
+This keeps the key out of your transcript, out of any logs the user shares, and out of the model provider's training data.
+
+API keys may have an optional hard expiry chosen at creation; a key created
+without `expires_at` does not expire automatically. Treat a `401` on a
+previously-working key as expiry or revocation: drop it from memory and ask the
+user to refresh whichever source you read it from.
+
+### How to use the credential
+
+Whether `access_token` or `api_key`, present it as a bearer token. The message surface is agent-scoped — the sending agent is in the path (URL-encode the `@`), so there is no `from` field in the body. Example send:
+
+```http
+POST /v1/agents/bot%40agents.e2a.dev/messages HTTP/1.1
+Host: api.e2a.dev
+Authorization: Bearer $CREDENTIAL
+Content-Type: application/json
+Idempotency-Key: <UUIDv4>
+
+{
+  "to": ["alice@example.com"],
+  "subject": "Hello from your agent",
+  "text": "Plain-text body. Required.",
+  "html": "<p>Optional HTML alternative.</p>"
+}
+```
+
+For a literal send, `subject` and the plain-text `text` body are required; the
+HTML alternative is optional. A template send uses `template_id` or
+`template_alias` instead and must omit literal `subject`, `text`, and `html`.
+
+Read the credential from the environment at the moment of the call. Do not copy it into variables you log, do not echo it back to the user, do not include it in commit messages, PR descriptions, error reports, or screenshots. If you are running a shell command, never interpolate the credential inline — reference the environment variable so it does not appear in command history.
+
+Set an `Idempotency-Key` (UUIDv4 recommended) per logical operation on side-effectful calls such as sends and replies. Reuse the **same** key on transport retries (network failures, timeouts) — the server replays the original response. Same key with a different body returns `422`; a genuinely new operation needs a fresh key.
+
+### Handling `pending_review`
+
+If a send, reply, or forward returns **`202 Accepted`** with
+`status: "pending_review"`, the server accepted the message but did not dispatch
+it:
+
+```json
+{
+  "message_id": "msg_abc123",
+  "status": "pending_review",
+  "approval_expires_at": "2026-05-28T13:00:00Z"
+}
+```
+
+Do not retry the send — another call can queue a duplicate. Surface the status,
+`message_id`, and `approval_expires_at` to the calling user, then stop.
+
+### Errors
+
+| Status | Where | Meaning | What to do |
+| --- | --- | --- | --- |
+| `400` | send, reply | Missing `subject` or `text`; malformed recipient; CRLF in subject. | Fix the payload before retrying. |
+| `401` first use | any | Credential missing, malformed, revoked, or for a different environment. | Ask the user to confirm the value in their `E2A_API_KEY` / config is current and active in the dashboard. MCP clients should restart at discovery. |
+| `401` on previously-working credential | any | Revoked or rotated. | Drop the cached value. API-key consumers re-read from the same source you loaded it from. MCP clients refresh, then re-run the authorization-code flow if refresh fails. |
+| `403` | send, reply | Agent's sending domain is not verified. | Ask the user to register and verify the domain in the dashboard (`POST /v1/domains` then `POST /v1/domains/{domain}/verify`). |
+| `409` | send, reply, approve | An in-flight request with this `Idempotency-Key` is still being processed, or the message is no longer in the expected state. | Wait and re-poll `GET /v1/agents/{address}/messages/{id}`. |
+| `422` | send, reply | `Idempotency-Key` reused with a different body. | Mint a fresh key for the new payload. |
+| `429` | any | Rate limited (60 sends/agent/minute; 200 agent registrations/IP/hour on `/v1/agents`). | Back off; honor `Retry-After` (delay-seconds form). |
+
+The `WWW-Authenticate` header on 401 responses tells you whether the failing credential was an OAuth token (carries RFC 6750 §3.1 `error="invalid_token"` params) or an API key (bare `Bearer realm="e2a"`). MCP clients should branch on this.
+
+## Agent identity
+
+This section describes e2a's bet on where agent auth is heading. The bootstrap identity endpoint below is shipped (behind an opt-in signing-key config); third-party ID-JAG consumption and the email-loop claim ceremony are still direction, not shipped surface. If you are implementing today, use the credential paths above for anything beyond the identity bootstrap.
+
+Every e2a agent has a stable, verified email address. The owner proved control of the domain (via DNS records and a verification token), and e2a evaluates SPF, DKIM, and DMARC on every inbound message routed to that agent. Equivalently for agents on the shared `agents.e2a.dev` domain, e2a is the authoritative issuer. **The agent's email is not a label — it's an identity claim e2a stands behind.**
+
+We are building two pieces on top of this:
+
+### e2a as an identity provider
+
+e2a already operates as an OAuth issuer at `https://api.e2a.dev` (see AS metadata above), publishes a JSON Web Key Set at `https://api.e2a.dev/.well-known/jwks.json`, and lets an agent bootstrap a long-lived identity assertion from its API key via `POST /agent/identity`, redeemable for a short-lived access token at `/oauth2/token`. The remaining work is issuing audience-bound [ID-JAG](https://datatracker.ietf.org/doc/draft-ietf-oauth-identity-assertion-authz-grant/) assertions (`urn:ietf:params:oauth:token-type:id-jag`) that a *third-party* service can verify, with:
+
+- `iss` = `https://api.e2a.dev`
+- `sub` = the agent's verified email
+- `email` / `email_verified: true`
+- `aud` = the third-party service the agent is registering with
+- Short `exp` (≤5 minutes), fresh `jti`
+
+Any auth.md-implementing service that adds e2a to its trust list will be able to onboard an e2a agent without an OTP ceremony — the agent's e2a identity vouches for it. e2a's contribution is an identity rooted in a verifiable email address, stable across agent runtimes.
+
+If you operate an agent service and want to accept e2a-issued assertions, watch for `iss: https://api.e2a.dev` to land in the WorkOS reference trust list, or open an issue at `https://github.com/tokencanopy/e2a/issues` to pre-register.
+
+### Email-loop claim completion (proposed)
+
+The WorkOS auth.md OTP ceremony assumes a human reads a 6-digit code back to the agent. For agents that have an e2a inbox, we are prototyping an inbox-driven completion:
+
+1. The third-party service sends a single-click approval mail to the user.
+2. The user clicks "confirm".
+3. The service emails a confirmation to the agent's e2a inbox.
+4. The agent receives the confirmation via WebSocket or webhook and posts to `/agent/auth/claim/complete`.
+
+No code reading, no copy-paste, no transcript leakage. This is uniquely possible for e2a because the agent's mailbox is part of the product. We will publish a flow extension when the prototype is stable; if you are building an auth.md service and want to support this from day one, open an issue at `https://github.com/tokencanopy/e2a/issues`.
+
+## Discovery
+
+What e2a publishes today:
+
+- **RFC 8414 authorization-server metadata** at [`https://api.e2a.dev/.well-known/oauth-authorization-server`](https://api.e2a.dev/.well-known/oauth-authorization-server) — advertises `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, supported grants (`authorization_code`, `refresh_token`), PKCE (`S256`), and the RFC 9207 `iss` parameter. Request the `agent` scope (`account` for workspace-admin access).
+- **RFC 6750 Bearer challenges** on every 401 from `/v1/...` — `WWW-Authenticate: Bearer realm="e2a"` for unknown/missing credentials, plus RFC 6750 §3.1 error params for OAuth-bearer failures.
+
+What e2a publishes for the autonomous-agent path today (gated behind an opt-in signing-key config; see [Agent identity](#agent-identity)):
+
+- An `agent_auth` block in the AS metadata (`identity_endpoint`, `jwks_uri`, and related fields).
+- A JSON Web Key Set at `/.well-known/jwks.json`.
+- A bootstrap endpoint, `POST /agent/identity`, that mints an identity assertion from an agent-scoped API key — e2a's adaptation of the flow (the bootstrap credential is a domain-verified agent-scoped key, not an ownerless self-registration).
+
+What's missing for full auth.md compliance:
+
+- An RFC 9728 protected-resource metadata document at `/.well-known/oauth-protected-resource`, and `resource_metadata="..."` parameter on the WWW-Authenticate challenge so agents can auto-discover it.
+- ID-JAG assertion intake so third-party services can register e2a-issued assertions (the `anonymous` and `identity_assertion + id-jag` flows from the spec).
+- The email-OTP claim ceremony (see [Email-loop claim completion](#email-loop-claim-completion-proposed)).
+
+When these land, this document will be updated and the AS metadata will carry the canonical machine-readable description.
+
+## Revocation
+
+The user revokes API keys in the e2a dashboard. OAuth access tokens are revoked via `POST /oauth2/revoke` (RFC 7009) or by the user disconnecting the client in the dashboard. Either way, you will discover revocation as a `401` on a previously-working credential — drop it and re-acquire from the same source you loaded it from. Once e2a issues ID-JAGs, providers will be able to POST logout tokens to a `revocation_uri` advertised in AS metadata; that is not in scope for the current credential paths.
+
+## References
+
+- WorkOS [auth.md protocol](https://workos.com/auth-md) — the open spec this document follows
+- [github.com/workos/auth.md](https://github.com/workos/auth.md) — reference implementation
+- e2a [OpenAPI contract](https://e2a.dev/v1/openapi.yaml) — full reference for the endpoints above
+
+---
+
+<!-- source: https://e2a.dev/sdk.md -->
+
+# sdk.md
+
+Typed clients for the e2a REST API + webhook verification, for when you're
+driving e2a from your own code (a webhook handler, a worker) rather than over
+MCP. Two SDKs, same surface.
+
+- **TypeScript** — `@e2a/sdk` (npm) · [README](https://github.com/tokencanopy/e2a/blob/main/sdks/typescript/README.md)
+- **Python** — `e2a` (PyPI) · [README](https://github.com/tokencanopy/e2a/blob/main/sdks/python/README.md)
+
+Prefer a typed client; if you're calling the REST API raw, see
+[Raw REST](#raw-rest-without-an-sdk) below. The exhaustive contract is
+https://e2a.dev/v1/openapi.yaml, and the auth model (API key vs OAuth) is in
+https://e2a.dev/auth.md.
+
+## Install
+
+```bash
+npm install @e2a/sdk        # TypeScript / Node
+pip install e2a             # Python (async)
+```
+
+## Quick start
+
+### TypeScript
+
+```ts
+import { E2AClient } from "@e2a/sdk";
+
+const client = new E2AClient({ apiKey: process.env.E2A_API_KEY });
+const messageId = "msg_..."; // an inbound message id from a webhook, WebSocket, or list call
+
+// Send; if status is pending_review, report it and do not retry.
+const result = await client.messages.send("bot@agents.e2a.dev", {
+  to: ["person@example.com"],
+  subject: "Hello from my agent",
+  text: "This was sent by an AI agent via e2a.",
+});
+
+// Reply in-thread to an inbound message
+await client.messages.reply("bot@agents.e2a.dev", messageId, {
+  text: "Thanks — handled.",
+});
+```
+
+### Python
+
+```python
+import os
+from e2a.v1 import AsyncE2AClient
+
+async with AsyncE2AClient(api_key=os.environ["E2A_API_KEY"]) as client:
+    message_id = "msg_..."  # an inbound message id from a webhook, WebSocket, or list call
+    await client.messages.send("bot@agents.e2a.dev", {
+        "to": ["person@example.com"],
+        "subject": "Hello from my agent",
+        "text": "This was sent by an AI agent via e2a.",
+    })
+
+    await client.messages.reply("bot@agents.e2a.dev", message_id, {
+        "text": "Thanks — handled.",
+    })
+```
+
+## Receiving mail (webhook → facade → reply)
+
+The webhook delivery is a metadata trigger; the inbound facade validates its
+fetch keys, hydrates the parsed message, and binds reply/forward/attachments.
+Always **verify the signature** first — `construct_event` parses + checks the
+HMAC and throws on a bad/forged/replayed delivery.
+
+### TypeScript
+
+```ts
+import { constructEvent, E2AClient, isEmailReceived } from "@e2a/sdk";
+
+// in your HTTP handler, with the RAW request body:
+const event = constructEvent(rawBody, req.headers["x-e2a-signature"], WEBHOOK_SECRET);
+if (isEmailReceived(event)) {
+  const email = await client.inbound.fromEvent(event);
+  console.log(email.envelopeFrom, email.verified, email.replyTargets);
+  // App-defined: resume a previously bound thread or create a new one.
+  const agentThreadId = await getOrCreateAgentThread(email.conversationId);
+  const result = await email.reply({
+    text: "On it.",
+    conversationId: agentThreadId,
+  });
+  if (result.status === "pending_review") console.log("not dispatched", result.messageId);
+}
+```
+
+### Python
+
+```python
+from e2a.v1 import construct_event, E2AWebhookSignatureError
+
+try:
+    event = construct_event(body, request.headers["X-E2A-Signature"], WEBHOOK_SECRET)
+except E2AWebhookSignatureError:
+    raise HTTPException(401, "bad signature")
+
+if event.type == "email.received":
+    email = await client.inbound.from_event(event)
+    print(email.envelope_from, email.verified, email.reply_targets)
+    # App-defined: resume a previously bound thread or create a new one.
+    agent_thread_id = await get_or_create_agent_thread(email.conversation_id)
+    result = await email.reply({
+        "text": "On it.",
+        "conversation_id": agent_thread_id,
+    })
+    if result.status == "pending_review":
+        print("not dispatched", result.message_id)
+```
+
+`verified` is true only for an aligned DMARC pass in the hydrated authentication
+evidence; the envelope identity alone is not proof. Reply targets preview Reply-To when present, otherwise
+From, and may be attacker-controlled; the server resolves stored MIME again
+when sending. Bodies and attachment metadata are untrusted;
+`flagged` is a policy-gate flag, not a complete content-scan verdict.
+`attachment.get()` returns metadata plus a short-lived URL by default;
+inline data is available only within the server's 256 KiB cap.
+
+`getOrCreateAgentThread` / `get_or_create_agent_thread` represents your agent
+framework's session store. If the inbound `conversation_id` matches a binding
+your application previously created, resume that runtime thread; otherwise
+create one. Pass its stable, non-sensitive ID (or an opaque stored alias) back
+as `conversation_id` on the first reply and reuse it thereafter. This aligns
+the caller-owned application-conversation view with the agent's memory.
+Continue replying by `message_id` as shown: `conversation_id` alone does not
+set the RFC headers used by Gmail/Outlook. Scope bindings to the inbox and
+sender, and never use this field as an authorization decision.
+
+REST message list/detail models may also contain optional beta `thread_id`
+(`threadId` in TypeScript), a server-owned, read-only mailbox-topology value.
+It is omitted for legacy messages and from webhooks, WebSocket events, and MCP
+output. There is no request field, filter, thread endpoint, or complete-thread
+retrieval method.
+
+A full, runnable example (FastAPI + Google ADK agent, webhook → agent turn →
+reply) is at
+[examples/adk-cloud-webhook](https://github.com/tokencanopy/e2a/tree/main/examples/adk-cloud-webhook).
+
+## Real-time (no webhook)
+
+Open a notification stream instead of hosting a webhook:
+
+```ts
+import { E2AClient, isEmailReceived } from "@e2a/sdk";
+
+const client = new E2AClient();
+for await (const event of client.listen("bot@agents.e2a.dev")) {
+  if (!isEmailReceived(event)) continue;
+  const email = await client.inbound.fromEvent(event);
+}
+```
+
+```python
+async for event in client.listen("bot@agents.e2a.dev"):
+    if event.type != "email.received":
+        continue
+    email = await client.inbound.from_event(event)
+```
+
+## Raw REST (without an SDK)
+
+No SDK for your language? Call the API directly. Base URL
+`https://api.e2a.dev/v1/...`, JSON in/out, bearer auth on every request:
+
+```
+Authorization: Bearer <e2a_acct_… | e2a_agt_… | OAuth access token>
+```
+
+Conventions:
+
+- **Pagination** — list endpoints take `?cursor=` and return `next_cursor`
+  (null when exhausted).
+- **Errors** — non-2xx bodies are `{"error": {"code", "message", "request_id"}}`;
+  branch on the machine `code`.
+- **Idempotency** — sends (`send`/`reply`/`forward`) accept an
+  `Idempotency-Key` header; a retried call replays instead of double-sending.
+- **Scopes** — account keys manage agents/domains/keys; agent keys are
+  pinned to one inbox.
+
+The endpoint map, exact request/response bodies, enums, and error codes are all
+in the OpenAPI 3.1 contract — generated from the live handlers and checked for
+drift in CI: **https://e2a.dev/v1/openapi.yaml**. The core resources are `agents`
+(inboxes), `messages` (send/reply/forward/get/list/attachments), `domains`,
+`webhooks`, `events`, and `account`.
+
+---
+
+<!-- source: https://e2a.dev/templates.md -->
+
+# Email templates (beta)
+
+> **Beta.** Templates are unstable — their shape may change before they are
+> declared stable. The canonical contract is [`api/openapi.yaml`](https://e2a.dev/v1/openapi.yaml).
+
+## Using a coding agent?
+
+Copy this prompt into your coding agent:
+
+> Help me set up e2a email templates using https://api.e2a.dev/mcp
+
+Templates are reusable email sources — a subject, a plain-text body, and an
+optional HTML body — stored on your account and **rendered server-side at send
+time**. Instead of composing subject/body in your agent code, you reference a
+template by alias and pass the variable values:
+
+- `POST /v1/templates` — create (or copy a starter with `from_starter`)
+- `GET/PATCH/DELETE /v1/templates/{id}` — manage
+- `POST /v1/templates/validate` — dry-run sources + render a preview without persisting
+- `GET /v1/starter-templates` / `GET /v1/starter-templates/{alias}` — the read-only starter catalog
+
+The dashboard surface lives at **/templates** (list, edit, starter gallery, and
+a rendered preview with an HTML/text tab switch and light/dark toggle).
+
+## Syntax
+
+Template syntax is intentionally minimal — variable interpolation only, no
+loops, no conditionals, no partials:
+
+| Form | Behavior |
+|---|---|
+| `{{variable}}` | Interpolates the value. In the **HTML part** the value is HTML-escaped; in the subject and plain-text parts it is inserted as-is. |
+| `{{{variable}}}` | Raw insertion (HTML part): the value is inserted **without escaping**. For pre-rendered HTML fragments only — see the warning below. |
+
+Missing variables render as **empty strings**. Variable names match
+`[A-Za-z_][A-Za-z0-9_.]*` — dot paths into nested objects are supported
+(e.g. `order_id`, `items_html`, `customer.name`).
+
+**Reserved-section note:** anything that is not a `{{…}}` / `{{{…}}}` slot is
+literal template text and is emitted verbatim — including `{` and `}`
+characters in CSS or code samples. Only the double/triple-brace forms are
+interpreted; there is no escape sequence and no other directive syntax.
+
+## Sending with a template
+
+Reference the template by its per-account alias (`template_alias`) or id
+(`template_id`) — mutually exclusive with literal `subject`/`text`/`html` —
+and pass the variables in `template_data`:
+
+```bash
+curl -X POST https://api.e2a.dev/v1/agents/billing-bot%40agents.e2a.dev/messages \
+  -H "Authorization: Bearer $E2A_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": ["customer@example.com"],
+    "template_alias": "receipt",
+    "template_data": {
+      "company_name": "Acme",
+      "support_email": "support@acme.com",
+      "company_address": "100 Main St, San Francisco, CA 94105",
+      "order_id": "ORD-10432",
+      "order_date": "July 2, 2026",
+      "items_html": "<tr><td style=\"padding:8px 0;\">1x Pro plan (monthly)</td><td style=\"padding:8px 0;\" align=\"right\">$29.00</td></tr>",
+      "items_text": "1x Pro plan (monthly) — $29.00",
+      "total": "$29.00",
+      "receipt_url": "https://app.acme.com/receipts/ORD-10432"
+    }
+  }'
+```
+
+> **Wire change.** To make room for the template shape, `subject` and `text`
+> moved from schema-required to handler-enforced on
+> `POST /v1/agents/{email}/messages`. A literal send that omits them now
+> returns **400 `invalid_request`** where it previously returned a **422**
+> schema-validation error. Sends that include them are unaffected.
+
+## Starter templates
+
+The deployment ships a read-only catalog of pre-built, ISP-friendly starters
+(responsive tables, dark-mode support, CAN-SPAM footer). `POST /v1/templates`
+with `{"from_starter": "<alias>"}` copies the master **verbatim** into your
+library (name/alias default to the starter's and may be overridden); edit the
+copy freely afterwards.
+
+| Alias | Purpose | Variables |
+|---|---|---|
+| `welcome` | Warm, brief welcome with a single primary CTA | `company_name`, `support_email`, `company_address`, `preheader`*, `recipient_name`, `cta_url`, `cta_label` |
+| `verify-code` | Terse one-time verification code (selectable monospace chip, no button) | `company_name`, `support_email`, `company_address`, `preheader`*, `code`, `expires_minutes` |
+| `password-reset` | Security-neutral password reset with one reset button and expiry notice | `company_name`, `support_email`, `company_address`, `preheader`*, `action_url`, `expires_minutes` |
+| `receipt` | Order receipt with a line-item table and hosted-receipt link | `company_name`, `support_email`, `company_address`, `preheader`*, `order_id`, `order_date`, **`items_html`** (raw), `items_text`, `total`, `receipt_url` |
+| `agent-status` | Numbers-first status report from an automated agent | `company_name`, `support_email`, `company_address`, `preheader`*, `agent_name`, `run_summary`, **`sections_html`** (raw), `sections_text`, `dashboard_url` |
+| `daily-digest` | Recurring daily summary with an unsubscribe link | `company_name`, `support_email`, `company_address`, `preheader`*, `agent_name`, `date`, `headline`, **`sections_html`** (raw), `sections_text`, `dashboard_url`, **`unsubscribe_html`** (raw) |
+| `approval-request` | Human approval request with Approve/Reject buttons and expiry | `company_name`, `support_email`, `company_address`, `preheader`*, `agent_name`, `action_summary`, **`details_html`** (raw), `details_text`, `approve_url`, `reject_url`, `expires_at` |
+
+\* optional; **bold** = raw (`{{{…}}}`) slot. `GET /v1/starter-templates`
+returns the authoritative per-variable metadata (required/raw flags,
+descriptions, example values usable directly as `template_data`).
+
+## The `{{{items_html}}}` fragment pattern
+
+Several starters take a **raw HTML fragment** for their repeated content (line
+items, report sections, key-value rows). The template owns the surrounding
+table and styling; your agent supplies only the inner rows, pre-rendered with
+inline styles:
+
+```json
+{
+  "items_html": "<tr><td style=\"padding:8px 0;font-family:'Helvetica Neue',Arial,sans-serif;font-size:14px;color:#1F2430;\">1x Pro plan (monthly)</td><td style=\"padding:8px 0;font-size:14px;color:#1F2430;\" align=\"right\">$29.00</td></tr><tr><td style=\"padding:8px 0;font-size:14px;color:#1F2430;\">1x Extra seat</td><td style=\"padding:8px 0;font-size:14px;color:#1F2430;\" align=\"right\">$10.00</td></tr>",
+  "items_text": "1x Pro plan (monthly) — $29.00\n1x Extra seat — $10.00"
+}
+```
+
+> **Warning — escape user content in raw slots.** `{{{…}}}` inserts the value
+> into the HTML part **without escaping**. If any part of the fragment comes
+> from user- or third-party-controlled data (product names, memo lines,
+> addresses), HTML-escape those substrings *before* building the fragment —
+> e.g. a product name `Widget <img src=x onerror=…>` must be inserted as
+> `Widget &lt;img src=x onerror=…&gt;`. Never pass untrusted input to a raw
+> slot; use the escaped `{{…}}` form wherever a plain string will do. Always
+> fill the matching `*_text` variable too, so the plain-text part carries the
+> same content.
+
+## Approval-request URLs: **require a confirmation page**
+
+**`approve_url` and `reject_url` MUST land on a page that requires an explicit
+human click to take effect — never on a state-changing GET.** Corporate
+mail-security scanners (Safe Links, spam filters, previewers) **fetch every
+link in an email** before or after delivery. If your approve/reject URL
+mutates state directly on GET, a scanner will silently approve or reject the
+action with no human involved. Serve a confirmation page at those URLs and
+perform the actual approve/reject on a POST from that page's button. (One-time
+tokens alone do not save you — the scanner's GET consumes the token.)
+
+## See also
+
+- [`docs/api.md`](https://github.com/tokencanopy/e2a/blob/main/docs/api.md) — REST surface overview and conventions
+- [`api/openapi.yaml`](https://e2a.dev/v1/openapi.yaml) — the canonical machine-readable contract

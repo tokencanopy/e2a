@@ -31,7 +31,7 @@ type infoOutput struct {
 }
 
 func (s *Server) registerInfo() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getInfo",
 		Method:      http.MethodGet,
 		Path:        "/v1/info",
@@ -111,7 +111,7 @@ type agentOutput struct {
 }
 
 func (s *Server) registerAgents() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listAgents",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents",
@@ -121,7 +121,7 @@ func (s *Server) registerAgents() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListAgents)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAgent",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}",
@@ -145,7 +145,7 @@ func (s *Server) handleListAgents(ctx context.Context, in *listAgentsInput) (*li
 	}
 	// The cursor is bound to the view (live vs trash) so a continuation can't
 	// silently flip between them.
-	afterCreatedAt, afterID, err := s.decodeKeysetView(in.Cursor, in.Deleted)
+	afterCreatedAt, afterID, err := s.decodeKeysetView(user.ID, cursorAgents, in.Cursor, in.Deleted)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +174,7 @@ func (s *Server) handleListAgents(ctx context.Context, in *listAgentsInput) (*li
 	var nextCursor string
 	if hasMore {
 		last := agents[len(agents)-1]
-		if nextCursor, err = s.encodeKeysetView(last.CreatedAt, last.ID, in.Deleted); err != nil {
+		if nextCursor, err = s.encodeKeysetView(user.ID, cursorAgents, last.CreatedAt, last.ID, in.Deleted); err != nil {
 			return nil, err
 		}
 	}

@@ -34,6 +34,7 @@ type MessageView struct {
 	Recipient      string                    `json:"delivered_to" doc:"The envelope Delivered-To address — this delivery's per-agent target (the mailbox that actually received this row), distinct from the To header (the to array)."`
 	Subject        string                    `json:"subject"`
 	ConversationID string                    `json:"conversation_id"`
+	ThreadID       string                    `json:"thread_id,omitempty" doc:"Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."`
 	// Direction (inbound|outbound) — mirrors MessageSummaryView so a client
 	// fetching a single message keeps the full trust-axis context (review F1).
 	// Deliberately a CLOSED enum despite being response-side: direction is a
@@ -66,13 +67,19 @@ type MessageView struct {
 	// DeliveryStatus is the outbound delivery rollup (migration 031:
 	// 'sent', 'delivered', 'bounced', …) — the worst recipient status by
 	// precedence. Outbound-only; omitted on inbound messages.
-	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"`
+	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"`
 	// DeliveryDetail is the human-readable diagnostic for the delivery
 	// rollup (e.g. bounce sub-type / SMTP response). Outbound-only.
 	DeliveryDetail string `json:"delivery_detail,omitempty"`
 	// SentAs is the From identity actually used at relay accept time.
 	// Outbound-only; omitted on inbound messages.
 	SentAs string `json:"sent_as,omitempty" doc:"From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."`
+	// ScheduledAt is the future instant a scheduled outbound send was queued to be
+	// submitted (migration 084). Set on outbound rows created with a future
+	// send_at and retained afterwards (it records the scheduled instant and is not
+	// cleared once the send fires); omitted for immediate sends and all inbound
+	// rows. delivery_status stays 'accepted' while scheduled.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."`
 	// Flagged + FlagReason carry the beta inbound ingestion verdict: true when
 	// the agent's inbound-policy gate flagged this message on arrival while still
 	// delivering it. Polling agents need this signal because no review item is
@@ -194,6 +201,7 @@ func messageViewFromIdentity(m *identity.Message) MessageView {
 		v.DeliveryStatus = m.DeliveryStatus
 		v.DeliveryDetail = m.DeliveryDetail
 		v.SentAs = m.SentAs
+		v.ScheduledAt = utcPtr(m.ScheduledAt)
 		// HITL lifecycle (status column) — outbound only, mirroring the summary
 		// view; on inbound rows `status` is not the HITL value (review F1).
 		v.HITLStatus = m.Status
@@ -261,6 +269,7 @@ type MessageSummaryView struct {
 	Recipient      string   `json:"delivered_to" doc:"The envelope Delivered-To address — this delivery's per-agent target (the mailbox that actually received this row), distinct from the To header (the to array)."`
 	Subject        string   `json:"subject"`
 	ConversationID string   `json:"conversation_id,omitempty"`
+	ThreadID       string   `json:"thread_id,omitempty" doc:"Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."`
 	// Status is the inbox read-state, exposed as `read_status` (MSG-1).
 	Status        string `json:"read_status"`
 	HITLStatus    string `json:"review_status,omitempty" doc:"Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."`
@@ -268,9 +277,15 @@ type MessageSummaryView struct {
 	WebhookError  string `json:"webhook_error,omitempty"`
 	// DeliveryStatus / DeliveryDetail / SentAs are the outbound delivery
 	// rollup (migration 031). Outbound-only; omitted on inbound rows.
-	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"`
+	DeliveryStatus string `json:"delivery_status,omitempty" doc:"Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"`
 	DeliveryDetail string `json:"delivery_detail,omitempty"`
 	SentAs         string `json:"sent_as,omitempty" doc:"From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."`
+	// ScheduledAt mirrors MessageView.ScheduledAt on list rows (migration 084):
+	// the future instant a scheduled outbound send is queued to be submitted.
+	// Outbound-only and present only when a future send_at was set — omitted
+	// otherwise — so a list consumer can distinguish a scheduled send from an
+	// ordinary queued one without a per-message drill-down.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows. Moving to trash before provider submission prevents submission. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."`
 	// Flagged + FlagReason are the beta inbound ingestion verdict. They remain in
 	// list projections so polling agents can identify delivered flag outcomes
 	// without a per-message drill-down.
@@ -333,6 +348,7 @@ func messageSummaryFromIdentity(m identity.Message) MessageSummaryView {
 		s.DeliveryStatus = m.DeliveryStatus
 		s.DeliveryDetail = m.DeliveryDetail
 		s.SentAs = m.SentAs
+		s.ScheduledAt = utcPtr(m.ScheduledAt)
 	}
 	return s
 }
@@ -400,7 +416,7 @@ type messagesCursor struct {
 }
 
 func (s *Server) registerMessages() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listMessages",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages",
@@ -410,27 +426,27 @@ func (s *Server) registerMessages() {
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListMessages)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteMessage",
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}/messages/{id}",
 		Summary:     "Delete a message (move to trash)",
-		Description: "Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held).",
+		Description: "Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.",
 		Tags:        []string{"messages"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "restoreMessage",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/messages/{id}/restore",
 		Summary:     "Restore a message from the trash",
-		Description: "Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. Returns the restored message. 409 not_in_trash when the message is not in the trash.",
+		Description: "Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. For a scheduled outbound message, restoring before scheduled_at re-arms submission; restoring at or after scheduled_at returns the message live with delivery_status=failed and leaves submission canceled. Returns the restored message. 409 not_in_trash when the message is not in the trash.",
 		Tags:        []string{"messages"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleRestoreMessage)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getMessage",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -450,10 +466,12 @@ func (s *Server) registerMessages() {
 		if err != nil || msg == nil {
 			return nil, NewError(http.StatusNotFound, "not_found", "message not found")
 		}
-		return &messageOutput{Body: messageViewFromIdentity(msg)}, nil
+		view := messageViewFromIdentity(msg)
+		view.ThreadID = msg.ThreadID
+		return &messageOutput{Body: view}, nil
 	})
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "updateMessage",
 		Method:      http.MethodPatch,
 		Path:        "/v1/agents/{email}/messages/{id}",
@@ -556,7 +574,7 @@ func mapTrashErr(err error, resource string) error {
 		return NewError(http.StatusConflict, "not_in_trash", resource+" is not in the trash")
 	case errors.Is(err, identity.ErrSendInProgress):
 		return NewError(http.StatusConflict, "send_in_progress",
-			resource+" has an outbound send in progress; retry permanent deletion after it finishes")
+			resource+" has an outbound send in progress; retry deletion after it finishes")
 	default:
 		return NewError(http.StatusInternalServerError, "internal_error", "operation failed")
 	}
@@ -620,14 +638,18 @@ func (s *Server) handleRestoreMessage(ctx context.Context, in *MessageIDParam) (
 	if err != nil {
 		return nil, err
 	}
-	if s.deps.RestoreMessage == nil || s.deps.GetMessage == nil {
+	if s.deps.RestoreMessage == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "restore unavailable")
 	}
-	if err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID); err != nil {
+	// The store builds the restored view INSIDE the restore's own transaction
+	// (same detail projection, read-marking included). Re-reading here after
+	// the restore committed was a torn read: a concurrent re-trash or purge in
+	// the gap answered 500 "failed to reload message" on a committed restore.
+	msg, err := s.deps.RestoreMessage(ctx, in.MessageID, ag.ID)
+	if err != nil {
 		return nil, mapTrashErr(err, "message")
 	}
-	msg, err := s.deps.GetMessage(ctx, in.MessageID, ag.ID)
-	if err != nil || msg == nil {
+	if msg == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to reload message")
 	}
 	return &messageOutput{Body: messageViewFromIdentity(msg)}, nil
@@ -730,8 +752,8 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	var afterID string
 	if in.Cursor != "" {
 		var cur messagesCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(ag.UserID, cursorMessages, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.AgentID != ag.ID || cur.Status != status || cur.Direction != direction || cur.Sort != sort ||
 			cur.From != in.From || cur.SubjectContains != in.SubjectContains ||
@@ -781,12 +803,13 @@ func (s *Server) handleListMessages(ctx context.Context, in *ListMessagesInput) 
 	items := make([]MessageSummaryView, len(msgs))
 	for i, m := range msgs {
 		items[i] = messageSummaryFromIdentity(m)
+		items[i].ThreadID = m.ThreadID
 	}
 
 	var nextCursor string
 	if hasMore {
 		last := msgs[len(msgs)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, messagesCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, ag.UserID, cursorMessages, messagesCursor{
 			CreatedAt: last.CreatedAt, ID: last.ID,
 			Status: status, Direction: direction, AgentID: ag.ID, Sort: sort,
 			From: in.From, SubjectContains: in.SubjectContains, ConversationID: in.ConversationID,

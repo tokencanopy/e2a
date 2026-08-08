@@ -1,7 +1,7 @@
 "use client";
 
 // The standalone /reviews/review route was folded into the
-// split-pane at /reviews. This page exists only to redirect
+// consolidated queue at /reviews. This page exists only to redirect
 // callers that have the old URL bookmarked or follow it from a stale
 // notification. The destination preserves the ?id= query so context
 // isn't lost.

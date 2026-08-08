@@ -14,12 +14,20 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { ContactDueContact } from '../models/ContactDueContact.js';
+import { ContactDueData } from '../models/ContactDueData.js';
+import { ContactEngagementView } from '../models/ContactEngagementView.js';
+import { ContactImportItemResult } from '../models/ContactImportItemResult.js';
+import { ContactImportResult } from '../models/ContactImportResult.js';
+import { ContactImportRow } from '../models/ContactImportRow.js';
+import { ContactView } from '../models/ContactView.js';
 import { ConversationDetailView } from '../models/ConversationDetailView.js';
 import { ConversationSummaryView } from '../models/ConversationSummaryView.js';
 import { CreateAPIKeyRequest } from '../models/CreateAPIKeyRequest.js';
 import { CreateAPIKeyResponse } from '../models/CreateAPIKeyResponse.js';
 import { CreateAgentRequest } from '../models/CreateAgentRequest.js';
 import { CreateAgentSuppressionRequest } from '../models/CreateAgentSuppressionRequest.js';
+import { CreateContactRequest } from '../models/CreateContactRequest.js';
 import { CreateTemplateRequest } from '../models/CreateTemplateRequest.js';
 import { CreateWebhookRequest } from '../models/CreateWebhookRequest.js';
 import { CreateWebhookResponse } from '../models/CreateWebhookResponse.js';
@@ -27,7 +35,10 @@ import { DMARCResult } from '../models/DMARCResult.js';
 import { DNSRecord } from '../models/DNSRecord.js';
 import { DeleteAgentResult } from '../models/DeleteAgentResult.js';
 import { DeleteApiKeyResult } from '../models/DeleteApiKeyResult.js';
+import { DeleteContactResult } from '../models/DeleteContactResult.js';
 import { DeleteDomainResult } from '../models/DeleteDomainResult.js';
+import { DeleteEngagementResult } from '../models/DeleteEngagementResult.js';
+import { DeleteImportBatchResult } from '../models/DeleteImportBatchResult.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { DeleteSuppressionResult } from '../models/DeleteSuppressionResult.js';
 import { DeleteTemplateResult } from '../models/DeleteTemplateResult.js';
@@ -46,13 +57,16 @@ import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
 import { EmailFailedData } from '../models/EmailFailedData.js';
 import { EmailReceivedData } from '../models/EmailReceivedData.js';
 import { EmailSentData } from '../models/EmailSentData.js';
+import { EmbeddedContactView } from '../models/EmbeddedContactView.js';
 import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
+import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
 import { LimitExceededEnvelope } from '../models/LimitExceededEnvelope.js';
 import { LimitExceededErrorBody } from '../models/LimitExceededErrorBody.js';
@@ -68,6 +82,8 @@ import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
+import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
+import { PageContactView } from '../models/PageContactView.js';
 import { PageConversationSummaryView } from '../models/PageConversationSummaryView.js';
 import { PageDomainView } from '../models/PageDomainView.js';
 import { PageEventView } from '../models/PageEventView.js';
@@ -123,10 +139,12 @@ import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
+import { UpdateContactRequest } from '../models/UpdateContactRequest.js';
 import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
 import { UpdateMessageResultView } from '../models/UpdateMessageResultView.js';
 import { UpdateTemplateRequest } from '../models/UpdateTemplateRequest.js';
 import { UpdateWebhookRequest } from '../models/UpdateWebhookRequest.js';
+import { UpsertEngagementRequest } from '../models/UpsertEngagementRequest.js';
 import { UsageEventEntry } from '../models/UsageEventEntry.js';
 import { UserExport } from '../models/UserExport.js';
 import { UserExportUser } from '../models/UserExportUser.js';
@@ -272,7 +290,7 @@ export class ObjectAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
      * Delete your account + all data (irreversible)
      * @param param the request object
      */
@@ -281,7 +299,7 @@ export class ObjectAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
      * Delete your account + all data (irreversible)
      * @param param the request object
      */
@@ -769,7 +787,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
      * Restore an agent from the trash
      * @param param the request object
      */
@@ -778,7 +796,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
      * Restore an agent from the trash
      * @param param the request object
      */
@@ -820,6 +838,494 @@ export class ObjectAgentsApi {
      */
     public updateAgent(param: AgentsApiUpdateAgentRequest, options?: ConfigurationOptions): Promise<AgentView> {
         return this.api.updateAgent(param.email, param.updateAgentRequest,  options).toPromise();
+    }
+
+}
+
+import { ObservableContactsApi } from "./ObservableAPI.js";
+import { ContactsApiRequestFactory, ContactsApiResponseProcessor} from "../apis/ContactsApi.js";
+
+export interface ContactsApiCreateContactRequest {
+    /**
+     *
+     * @type CreateContactRequest
+     * @memberof ContactsApicreateContact
+     */
+    createContactRequest: CreateContactRequest
+    /**
+     * Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApicreateContact
+     */
+    idempotencyKey?: string
+}
+
+export interface ContactsApiDeleteContactRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteContact
+     */
+    address: string
+    /**
+     * Must be the literal DELETE — this action is irreversible.
+     * Defaults to: undefined
+     * @type &#39;DELETE&#39;
+     * @memberof ContactsApideleteContact
+     */
+    confirm: 'DELETE'
+}
+
+export interface ContactsApiDeleteEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteEngagement
+     */
+    address: string
+    /**
+     * Must be the literal DELETE — this action is irreversible.
+     * Defaults to: undefined
+     * @type &#39;DELETE&#39;
+     * @memberof ContactsApideleteEngagement
+     */
+    confirm: 'DELETE'
+}
+
+export interface ContactsApiDeleteImportBatchRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApideleteImportBatch
+     */
+    batchId: string
+    /**
+     * Must be the literal DELETE — this action is irreversible.
+     * Defaults to: undefined
+     * @type &#39;DELETE&#39;
+     * @memberof ContactsApideleteImportBatch
+     */
+    confirm: 'DELETE'
+}
+
+export interface ContactsApiGetContactRequest {
+    /**
+     * The contact\&#39;s email address, URL-encoded.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApigetContact
+     */
+    address: string
+}
+
+export interface ContactsApiGetEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApigetEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApigetEngagement
+     */
+    address: string
+}
+
+export interface ContactsApiImportContactsRequest {
+    /**
+     *
+     * @type ImportContactsRequest
+     * @memberof ContactsApiimportContacts
+     */
+    importContactsRequest: ImportContactsRequest
+    /**
+     * Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiimportContacts
+     */
+    idempotencyKey?: string
+}
+
+export interface ContactsApiListContactsRequest {
+    /**
+     * Filter by provenance. Known values: import, manual, inbound.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistContacts
+     */
+    source?: string
+    /**
+     * Filter to the contacts created by one import.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistContacts
+     */
+    importBatchId?: string
+    /**
+     * Only contacts created strictly after this instant (RFC 3339).
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistContacts
+     */
+    createdAfter?: Date
+    /**
+     * Only contacts created strictly before this instant (RFC 3339).
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistContacts
+     */
+    createdBefore?: Date
+    /**
+     * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistContacts
+     */
+    cursor?: string
+    /**
+     * Maximum number of items to return (1-100).
+     * Minimum: 1
+     * Maximum: 100
+     * Defaults to: 100
+     * @type number
+     * @memberof ContactsApilistContacts
+     */
+    limit?: number
+}
+
+export interface ContactsApiListEngagementsRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    email: string
+    /**
+     * Only engagements at this exact stage.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    stage?: string
+    /**
+     * Filter on whether the contact has answered since outreach began. Omit for both.
+     * Defaults to: undefined
+     * @type &#39;true&#39; | &#39;false&#39;
+     * @memberof ContactsApilistEngagements
+     */
+    replied?: 'true' | 'false'
+    /**
+     * Filter on whether sends are blocked. Omit for both.
+     * Defaults to: undefined
+     * @type &#39;true&#39; | &#39;false&#39;
+     * @memberof ContactsApilistEngagements
+     */
+    suppressed?: 'true' | 'false'
+    /**
+     * Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistEngagements
+     */
+    nextActionBefore?: Date
+    /**
+     * Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client\&#39;s own state write was lost — without it, a failed write can cause a duplicate send.
+     * Defaults to: undefined
+     * @type Date
+     * @memberof ContactsApilistEngagements
+     */
+    lastOutboundBefore?: Date
+    /**
+     * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApilistEngagements
+     */
+    cursor?: string
+    /**
+     * Maximum number of items to return (1-100).
+     * Minimum: 1
+     * Maximum: 100
+     * Defaults to: 100
+     * @type number
+     * @memberof ContactsApilistEngagements
+     */
+    limit?: number
+}
+
+export interface ContactsApiUpdateContactRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupdateContact
+     */
+    address: string
+    /**
+     *
+     * @type UpdateContactRequest
+     * @memberof ContactsApiupdateContact
+     */
+    updateContactRequest: UpdateContactRequest
+    /**
+     * Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupdateContact
+     */
+    ifMatch?: string
+}
+
+export interface ContactsApiUpsertEngagementRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupsertEngagement
+     */
+    email: string
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupsertEngagement
+     */
+    address: string
+    /**
+     *
+     * @type UpsertEngagementRequest
+     * @memberof ContactsApiupsertEngagement
+     */
+    upsertEngagementRequest: UpsertEngagementRequest
+    /**
+     * Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ContactsApiupsertEngagement
+     */
+    ifMatch?: string
+}
+
+export class ObjectContactsApi {
+    private api: ObservableContactsApi
+
+    public constructor(configuration: Configuration, requestFactory?: ContactsApiRequestFactory, responseProcessor?: ContactsApiResponseProcessor) {
+        this.api = new ObservableContactsApi(configuration, requestFactory, responseProcessor);
+    }
+
+    /**
+     * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Create a contact (beta)
+     * @param param the request object
+     */
+    public createContactWithHttpInfo(param: ContactsApiCreateContactRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        return this.api.createContactWithHttpInfo(param.createContactRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Create a contact (beta)
+     * @param param the request object
+     */
+    public createContact(param: ContactsApiCreateContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
+        return this.api.createContact(param.createContactRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Delete a contact (beta)
+     * @param param the request object
+     */
+    public deleteContactWithHttpInfo(param: ContactsApiDeleteContactRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteContactResult>> {
+        return this.api.deleteContactWithHttpInfo(param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Delete a contact (beta)
+     * @param param the request object
+     */
+    public deleteContact(param: ContactsApiDeleteContactRequest, options?: ConfigurationOptions): Promise<DeleteContactResult> {
+        return this.api.deleteContact(param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param param the request object
+     */
+    public deleteEngagementWithHttpInfo(param: ContactsApiDeleteEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteEngagementResult>> {
+        return this.api.deleteEngagementWithHttpInfo(param.email, param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Removes this agent\'s outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Un-enrol a contact (beta)
+     * @param param the request object
+     */
+    public deleteEngagement(param: ContactsApiDeleteEngagementRequest, options?: ConfigurationOptions): Promise<DeleteEngagementResult> {
+        return this.api.deleteEngagement(param.email, param.address, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param param the request object
+     */
+    public deleteImportBatchWithHttpInfo(param: ContactsApiDeleteImportBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteImportBatchResult>> {
+        return this.api.deleteImportBatchWithHttpInfo(param.batchId, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Reverse a contact import (beta)
+     * @param param the request object
+     */
+    public deleteImportBatch(param: ContactsApiDeleteImportBatchRequest, options?: ConfigurationOptions): Promise<DeleteImportBatchResult> {
+        return this.api.deleteImportBatch(param.batchId, param.confirm,  options).toPromise();
+    }
+
+    /**
+     * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Get a contact (beta)
+     * @param param the request object
+     */
+    public getContactWithHttpInfo(param: ContactsApiGetContactRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        return this.api.getContactWithHttpInfo(param.address,  options).toPromise();
+    }
+
+    /**
+     * Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Get a contact (beta)
+     * @param param the request object
+     */
+    public getContact(param: ContactsApiGetContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
+        return this.api.getContact(param.address,  options).toPromise();
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param param the request object
+     */
+    public getEngagementWithHttpInfo(param: ContactsApiGetEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
+        return this.api.getEngagementWithHttpInfo(param.email, param.address,  options).toPromise();
+    }
+
+    /**
+     * Fetches this agent\'s relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Get one outreach record (beta)
+     * @param param the request object
+     */
+    public getEngagement(param: ContactsApiGetEngagementRequest, options?: ConfigurationOptions): Promise<ContactEngagementView> {
+        return this.api.getEngagement(param.email, param.address,  options).toPromise();
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row\'s CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character or invalid UTF-8 byte sequence anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param param the request object
+     */
+    public importContactsWithHttpInfo(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactImportResult>> {
+        return this.api.importContactsWithHttpInfo(param.importContactsRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row\'s CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character or invalid UTF-8 byte sequence anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable.
+     * Import contacts in bulk (beta)
+     * @param param the request object
+     */
+    public importContacts(param: ContactsApiImportContactsRequest, options?: ConfigurationOptions): Promise<ContactImportResult> {
+        return this.api.importContacts(param.importContactsRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * List contacts (beta)
+     * @param param the request object
+     */
+    public listContactsWithHttpInfo(param: ContactsApiListContactsRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<PageContactView>> {
+        return this.api.listContactsWithHttpInfo(param.source, param.importBatchId, param.createdAfter, param.createdBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * List contacts (beta)
+     * @param param the request object
+     */
+    public listContacts(param: ContactsApiListContactsRequest = {}, options?: ConfigurationOptions): Promise<PageContactView> {
+        return this.api.listContacts(param.source, param.importBatchId, param.createdAfter, param.createdBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param param the request object
+     */
+    public listEngagementsWithHttpInfo(param: ContactsApiListEngagementsRequest, options?: ConfigurationOptions): Promise<HttpInfo<PageContactEngagementView>> {
+        return this.api.listEngagementsWithHttpInfo(param.email, param.stage, param.replied, param.suppressed, param.nextActionBefore, param.lastOutboundBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable.
+     * List an agent\'s outreach (beta)
+     * @param param the request object
+     */
+    public listEngagements(param: ContactsApiListEngagementsRequest, options?: ConfigurationOptions): Promise<PageContactEngagementView> {
+        return this.api.listEngagements(param.email, param.stage, param.replied, param.suppressed, param.nextActionBefore, param.lastOutboundBefore, param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Update a contact (beta)
+     * @param param the request object
+     */
+    public updateContactWithHttpInfo(param: ContactsApiUpdateContactRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactView>> {
+        return this.api.updateContactWithHttpInfo(param.address, param.updateContactRequest, param.ifMatch,  options).toPromise();
+    }
+
+    /**
+     * Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable.
+     * Update a contact (beta)
+     * @param param the request object
+     */
+    public updateContact(param: ContactsApiUpdateContactRequest, options?: ConfigurationOptions): Promise<ContactView> {
+        return this.api.updateContact(param.address, param.updateContactRequest, param.ifMatch,  options).toPromise();
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param param the request object
+     */
+    public upsertEngagementWithHttpInfo(param: ContactsApiUpsertEngagementRequest, options?: ConfigurationOptions): Promise<HttpInfo<ContactEngagementView>> {
+        return this.api.upsertEngagementWithHttpInfo(param.email, param.address, param.upsertEngagementRequest, param.ifMatch,  options).toPromise();
+    }
+
+    /**
+     * Enrols a contact in this agent\'s outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable.
+     * Enrol or update outreach state (beta)
+     * @param param the request object
+     */
+    public upsertEngagement(param: ContactsApiUpsertEngagementRequest, options?: ConfigurationOptions): Promise<ContactEngagementView> {
+        return this.api.upsertEngagement(param.email, param.address, param.upsertEngagementRequest, param.ifMatch,  options).toPromise();
     }
 
 }
@@ -892,7 +1398,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * Fetch a single conversation thread with its participants, labels, and member messages.
+     * Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
      * Get a conversation
      * @param param the request object
      */
@@ -901,7 +1407,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * Fetch a single conversation thread with its participants, labels, and member messages.
+     * Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
      * Get a conversation
      * @param param the request object
      */
@@ -910,7 +1416,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * List an agent\'s conversation threads (derived from messages.conversation_id).
+     * List an agent\'s application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
      * List conversations
      * @param param the request object
      */
@@ -919,7 +1425,7 @@ export class ObjectConversationsApi {
     }
 
     /**
-     * List an agent\'s conversation threads (derived from messages.conversation_id).
+     * List an agent\'s application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
      * List conversations
      * @param param the request object
      */
@@ -1306,7 +1812,7 @@ export interface MessagesApiForwardMessageRequest {
      */
     idempotencyKey?: string
     /**
-     * Optional bounded wait. wait&#x3D;sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. Default: no wait. Always branch on body.status, not the HTTP code.
+     * Optional bounded wait. wait&#x3D;sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. A future send_at returns status&#x3D;scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code.
      * Defaults to: undefined
      * @type string
      * @memberof MessagesApiforwardMessage
@@ -1528,7 +2034,7 @@ export interface MessagesApiReplyToMessageRequest {
      */
     idempotencyKey?: string
     /**
-     * Optional bounded wait. wait&#x3D;sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. Default: no wait. Always branch on body.status, not the HTTP code.
+     * Optional bounded wait. wait&#x3D;sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. A future send_at returns status&#x3D;scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code.
      * Defaults to: undefined
      * @type string
      * @memberof MessagesApireplyToMessage
@@ -1575,7 +2081,7 @@ export interface MessagesApiSendMessageRequest {
      */
     idempotencyKey?: string
     /**
-     * Optional bounded wait. wait&#x3D;sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. Default: no wait. Always branch on body.status, not the HTTP code.
+     * Optional bounded wait. wait&#x3D;sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status&#x3D;accepted. A future send_at returns status&#x3D;scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code.
      * Defaults to: undefined
      * @type string
      * @memberof MessagesApisendMessage
@@ -1614,7 +2120,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held).
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */
@@ -1623,7 +2129,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held).
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */
@@ -1632,7 +2138,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. 202 when held for HITL. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
+     * Beta: scheduled sending may change before it is declared stable. Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
      * Forward a message
      * @param param the request object
      */
@@ -1641,7 +2147,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. 202 when held for HITL. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
+     * Beta: scheduled sending may change before it is declared stable. Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
      * Forward a message
      * @param param the request object
      */
@@ -1722,7 +2228,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). 202 when held for HITL. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
+     * Beta: scheduled sending may change before it is declared stable. Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
      * Reply to a message
      * @param param the request object
      */
@@ -1731,7 +2237,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). 202 when held for HITL. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
+     * Beta: scheduled sending may change before it is declared stable. Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large.
      * Reply to a message
      * @param param the request object
      */
@@ -1740,7 +2246,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. Returns the restored message. 409 not_in_trash when the message is not in the trash.
+     * Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. For a scheduled outbound message, restoring before scheduled_at re-arms submission; restoring at or after scheduled_at returns the message live with delivery_status=failed and leaves submission canceled. Returns the restored message. 409 not_in_trash when the message is not in the trash.
      * Restore a message from the trash
      * @param param the request object
      */
@@ -1749,7 +2255,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. Returns the restored message. 409 not_in_trash when the message is not in the trash.
+     * Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. For a scheduled outbound message, restoring before scheduled_at re-arms submission; restoring at or after scheduled_at returns the message live with delivery_status=failed and leaves submission canceled. Returns the restored message. 409 not_in_trash when the message is not in the trash.
      * Restore a message from the trash
      * @param param the request object
      */
@@ -1758,7 +2264,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. 202 + pending_review when the agent has HITL enabled. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).
+     * Beta: scheduled sending may change before it is declared stable. Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).
      * Send a new email
      * @param param the request object
      */
@@ -1767,7 +2273,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. 202 + pending_review when the agent has HITL enabled. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).
+     * Beta: scheduled sending may change before it is declared stable. Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry).
      * Send a new email
      * @param param the request object
      */

@@ -6,6 +6,33 @@ knowledge of the project. For deeper prose, see `README.md` (product),
 `CONTRIBUTING.md` (contributor workflow), `docs/` (API reference,
 deployment, design docs), and `SECURITY.md`.
 
+## Public repository data boundary (non-negotiable)
+
+This repository and all of its GitHub surfaces are public. **Never put real
+customer data or non-public production-derived data in source files, tests,
+fixtures, generated artifacts, commit messages, branch names,
+PR/issue/discussion titles or bodies, review comments, screenshots, log
+excerpts, or benchmark output.** This includes email and agent addresses,
+customer domains or names, user/account/agent/message/contact IDs, message
+content or subjects, customer-specific URLs or IP addresses, timestamps tied to
+customer activity, and delivery, bounce, or incident details that can be
+correlated to a customer. An address on `agents.e2a.dev` is a customer
+identifier, not a safe example value. Public service metadata deliberately
+documented for users, such as `https://api.e2a.dev`, is not customer data.
+
+Before any GitHub-facing write, replace production-derived values with synthetic
+ones such as `example.com`, `.test`, `.invalid`, `agents.localhost`, or clearly
+fictional resource IDs. Describe production evidence only in anonymized,
+non-correlatable terms (for example, "a production customer saw repeated SMTP
+rejections"). Keep exact evidence only in an approved private incident or
+operations system. Relevance to a fix is not an exception to this boundary.
+
+If customer data is found before push, stop and rewrite the affected files and
+commits. If it reaches GitHub, treat it as a data exposure: stop propagation,
+notify Josh/security, sanitize the PR or issue, rewrite reachable Git history,
+check related refs/forks/caches, and contact GitHub Support when cached views or
+references need purging. Deleting the visible text alone is not sufficient.
+
 ## Project overview
 
 e2a is an **authenticated email gateway for AI agents**: it gives an agent a
@@ -16,9 +43,10 @@ through an HTTP API (SMTP relay agent-to-agent, upstream SMTP such as SES
 agent-to-human), with an optional human-in-the-loop (HITL) approval gate and
 opt-in prompt-injection content screening (piguard).
 
-Polyglot monorepo, Apache-2.0, GitHub: `tokencanopy/e2a`. The `/v1` API and
-SDKs are release candidates; stable compatibility guarantees start at the
-announced GA tag.
+Polyglot monorepo, Apache-2.0, GitHub: `tokencanopy/e2a`. The core `/v1` API
+and SDKs are stable (GA — no breaking changes within `/v1`); the beta surface
+is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
+(machine-readable: `x-stability-level` in `api/openapi.yaml`).
 
 | Surface | Path | Stack | Package |
 |---|---|---|---|
@@ -49,7 +77,8 @@ with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
 - `tests/contract/` — Go contract tests driven by `scenarios.yaml`;
   `tests/e2e-prod/` — production smoke-test harness (TypeScript).
 - `docs/` — `api.md`, `deployment.md`, `events.md`, `templates.md`,
-  `data-handling.md`, `api-compatibility-gate.md`, `design/`, `runbooks/`.
+  `observability.md`, `data-handling.md`, `api-compatibility-gate.md`,
+  `design/`, `runbooks/`.
 - `scripts/` — CI guardrails (OpenAPI compat check, plugin validator,
   SDK version-sync check, repo text-integrity check).
 - `examples/adk-cloud-webhook/`, `examples/agent-framework-webhooks/` —
@@ -211,11 +240,16 @@ Key packages, grouped (name — a few words each):
 - Webhooks & jobs: `webhook`/`webhookdelivery`/`webhookpub` subscriptions,
   durable fan-out, SSRF-guarded HTTP POST delivery+retry; `eventpayload`
   typed webhook `data` payloads; `jobs` River-backed durable job runtime
-  (Postgres mandatory); `janitor` periodic TTL sweeps (trash, expired holds).
+  (Postgres mandatory); `janitor` periodic TTL sweeps (trash, expired holds);
+  `contactdue` outreach wake-up sweep — emits `contact.due` for engagements
+  past `next_action_at`, on its own River queue/interval, deliberately
+  separate from the janitor's cleanup cadence.
 - Send guards & accounting: `idempotency` `Idempotency-Key` storage+replay;
   `unsubscribe` opaque per-recipient unsubscribe tokens/URLs
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
-  entitlements; `sendramp` per-domain recipient-volume ramping.
+  entitlements; `sendramp` per-domain recipient-volume ramping; `sendrate`
+  per-agent fire-time submission rate limiting (durable sliding window
+  enforced in the send worker immediately before provider submission).
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
@@ -263,9 +297,11 @@ manually on every API change even though the template won't remind you.
 
 ## Client surfaces
 
-- **TS SDK** (`sdks/typescript/`): layered — generated types → `E2AApi` (raw
-  HTTP) → `E2AClient` (high-level `.parse()`, `.reply()`); WebSocket in
-  `v1/ws.ts`; webhook signature verification in `v1/webhook-signature.ts`.
+- **TS SDK** (`sdks/typescript/`): layered — generated types → generated
+  `Promise*Api` classes (raw HTTP) → `E2AClient` with namespaced resources
+  (`client.messages.send` / `.reply`, `client.inbound.fromEvent`); WebSocket
+  in `v1/ws.ts`; webhook verification via standalone `constructEvent` in
+  `v1/webhook-signature.ts`.
 - **Python SDK** (`sdks/python/`): src layout, async-native (httpx), sync +
   async high-level clients over the generated base; PEP 561 `py.typed`.
 - **CLI** (`cli/`): commands login, whoami, agents, keys, protection, send,
@@ -277,7 +313,7 @@ manually on every API change even though the template won't remind you.
   definite configuration failure). Add new codes, never renumber.
 - **MCP server** (`mcp/`): inbox tools over the REST API; hosted HTTP
   transport (image `ghcr.io/tokencanopy/e2a-mcp-http`). **npm publishing is
-  retired** (`@e2a/mcp-server` frozen at 0.4.0) — do not configure a trusted
+  retired** (`@e2a/mcp-server` frozen at 0.5.0) — do not configure a trusted
   publisher.
 - **Web** (`web/`): Next.js 16 static export; dev rewrites `/api/*` to
   :8080; consumes `@e2a/ui` via a `file:` dep, so `design-system/dist/` is
@@ -291,14 +327,45 @@ manually on every API change even though the template won't remind you.
   runs everything with `-tags integration -p 4` (safe: per-package test DBs). CI additionally race-checks
   `./internal/sendramp` and `./internal/outboundsend` with `-race`.
 - **Coverage ratchet**: `.testcoverage.yml` sets per-package floors (currently
-  webhook, webhookpub, webhookdelivery, httpapi, outboundsend, sendramp,
-  inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
+  webhook, webhookpub, webhookdelivery, httpapi, contactdue, outboundsend,
+  sendramp, sendrate, inboundprocess, jobs, auth, apiserver, loopback, inboundscreen).
   Ratchet floors UP, never down. `make cover-check` runs the same gate CI
   runs (`vladopajic/go-test-coverage`).
 - **Contract tests**: TS and Python SDK contract tests run against
   `cmd/e2a-contract-server`, a real e2a instance backed by Postgres (CI builds
   and launches it automatically; locally you need it running for
-  `test:contract` / `test_contract.py`).
+  `test:contract` / `test_contract.py`). **Every new or changed public `/v1`
+  API feature must add or update a self-cleaning shared scenario in
+  `tests/contract/scenarios.yaml` and prove it through the Go, TypeScript, and
+  Python live-server contract runners.** Handler/unit tests, generated-client
+  tests, and OpenAPI golden tests are complementary and do not substitute for
+  cross-SDK conformance. If the shared scenario language cannot express the
+  feature, extend all three interpreters in parity, add runner-level regressions
+  in every language, and prefer dynamic placeholders over fixtures that age or
+  collide under concurrent runs.
+- **New SDK surface needs live coverage in per-PR CI, not only staging.** The
+  post-merge staging conformance gate must never be the FIRST live exercise
+  of a method — that is how `If-Match: undefined` shipped (#774). The
+  ts-contract job enforces a denominator: every ergonomic client method must
+  be exercised by `sdks/typescript/test/v1/contract-client.test.ts` or carry
+  an explicit allowlist entry in `contract-coverage.test.ts` (a ratchet —
+  shrink it; grow it only with a reason the contract server can't run the
+  path).
+- **Generated clients are pipeline artifacts — never hand-edit them.** Any
+  behavior fix belongs in the generation pipeline (`make generate-sdk`, e.g.
+  the TS post-processing step `scripts/guard-optional-header-params.py`), so
+  regeneration cannot undo it. Static audits pin the load-bearing emission
+  shapes per PR — optional header params must stay guarded in both generated
+  clients (TS: `test/v1/optional-header-params.test.ts`; Python:
+  `tests/test_generated_header_guards.py`) — because the freshness gate alone
+  re-blesses whatever a new generator version emits.
+- **Data-modifying CTEs must not re-select from the table they modified.** In
+  Postgres the outer query runs on the statement snapshot, which predates the
+  CTE's own writes — `WITH x AS (UPDATE t … RETURNING …) SELECT … FROM t`
+  returns the pre-update row (this broke `UpdateEngagementIfUnchanged`'s ETag
+  chain, #775). Read FROM the CTE's RETURNING output, or split write and read
+  into two statements in one transaction. Guarded repo-wide by
+  `internal/sqlguard` (waiver: `// cte-snapshot-safe: <reason>`).
 - **Schema-change rule**: when changing a table shape, add/update DB-backed
   tests in every package that writes direct SQL against that table — the
   idempotent migration runner will not catch drifted runtime SQL.
@@ -371,7 +438,10 @@ manually on every API change even though the template won't remind you.
 - **Publishing** (all tag/dispatch-triggered GitHub workflows):
   - Python SDK: bump `sdks/python/pyproject.toml` version, tag `python-v*`.
   - TS SDK: bump `sdks/typescript/package.json` version, tag `ts-sdk-v*`.
-  - CLI: bump `cli/package.json` version, then GitHub release publish or
-    `gh workflow run "Publish CLI" --ref main`.
+  - CLI: bump `cli/package.json` version, tag `cli-v*` (or
+    `gh workflow run "Publish CLI" --ref main`). Deliberately NOT the
+    product `v*` tag: the CLI depends on `@e2a/sdk`, so push `cli-v*`
+    only after `ts-sdk-v*` — publishing from the product tag raced the
+    CLI onto npm before its SDK existed.
   - MCP: hosted-only — `publish-mcp-http.yml` pushes the HTTP image on tag;
     npm publish is retired.

@@ -87,22 +87,22 @@ type conversationOutput struct {
 }
 
 func (s *Server) registerConversations() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listConversations",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations",
 		Summary:     "List conversations",
-		Description: "List an agent's conversation threads (derived from messages.conversation_id).",
+		Description: "List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.",
 		Tags:        []string{"conversations"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListConversations)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getConversation",
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/{email}/conversations/{id}",
 		Summary:     "Get a conversation",
-		Description: "Fetch a single conversation thread with its participants, labels, and member messages.",
+		Description: "Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.",
 		Tags:        []string{"conversations"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleGetConversation)
@@ -132,8 +132,8 @@ func (s *Server) handleListConversations(ctx context.Context, in *ListConversati
 	var afterID string
 	if in.Cursor != "" {
 		var cur conversationsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(ag.UserID, cursorConversations, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		if cur.AgentID != ag.ID || cur.Since != rfc3339OrEmpty(since) || cur.Until != rfc3339OrEmpty(until) {
 			return nil, NewError(http.StatusBadRequest, "invalid_cursor",
@@ -169,7 +169,7 @@ func (s *Server) handleListConversations(ctx context.Context, in *ListConversati
 	var nextCursor string
 	if hasMore {
 		last := convos[len(convos)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, conversationsCursor{
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, ag.UserID, cursorConversations, conversationsCursor{
 			LastMessageAt:  last.LastMessageAt,
 			ConversationID: last.ID,
 			AgentID:        ag.ID,

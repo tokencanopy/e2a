@@ -16,11 +16,15 @@ package contract
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -70,17 +74,30 @@ type messageSetup struct {
 }
 
 type step struct {
-	ID           string                 `yaml:"id"`
-	Action       string                 `yaml:"action"`
-	Method       string                 `yaml:"method,omitempty"`
-	Path         string                 `yaml:"path,omitempty"`
-	Body         map[string]interface{} `yaml:"body,omitempty"`
-	AuthOverride *string                `yaml:"auth_override,omitempty"`
-	AgentEmail   string                 `yaml:"agent_email,omitempty"`
-	From         string                 `yaml:"from,omitempty"`
-	Subject      string                 `yaml:"subject,omitempty"`
-	VerifyDomain string                 `yaml:"verify_domain,omitempty"`
-	Expect       *expectation           `yaml:"expect,omitempty"`
+	ID     string                 `yaml:"id"`
+	Action string                 `yaml:"action"`
+	Method string                 `yaml:"method,omitempty"`
+	Path   string                 `yaml:"path,omitempty"`
+	Body   map[string]interface{} `yaml:"body,omitempty"`
+	// RawBodyBase64 and HeadersBase64 are the raw-bytes escape hatches (see
+	// the scenarios.yaml header). YAML scalars are UTF-8 by definition, so a
+	// scenario that must put NON-UTF-8 bytes on the wire — the whole point of
+	// the invalid_utf8_rejected scenario — cannot express them as text. The
+	// runner base64-decodes these and transmits the bytes verbatim; they must
+	// never round-trip through a JSON encoder or a charset conversion.
+	//
+	// RawBodyBase64 is a POINTER so that absent and `raw_body_base64: ""` are
+	// distinguishable: an empty value declares a body source and supplies
+	// nothing, which is a scenario-authoring mistake all three runners refuse
+	// identically rather than one of them silently sending a zero-byte body.
+	RawBodyBase64 *string           `yaml:"raw_body_base64,omitempty"`
+	HeadersBase64 map[string]string `yaml:"headers_base64,omitempty"`
+	AuthOverride  *string           `yaml:"auth_override,omitempty"`
+	AgentEmail    string            `yaml:"agent_email,omitempty"`
+	From          string            `yaml:"from,omitempty"`
+	Subject       string            `yaml:"subject,omitempty"`
+	VerifyDomain  string            `yaml:"verify_domain,omitempty"`
+	Expect        *expectation      `yaml:"expect,omitempty"`
 	// Capture extracts values from the response and stores them as
 	// placeholders for later steps. Keys are the placeholder names
 	// (without curly braces); values are dotted JSON paths into the
@@ -95,6 +112,13 @@ type expectation struct {
 	BodyMatch         map[string]interface{}            `yaml:"body_match,omitempty"`
 	BodyArrayContains map[string]map[string]interface{} `yaml:"body_array_contains,omitempty"`
 	BodyExcludes      []string                          `yaml:"body_excludes,omitempty"`
+	// ResponseExcludes asserts a substring appears NOWHERE in the raw response
+	// text. body_excludes is a top-level PROPERTY-NAME check, which is the
+	// wrong tool for "the server must not echo the offending input back": a
+	// leak nested at error.details.fields[0].value would satisfy it. This one
+	// is deliberately not JSON-aware — it runs on the bytes, so an echo
+	// escapes nothing by hiding at a depth nobody thought to assert on.
+	ResponseExcludes []string `yaml:"response_excludes,omitempty"`
 	// WS-specific
 	FieldsPresent []string               `yaml:"fields_present,omitempty"`
 	FieldsAbsent  []string               `yaml:"fields_absent,omitempty"`
@@ -110,6 +134,9 @@ type testEnv struct {
 	wsHub   *ws.Hub
 	apiKey  string
 	userID  string
+	// cappedAPIKey authenticates the contract server's secondary account,
+	// seeded with testutil.CappedLimits, that quota scenarios run as.
+	cappedAPIKey string
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -133,6 +160,8 @@ func setupEnv(t *testing.T) *testEnv {
 		wsHub:   cs.WSHub,
 		apiKey:  cs.APIKey,
 		userID:  cs.UserID,
+
+		cappedAPIKey: cs.CappedAPIKey,
 	}
 }
 
@@ -274,16 +303,59 @@ type runner struct {
 }
 
 func newRunner(env *testEnv, sc scenario) *runner {
+	tokenBytes := make([]byte, 6)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		panic(fmt.Sprintf("generate contract scenario token: %v", err))
+	}
+	future := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second)
 	return &runner{
-		env:  env,
-		sc:   sc,
-		vars: make(map[string]string),
+		env: env,
+		sc:  sc,
+		vars: map[string]string{
+			"future_rfc3339": future.Format(time.RFC3339),
+			"scenario_token": hex.EncodeToString(tokenBytes),
+		},
+	}
+}
+
+func TestRunnerInitializesDynamicScenarioVars(t *testing.T) {
+	before := time.Now().UTC()
+	env := &testEnv{baseURL: "https://contract.test", apiKey: "key"}
+	first := newRunner(env, scenario{})
+	second := newRunner(env, scenario{})
+
+	futureValue := first.resolve("{future_rfc3339}")
+	future, err := time.Parse(time.RFC3339, futureValue)
+	if err != nil {
+		t.Fatalf("future_rfc3339 = %q: %v", futureValue, err)
+	}
+	if futureValue != first.resolve("{future_rfc3339}") {
+		t.Fatal("future_rfc3339 changed within one scenario")
+	}
+	if future.Before(before.Add(4*time.Minute)) || future.After(time.Now().UTC().Add(6*time.Minute)) {
+		t.Fatalf("future_rfc3339 = %s, want approximately five minutes ahead", futureValue)
+	}
+	if future.Nanosecond() != 0 {
+		t.Fatalf("future_rfc3339 = %s, want whole-second precision", futureValue)
+	}
+
+	firstToken := first.resolve("{scenario_token}")
+	secondToken := second.resolve("{scenario_token}")
+	if len(firstToken) != 12 {
+		t.Fatalf("scenario_token length = %d, want 12", len(firstToken))
+	}
+	if _, err := strconv.ParseUint(firstToken, 16, 64); err != nil {
+		t.Fatalf("scenario_token = %q, want lowercase hex: %v", firstToken, err)
+	}
+	if firstToken == secondToken {
+		t.Fatalf("scenario_token collision: %q", firstToken)
 	}
 }
 
 func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, "{base_url}", r.env.baseURL)
 	s = strings.ReplaceAll(s, "{api_key}", r.env.apiKey)
+	s = strings.ReplaceAll(s, "{capped_api_key}", r.env.cappedAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)
 	}
@@ -440,11 +512,71 @@ func (r *runner) execRequest(t *testing.T, s *step) {
 	}
 }
 
+// stepRawBody decodes raw_body_base64, enforcing that a step declares at most
+// one body source. Returns (nil, nil) when the step has no raw body.
+func stepRawBody(s *step) ([]byte, error) {
+	if s.RawBodyBase64 == nil {
+		return nil, nil
+	}
+	if s.Body != nil {
+		return nil, fmt.Errorf("step %s: body and raw_body_base64 are mutually exclusive", s.ID)
+	}
+	if *s.RawBodyBase64 == "" {
+		return nil, fmt.Errorf("step %s: raw_body_base64 is empty; omit the key to send no body", s.ID)
+	}
+	return decodeStrictBase64(*s.RawBodyBase64, fmt.Sprintf("step %s: raw_body_base64", s.ID))
+}
+
+// strictBase64 is canonical standard base64: the standard alphabet with
+// canonical padding, nothing else. It is the shared definition all three
+// runners validate against.
+var strictBase64 = regexp.MustCompile(`^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+
+// decodeStrictBase64 refuses anything that is not exactly-canonical base64.
+//
+// The explicit format check is NOT redundant with the decoders: all three
+// stdlib decoders are permissive in different places, so a typo'd or truncated
+// fixture used to fail in one language and silently put DIFFERENT BYTES on the
+// wire in another — one shared scenario quietly testing something else.
+// Measured on the same four inputs:
+//
+//	                      Go DecodeString   Python validate=True   Node Buffer.from
+//	"not base64!!"        error             error                  6 bytes
+//	"eyJhIjoxfQ" (unpad)  error             error                  decodes
+//	"eyJhIjox\nfQ=="      DECODES (\n skip) error                  decodes
+//
+// Validating the string first makes all three answer identically. Like every
+// stdlib decoder here it does not police non-canonical trailing bits, so
+// nothing diverges on that axis either. Parity tests:
+// TestRunnerRejectsBadRawBodyBase64 here, "rejects raw_body_base64 with %s" in
+// the TypeScript runner, test_runner_rejects_bad_raw_body_base64 in Python.
+func decodeStrictBase64(value, what string) ([]byte, error) {
+	if !strictBase64.MatchString(value) {
+		return nil, fmt.Errorf("%s: not valid base64: %q", what, value)
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	return raw, nil
+}
+
 func (r *runner) execRequestError(s *step) error {
 	path := r.resolve(s.Path)
 
+	rawBodyBytes, err := stepRawBody(s)
+	if err != nil {
+		return err
+	}
+
 	var bodyReader io.Reader
-	if s.Body != nil {
+	hasBody := s.Body != nil || rawBodyBytes != nil
+	switch {
+	case rawBodyBytes != nil:
+		// Verbatim: no JSON encoder, no re-encoding. Anything else would
+		// launder the very bytes the scenario exists to transmit.
+		bodyReader = bytes.NewReader(rawBodyBytes)
+	case s.Body != nil:
 		data, _ := json.Marshal(r.resolveValue(s.Body))
 		bodyReader = bytes.NewReader(data)
 	}
@@ -455,8 +587,17 @@ func (r *runner) execRequestError(s *step) error {
 	if auth, ok := r.authHeader(s); ok {
 		req.Header.Set("Authorization", auth)
 	}
-	if s.Body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// Go's http.Header is byte-transparent for obs-text (anything >= 0x80), so
+	// a decoded byte string reaches the wire unchanged.
+	for name, encoded := range s.HeadersBase64 {
+		value, decodeErr := decodeStrictBase64(encoded, fmt.Sprintf("step %s: headers_base64[%s]", s.ID, name))
+		if decodeErr != nil {
+			return decodeErr
+		}
+		req.Header.Set(name, string(value))
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -474,6 +615,16 @@ func (r *runner) execRequestError(s *step) error {
 	// Status assertion
 	if s.Expect.Status != 0 && resp.StatusCode != s.Expect.Status {
 		return fmt.Errorf("step %s: status = %d, want %d; body: %s", s.ID, resp.StatusCode, s.Expect.Status, rawBody)
+	}
+
+	// Raw-text assertion. Runs on the undecoded bytes and BEFORE the JSON
+	// assertions so it also applies to steps that make no other body claim.
+	for _, needle := range s.Expect.ResponseExcludes {
+		resolved := r.resolve(needle)
+		if strings.Contains(string(rawBody), resolved) {
+			return fmt.Errorf("step %s: response contains %q anywhere in its body, which it must not: %s",
+				s.ID, resolved, rawBody)
+		}
 	}
 
 	// JSON body assertions
@@ -772,16 +923,156 @@ func loadScenarios(t *testing.T) []scenario {
 	return sf.Scenarios
 }
 
+// requireCappedKey fails a scenario that asks for the capped account when the
+// harness cannot supply it. Deliberately a failure and not a skip: a quota
+// scenario that quietly stops running is indistinguishable from one that
+// passes, which is exactly how limit coverage would rot back to zero.
+func requireCappedKey(t *testing.T, env *testEnv, sc scenario) {
+	t.Helper()
+	if env.cappedAPIKey == "" && scenarioUsesCappedKey(t, sc) {
+		t.Fatalf("scenario %s uses %s but the contract server supplied no capped API key", sc.Name, cappedKeyPlaceholder)
+	}
+}
+
+// scenarioUsesCappedKey reports whether the scenario authenticates as the
+// capped-plan account anywhere.
+//
+// It inspects auth_override VALUES specifically. Substring-matching a
+// serialized dump of the whole scenario looks equivalent and is not: the
+// scenario's own description mentions {capped_api_key} in prose, so a dump
+// match stays true even if every auth_override is switched back to the primary
+// account — which is exactly the regression this is supposed to detect.
+func scenarioUsesCappedKey(t *testing.T, sc scenario) bool {
+	t.Helper()
+	overrides := []*string{sc.AuthOverride}
+	for _, s := range sc.Steps {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, s := range sc.Cleanup {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, o := range overrides {
+		if o != nil && strings.Contains(*o, cappedKeyPlaceholder) {
+			return true
+		}
+	}
+	return false
+}
+
+const cappedKeyPlaceholder = "{capped_api_key}"
+
 func TestScenarios(t *testing.T) {
 	scenarios := loadScenarios(t)
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.Name, func(t *testing.T) {
 			env := setupEnv(t)
+			requireCappedKey(t, env, sc)
 			r := newRunner(env, sc)
 			t.Cleanup(func() { r.cleanup(t) })
 			r.executeSetup(t)
 			r.executeSteps(t)
 		})
+	}
+}
+
+// TestLimitsScenarioShape is the Go half of the always-on guard the TS and
+// Python runners also carry. The live quota run can skip in those runners when
+// no capped key is supplied (a deployed target has no capped account); this
+// pins the scenario's shape everywhere, so a deletion or a defanged assertion
+// fails the build even where the live run does not execute.
+func TestLimitsScenarioShape(t *testing.T) {
+	var sc scenario
+	for _, candidate := range loadScenarios(t) {
+		if candidate.Name == "account_limits_enforced" {
+			sc = candidate
+			break
+		}
+	}
+	if sc.Name == "" {
+		t.Fatal("scenario account_limits_enforced not found — quota enforcement would have no live coverage in any runner")
+	}
+	if !scenarioUsesCappedKey(t, sc) {
+		t.Fatalf("scenario %s no longer authenticates as the capped account, so it cannot reach a cap", sc.Name)
+	}
+
+	steps := map[string]step{}
+	for _, s := range sc.Steps {
+		steps[s.ID] = s
+	}
+	// Every lookup below is ok-checked: an indexed miss on a renamed step would
+	// otherwise nil-panic instead of reporting which pin broke.
+	matched := func(id string) map[string]interface{} {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		return s.Expect.BodyMatch
+	}
+	wantStatus := func(id string, want int) {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		if s.Expect.Status != want {
+			t.Errorf("step %s status = %d, want %d", id, s.Expect.Status, want)
+		}
+	}
+
+	// Refused AT the cap, carrying the fields an SDK needs to say WHICH quota
+	// stopped the caller — including the upgrade affordance, which is omitempty
+	// and so disappears silently if the server stops sending it.
+	wantStatus("second_domain_hits_the_cap", 402)
+	domainRefusal := matched("second_domain_hits_the_cap")
+	for path, want := range map[string]interface{}{
+		"error.code":                "limit_exceeded",
+		"error.details.resource":    "domains",
+		"error.details.limit":       1,
+		"error.details.current":     1,
+		"error.details.plan_code":   "contract_capped",
+		"error.details.upgrade_url": "https://e2a.dev/upgrade",
+	} {
+		if got := domainRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("second_domain_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+
+	// A second resource with a DIFFERENT cap, so no single hardcoded number can
+	// satisfy both refusals and one wired quota cannot stand in for all of them.
+	wantStatus("third_agent_hits_the_cap", 402)
+	agentRefusal := matched("third_agent_hits_the_cap")
+	for path, want := range map[string]interface{}{
+		"error.details.resource": "agents",
+		"error.details.limit":    2,
+		"error.details.current":  2,
+	} {
+		if got := agentRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("third_agent_hits_the_cap body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+
+	// ...and allowed when it should be. Without these a server that 402'd
+	// unconditionally would satisfy every assertion above.
+	wantStatus("reregister_owned_domain_at_cap_is_allowed", 201)
+	wantStatus("agent_create_succeeds_again_after_freeing_a_slot", 201)
+
+	// Cleanup must remove EVERY agent the scenario can create, including the one
+	// the happy path deletes mid-scenario: steps stop at the first failure, so a
+	// failure in between would otherwise strand it and put the next run at its
+	// cap on an early step.
+	var cleanupIDs []string
+	for _, c := range sc.Cleanup {
+		cleanupIDs = append(cleanupIDs, c.ID)
+	}
+	want := []string{"delete_agent_1", "delete_agent_2", "delete_agent_3", "delete_domain"}
+	if len(cleanupIDs) != len(want) {
+		t.Fatalf("cleanup = %v, want %v", cleanupIDs, want)
+	}
+	for i := range want {
+		if cleanupIDs[i] != want[i] {
+			t.Errorf("cleanup[%d] = %s, want %s", i, cleanupIDs[i], want[i])
+		}
 	}
 }

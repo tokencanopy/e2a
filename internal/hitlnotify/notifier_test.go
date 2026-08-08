@@ -105,17 +105,28 @@ func TestNotifierSendsEmailToOwner(t *testing.T) {
 	// token-gated confirm page.
 	data := sent.Data
 	for _, needle := range []string{
-		"bot@send-email.bot.test",      // agent email
-		"alice@example.com",            // recipient
-		"carol@example.com",            // cc
-		"Important draft",              // subject
-		"/v1/approve?t=",               // magic approve link
-		"/v1/reject?t=",                // magic reject link
-		"/dashboard/pending?id=" + msg.ID, // dashboard link (query-style; no per-message static route)
+		"bot@send-email.bot.test", // agent email
+		"alice@example.com",       // recipient
+		"carol@example.com",       // cc
+		"Important draft",         // subject
+		"/v1/approve?t=",          // secondary magic approve link
+		"/v1/reject?t=",           // secondary magic reject link
+		"/reviews?id=" + msg.ID,   // primary consolidated dashboard review
 	} {
 		if !strings.Contains(data, needle) {
 			t.Errorf("email body missing %q", needle)
 		}
+	}
+	if strings.Contains(data, "/dashboard/pending?id=") {
+		t.Errorf("notification should link directly to the consolidated review page, got:\n%s", data)
+	}
+	reviewAt := strings.Index(data, "Review message")
+	approveAt := strings.Index(data, "Quick approve")
+	rejectAt := strings.Index(data, "Quick reject")
+	if reviewAt < 0 || approveAt < 0 || rejectAt < 0 {
+		t.Errorf("notification missing review-first action labels, got:\n%s", data)
+	} else if reviewAt > approveAt || reviewAt > rejectAt {
+		t.Errorf("Review message must be the primary action before quick actions, got:\n%s", data)
 	}
 	// Sensitive draft body must not travel in the email.
 	if strings.Contains(data, "This is the body that will be reviewed.") {
@@ -186,8 +197,11 @@ func TestNotifierBuildsAbsoluteURLs(t *testing.T) {
 	if !strings.Contains(data, publicURL+"/v1/approve?t=") {
 		t.Errorf("approve URL should be absolute under %q, got:\n%s", publicURL, data)
 	}
-	if !strings.Contains(data, publicURL+"/dashboard/pending?id=") {
-		t.Errorf("dashboard URL should be absolute under %q", publicURL)
+	if !strings.Contains(data, publicURL+"/reviews?id="+msg.ID) {
+		t.Errorf("review URL should be absolute under %q", publicURL)
+	}
+	if strings.Contains(data, publicURL+"/dashboard/pending?id=") {
+		t.Errorf("notification should not use the legacy dashboard redirect, got:\n%s", data)
 	}
 }
 

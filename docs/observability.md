@@ -22,6 +22,7 @@ cheap `river_job` GROUP BY reads). Enable Prometheus exposition with:
 metrics:
   enabled: true                  # or E2A_METRICS_ENABLED=true
   listen_addr: "127.0.0.1:9091"  # or E2A_METRICS_LISTEN_ADDR
+  build: "1.3.0"                 # or E2A_METRICS_BUILD; labels every sample
 ```
 
 `GET /metrics` is served on a **separate listener**, never on the public API
@@ -40,6 +41,13 @@ patterns, webhook event types) are additionally bounded by hard series caps
 `route` label is always the chi route *pattern* (`/v1/agents/{email}`), never
 a raw path. These boundaries are pinned by unit tests in
 `internal/telemetry`.
+
+Every server and prober sample also carries one bounded `build` label. Hosted
+deploys set it to the real release/image tag even though blue/green containers
+run from temporary local aliases; self-hosted processes that do not set
+`metrics.build` / `E2A_METRICS_BUILD` expose `build="unknown"`. Aggregations
+that should span a cutover should continue to use `sum(...)`; group by
+`build` when correlating an SLO change with a release.
 
 ## Health endpoints (probes)
 
@@ -60,14 +68,14 @@ SES outage must not knock every instance out of rotation).
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `e2a_http_requests_total` | counter | `method`, `route`, `status_class` | Requests served. `route` is the chi pattern; requests that fall through to the legacy (non-`/v1`) mux appear as `route="/legacy"`; `status_class` ∈ `1xx..5xx` (WebSocket upgrades count as `1xx`). |
-| `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
+| `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Includes an exact `0.75` second SLO bucket. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
 
 ### SMTP intake (relay edge)
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients. A DATA phase aborted mid-read (client dropped, size limit) records no outcome. |
-| `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). |
+| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients; `rejected_line_too_long` (554 — a line over the relay's `MaxLineLength`) is one per DATA transaction aborted mid-read. Other mid-read DATA aborts (client dropped, size limit) record no outcome. |
+| `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). Includes an exact `2` second SLO bucket. |
 
 Policy rejections (550/552) are *correct* behavior, not failures — the
 acceptance SLI below deliberately excludes them.
@@ -76,11 +84,12 @@ acceptance SLI below deliberately excludes them.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_outbound_queue_wait_seconds` | histogram | — | Due→pickup wait per attempt (River `attempted_at − scheduled_at`). Measures worker keep-up, deliberately not cumulative message age: a retry's backoff or a ramp deferral does not count as queue wait. |
+| `e2a_outbound_queue_wait_seconds` | histogram | — | Due→pickup wait per attempt (River `attempted_at − scheduled_at`). Measures worker keep-up, deliberately not cumulative message age: a retry's backoff, a ramp deferral, or a rate-limit deferral does not count as queue wait. |
 | `e2a_outbound_attempts_total` | counter | `outcome` | Upstream submission attempts: `success`, `temporary_failure`, `permanent_failure`. |
 | `e2a_outbound_attempt_duration_seconds` | histogram | — | Upstream (SES/SMTP relay) submission duration. |
+| `e2a_outbound_rate_deferred_total` | counter | — | Submissions deferred by the per-agent fire-time rate limiter (`internal/sendrate`, 60/min/agent sliding window, enforced in the send worker immediately before provider submission). A deferral snoozes the job without burning an attempt, metering, or emitting a terminal event — the message fires when the window frees capacity (re-fire spread by a deterministic per-message jitter). A sustained high rate means agents are queueing behind their own budget. Deferral loops are bounded by the 72h retry horizon, so a backlog beyond ~259,200 messages/agent/burst (60 × 60 × 72) fails its tail terminally with `send_rate_timeout` (`failed_local_retries`). |
 | `e2a_outbound_terminal_total` | counter | `outcome` | Messages reaching a terminal submission outcome, **exactly once per message**: `sent`, `failed_suppressed`, `failed_provider`, `failed_local_retries`, `failed_cancelled` (policy cancel settled by the reconciler — kept out of `failed_local_retries` so cancellations can't mask a retries-exhausted regression). A deferred final attempt is counted when the terminal reconciler settles it — as `sent` when provider-accept evidence arrived (never a false failure), else as a failure. |
-| `e2a_outbound_terminal_latency_seconds` | histogram | — | Acceptance→terminal latency per message (the terminal write's occurred_at − `messages.created_at`), observed **exactly once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both). Provider-evidence settles use the evidence's accept time as occurred_at, so they measure acceptance→provider-accept, not acceptance→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
+| `e2a_outbound_terminal_latency_seconds` | histogram | — | Eligibility→terminal latency per message (the terminal write's occurred_at − the **submission anchor**), observed **at most once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both; a terminal landing before its own anchor records the count with no sample — see the SLO section). The anchor is `messages.created_at` for an ordinary send, and the latest of `created_at`, `scheduled_at`, and `reviewed_at` otherwise: a HITL hold anchors at the moment it was approved into the send pipeline, a scheduled send at its fire time. Neither wait is e2a latency, and charging them here made every hold approved after >5 min — and every send scheduled further out than the window — an automatic SLO miss. Provider-evidence settles use the evidence's accept time as occurred_at, so they measure anchor→provider-accept, not anchor→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
 
 ### Webhook delivery
 
@@ -88,6 +97,7 @@ acceptance SLI below deliberately excludes them.
 |---|---|---|---|
 | `e2a_webhook_attempts_total` | counter | `outcome`, `status_class` | Delivery attempts to subscriber endpoints: `delivered`, `retryable_failure`, `exhausted` (terminal after max attempts — including a delivery that exhausted its retries on a pre-POST infrastructure error, e.g. a sustained webhook-lookup outage), `webhook_deleted`, `skipped_disabled`. `status_class` is the endpoint's response class, or `none` when no HTTP response was received — connect/DNS/SSRF-blocked, or no POST was ever made. |
 | `e2a_webhook_attempt_duration_seconds` | histogram | — | HTTP POST duration per attempt. |
+| `e2a_webhook_delivery_terminal_total` | counter | `outcome`, `scope` | Delivery rows reaching a terminal state, emitted only after the terminal DB transition succeeds. `outcome` is `delivered`, `e2a_failure` (internal lookup/retry exhaustion or TTL expiry), `endpoint_failure` (the customer endpoint never accepted within eight attempts), or `excluded` (for example, a deleted webhook). `scope` is `initial`, `replay`, `test`, or `unknown`; `unknown` is the conservative classification when a pre-load failure or batched TTL transition cannot inspect the row. The hosted eventual-delivery SLO uses initial + unknown deliveries and excludes endpoint failures, so customer behavior cannot burn e2a's budget. |
 | `e2a_webhook_first_attempt_latency_seconds` | histogram | — | Event→first-attempt latency per subscriber delivery (attempt start − the `webhook_events` row's `created_at`), observed **only on a first-delivery row's first HTTP attempt** (no recorded prior attempt — regardless of River attempt number, so a first POST delayed by pre-POST failures still observes). Retries, the no-POST outcomes (`webhook_deleted`, `skipped_disabled`), replay rows (their baseline would be the original event's age), eventless `/test` deliveries, and jobs that sat through a customer-disabled window (River snooze) never observe. |
 | `e2a_outbox_events_published_total` | counter | `type` | Events written to the outbox (fan-out input). |
 | `e2a_outbox_events_fanout_total` / `e2a_outbox_fanout_matched_total` | counter | `type` | Fan-out completions / subscriber delivery rows written. |
@@ -123,6 +133,40 @@ empties.
 | `e2a_queue_depth` | gauge | `queue`, `state` | Job counts per queue (`outbound`, `inbound`, `webhook`, `maintenance`, `notify`, `default`) and state (`available`, `running`, `retryable`, `scheduled`). |
 | `e2a_queue_oldest_age_seconds` | gauge | `queue` | Age of the oldest runnable (`available`) job. Growth means workers aren't keeping up. |
 
+### Thread identity
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_thread_resolution_total` | counter | `source` | Committed mailbox-local topology decisions and diagnostics. Final decision sources are `api_reply`, `fresh_send`, `forward`, `rfc_in_reply_to`, `rfc_references`, `self_twin`, `authenticated_delivery_twin`, and `no_anchor`. Diagnostic sources are `lazy_legacy_anchor`, `anchor_found_without_thread`, `legacy_anchor_unmatched`, `ambiguous_anchor`, and `cycle_detected`; a diagnostic can accompany a final source for the same committed write. |
+| `e2a_thread_header_parse_failures_total` | counter | `header` | Inbound `In-Reply-To` or `References` headers rejected by the strict RFC Message-ID parser. The header label is bounded to `in_reply_to` or `references`; rejected fields fail closed and are treated as having no candidates. This is a processing-attempt diagnostic and can repeat for fan-out recipients or retried async work. |
+| `e2a_thread_null_messages` | gauge | `age_bucket` | Threadless messages in the current bounded sample, split into `lt_1h`, `1h_6h`, and `6h_24h`. Rows older than 24 hours are intentionally excluded because historical threadless rows are supported migration state. |
+| `e2a_thread_invariant_violations` | gauge | `kind` | Invalid parent edges in the current bounded sample: `dangling_parent`, `cross_agent_parent`, `thread_mismatch`, `cycle`, or `cycle_depth_limit`. |
+| `e2a_thread_relationship_percent` | gauge | `kind` | Sampled mailbox-local topology ratios: `threads_multi_conversation` and `conversations_multi_thread`. These are expected measurements, not error signals. |
+
+Resolution samples are emitted only after the write transaction commits.
+Rolled-back attempts, serialization retries, transient SMTP failures, and
+idempotency replays that create no new topology decision do not increment the
+counter. This makes the counter suitable for measuring durable assignment
+outcomes rather than database-attempt volume.
+
+The hourly janitor walks at most 1,000 messages in primary-key order and
+rotates a cursor through the table; parent traversal is capped at 64 edges.
+This is a bounded sample, not a full-table aggregate. It clears a sampled
+child's invalid `thread_parent_id` (including a cycle edge) with a guarded
+update, but never changes `thread_id` or `rfc_message_id_key`. A chain that
+merely reaches the traversal cap is measured as `cycle_depth_limit` and left
+unchanged.
+
+Lazy adoption volume over the last hour is:
+
+```promql
+sum(increase(e2a_thread_resolution_total{source="lazy_legacy_anchor"}[1h]))
+```
+
+Ambiguous anchors also emit a structured, process-wide rate-limited log (at
+most one line per minute). It contains only candidate/thread counts: no
+addresses, subjects, message content, or RFC Message-IDs.
+
 ### Maintenance
 
 | Metric | Type | Labels | Meaning |
@@ -130,6 +174,7 @@ empties.
 | `e2a_janitor_rows_deleted_total` | counter | `table` | TTL sweep deletions. |
 | `e2a_notify_missed_total` | counter | — | Fallback-poll wakeups LISTEN/NOTIFY missed (reconnect churn indicator). |
 | `e2a_redeliver_requests_total` | counter | `scope` | Customer-driven webhook replays. |
+| `e2a_contact_due_events_total` | counter | `outcome` | `contact.due` sweep outcomes. `published` counts wake-ups committed to the durable outbox. `failed` counts a failed atomic claim/publish attempt (or the affected batch size when known); the transaction rolls back and River retries the job. A sustained zero `published` despite known overdue, armed engagements can indicate a stalled sweep. Alert on sustained `failed` growth or exhausted River jobs rather than treating one increment as a permanent miss. |
 
 ## Prober metrics (external black-box, `cmd/e2a-prober`)
 
@@ -142,6 +187,7 @@ endpoint (`E2A_PROBE_LISTEN`, default `:8090`) exposes:
 |---|---|---|
 | `e2a_selftest_success` | gauge | Last full battery run passed (1) or not (0). |
 | `e2a_selftest_scenario_success{scenario}` | gauge | Per-scenario pass/fail of the last run. |
+| `e2a_selftest_scenario_runs_total{scenario,outcome}` | counter | Monotonic completed scenario runs by `pass`, `warn`, or `fail`. Use this counter—not the last-result gauge—for rolling-window SLO ratios and burn alerts. It resets normally on prober restart. |
 | `e2a_selftest_scenario_duration_seconds{scenario}` | gauge | Per-scenario latency of the last run — a scenario can pass while degrading; this is where it shows first. |
 | `e2a_selftest_duration_seconds` | gauge | Total battery duration. |
 
@@ -177,11 +223,12 @@ unmatched paths — LB health probes and internet scanner noise — which would
 dilute the denominator. Panicking handlers DO count (recorded as 5xx by the
 middleware's deferred sample), so a crash loop cannot hide from this SLI.
 
-**HTTP latency** — p99 across `/v1`:
+**HTTP latency** — fraction of `/v1` requests within the 750 ms p99
+objective (the exact threshold bucket makes this suitable for burn alerts):
 
 ```promql
-histogram_quantile(0.99,
-  sum by (le) (rate(e2a_http_request_duration_seconds_bucket{route=~"/v1/.*"}[5m])))
+sum(rate(e2a_http_request_duration_seconds_bucket{route=~"/v1/.*",le="0.75"}[5m]))
+/ sum(rate(e2a_http_request_duration_seconds_count{route=~"/v1/.*"}[5m]))
 ```
 
 WebSocket upgrades never enter this histogram (see the catalog), so no
@@ -193,6 +240,14 @@ route exclusion is needed.
 ```promql
 sum(rate(e2a_smtp_inbound_total{outcome=~"accepted|accepted_dedup"}[5m]))
 / sum(rate(e2a_smtp_inbound_total{outcome=~"accepted|accepted_dedup|tempfail"}[5m]))
+```
+
+**SMTP DATA latency** — fraction completing within the 2 second p95
+objective:
+
+```promql
+sum(rate(e2a_smtp_inbound_duration_seconds_bucket{le="2"}[5m]))
+/ sum(rate(e2a_smtp_inbound_duration_seconds_count[5m]))
 ```
 
 **Outbound submission success** — terminal outcomes that reached the
@@ -209,48 +264,66 @@ policy cancellation are e2a protecting the sender, not delivery failures.
 **Outbound queue wait** — p95 pickup latency and backlog age:
 
 ```promql
-histogram_quantile(0.95, sum by (le) (rate(e2a_outbound_queue_wait_seconds_bucket[5m])))
+sum(rate(e2a_outbound_queue_wait_seconds_bucket{le="30"}[5m]))
+/ sum(rate(e2a_outbound_queue_wait_seconds_count[5m]))
 max(e2a_queue_oldest_age_seconds{queue="outbound"})
 ```
 
-**Outbound acceptance→terminal** — fraction of messages reaching a terminal
-outcome within 5 minutes of acceptance (the `le="300"` bucket edge is the
-SLO threshold):
+**Outbound eligibility→terminal** (historically "acceptance→terminal", which
+is still the hosted alert's name — the query below is unchanged by the
+rename) — fraction of messages reaching a terminal outcome within 5 minutes of
+becoming *eligible to submit* (the `le="300"` bucket edge is the SLO
+threshold). The baseline is the submission anchor in the catalog above, not raw
+`created_at`: a HITL hold's review dwell and a scheduled send's deliberate delay
+are outside the measurement, so a reviewer who takes an hour cannot burn e2a's
+budget:
 
 ```promql
 sum(rate(e2a_outbound_terminal_latency_seconds_bucket{le="300"}[1h]))
 / sum(rate(e2a_outbound_terminal_latency_seconds_count[1h]))
 ```
 
-The histogram's exactly-once contract (one sample per message, co-located
-with `e2a_outbound_terminal_total`) is what makes this ratio a per-message
-fraction; an outage-tail message can legitimately land in the day-scale
-buckets, so alert on the ratio, not the tail.
+The histogram's per-message contract (at most one sample per message,
+co-located with `e2a_outbound_terminal_total`) is what makes this ratio a
+per-message fraction; an outage-tail message can legitimately land in the
+day-scale buckets, so alert on the ratio, not the tail. A terminal that lands
+before its own anchor — a scheduled send cancelled ahead of its fire time, or
+an approve submitted inside the app/DB clock skew — records the count with no
+latency sample, so `_count` can trail `e2a_outbound_terminal_total` slightly
+wherever holds or schedules are used. Both sides of the ratio lose the same
+sample, so the drop cannot flatter the SLI.
 
-**Webhook attempt health** — per-attempt success to responsive endpoints,
-across all attempt indexes (there is no attempt-number label; an unhealthy
-customer endpoint is not an e2a failure, but a rising `none` / `5xx` share
-across *all* tenants is). `skipped_disabled` is deliberately outside both
-numerator and denominator — a disabled webhook re-emits it on every hourly
-snooze, and no POST happens:
+When the anchor first ships, the reported late fraction steps down on any
+deployment using HITL or scheduled sends — those samples were never e2a
+latency. Annotate the dashboard at that release so the step is not read as a
+regression, and do not re-baseline the alert against pre-anchor history.
+
+**Webhook eventual delivery** — initial deliveries that reached a terminal
+state without an e2a-attributable failure. `endpoint_failure` is deliberately
+outside the denominator: an unhealthy customer endpoint is not an e2a
+failure. `unknown` is included conservatively so an internal failure cannot
+hide merely because the worker could not load the row:
 
 ```promql
-sum(rate(e2a_webhook_attempts_total{outcome="delivered"}[5m]))
-/ sum(rate(e2a_webhook_attempts_total{outcome=~"delivered|retryable_failure|exhausted"}[5m]))
+sum(rate(e2a_webhook_delivery_terminal_total{
+  outcome="delivered",scope=~"initial|unknown"}[1h]))
+/ sum(rate(e2a_webhook_delivery_terminal_total{
+  outcome=~"delivered|e2a_failure",scope=~"initial|unknown"}[1h]))
 ```
 
-One deliberate gap: a delivery retrying a *pre-POST* infrastructure error
-(e.g. a webhook-lookup DB outage) emits nothing until it exhausts — up to
-the 29h21m retry envelope — because no attempt happens to count. River's
-job-error logs and `e2a_queue_oldest_age_seconds{queue="webhook"}` cover
-the window; the first `exhausted` sample lands the SLI impact when the
-envelope runs out.
+The attempt counter remains useful diagnostic data, but it is not the
+eventual-delivery SLI: it mixes attempts with deliveries and would
+overweight endpoints that consume the full retry envelope. A delivery
+retrying a pre-POST infrastructure error cannot become terminal until it
+exhausts (up to 29h21m), so queue age and job-error alerts cover that window;
+the terminal counter records the e2a failure when the row settles.
 
-**Webhook event→first attempt** — p95 latency from event creation to the
-first HTTP attempt (covers fan-out, queue wait, and worker pickup):
+**Webhook event→first attempt** — fraction within the 60 second p95
+objective (covers fan-out, queue wait, and worker pickup):
 
 ```promql
-histogram_quantile(0.95, sum by (le) (rate(e2a_webhook_first_attempt_latency_seconds_bucket[5m])))
+sum(rate(e2a_webhook_first_attempt_latency_seconds_bucket{le="60"}[5m]))
+/ sum(rate(e2a_webhook_first_attempt_latency_seconds_count[5m]))
 ```
 
 **WebSocket handshake success (valid credentials)** — accepted handshakes
@@ -277,19 +350,25 @@ miss by `pgx.ErrNoRows`) is the only e2a-attributable reason and the only
 one in the denominator — a Postgres outage burns this SLI rather than
 reading 0/0 behind the client-fault labels.
 
-**WebSocket health** — active connections, abnormal disconnect rate, and the
-black-box push path:
+**WebSocket health** — active connections, abnormal disconnect rate, and
+the black-box push-path success ratio:
 
 ```promql
 sum(rate(e2a_ws_disconnects_total{reason=~"ping_timeout|error"}[15m]))
-e2a_selftest_scenario_success{scenario="websocket_round_trip"}
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="websocket_round_trip",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="websocket_round_trip"}[6h]))
 ```
 
 **MCP availability** — measured *independently* by the prober (strategy
 target: "measured independently"), not self-reported by the MCP process:
 
 ```promql
-avg_over_time(e2a_selftest_scenario_success{scenario="mcp_http_round_trip"}[30d])
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="mcp_http_round_trip",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="mcp_http_round_trip"}[6h]))
 ```
 
 ## Initial SLO targets
@@ -308,7 +387,7 @@ after M ≥ 2 consecutive failed probes).
 | Outbound | terminal outcome within 5 min of acceptance | ≥ 99% |
 | Outbound | queue wait p95 | < 30 s |
 | Webhooks | event → first delivery attempt | < 60 s (p95) |
-| Webhooks | eventual delivery to responsive endpoints (≤ 8 attempts) | ≥ 99% |
+| Webhooks | e2a-attributable eventual delivery execution (initial deliveries; customer endpoint failures excluded; ≤ 8 attempts) | ≥ 99% |
 | WebSocket | handshake success (valid credentials) | ≥ 99.9% |
 | WebSocket | prober round-trip (connect → live push) | ≥ 99.9% of probes |
 | MCP | prober connection + tool-call success | ≥ 99.9% of probes |

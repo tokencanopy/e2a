@@ -40,6 +40,7 @@ func TestValidateRecipients(t *testing.T) {
 		{"multiple groups, all valid", [][]string{{"a@x.com", "b@x.com"}, {"c@x.com"}, {"d@x.com"}}, false},
 		{"display-name form", [][]string{{"Alice Smith <alice@example.com>"}}, false},
 		{"IDN domain (Unicode)", [][]string{{"alice@пример.рф"}}, false},
+		{"oversized UTF-8 addr-spec", [][]string{{strings.Repeat("😀", 250) + "@b.test"}}, true},
 		{"single invalid — no @", [][]string{{"not an email"}}, true},
 		{"valid then invalid", [][]string{{"alice@x.com", "garbage"}}, true},
 		{"invalid in CC group", [][]string{{"alice@x.com"}, {"oops"}, {"bob@x.com"}}, true},

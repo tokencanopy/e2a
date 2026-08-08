@@ -48,26 +48,26 @@ type WebhookFilters struct {
 // secret during the 24h rotation grace window; slice 4 dual-signs
 // using both during that window so receivers can roll forward.
 type Webhook struct {
-	ID                          string          `json:"id"`
-	UserID                      string          `json:"user_id"`
-	URL                         string          `json:"url"`
-	Description                 string          `json:"description"`
-	Events                      []string        `json:"events"`
-	Filters                     WebhookFilters  `json:"filters"`
-	SigningSecret               string          `json:"signing_secret,omitempty"`
-	SigningSecretPrev           string          `json:"-"`
-	SigningSecretPrevExpiresAt  *time.Time      `json:"-"`
-	Enabled                     bool            `json:"enabled"`
-	AutoDisabledAt              *time.Time      `json:"auto_disabled_at,omitempty"`
-	CreatedAt                   time.Time       `json:"created_at"`
-	LastDeliveredAt             *time.Time      `json:"last_delivered_at,omitempty"`
+	ID                         string         `json:"id"`
+	UserID                     string         `json:"user_id"`
+	URL                        string         `json:"url"`
+	Description                string         `json:"description"`
+	Events                     []string       `json:"events"`
+	Filters                    WebhookFilters `json:"filters"`
+	SigningSecret              string         `json:"signing_secret,omitempty"`
+	SigningSecretPrev          string         `json:"-"`
+	SigningSecretPrevExpiresAt *time.Time     `json:"-"`
+	Enabled                    bool           `json:"enabled"`
+	AutoDisabledAt             *time.Time     `json:"auto_disabled_at,omitempty"`
+	CreatedAt                  time.Time      `json:"created_at"`
+	LastDeliveredAt            *time.Time     `json:"last_delivered_at,omitempty"`
 }
 
 // Sentinel errors so API handlers can map error → HTTP status with
 // errors.Is rather than string-matching.
 var (
-	ErrWebhookNotFound    = errors.New("webhook not found")
-	ErrWebhookCapReached  = errors.New("webhook count limit reached for this user")
+	ErrWebhookNotFound   = errors.New("webhook not found")
+	ErrWebhookCapReached = errors.New("webhook count limit reached for this user")
 )
 
 // generateWebhookID and generateWebhookSecret produce the prefixed IDs
@@ -185,6 +185,35 @@ func (s *Store) CreateWebhookIdem(ctx context.Context, userID, url, description 
 	return w, nil
 }
 
+// webhookColumns is the single projection every full-webhook read uses. It is
+// deliberately unqualified so the identical list also serves as an UPDATE …
+// RETURNING list, where bare column names resolve to the row's POST-update
+// values.
+const webhookColumns = `id, user_id, url, description, events, filters,
+	        signing_secret, COALESCE(signing_secret_prev, ''),
+	        signing_secret_prev_expires_at,
+	        enabled, auto_disabled_at, created_at, last_delivered_at`
+
+// scanWebhook materializes one webhookColumns row. ErrNoRows is left for the
+// caller to translate, since "no row" means not-found on a read and
+// not-found-or-not-owned on a write.
+func scanWebhook(row pgx.Row) (*Webhook, error) {
+	w := &Webhook{}
+	var filtersJSON []byte
+	if err := row.Scan(
+		&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
+		&w.SigningSecret, &w.SigningSecretPrev,
+		&w.SigningSecretPrevExpiresAt,
+		&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
+	); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(filtersJSON, &w.Filters); err != nil {
+		return nil, fmt.Errorf("unmarshal filters: %w", err)
+	}
+	return w, nil
+}
+
 // GetWebhookByID returns the webhook iff it's owned by userID. Cross-
 // user reads (or missing rows) return ErrWebhookNotFound — same
 // not-found-on-cross-user convention used elsewhere in the codebase
@@ -194,31 +223,14 @@ func (s *Store) CreateWebhookIdem(ctx context.Context, userID, url, description 
 // worker's benefit; the public API layer scrubs this field before
 // responding to GETs.
 func (s *Store) GetWebhookByID(ctx context.Context, webhookID, userID string) (*Webhook, error) {
-	w := &Webhook{}
-	var filtersJSON []byte
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, url, description, events, filters,
-		        signing_secret, COALESCE(signing_secret_prev, ''),
-		        signing_secret_prev_expires_at,
-		        enabled, auto_disabled_at, created_at, last_delivered_at
-		 FROM webhooks WHERE id = $1 AND user_id = $2`,
+	w, err := scanWebhook(s.pool.QueryRow(ctx,
+		`SELECT `+webhookColumns+` FROM webhooks WHERE id = $1 AND user_id = $2`,
 		webhookID, userID,
-	).Scan(
-		&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
-		&w.SigningSecret, &w.SigningSecretPrev,
-		&w.SigningSecretPrevExpiresAt,
-		&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrWebhookNotFound
-		}
-		return nil, err
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrWebhookNotFound
 	}
-	if err := json.Unmarshal(filtersJSON, &w.Filters); err != nil {
-		return nil, fmt.Errorf("unmarshal filters: %w", err)
-	}
-	return w, nil
+	return w, err
 }
 
 // GetWebhookByIDInternal returns the webhook by ID with no ownership
@@ -231,31 +243,14 @@ func (s *Store) GetWebhookByID(ctx context.Context, webhookID, userID string) (*
 // a method name that calls out "skipping the standard authorization
 // check" so a reviewer doesn't have to read the body to know why.
 func (s *Store) GetWebhookByIDInternal(ctx context.Context, webhookID string) (*Webhook, error) {
-	w := &Webhook{}
-	var filtersJSON []byte
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, url, description, events, filters,
-		        signing_secret, COALESCE(signing_secret_prev, ''),
-		        signing_secret_prev_expires_at,
-		        enabled, auto_disabled_at, created_at, last_delivered_at
-		 FROM webhooks WHERE id = $1`,
+	w, err := scanWebhook(s.pool.QueryRow(ctx,
+		`SELECT `+webhookColumns+` FROM webhooks WHERE id = $1`,
 		webhookID,
-	).Scan(
-		&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
-		&w.SigningSecret, &w.SigningSecretPrev,
-		&w.SigningSecretPrevExpiresAt,
-		&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrWebhookNotFound
-		}
-		return nil, err
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrWebhookNotFound
 	}
-	if err := json.Unmarshal(filtersJSON, &w.Filters); err != nil {
-		return nil, fmt.Errorf("unmarshal filters: %w", err)
-	}
-	return w, nil
+	return w, err
 }
 
 // Storage layer surfaces enabled and disabled rows alike; filter at the handler
@@ -485,18 +480,22 @@ func (s *Store) UpdateWebhook(ctx context.Context, webhookID, userID string, u W
 		return s.GetWebhookByID(ctx, webhookID, userID)
 	}
 
+	// RETURNING the full row rather than RETURNING id + a separate
+	// GetWebhookByID. The follow-up read ran on its own snapshot outside this
+	// statement's transaction, so a concurrent PATCH could land in between and
+	// the caller got the OTHER writer's config echoed back as the result of
+	// their own update — and a concurrent DELETE turned a committed update into
+	// a 404. RETURNING is evaluated on the row this statement wrote, so the
+	// response always describes this write.
 	query := fmt.Sprintf(
-		`UPDATE webhooks SET %s WHERE id = $1 AND user_id = $2 RETURNING id`,
-		joinComma(sets),
+		`UPDATE webhooks SET %s WHERE id = $1 AND user_id = $2 RETURNING %s`,
+		joinComma(sets), webhookColumns,
 	)
-	var returnedID string
-	if err := s.pool.QueryRow(ctx, query, args...).Scan(&returnedID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrWebhookNotFound
-		}
-		return nil, err
+	w, err := scanWebhook(s.pool.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrWebhookNotFound
 	}
-	return s.GetWebhookByID(ctx, webhookID, userID)
+	return w, err
 }
 
 func joinComma(parts []string) string {

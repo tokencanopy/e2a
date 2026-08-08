@@ -11,6 +11,7 @@
  */
 
 import { Attachment } from '../models/Attachment.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { HttpFile } from '../http/http.js';
 
@@ -20,25 +21,26 @@ export class SendEmailRequest {
     */
     'attachments'?: Array<Attachment>;
     /**
-    * Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+    * Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP\'s mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
     */
     'bcc'?: Array<string>;
     /**
-    * Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+    * Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP\'s mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
     */
     'cc'?: Array<string>;
     /**
-    * Caller-assigned conversation (thread) id. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+    * Caller-assigned application conversation/grouping id. This value is independent of email thread topology. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
     */
     'conversationId'?: string;
     /**
     * Literal HTML body. Mutually exclusive with template_id/template_alias.
     */
     'html'?: string;
+    'replyTo'?: ForwardRequestReplyTo;
     /**
-    * Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. \"Support <support@acme.com>\"). At most 320 characters (display name + address combined). Defaults to the sending agent\'s own address.
+    * Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler\'s poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent\'s own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the message would otherwise be held for review. Scheduling survives a review hold: if the message is held, send_at is preserved on the pending_review message (surfaced there as scheduled_at) and re-armed on approval — the message is then submitted at send_at if that instant is still in the future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.
     */
-    'replyTo'?: string;
+    'sendAt'?: Date;
     /**
     * Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).
     */
@@ -60,7 +62,7 @@ export class SendEmailRequest {
     */
     'text'?: string;
     /**
-    * Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+    * Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP\'s mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
     */
     'to': Array<string>;
     /**
@@ -106,8 +108,14 @@ export class SendEmailRequest {
         {
             "name": "replyTo",
             "baseName": "reply_to",
-            "type": "string",
+            "type": "ForwardRequestReplyTo",
             "format": ""
+        },
+        {
+            "name": "sendAt",
+            "baseName": "send_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "subject",

@@ -1,8 +1,10 @@
 # Sending ramp operations
 
 The sending ramp is an operator-managed safeguard for newly verified custom
-sender domains. End users can read its state through the domain API but cannot
-change the schedule, exempt themselves, or reset progression.
+sender domains. End users can read its state through the domain API (the
+`sending_ramp` field — see
+[`docs/api.md` → Domains](../api.md#domains-v1domains)) but cannot change the
+schedule, exempt themselves, or reset progression.
 
 ## Progression and timeout
 
@@ -22,8 +24,8 @@ sustained over-cap admission or a ramp-store incident.
 
 ## Exemptions
 
-Migration 067 exempts domains that were already sending-verified when the
-feature shipped. A verified domain that sends while `sending_ramp.enabled` is
+Migration `067_domain_sending_ramp.sql` exempts domains that were already
+sending-verified when the feature shipped. A verified domain that sends while `sending_ramp.enabled` is
 false is also persistently exempt. Enabling the feature later does not revoke
 those exemptions. This prevents a rollout from unexpectedly throttling an
 established sender.

@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
+import { writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseHelpCommands, recordAdvertised, recordCovered, flushCliCoverage } from "./harness/cli-coverage.js";
 
@@ -84,22 +85,80 @@ function runAsync(args: string[], extra: Record<string, string> = {}): Promise<R
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 // The CLI can't delete agents; clean up created inboxes over the API.
-async function apiDeleteAgent(email: string): Promise<void> {
-  await fetch(`${URL_}/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${KEY}` },
-  }).catch(() => {});
+async function apiDeleteAgent(email: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${URL_}/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${KEY}` },
+    });
+    if (res.ok) return undefined;
+    return `${email}: HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 200)}`;
+  } catch (err) {
+    return `${email}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// Agent suppressions deliberately survive both soft and permanent agent
+// deletion, so deleting only the throwaway inbox cannot clean up a failed
+// suppressions test. Remove each created row first; 404 means the happy path
+// already removed it.
+async function apiDeleteAgentSuppression(agent: string, address: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(
+      `${URL_}/v1/agents/${encodeURIComponent(agent)}/suppressions/${encodeURIComponent(address)}?confirm=DELETE`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${KEY}` },
+      },
+    );
+    if (res.ok) return undefined;
+    if (res.status === 404) {
+      // A missing row is clean only while the agent is still live. The delete
+      // handler also returns 404 for a missing/trashed agent, in which case the
+      // durable row may still exist but is no longer manageable through it.
+      const agentRes = await fetch(`${URL_}/v1/agents/${encodeURIComponent(agent)}`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      if (agentRes.ok) return undefined;
+      return `${agent} / ${address}: suppression cleanup returned 404 and live-agent check returned ` +
+        `HTTP ${agentRes.status} ${agentRes.statusText}: ${(await agentRes.text()).slice(0, 200)}`;
+    }
+    return `${agent} / ${address}: HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 200)}`;
+  } catch (err) {
+    return `${agent} / ${address}: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 const createdAgents: string[] = [];
+const createdAgentSuppressions: Array<{ agent: string; address: string }> = [];
 afterAll(async () => {
-  for (const a of createdAgents) await apiDeleteAgent(a);
-  // Explicit flush: this suite runs inside a vitest worker, whose 'exit'
-  // lifecycle (the recorder's best-effort fallback) is not guaranteed to
-  // line up with the outer vitest process — see cli-coverage.ts. Calling
-  // this here, unconditionally, is what actually gets the shard written for
-  // `npm run coverage:gate:cli` to read.
-  flushCliCoverage();
+  const cleanupFailures: string[] = [];
+  const agentsWithSuppressionCleanupFailures = new Set<string>();
+  try {
+    // Suppressions must be removed while the owning agent is still live.
+    for (const { agent, address } of createdAgentSuppressions) {
+      const failure = await apiDeleteAgentSuppression(agent, address);
+      if (failure) {
+        cleanupFailures.push(failure);
+        agentsWithSuppressionCleanupFailures.add(agent);
+      }
+    }
+    for (const a of createdAgents) {
+      // Keep the agent live when its durable suppression could not be removed;
+      // deleting it would make that row inaccessible through the API.
+      if (agentsWithSuppressionCleanupFailures.has(a)) continue;
+      const failure = await apiDeleteAgent(a);
+      if (failure) cleanupFailures.push(failure);
+    }
+  } finally {
+    // Explicit flush: this suite runs inside a vitest worker, whose 'exit'
+    // lifecycle (the recorder's best-effort fallback) is not guaranteed to
+    // line up with the outer vitest process — see cli-coverage.ts. Calling
+    // this here, unconditionally, is what actually gets the shard written for
+    // `npm run coverage:gate:cli` to read.
+    flushCliCoverage();
+  }
+  expect(cleanupFailures, cleanupFailures.join("\n")).toEqual([]);
 });
 
 describe.skipIf(!live)("cli live parity", () => {
@@ -119,6 +178,7 @@ describe.skipIf(!live)("cli live parity", () => {
     expect(commands).toEqual([
       "agents",
       "config",
+      "contacts",
       "doctor",
       "keys",
       "listen",
@@ -127,6 +187,7 @@ describe.skipIf(!live)("cli live parity", () => {
       "protection",
       "reply",
       "send",
+      "suppressions",
       "whoami",
     ]);
     recordAdvertised(commands);
@@ -273,46 +334,242 @@ describe.skipIf(!live)("cli live parity", () => {
     recordCovered("protection");
   });
 
+  it("suppressions: agent-scoped add → list → remove, plus account-wide list", () => {
+    const slug = Date.now().toString(36);
+    const bot = `cli-live-supp-${slug}@${DOMAIN}`;
+    const blocked = `cli-supp-blocked-${slug}@example.invalid`;
+
+    const created = run(["agents", "create", bot, "--name", "cli supp e2e", "--json"]);
+    expect(created.code, created.stderr).toBe(0);
+    createdAgents.push(bot);
+
+    // Account-wide add is impossible by design — account entries come only from
+    // bounces/complaints — so coverage exercises the agent-scoped manual block.
+    // Register cleanup before the POST: a committed write followed by a lost or
+    // malformed response is still a side effect we must attempt to remove.
+    createdAgentSuppressions.push({ agent: bot, address: blocked });
+    const add = run(["suppressions", "add", blocked, "--agent", bot, "--reason", "cli e2e", "--json"]);
+    expect(add.code, add.stderr).toBe(0);
+    expect(JSON.parse(add.stdout).address).toBe(blocked);
+
+    const listAgent = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAgent.code, listAgent.stderr).toBe(0);
+    expect(listAgent.stdout).toContain(blocked);
+
+    const removed = run(["suppressions", "remove", blocked, "--agent", bot, "--json"]);
+    expect(removed.code, removed.stderr).toBe(0);
+    const listAfterRemove = run(["suppressions", "list", "--agent", bot, "--json"]);
+    expect(listAfterRemove.code, listAfterRemove.stderr).toBe(0);
+    expect(listAfterRemove.stdout).not.toContain(blocked);
+
+    // Account-wide list is read-only and typically empty on staging (no bounce
+    // simulators there); assert it merely resolves for a bare account key.
+    const listAccount = run(["suppressions", "list", "--json"]);
+    expect(listAccount.code, listAccount.stderr).toBe(0);
+
+    recordCovered("suppressions");
+  });
+
+  it("contacts: create/get/list/update/delete + import/imports delete + outreach tree", () => {
+    const slug = Date.now().toString(36);
+    const addr = `cli-live-contacts-${slug}@example.com`;
+    const importAddr1 = `cli-live-contacts-import-a-${slug}@example.com`;
+    const importAddr2 = `cli-live-contacts-import-b-${slug}@example.com`;
+    const csvPath = `/tmp/e2a-cli-e2e-contacts-${slug}.csv`;
+    writeFileSync(
+      csvPath,
+      `email,name,company\n${importAddr1},Import One,Acme\n${importAddr2},Import Two,Acme\n`,
+    );
+
+    try {
+      // Identity CRUD.
+      const created = run([
+        "contacts", "create", addr,
+        "--name", "CLI Live", "--metadata", '{"origin":"cli-e2e"}', "--json",
+      ]);
+      expect(created.code, created.stderr).toBe(0);
+      expect(JSON.parse(created.stdout).address).toBe(addr);
+
+      const got = run(["contacts", "get", addr]);
+      expect(got.code, got.stderr).toBe(0);
+      const etag = got.stdout.match(/^etag:\s+(\S+)$/m)?.[1];
+      expect(etag, `contacts get must print an etag line:\n${got.stdout}`).toBeTruthy();
+
+      const list = run(["contacts", "list", "--json"]);
+      expect(list.code, list.stderr).toBe(0);
+      expect(list.stdout).toContain(addr);
+
+      const updated = run([
+        "contacts", "update", addr, "--name", "CLI Live Updated", "--if-match", etag!, "--json",
+      ]);
+      expect(updated.code, updated.stderr).toBe(0);
+      expect(JSON.parse(updated.stdout).displayName).toBe("CLI Live Updated");
+
+      // CSV import: --dry-run previews without writing, the real run writes,
+      // imports delete reverses the batch.
+      const dryRun = run(["contacts", "import", csvPath, "--dry-run", "--json"]);
+      expect(dryRun.code, dryRun.stderr).toBe(0);
+      expect(JSON.parse(dryRun.stdout).rows).toBe(2);
+      // Preview must not have created anything.
+      expect(run(["contacts", "get", importAddr1]).code).not.toBe(0);
+
+      const imported = run(["contacts", "import", csvPath, "--json"]);
+      expect(imported.code, imported.stderr).toBe(0);
+      const importResult = JSON.parse(imported.stdout);
+      expect(importResult.batchId).toBeTruthy();
+      expect(importResult.created).toBe(2);
+
+      const reversed = run(["contacts", "imports", "delete", importResult.batchId, "--json"]);
+      expect(reversed.code, reversed.stderr).toBe(0);
+      expect(JSON.parse(reversed.stdout).deleted).toBe(true);
+      expect(run(["contacts", "get", importAddr1]).code).not.toBe(0);
+
+      // Outreach tree against a fresh (throwaway) agent.
+      const bot = `cli-live-outreach-${slug}@${DOMAIN}`;
+      const createdAgent = run(["agents", "create", bot, "--name", "cli live contacts e2e", "--json"]);
+      expect(createdAgent.code, createdAgent.stderr).toBe(0);
+      createdAgents.push(bot);
+
+      const nextAction = new Date(Date.now() + 86_400_000).toISOString();
+      const enrolled = run([
+        "contacts", "outreach", "set", addr,
+        "--agent", bot, "--stage", "prospect", "--next-action", nextAction, "--json",
+      ]);
+      expect(enrolled.code, enrolled.stderr).toBe(0);
+      expect(JSON.parse(enrolled.stdout).stage).toBe("prospect");
+
+      const outreach = run(["contacts", "outreach", "get", addr, "--agent", bot]);
+      expect(outreach.code, outreach.stderr).toBe(0);
+      // TSV: address \t stage \t nextActionAt \t etag
+      const fields = outreach.stdout.trim().split("\t");
+      expect(fields[0]).toBe(addr);
+      expect(fields[1]).toBe("prospect");
+      expect(fields[3], `outreach get must end with an etag field:\n${outreach.stdout}`).toBeTruthy();
+
+      const outreachList = run([
+        "contacts", "outreach", "list", "--agent", bot, "--stage", "prospect", "--json",
+      ]);
+      expect(outreachList.code, outreachList.stderr).toBe(0);
+      expect(outreachList.stdout).toContain(addr);
+
+      const unenrolled = run(["contacts", "outreach", "delete", addr, "--agent", bot, "--json"]);
+      expect(unenrolled.code, unenrolled.stderr).toBe(0);
+      expect(run(["contacts", "outreach", "get", addr, "--agent", bot]).code).not.toBe(0);
+
+      // Deleting the identity removes the contact (suppression survives server-side).
+      const deleted = run(["contacts", "delete", addr, "--json"]);
+      expect(deleted.code, deleted.stderr).toBe(0);
+      expect(JSON.parse(deleted.stdout).address).toBe(addr);
+      expect(run(["contacts", "get", addr]).code).not.toBe(0);
+
+      recordCovered("contacts");
+    } finally {
+      // Tolerate non-zero: the happy path already deleted these.
+      for (const a of [addr, importAddr1, importAddr2]) run(["contacts", "delete", a]);
+      rmSync(csvPath, { force: true });
+    }
+  }, 60_000);
+
   it("doctor: healthy (0), warnings-only (8), and config failure (9) exit codes", () => {
-    // Healthy: valid creds, a real agent, no custom domains/webhooks
-    // registered on this dedicated account → every check is pass or a
-    // benign skip, no warn/fail anywhere.
-    const healthy = run(["doctor", "--json"]);
-    const healthyReport = JSON.parse(healthy.stdout);
-    expect(healthy.code, healthy.stderr).toBe(healthyReport.exit_code);
-    expect(healthy.code, JSON.stringify(healthyReport, null, 2)).toBe(0);
-    expect(healthyReport.schema).toBe("e2a.doctor/v1");
-    expect(healthyReport.status).toBe("healthy");
-    const agentCheck = healthyReport.checks.find((c: { id: string }) => c.id === "agent.access");
-    expect(agentCheck?.status).toBe("pass");
+    // The account-scoped conformance credential is deliberately shared with
+    // suites that create custom-domain fixtures. Doctor correctly diagnoses
+    // their missing DNS, so that mutable account can never be a deterministic
+    // "healthy" fixture. Mint a short-lived agent-scoped key instead: domain
+    // and webhook checks then skip by contract, while the real API, auth,
+    // agent-access, SMTP, report, and exit-code paths still run live.
+    const doctorAgent = `cli-live-doctor-${Date.now().toString(36)}@${DOMAIN}`;
+    const createdAgent = run(["agents", "create", doctorAgent, "--name", "cli live doctor e2e", "--json"]);
+    expect(createdAgent.code, createdAgent.stderr).toBe(0);
+    createdAgents.push(doctorAgent);
 
-    // Warnings-only (8): force the ONE warn-producing, side-effect-free
-    // client-side condition doctor has — a partially-configured
-    // E2A_OUTBOUND_SMTP_* environment (host without from_domain) — with
-    // nothing else in a fail/auth/config state, so the exit-code priority
-    // (auth > config > transient > warn) lands on WARN.
-    const warn = run(["doctor", "--json"], { E2A_OUTBOUND_SMTP_HOST: "smtp.example.com" });
-    const warnReport = JSON.parse(warn.stdout);
-    expect(warn.code, warn.stderr).toBe(8);
-    expect(warnReport.exit_code).toBe(8);
-    expect(warnReport.status).toBe("warnings");
-    const smtpCheck = warnReport.checks.find((c: { id: string }) => c.id === "smtp.config");
-    expect(smtpCheck?.status).toBe("warn");
-    expect(smtpCheck?.reason_code).toBe("smtp_partial");
+    let keyId = "";
+    let primaryError: unknown;
+    try {
+      const createdKey = run([
+        "keys",
+        "create",
+        "--agent",
+        doctorAgent,
+        "--name",
+        "cli-live-doctor-isolated",
+        "--json",
+      ]);
+      expect(createdKey.code, createdKey.stderr).toBe(0);
+      const key = JSON.parse(createdKey.stdout);
+      keyId = key.id ?? key.keyId;
+      expect(keyId).toBeTruthy();
+      expect(
+        typeof key.key === "string" && key.key.startsWith("e2a_agt_"),
+        "agent-scoped key response must contain an e2a_agt_ secret",
+      ).toBe(true);
+      const isolated = {
+        E2A_API_KEY: key.key,
+        E2A_AGENT_EMAIL: doctorAgent,
+      };
 
-    // Definite configuration failure (9): a nonexistent agent is a config
-    // problem, not a network one — read-only (GET only), no fixture needed.
-    const bogusAgent = `cli-live-doctor-missing-${Date.now().toString(36)}@${DOMAIN}`;
-    const fail = run(["doctor", "--agent", bogusAgent, "--json"]);
-    const failReport = JSON.parse(fail.stdout);
-    expect(fail.code, fail.stderr).toBe(9);
-    expect(failReport.exit_code).toBe(9);
-    expect(failReport.status).toBe("failed");
-    const failedCheck = failReport.checks.find((c: { id: string }) => c.id === "agent.access");
-    expect(failedCheck?.status).toBe("fail");
-    expect(failedCheck?.reason_code).toBe("agent_not_found");
+      const healthy = run(["doctor", "--json"], isolated);
+      const healthyReport = JSON.parse(healthy.stdout);
+      expect(healthy.code, healthy.stderr).toBe(healthyReport.exit_code);
+      expect(healthy.code, JSON.stringify(healthyReport, null, 2)).toBe(0);
+      expect(healthyReport.schema).toBe("e2a.doctor/v1");
+      expect(healthyReport.status).toBe("healthy");
+      const authCheck = healthyReport.checks.find((c: { id: string }) => c.id === "api.auth");
+      expect(authCheck?.evidence?.scope).toBe("agent");
+      expect(authCheck?.evidence?.bound_agent).toBe(doctorAgent);
+      const agentCheck = healthyReport.checks.find((c: { id: string }) => c.id === "agent.access");
+      expect(agentCheck?.status).toBe("pass");
+      expect(agentCheck?.evidence?.email).toBe(doctorAgent);
+      for (const id of ["domain.registered", "webhook.config"]) {
+        const scopedSkip = healthyReport.checks.find((c: { id: string }) => c.id === id);
+        expect(scopedSkip?.status, `${id} must skip for an agent-scoped key`).toBe("skip");
+        expect(scopedSkip?.reason_code).toBe("requires_account_scope");
+      }
 
-    recordCovered("doctor");
+      // Warnings-only (8): force the ONE warn-producing, side-effect-free
+      // client-side condition doctor has — a partially-configured
+      // E2A_OUTBOUND_SMTP_* environment (host without from_domain) — with
+      // nothing else in a fail/auth/config state, so the exit-code priority
+      // (auth > config > transient > warn) lands on WARN.
+      const warn = run(["doctor", "--json"], {
+        ...isolated,
+        E2A_OUTBOUND_SMTP_HOST: "smtp.example.com",
+      });
+      const warnReport = JSON.parse(warn.stdout);
+      expect(warn.code, warn.stderr).toBe(8);
+      expect(warnReport.exit_code).toBe(8);
+      expect(warnReport.status).toBe("warnings");
+      const smtpCheck = warnReport.checks.find((c: { id: string }) => c.id === "smtp.config");
+      expect(smtpCheck?.status).toBe("warn");
+      expect(smtpCheck?.reason_code).toBe("smtp_partial");
+
+      // Definite configuration failure (9): a nonexistent agent is a config
+      // problem, not a network one — read-only (GET only), no fixture needed.
+      const bogusAgent = `cli-live-doctor-missing-${Date.now().toString(36)}@${DOMAIN}`;
+      const fail = run(["doctor", "--agent", bogusAgent, "--json"], isolated);
+      const failReport = JSON.parse(fail.stdout);
+      expect(fail.code, fail.stderr).toBe(9);
+      expect(failReport.exit_code).toBe(9);
+      expect(failReport.status).toBe("failed");
+      const failedCheck = failReport.checks.find((c: { id: string }) => c.id === "agent.access");
+      expect(failedCheck?.status).toBe("fail");
+      expect(failedCheck?.reason_code).toBe("agent_not_found");
+
+      recordCovered("doctor");
+    } catch (err) {
+      primaryError = err;
+      throw err;
+    } finally {
+      if (keyId) {
+        const revoked = run(["keys", "delete", keyId]);
+        if (revoked.code !== 0) {
+          if (primaryError) {
+            console.warn(`failed to revoke temporary doctor key ${keyId}: ${revoked.stderr}`);
+          } else {
+            expect(revoked.code, revoked.stderr).toBe(0);
+          }
+        }
+      }
+    }
   });
 
   it("config: list/get/set round-trip against an isolated HOME", () => {

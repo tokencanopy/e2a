@@ -36,8 +36,8 @@ there is one fix path, not two.
 | edge | driver | trigger |
 |---|---|---|
 | `shipped → triaged` | comms lane | filer disputes the fix (verified reply) |
-| `closed_duplicate → triaged` | comms lane | filer disputes the dup verdict (verified reply) |
-| `closed_noise → received*` | comms lane | filer supplies substance (verified reply) |
+| `closed_duplicate → triaged` | comms lane *(deferred — follow-on with the dup-filer fan-out; no v0 driver)* | filer disputes the dup verdict (verified reply) |
+| `closed_noise → received*` | comms lane *(deferred — follow-on with the dup-filer fan-out; no v0 driver)* | filer supplies substance (verified reply) |
 | `triaged → awaiting_approval` | comms lane | fix_gate hitl: approval-request emailed to the approver |
 | `awaiting_approval → triaged` | comms lane | approver **approves** (verified reply); `agent-fix` applied |
 | `awaiting_approval → closed_wontfix` | comms lane | approver **declines** (verified reply); reason recorded |

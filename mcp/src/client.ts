@@ -47,6 +47,20 @@ import type {
   Page,
   PageMessageLifecycleTransition,
   ListMessagesParams,
+  ContactView,
+  ContactEngagementView,
+  ContactImportResult,
+  CreateContactRequest,
+  UpdateContactRequest,
+  ImportContactsRequest,
+  UpsertEngagementRequest,
+  DeleteContactResult,
+  DeleteImportBatchResult,
+  DeleteEngagementResult,
+  SuppressionView,
+  AgentSuppressionView,
+  CreateAgentSuppressionRequest,
+  DeleteSuppressionResult,
 } from "@e2a/sdk/v1";
 import type { McpConfig } from "./config.js";
 import type { Scope } from "./tools/tiers.js";
@@ -158,13 +172,123 @@ export class McpClient {
     return this.sdk.agents.replaceProtection(this.resolveAddress(explicitAddress), config);
   }
 
-  async deleteAgent(explicitAddress?: string): Promise<DeleteAgentResult> {
+  async deleteAgent(explicitAddress?: string, permanent?: boolean): Promise<DeleteAgentResult> {
     const address = this.resolveAddress(explicitAddress);
-    return this.sdk.agents.delete(address);
+    return this.sdk.agents.delete(address, { permanent });
   }
 
   restoreAgent(explicitAddress?: string): Promise<AgentView> {
     return this.sdk.agents.restore(this.resolveAddress(explicitAddress));
+  }
+
+  // ── Contacts and outreach (beta) ───────────────────────────────
+
+  listContacts(params: {
+    source?: string;
+    importBatchId?: string;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<Page<ContactView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.contacts.list(rest).page(cursor);
+  }
+
+  getContact(address: string): Promise<ContactView> {
+    return this.sdk.contacts.get(address);
+  }
+
+  getContactWithETag(address: string): Promise<{ data: ContactView; etag?: string }> {
+    return this.sdk.contacts.getWithETag(address);
+  }
+
+  createContact(body: CreateContactRequest, idempotencyKey?: string): Promise<ContactView> {
+    return this.sdk.contacts.create(body, { idempotencyKey });
+  }
+
+  updateContact(address: string, patch: UpdateContactRequest, ifMatch?: string): Promise<ContactView> {
+    return this.sdk.contacts.update(address, patch, { ifMatch });
+  }
+
+  deleteContact(address: string): Promise<DeleteContactResult> {
+    return this.sdk.contacts.delete(address);
+  }
+
+  importContacts(body: ImportContactsRequest, idempotencyKey?: string): Promise<ContactImportResult> {
+    return this.sdk.contacts.import(body, { idempotencyKey });
+  }
+
+  deleteContactImport(batchId: string): Promise<DeleteImportBatchResult> {
+    return this.sdk.contacts.deleteImport(batchId);
+  }
+
+  listOutreach(params: {
+    stage?: string;
+    replied?: boolean;
+    suppressed?: boolean;
+    nextActionBefore?: Date;
+    lastOutboundBefore?: Date;
+    cursor?: string;
+    limit?: number;
+  } = {}, explicitAddress?: string): Promise<Page<ContactEngagementView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.contacts.outreach(this.resolveAddress(explicitAddress), rest).page(cursor);
+  }
+
+  getOutreach(address: string, explicitAddress?: string): Promise<ContactEngagementView> {
+    return this.sdk.contacts.getOutreach(this.resolveAddress(explicitAddress), address);
+  }
+
+  getOutreachWithETag(
+    address: string,
+    explicitAddress?: string,
+  ): Promise<{ data: ContactEngagementView; etag?: string }> {
+    return this.sdk.contacts.getOutreachWithETag(this.resolveAddress(explicitAddress), address);
+  }
+
+  setOutreach(
+    address: string,
+    body: UpsertEngagementRequest,
+    explicitAddress?: string,
+    ifMatch?: string,
+  ): Promise<ContactEngagementView> {
+    return this.sdk.contacts.setOutreach(
+      this.resolveAddress(explicitAddress), address, body, { ifMatch },
+    );
+  }
+
+  deleteOutreach(address: string, explicitAddress?: string): Promise<DeleteEngagementResult> {
+    return this.sdk.contacts.deleteOutreach(this.resolveAddress(explicitAddress), address);
+  }
+
+  // ── Suppressions ────────────────────────────────────────────────
+  // Account list: auto-populated bounce/complaint blocks spanning every agent.
+  // Agent list: unsubscribe/manual blocks scoped to one exact sending agent.
+
+  listSuppressions(params: { cursor?: string; limit?: number } = {}): Promise<Page<SuppressionView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.account.suppressions.list(rest).page(cursor);
+  }
+
+  deleteSuppression(address: string): Promise<DeleteSuppressionResult> {
+    return this.sdk.account.suppressions.delete(address);
+  }
+
+  listAgentSuppressions(
+    email: string,
+    params: { cursor?: string; limit?: number } = {},
+  ): Promise<Page<AgentSuppressionView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.agents.listSuppressions(email, rest).page(cursor);
+  }
+
+  createAgentSuppression(email: string, body: CreateAgentSuppressionRequest): Promise<AgentSuppressionView> {
+    return this.sdk.agents.createSuppression(email, body);
+  }
+
+  deleteAgentSuppression(email: string, address: string): Promise<DeleteSuppressionResult> {
+    return this.sdk.agents.deleteSuppression(email, address);
   }
 
   // ── Messages ────────────────────────────────────────────────────
@@ -185,7 +309,8 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,
@@ -203,7 +328,8 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,
@@ -226,7 +352,8 @@ export class McpClient {
       bcc?: Array<string>;
       attachments?: Array<Attachment>;
       conversationId?: string;
-      replyTo?: string;
+      replyTo?: string | Array<string>;
+      sendAt?: Date;
     },
     opts: SendOpts = {},
     explicitAddress?: string,

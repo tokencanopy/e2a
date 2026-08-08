@@ -83,7 +83,7 @@ plugins/e2a/
 ├── skills/e2a/SKILL.md          # the "operate-well" skill (surfaces as /e2a)
 ├── skills/agentify/SKILL.md     # deploy the autonomous-repo feedback loop (/agentify)
 ├── skills/tether/SKILL.md       # email handoff for long-running sessions (/tether)
-├── skills/autopilot/SKILL.md    # always-on: spawn a headless session per trusted email (/autopilot)
+├── skills/autopilot/SKILL.md    # policy-first, always-on local email agent (/autopilot)
 └── clients/                     # manual paste-in configs for non-plugin clients
 ```
 

@@ -12,7 +12,7 @@ End-to-end demos showing how to wire the e2a MCP surface into popular agent fram
 
 ## One hosted endpoint, same tool surface
 
-Each example exercises the same e2a tool surface (60 tools; the visible set depends on your key's scope) against the hosted MCP server. The Python framework examples ship an `agent.py` script; the Codex example ships a TOML block (Codex is itself the agent, so you configure it instead of writing a script).
+Each example exercises the same e2a tool surface (76 tools; the visible set depends on your key's scope) against the hosted MCP server. The Python framework examples ship an `agent.py` script; the Codex example ships a TOML block (Codex is itself the agent, so you configure it instead of writing a script).
 
 Every example connects to `https://api.e2a.dev/mcp` over Streamable HTTP with an
 agent-scoped API key in the `Authorization` header. Set `E2A_MCP_URL` to point
@@ -32,7 +32,10 @@ tool failures whose structured error reports `retryable: true`.
 - `what's in my inbox?` — exercises `list_messages` + `get_message`
 - `reply to the most recent message politely` — exercises `reply_to_message` (preserves threading headers)
 - `who am I?` — exercises `whoami`
-- `what's waiting for my approval?` — exercises `list_reviews` (works once you've enabled HITL on your agent)
+- `what's waiting for my approval?` — exercises `list_reviews`. This is an
+  account-owner review-queue tool, not agent self-approval, so it's only
+  visible to an **account-scoped** key — it won't register as a tool at all
+  under the agent-scoped key these examples otherwise use.
 
 ## Pointing at a self-hosted e2a
 

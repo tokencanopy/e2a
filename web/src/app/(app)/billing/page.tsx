@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
+import { billingPolling } from "../../../lib/livePolling";
+import { limitsKey } from "../../../lib/swrKeys";
 import { PageShell } from "../../components/loft/PageShell";
 
 // LimitsInfo matches the LimitsView shape returned by GET /v1/account.
@@ -117,6 +119,24 @@ const QUOTA_DIMS: { label: string; format: (p: PlanEntry) => string }[] = [
   { label: "Storage", format: (p) => formatBytes(p.max_storage_bytes) },
 ];
 
+// Stripe Checkout returns the user to CHECKOUT_SUCCESS_URL
+// (/billing?status=success) as a full page load. That load races the
+// asynchronous checkout.session.completed webhook that provisions the new
+// limits, and the redirect normally wins — so the first read still reports
+// the old plan. Re-read on a short interval until the sidecar says the
+// subscription is active, then stop.
+//
+// "active" is a sound completion signal here because Checkout is only
+// reachable from a non-subscribed state; existing subscribers change plans
+// through the Stripe portal, which returns to /billing with no marker.
+const RECONCILE_INTERVAL_MS = 2000;
+const RECONCILE_TIMEOUT_MS = 20000;
+
+// idle    — ordinary visit, background polling only.
+// pending — just came back from Checkout, waiting on the webhook.
+// timeout — waited RECONCILE_TIMEOUT_MS and it still hasn't landed.
+type ReconcileState = "idle" | "pending" | "timeout";
+
 // pctTone picks the bar color based on how close to the cap the user
 // is. <70% neutral, 70-90% warning, >=90% danger. Tones reuse existing
 // CSS vars so the dashboard's theme tokens own the actual colors.
@@ -185,10 +205,20 @@ function PlanCard({
     <div
       className="rounded-lg border p-4 flex flex-col gap-3"
       style={{
-        // The current tier gets the accent border + a tinted surface so
-        // it reads as "you are here" at a glance.
+        // The current tier is marked by the accent border and the "Current"
+        // badge. It deliberately shares --bg-elev with the other tiers: the
+        // surface scale has no step above --bg-elev that keeps its direction
+        // in both themes (--bg-panel is lighter than --bg-elev in light mode
+        // but darker in dark mode), so a background distinction here would
+        // read as "raised" on one theme and "recessed" on the other.
+        //
+        // This previously read `isCurrent ? "var(--surface)" : "var(--bg-elev)"`.
+        // --surface is defined nowhere, so with no fallback the declaration was
+        // invalid at computed-value time and background-color fell back to its
+        // initial value, transparent — the current tier was the ONLY card with
+        // no surface at all, inverting the hierarchy it was meant to signal.
         borderColor: isCurrent ? "var(--accent)" : "var(--border)",
-        background: isCurrent ? "var(--surface)" : "var(--bg-elev)",
+        background: "var(--bg-elev)",
       }}
       aria-current={isCurrent ? "true" : undefined}
     >
@@ -235,9 +265,14 @@ function PlanCard({
 }
 
 export default function BillingPage() {
+  // Both reads poll: usage counters move as the account sends and
+  // receives, and the plan changes out-of-band when Stripe's webhook
+  // provisions an upgrade. Focus revalidation alone left the page frozen
+  // for anyone who simply kept it open.
   const { data, error, isLoading, mutate } = useSWR<LimitsInfo>(
-    "limits",
+    limitsKey,
     fetchLimits,
+    billingPolling,
   );
 
   // The plan catalog comes from the sidecar's source of truth. Gated on
@@ -250,6 +285,7 @@ export default function BillingPage() {
   } = useSWR<PlanInfo>(
     BILLING_API ? `${BILLING_API}/api/billing/plan` : null,
     fetchPlan,
+    billingPolling,
   );
 
   // Track which specific button is in flight so it can show "Opening…"
@@ -311,6 +347,74 @@ export default function BillingPage() {
     window.addEventListener("pageshow", onShow);
     return () => window.removeEventListener("pageshow", onShow);
   }, [mutate, mutatePlan]);
+
+  const [reconcile, setReconcile] = useState<ReconcileState>("idle");
+
+  // Consume the ?status marker Stripe redirected us back with. Read from
+  // window.location rather than useSearchParams() because this route is
+  // part of a static export — useSearchParams() would force the whole
+  // page under a Suspense boundary to prerender. The marker is stripped
+  // immediately: it has been used, and leaving it in the URL would
+  // restart the reconcile loop on every remount or Back navigation.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("status");
+    if (!status) return;
+    params.delete("status");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${qs ? `?${qs}` : ""}`,
+    );
+    // `cancel` needs no reconcile — nothing was provisioned. Clearing the
+    // marker above is the whole handling.
+    //
+    // The BILLING_API guard matters because reconciliation resolves on the
+    // sidecar's plan read: with no sidecar that read never happens, so a
+    // stray marker would park the page on a notice that can never clear.
+    if (status === "success" && BILLING_API) setReconcile("pending");
+  }, []);
+
+  // Poll both reads until the webhook lands or the window elapses. This
+  // is deliberately separate from the background `billingPolling`
+  // cadence: 30s is fine for idle drift, far too slow for someone
+  // staring at the page they just paid on.
+  // The deadline lives in a ref, not a local, so it is set ONCE when the
+  // reconcile window opens and survives any re-run of this effect. A local
+  // would be recomputed on every re-run, and this effect depends on `mutate`
+  // and `mutatePlan` — SWR's bound mutators, which are referentially stable
+  // in v2 but are not ours to guarantee. If a future SWR ever returned a
+  // fresh identity per render, a recomputed deadline would push the timeout
+  // permanently out of reach and this would poll the billing sidecar
+  // forever. The ref makes termination depend only on wall-clock time.
+  const reconcileDeadlineRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (reconcile !== "pending") {
+      // Leaving the window (resolved, timed out, or unmounted) clears the
+      // deadline so a subsequent reconcile starts a fresh one.
+      reconcileDeadlineRef.current = null;
+      return;
+    }
+    reconcileDeadlineRef.current ??= Date.now() + RECONCILE_TIMEOUT_MS;
+    const id = setInterval(() => {
+      if (Date.now() >= (reconcileDeadlineRef.current ?? 0)) {
+        setReconcile("timeout");
+        return;
+      }
+      void mutate();
+      void mutatePlan();
+    }, RECONCILE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [reconcile, mutate, mutatePlan]);
+
+  // Webhook landed — stop polling and let the page render normally.
+  useEffect(() => {
+    if (reconcile === "pending" && planData?.current.status === "active") {
+      setReconcile("idle");
+    }
+  }, [reconcile, planData]);
 
   // Compute usage percentages once data is loaded. Guard zero limits
   // (treat as 0% rather than NaN/Infinity) so a misconfigured row with
@@ -397,6 +501,40 @@ export default function BillingPage() {
         </div>
       )}
 
+      {/* Post-checkout reconciliation. Rendered outside the `data` gate so
+          it shows even if the usage read is slow or failing — the user
+          just paid, and silence is the worst response. A late webhook
+          that lands after we gave up still clears the notice, because the
+          background poll keeps running. */}
+      {reconcile === "pending" && (
+        <div
+          className="rounded-lg border px-4 py-3 text-sm mb-6"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--bg-elev)",
+            color: "var(--fg-muted)",
+          }}
+          role="status"
+        >
+          Finalizing your upgrade… your new plan will appear here in a moment.
+        </div>
+      )}
+      {reconcile === "timeout" && planData?.current.status !== "active" && (
+        <div
+          className="rounded-lg border px-4 py-3 text-sm mb-6"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--bg-elev)",
+            color: "var(--fg-muted)",
+          }}
+          role="status"
+        >
+          Your payment went through, but the new plan hasn&apos;t appeared yet.
+          It usually lands within a minute — this page keeps checking, or use
+          Refresh below.
+        </div>
+      )}
+
       {isLoading && !data && (
         <div className="text-sm text-muted">Loading…</div>
       )}
@@ -408,7 +546,7 @@ export default function BillingPage() {
             className="rounded-xl border p-5"
             style={{
               borderColor: "var(--border)",
-              background: "var(--surface)",
+              background: "var(--bg-panel)",
             }}
           >
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -447,7 +585,7 @@ export default function BillingPage() {
           {BILLING_API && (
             <section
               className="rounded-xl border p-5 space-y-4"
-              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}
             >
               <div>
                 <div className="text-xs uppercase tracking-wide text-muted">
@@ -494,7 +632,7 @@ export default function BillingPage() {
             className="rounded-xl border p-5 space-y-5"
             style={{
               borderColor: "var(--border)",
-              background: "var(--surface)",
+              background: "var(--bg-panel)",
             }}
           >
             <div>
@@ -533,7 +671,14 @@ export default function BillingPage() {
 
             <div className="pt-2">
               <button
-                onClick={() => mutate()}
+                onClick={() => {
+                  // Both reads, not just usage. The plan label, the
+                  // "Current" badge and every tier CTA come from the
+                  // sidecar catalog — refreshing usage alone made the
+                  // button look broken to anyone who had just upgraded.
+                  void mutate();
+                  void mutatePlan();
+                }}
                 className="text-xs text-muted hover:text-foreground transition"
               >
                 Refresh

@@ -22,6 +22,11 @@ on:
       - "CLAUDE.md"
       - "LICENSE"
       - "NOTICE"
+  # Manual trigger (an API dispatch, not a webhook): lets operators re-run the
+  # full battery on any ref when pull_request webhook delivery is unavailable
+  # (e.g. a GitHub Actions incident throttles webhooks) or to re-verify a pinned
+  # commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -61,6 +66,12 @@ jobs:
       # Network-free unit tests only — the e2e-prod suites against a live
       # deployment stay manual. No npm ci needed: node --test type-strips.
       - run: node --test tests/e2e-prod/harness/*.test.ts
+      # Offline unit tests for the three coverage gates (synthetic shards,
+      # red-without-contacts / green-when-complete). pyyaml is what the gates
+      # themselves need to parse api/openapi.yaml.
+      - run: |
+          pip install pyyaml
+          cd tests/e2e-prod && python3 -m unittest test_gates -v
       # monitor.py imports the Python SDK (from e2a.v1 import ...) — install
       # the repo's SDK so the gate tests this tree, not a published release.
       - run: |

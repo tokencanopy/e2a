@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -432,6 +433,73 @@ func TestDeleteUserData(t *testing.T) {
 		if n != 0 {
 			t.Errorf("orphan rows in %s: %d (cascade missed)", c.name, n)
 		}
+	}
+}
+
+func TestDeleteUserDataCancelsLinkedSendJobs(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	ctx := context.Background()
+	user := seedUserData(t, store, ctx, "delete-user-jobs")
+
+	var messageID string
+	if err := pool.QueryRow(ctx,
+		`SELECT m.id
+		   FROM messages m
+		   JOIN agent_identities a ON a.id = m.agent_id
+		  WHERE a.user_id = $1
+		    AND m.direction = 'outbound'
+		    AND m.status <> 'pending_review'
+		  ORDER BY m.id
+		  LIMIT 1`,
+		user.ID).Scan(&messageID); err != nil {
+		t.Fatalf("find message: %v", err)
+	}
+	linkTrashTestSendJob(t, pool, messageID, 401)
+
+	if _, err := store.DeleteUserData(ctx, user.ID); err != nil {
+		t.Fatalf("DeleteUserData: %v", err)
+	}
+	if got := canceller.jobIDs; len(got) != 1 || got[0] != 401 {
+		t.Fatalf("cancelled jobs = %v, want [401]", got)
+	}
+}
+
+func TestDeleteUserDataBlocksFreshSendClaim(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	canceller := &recordingOutboundJobCanceller{}
+	store.SetOutboundJobCanceller(canceller)
+	ctx := context.Background()
+	user := seedUserData(t, store, ctx, "delete-user-sending")
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE messages m
+		    SET delivery_status = 'sending',
+		        send_claimed_at = now(),
+		        send_job_id = 402
+		   FROM agent_identities a
+		  WHERE a.id = m.agent_id
+		    AND a.user_id = $1
+		    AND m.direction = 'outbound'`,
+		user.ID); err != nil {
+		t.Fatalf("mark sending: %v", err)
+	}
+
+	if _, err := store.DeleteUserData(ctx, user.ID); !errors.Is(err, identity.ErrSendInProgress) {
+		t.Fatalf("DeleteUserData = %v, want ErrSendInProgress", err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, user.ID).Scan(&exists); err != nil {
+		t.Fatalf("check user: %v", err)
+	}
+	if !exists {
+		t.Fatal("user was deleted while an outbound provider call had a fresh lease")
+	}
+	if len(canceller.jobIDs) != 0 {
+		t.Fatalf("jobs cancelled despite active send guard: %v", canceller.jobIDs)
 	}
 }
 

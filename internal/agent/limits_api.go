@@ -60,6 +60,16 @@ type invalidateLimitsRequest struct {
 // it's an internal seam between the OSS server and its operator's
 // provisioner. Self-hosters who don't run a provisioner simply leave
 // InternalAPISecret empty and the endpoint 503s.
+//
+// Scope caveat: the cache this busts is PER PROCESS. One POST clears it
+// in exactly the server process that handled the request. An operator
+// running several server replicas behind a load balancer must fan the
+// call out to every replica (or accept that non-targeted replicas keep
+// serving the old caps until limits.cache_ttl_seconds expires); a
+// single POST through the load balancer only reaches one of them. The
+// enforcer's generation guard makes each individual invalidation
+// reliable — it cannot make one invalidation reach processes it was
+// never sent to.
 func (a *API) handleInvalidateLimits(w http.ResponseWriter, r *http.Request) {
 	if a.internalAPISecret == "" {
 		http.Error(w, "internal api not configured", http.StatusServiceUnavailable)
@@ -96,9 +106,44 @@ func (a *API) handleInvalidateLimits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
+	// Shape-check the user_id before it reaches the enforcer. This is
+	// defense-in-depth, not the memory bound: the enforcer's process-wide
+	// invalidation epoch means Invalidate only ever DELETES map entries
+	// (see limits.DBEnforcer.Invalidate), so even an unvalidated user_id
+	// could not grow the cache. Rejecting garbage here still keeps the
+	// endpoint's contract tight and makes a misbehaving caller (a sidecar
+	// bug sending the wrong field) fail loudly instead of silently
+	// no-oping.
+	if !isUserID(req.UserID) {
+		http.Error(w, "user_id is malformed", http.StatusBadRequest)
+		return
+	}
 
 	a.enforcer.Invalidate(req.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// userIDLen is the length of an identity user id: identity.generateID emits
+// 16 random bytes hex-encoded. NOTE it is NOT a UUID — validating as one would
+// reject every real user and take the endpoint down.
+const userIDLen = 32
+
+// isUserID reports whether s has the shape of an identity user id: exactly
+// userIDLen lowercase hex characters. A shape check, not an existence check —
+// confirming existence would mean a DB round trip on a path whose whole purpose
+// is to avoid one, and a well-formed id for a deleted user is harmless (it
+// deletes a cache key nothing will ever read).
+func isUserID(s string) bool {
+	if len(s) != userIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func hmacHexSHA256(key, body []byte) string {

@@ -848,6 +848,38 @@ func TestOIDCLoginCarriesReturnToInResumeCookie(t *testing.T) {
 	}
 }
 
+func TestOIDCLoginCarriesReviewReturnToInResumeCookie(t *testing.T) {
+	fx := setupOIDC(t)
+
+	returnTo := "/reviews?id=msg_held"
+	tx := beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape(returnTo))
+
+	cookie := findCookie(tx.cookies, "e2a_oidc_resume")
+	if cookie == nil {
+		t.Fatal("resume cookie not set for review return_to login")
+	}
+	resume := decodeResumeCookieValue(t, cookie)
+	if resume.ReturnTo != returnTo {
+		t.Errorf("resume return_to = %q, want %q", resume.ReturnTo, returnTo)
+	}
+}
+
+func TestOIDCLoginCarriesInboxThreadReturnToInResumeCookie(t *testing.T) {
+	fx := setupOIDC(t)
+
+	returnTo := "/inboxes/messages?email=bot%40example.com#conv:%E5%AE%A2"
+	tx := beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape(returnTo))
+
+	cookie := findCookie(tx.cookies, "e2a_oidc_resume")
+	if cookie == nil {
+		t.Fatal("resume cookie not set for inbox return_to login")
+	}
+	resume := decodeResumeCookieValue(t, cookie)
+	if resume.ReturnTo != returnTo {
+		t.Errorf("resume return_to = %q, want %q", resume.ReturnTo, returnTo)
+	}
+}
+
 // TestOIDCLoginRejectsReturnToOutsideAllowList applies the legacy door's
 // exact reject list (TestHandleLogin_RejectsReturnToOutsideAllowList):
 // every value the allow-list refuses must 400 the login, before any
@@ -856,7 +888,10 @@ func TestOIDCLoginRejectsReturnToOutsideAllowList(t *testing.T) {
 	fx := setupOIDC(t)
 
 	bad := []string{
-		"/dashboard",                         // wrong prefix
+		"/dashboard",                         // unrelated dashboard route
+		"/reviews/other",                     // review allow-list is exact
+		"/reviews/../dashboard",              // review path traversal
+		"/inboxes/messages/view",             // inbox allow-list is exact
 		"/api/v1/agents",                     // wrong prefix
 		"https://evil.com/oauth2/authorize",  // absolute
 		"//evil.com/oauth2/authorize",        // protocol-relative

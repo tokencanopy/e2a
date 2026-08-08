@@ -55,6 +55,12 @@ type Metrics interface {
 	// table in {"webhook_events", "webhook_subscriber_deliveries", "webhook_deliveries", "messages", "user_sessions", "oauth"}.
 	JanitorRowsDeleted(table string, count int)
 
+	// ContactDuePublished / ContactDueFailed count outreach wake-ups by
+	// outcome. A failed publish means the agent was not woken for a schedule
+	// that has already been consumed, so it will not retry.
+	ContactDuePublished(count int)
+	ContactDueFailed(count int)
+
 	// NotifyMissed is incremented when the 1-second fallback poll
 	// finds work that LISTEN/NOTIFY didn't wake us for. A non-zero
 	// rate indicates reconnect churn or a dropped notification.
@@ -83,12 +89,18 @@ type Metrics interface {
 
 	// SMTPInbound records one SMTP intake decision. outcome ∈
 	// {accepted, accepted_dedup, tempfail, rejected_unknown_recipient,
-	// rejected_unverified_domain, rejected_quota}. Units differ by
-	// stage: accepted/accepted_dedup/tempfail are per DATA transaction;
-	// rejected_* are per rejected RCPT command (one transaction can
-	// emit several rejections and still accept). seconds is DATA
-	// processing time (0 for RCPT-stage rejections).
+	// rejected_unverified_domain, rejected_quota, rejected_line_too_long}.
+	// Units differ by stage: accepted/accepted_dedup/tempfail are per DATA
+	// transaction; rejected_line_too_long is per DATA transaction aborted
+	// mid-read (line over MaxLineLength); the other rejected_* are per
+	// rejected RCPT command (one transaction can emit several rejections
+	// and still accept). seconds is DATA processing time (0 for RCPT-stage
+	// rejections).
 	SMTPInbound(outcome string, seconds float64)
+
+	// ThreadHeaderParseFailure counts an inbound RFC threading header that
+	// failed strict parsing. header is one of {in_reply_to, references}.
+	ThreadHeaderParseFailure(header string)
 
 	// OutboundQueueWait records due→pickup latency for one outbound
 	// send attempt (River attempted_at − scheduled_at; created_at would
@@ -102,13 +114,16 @@ type Metrics interface {
 	// when it settles.
 	OutboundTerminal(outcome string)
 
-	// OutboundTerminalLatency records acceptance→terminal latency for
-	// one outbound message (the terminal write's occurred_at −
-	// messages.created_at). Observed exactly once per message,
-	// co-located with the OutboundTerminal emission so the two share
-	// their exactly-once contract (the SNS-feedback settle path stays
-	// uninstrumented for both — see the guard comment at the worker's
-	// MarkSent emit in internal/outboundsend).
+	// OutboundTerminalLatency records eligibility→terminal latency for
+	// one outbound message (the terminal write's occurred_at − the
+	// submission anchor: messages.created_at for an ordinary send, the
+	// approve or fire time for a held or scheduled one). Observed at most
+	// once per message, co-located with the OutboundTerminal emission so
+	// the two share their exactly-once contract (the SNS-feedback settle
+	// path stays uninstrumented for both — see the guard comment at the
+	// worker's MarkSent emit in internal/outboundsend). A terminal whose
+	// occurred_at precedes its anchor records the count with no latency
+	// sample, so the two can legitimately diverge for gated rows.
 	OutboundTerminalLatency(seconds float64)
 
 	// OutboundAttempt records one submission attempt to the upstream
@@ -116,12 +131,27 @@ type Metrics interface {
 	// seconds is the submission duration.
 	OutboundAttempt(outcome string, seconds float64)
 
+	// OutboundRateDeferred records one outbound submission deferred by the
+	// per-agent fire-time rate limiter (internal/sendrate): the job snoozes
+	// and re-fires when the agent's sliding window frees capacity — it is
+	// NOT an attempt, NOT a terminal outcome, and is never metered. A
+	// sustained high rate means agents are queueing behind their own
+	// 60/min budget.
+	OutboundRateDeferred()
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
 	// endpoint's response, or "none" when no response was received
 	// (connect/DNS/SSRF-blocked).
 	WebhookAttempt(outcome, statusClass string, seconds float64)
+
+	// WebhookTerminal records terminal delivery outcomes after the terminal
+	// database transition succeeds. outcome ∈ {delivered, e2a_failure,
+	// endpoint_failure, excluded}; scope ∈ {initial, replay, test, unknown}.
+	// The hosted SLO uses initial + unknown and excludes endpoint_failure:
+	// customer endpoint behavior must not burn e2a's error budget.
+	WebhookTerminal(outcome, scope string, count int)
 
 	// WebhookExpiredPending counts delivery rows that reached their
 	// retention TTL while still 'pending' and were marked terminally
@@ -182,6 +212,25 @@ type Metrics interface {
 	// are not keeping up.
 	SetQueueDepth(queue, state string, n int)
 	SetQueueOldestAge(queue string, seconds float64)
+
+	// ThreadResolution counts thread-identity decisions by bounded source.
+	// The lazy_legacy_anchor source is the adoption counter; use rate() over
+	// a one-hour range to monitor the compatibility tail.
+	ThreadResolution(source string, count int)
+
+	// SetThreadNullMessages samples recent messages that still have no
+	// materialized thread ID. ageBucket ∈ {lt_1h, 1h_6h, 6h_24h}.
+	SetThreadNullMessages(ageBucket string, count int)
+
+	// SetThreadInvariantViolations publishes the bounded audit's current
+	// findings. kind ∈ {dangling_parent, cross_agent_parent,
+	// thread_mismatch, cycle, cycle_depth_limit}.
+	SetThreadInvariantViolations(kind string, count int)
+
+	// SetThreadRelationshipPercent publishes sampled mailbox-local topology
+	// ratios. kind ∈ {threads_multi_conversation,
+	// conversations_multi_thread}; percent is clamped to [0,100].
+	SetThreadRelationshipPercent(kind string, percent float64)
 }
 
 // NoOp swallows every call. Default for tests that don't care.
@@ -193,29 +242,38 @@ func (NoOp) OutboxEventsNoMatch(string)     {}
 func (NoOp) OutboxFailures(string)          {}
 func (NoOp) RedeliverRequests(string)       {}
 func (NoOp) JanitorRowsDeleted(string, int) {}
+func (NoOp) ContactDuePublished(int)        {}
+func (NoOp) ContactDueFailed(int)           {}
 func (NoOp) NotifyMissed()                  {}
 func (NoOp) SetPublisherLag(float64)        {}
 
-func (NoOp) HTTPRequest(string, string, string, float64) {}
-func (NoOp) SMTPInbound(string, float64)                 {}
-func (NoOp) OutboundQueueWait(float64)                   {}
-func (NoOp) OutboundTerminal(string)                     {}
-func (NoOp) OutboundTerminalLatency(float64)             {}
-func (NoOp) OutboundAttempt(string, float64)             {}
-func (NoOp) WebhookAttempt(string, string, float64)      {}
-func (NoOp) WebhookExpiredPending(int)                   {}
-func (NoOp) WebhookFanOutRescued(int)                    {}
-func (NoOp) WebhookDeliveryRescued(int)                  {}
-func (NoOp) WebhookFirstAttemptLatency(float64)          {}
-func (NoOp) WSConnected()                                {}
-func (NoOp) WSDisconnected(string)                       {}
-func (NoOp) WSHandshakeRejected(string)                  {}
-func (NoOp) WSDrained(int)                               {}
-func (NoOp) WSSendFailure()                              {}
-func (NoOp) SetWSActive(int)                             {}
-func (NoOp) InboundProcess(string, float64)              {}
-func (NoOp) SetQueueDepth(string, string, int)           {}
-func (NoOp) SetQueueOldestAge(string, float64)           {}
+func (NoOp) HTTPRequest(string, string, string, float64)  {}
+func (NoOp) SMTPInbound(string, float64)                  {}
+func (NoOp) ThreadHeaderParseFailure(string)              {}
+func (NoOp) OutboundQueueWait(float64)                    {}
+func (NoOp) OutboundTerminal(string)                      {}
+func (NoOp) OutboundTerminalLatency(float64)              {}
+func (NoOp) OutboundAttempt(string, float64)              {}
+func (NoOp) OutboundRateDeferred()                        {}
+func (NoOp) WebhookAttempt(string, string, float64)       {}
+func (NoOp) WebhookTerminal(string, string, int)          {}
+func (NoOp) WebhookExpiredPending(int)                    {}
+func (NoOp) WebhookFanOutRescued(int)                     {}
+func (NoOp) WebhookDeliveryRescued(int)                   {}
+func (NoOp) WebhookFirstAttemptLatency(float64)           {}
+func (NoOp) WSConnected()                                 {}
+func (NoOp) WSDisconnected(string)                        {}
+func (NoOp) WSHandshakeRejected(string)                   {}
+func (NoOp) WSDrained(int)                                {}
+func (NoOp) WSSendFailure()                               {}
+func (NoOp) SetWSActive(int)                              {}
+func (NoOp) InboundProcess(string, float64)               {}
+func (NoOp) SetQueueDepth(string, string, int)            {}
+func (NoOp) SetQueueOldestAge(string, float64)            {}
+func (NoOp) ThreadResolution(string, int)                 {}
+func (NoOp) SetThreadNullMessages(string, int)            {}
+func (NoOp) SetThreadInvariantViolations(string, int)     {}
+func (NoOp) SetThreadRelationshipPercent(string, float64) {}
 
 // Log emits a structured log line for every metric call. Cheap and
 // portable; production aggregators (Loki, CloudWatch, Datadog) can
@@ -260,6 +318,22 @@ func (l *Log) JanitorRowsDeleted(table string, count int) {
 	log.Printf("[metrics] event=janitor.delete table=%s count=%d", table, count)
 }
 
+func (l *Log) ContactDuePublished(count int) {
+	if count == 0 {
+		return
+	}
+	log.Printf("[metrics] event=contact.due outcome=published count=%d", count)
+}
+
+func (l *Log) ContactDueFailed(count int) {
+	if count == 0 {
+		return
+	}
+	// Loud: a failed publish means an agent was not woken for a schedule that
+	// has already been consumed, so nothing will retry it.
+	log.Printf("[metrics] event=contact.due outcome=failed count=%d", count)
+}
+
 func (l *Log) NotifyMissed() {
 	log.Printf("[metrics] event=notify.missed")
 }
@@ -301,8 +375,18 @@ func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 	log.Printf("[metrics] event=outbound.attempt outcome=%s duration=%.3f", outcome, seconds)
 }
 
+func (l *Log) OutboundRateDeferred() {
+	log.Printf("[metrics] event=outbound.rate_deferred")
+}
+
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	log.Printf("[metrics] event=webhook.attempt outcome=%s status_class=%s duration=%.3f", outcome, statusClass, seconds)
+}
+
+func (l *Log) WebhookTerminal(outcome, scope string, count int) {
+	if count > 0 {
+		log.Printf("[metrics] event=webhook.terminal outcome=%s scope=%s count=%d", outcome, scope, count)
+	}
 }
 
 func (l *Log) WebhookExpiredPending(count int) {
@@ -372,6 +456,23 @@ func (l *Log) SetQueueOldestAge(queue string, seconds float64) {
 	}
 	log.Printf("[metrics] gauge=queue.oldest_age_seconds queue=%s value=%.2f", queue, seconds)
 }
+
+func (l *Log) ThreadResolution(source string, count int) {
+	if count > 0 {
+		log.Printf("[metrics] event=thread.resolution source=%s count=%d",
+			enum(threadResolutionSet, source), count)
+	}
+}
+
+func (l *Log) ThreadHeaderParseFailure(header string) {
+	log.Printf("[metrics] event=thread.header_parse_failure header=%s",
+		enum(threadHeaderSet, header))
+}
+
+// Periodic gauges are Prom-only, matching the other sampled gauge families.
+func (l *Log) SetThreadNullMessages(string, int)            {}
+func (l *Log) SetThreadInvariantViolations(string, int)     {}
+func (l *Log) SetThreadRelationshipPercent(string, float64) {}
 
 // Compile guard.
 var _ Metrics = NoOp{}

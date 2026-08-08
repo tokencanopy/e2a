@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,10 @@ import (
 // instead of blocking on Sender.Send. Self-sends never use it (they loopback).
 type OutboundEnqueuer interface {
 	EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error)
+	// EnqueueScheduledSendTx enqueues the send to run no earlier than `at`, used
+	// when an auto-approved hold carried a still-future send_at (#815). Same
+	// outbox tx as EnqueueSendTx; only the job's first-run time differs.
+	EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error)
 }
 
 type ManagedUnsubscribeIssuer interface {
@@ -76,6 +81,14 @@ type Worker struct {
 	outboundEnq       OutboundEnqueuer
 	unsubscribeIssuer ManagedUnsubscribeIssuer
 	wsHub             WebSocketHub
+	// footerResolver decides whether a TTL-auto-approved external send carries
+	// the operator-configured outbound footer (SendRequest.AppendOutboundFooter).
+	// Held rows do not persist the flag — every approval funnel resolves it at
+	// compose time — so the sweep needs the same per-account decision the human
+	// approve paths use (main wires agent.API.OutboundFooterForAccount).
+	// Optional and fail-closed: nil (self-host default, feature off) means the
+	// sweep never appends a footer.
+	footerResolver func(ctx context.Context, userID string) bool
 	// inboundScreen runs the agent's inbound protection over the loopback
 	// inbound leg of a TTL-auto-approved self-send — the same engine
 	// construction (heuristics + optional Gemini) the relay uses for SMTP
@@ -100,6 +113,12 @@ func (w *Worker) SetOutboundEnqueuer(e OutboundEnqueuer) { w.outboundEnq = e }
 
 func (w *Worker) SetManagedUnsubscribeIssuer(i ManagedUnsubscribeIssuer) { w.unsubscribeIssuer = i }
 func (w *Worker) SetWebSocketHub(h WebSocketHub)                         { w.wsHub = h }
+
+// SetOutboundFooterResolver wires the per-account outbound-footer decision for
+// TTL auto-approved sends. See the footerResolver field for semantics.
+func (w *Worker) SetOutboundFooterResolver(r func(ctx context.Context, userID string) bool) {
+	w.footerResolver = r
+}
 
 // New constructs a Worker. fromDomain is the deployment's outbound
 // from-domain (cfg.OutboundSMTP.FromDomain) — used by the self-send
@@ -320,6 +339,15 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 	if isPlatformTest {
 		comp, err = w.sender.ComposePlatformForAccept(req)
 	} else {
+		// Outbound footer: TTL auto-approval composes here, so the footer
+		// decision is resolved here — the same approval-time semantics as the
+		// human approve funnel (internal/agent approveOutboundAsyncComposed).
+		// Without this, an expires-to-approve hold would ship unfootered while
+		// the identical hold approved by a human a minute earlier would not.
+		// Fail-closed: nil resolver (feature off / self-host) = no footer.
+		if w.footerResolver != nil {
+			req.AppendOutboundFooter = w.footerResolver(ctx, agent.UserID)
+		}
 		comp, err = w.sender.ComposeForAccept(agent, req)
 	}
 	if err != nil {
@@ -332,7 +360,7 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 		To: comp.To, CC: comp.CC, BCC: comp.BCC, Subject: req.Subject,
 		Method: comp.Method, EnvelopeFrom: comp.EnvelopeFrom, SentAs: comp.SentAs, Raw: comp.Raw,
 	}
-	sent, err := w.store.ApproveAndAccept(ctx, c.MessageID, "", identity.MessageStatusReviewExpiredApproved, false, acc, w.outboundEnq.EnqueueSendTx, nil)
+	sent, err := w.store.ApproveAndAccept(ctx, c.MessageID, "", identity.MessageStatusReviewExpiredApproved, false, acc, w.outboundEnq.EnqueueSendTx, w.outboundEnq.EnqueueScheduledSendTx, nil)
 	if err != nil {
 		if errors.Is(err, identity.ErrNotPendingApproval) {
 			return true // resolved between load and transition
@@ -631,6 +659,10 @@ func sendRequestFromStoredMessage(m *identity.Message) (outbound.SendRequest, er
 	if len(m.ReplyTo) > 0 {
 		replyTo = m.ReplyTo[0]
 	}
+	replyToMessageID := ""
+	if m.Type == "reply" {
+		replyToMessageID = m.EmailMessageID
+	}
 	return outbound.SendRequest{
 		To:               m.ToRecipients,
 		CC:               m.CC,
@@ -639,7 +671,7 @@ func sendRequestFromStoredMessage(m *identity.Message) (outbound.SendRequest, er
 		Body:             m.BodyText,
 		HTMLBody:         m.BodyHTML,
 		ReplyTo:          replyTo,
-		ReplyToMessageID: m.EmailMessageID,
+		ReplyToMessageID: replyToMessageID,
 		ConversationID:   m.ConversationID,
 		Attachments:      attachments,
 		Unsubscribe:      outbound.ManagedUnsubscribeIntent(m.ManagedUnsubscribe),

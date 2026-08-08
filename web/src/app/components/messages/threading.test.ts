@@ -1,7 +1,12 @@
 // Threading-logic contract for the dashboard inbox.
 
 import type { MessageSummary } from "../types";
-import { groupIntoThreads, findThread } from "./threading";
+import {
+  decodeThreadFragment,
+  encodeThreadFragment,
+  groupIntoThreads,
+  findThread,
+} from "./threading";
 
 function isoMinutesAgo(now: Date, n: number): string {
   return new Date(now.getTime() - n * 60_000).toISOString();
@@ -21,10 +26,96 @@ function msg(partial: Partial<MessageSummary>): MessageSummary {
   };
 }
 
+describe("thread fragment codec", () => {
+  it("round-trips spaces, Unicode, and literal percent signs", () => {
+    const key = "conv:客户 1%ready";
+    const encoded = encodeThreadFragment(key);
+    expect(encoded).toBe("conv:%E5%AE%A2%E6%88%B7%201%25ready");
+    expect(decodeThreadFragment(encoded)).toBe(key);
+  });
+
+  it("leaves a malformed legacy percent fragment readable", () => {
+    expect(decodeThreadFragment("conv:100%ready")).toBe("conv:100%ready");
+  });
+});
+
 describe("groupIntoThreads", () => {
   const NOW = new Date("2026-05-24T12:00:00Z");
 
-  it("groups messages with the same conversation_id into one thread", () => {
+  it("groups non-null thread_id rows even when their workflow conversation_ids differ", () => {
+    const rows: MessageSummary[] = [
+      msg({
+        id: "m1",
+        thread_id: "thread_A",
+        conversation_id: "workflow_A",
+        subject: "Q3 contract",
+        created_at: isoMinutesAgo(NOW, 25),
+      }),
+      msg({
+        id: "m2",
+        thread_id: "thread_A",
+        conversation_id: "workflow_B",
+        direction: "outbound",
+        to: ["maya@stripe.com"],
+        recipient: "maya@stripe.com",
+        subject: "Re: Q3 contract",
+        created_at: isoMinutesAgo(NOW, 13),
+      }),
+    ];
+
+    const threads = groupIntoThreads(rows, NOW);
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].key).toBe("thr:thread_A");
+    expect(threads[0].conversationId).toBe("workflow_B");
+    expect(threads[0].msgCount).toBe(2);
+    expect(threads[0].messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("keeps distinct thread_ids separate even when conversation_id is shared", () => {
+    const rows: MessageSummary[] = [
+      msg({
+        id: "m_source",
+        thread_id: "thread_source",
+        conversation_id: "workflow_shared",
+        from: "customer@example.com",
+        created_at: isoMinutesAgo(NOW, 60),
+      }),
+      msg({
+        id: "m_reply",
+        thread_id: "thread_source",
+        conversation_id: "workflow_shared",
+        direction: "outbound",
+        to: ["customer@example.com"],
+        recipient: "customer@example.com",
+        created_at: isoMinutesAgo(NOW, 50),
+      }),
+      msg({
+        id: "m_forward",
+        thread_id: "thread_forward",
+        conversation_id: "workflow_shared",
+        direction: "outbound",
+        to: ["partner@example.com"],
+        recipient: "partner@example.com",
+        created_at: isoMinutesAgo(NOW, 40),
+      }),
+    ];
+
+    const threads = groupIntoThreads(rows, NOW);
+
+    expect(threads.map((thread) => thread.key).sort()).toEqual([
+      "thr:thread_forward",
+      "thr:thread_source",
+    ]);
+    expect(
+      threads.find((thread) => thread.key === "thr:thread_source")?.state,
+    ).toBe("active");
+    expect(
+      threads.find((thread) => thread.key === "thr:thread_forward")?.state,
+    ).toBe("active");
+  });
+
+  it("groups legacy null-thread rows with the same conversation_id", () => {
     const rows: MessageSummary[] = [
       msg({ id: "m1", conversation_id: "conv_A", subject: "Q3 contract", created_at: isoMinutesAgo(NOW, 25) }),
       msg({ id: "m2", conversation_id: "conv_A", direction: "outbound", to: ["maya@stripe.com"], recipient: "maya@stripe.com", subject: "Re: Q3 contract", created_at: isoMinutesAgo(NOW, 13) }),
@@ -38,7 +129,7 @@ describe("groupIntoThreads", () => {
     expect(threads[0].messages.map((m) => m.id)).toEqual(["m1", "m2"]);
   });
 
-  it("orphan messages (no conversation_id) become single-message threads keyed orphan:<id>", () => {
+  it("legacy null-thread rows without conversation_id use orphan:<id>", () => {
     const rows: MessageSummary[] = [
       msg({ id: "m_solo", subject: "GitHub PR merged", created_at: isoMinutesAgo(NOW, 30) }),
     ];
@@ -79,6 +170,32 @@ describe("groupIntoThreads", () => {
     expect(real?.conversationId).toBe("orphan:nefarious");
     expect(synthetic?.messages[0].id).toBe("nefarious");
     expect(synthetic?.conversationId).toBeUndefined();
+  });
+
+  it("keeps thread_id keys separate from legacy conversation and orphan namespaces", () => {
+    const rows: MessageSummary[] = [
+      msg({
+        id: "m_threaded",
+        thread_id: "conv:shared",
+        conversation_id: "shared",
+        created_at: isoMinutesAgo(NOW, 30),
+      }),
+      msg({
+        id: "m_legacy",
+        conversation_id: "shared",
+        created_at: isoMinutesAgo(NOW, 25),
+      }),
+      msg({
+        id: "conv:shared",
+        created_at: isoMinutesAgo(NOW, 20),
+      }),
+    ];
+
+    expect(groupIntoThreads(rows, NOW).map((thread) => thread.key).sort()).toEqual([
+      "conv:shared",
+      "orphan:conv:shared",
+      "thr:conv:shared",
+    ]);
   });
 
   it("derives state='pending' when any message in the thread is pending_approval", () => {
@@ -179,6 +296,7 @@ describe("findThread", () => {
   const threads = groupIntoThreads(
     [
       msg({ id: "m1", conversation_id: "conv_A", created_at: isoMinutesAgo(NOW, 30) }),
+      msg({ id: "m_threaded", thread_id: "thread_A", created_at: isoMinutesAgo(NOW, 25) }),
       msg({ id: "m_solo", created_at: isoMinutesAgo(NOW, 20) }),
     ],
     NOW,
@@ -194,9 +312,40 @@ describe("findThread", () => {
     expect(t?.key).toBe("orphan:m_solo");
   });
 
-  it("falls back to the first thread when the key is unknown or null", () => {
-    expect(findThread(threads, null)?.key).toBe(threads[0].key);
-    expect(findThread(threads, "conv_DOES_NOT_EXIST")?.key).toBe(threads[0].key);
+  it("matches canonical thr:<thread_id> keys", () => {
+    expect(findThread(threads, "thr:thread_A")?.key).toBe("thr:thread_A");
+  });
+
+  it("returns null instead of guessing when the key is unknown or absent", () => {
+    expect(findThread(threads, null)).toBeNull();
+    expect(findThread(threads, "conv_DOES_NOT_EXIST")).toBeNull();
+  });
+
+  it("rejects an old conv fragment when that conversation now spans groups", () => {
+    const split = groupIntoThreads(
+      [
+        msg({
+          id: "m_legacy",
+          conversation_id: "workflow_shared",
+          created_at: isoMinutesAgo(NOW, 30),
+        }),
+        msg({
+          id: "m_thread_a",
+          thread_id: "thread_A",
+          conversation_id: "workflow_shared",
+          created_at: isoMinutesAgo(NOW, 20),
+        }),
+        msg({
+          id: "m_thread_b",
+          thread_id: "thread_B",
+          conversation_id: "workflow_shared",
+          created_at: isoMinutesAgo(NOW, 10),
+        }),
+      ],
+      NOW,
+    );
+
+    expect(findThread(split, "conv:workflow_shared")).toBeNull();
   });
 
   it("returns null for an empty thread list", () => {

@@ -80,7 +80,7 @@ func TestApproveAndAcceptLifecycle(t *testing.T) {
 			id, err := enqueueTask6ApprovalJob(ctx, tx, messageID)
 			durableJobID = id
 			return id, err
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestApproveAndAcceptLifecycle(t *testing.T) {
 		t.Fatalf("durable approval job message=%s want %s", durableMessageID, msg.ID)
 	}
 	_, err = store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc,
-		enqueueTask6ApprovalJob, nil)
+		enqueueTask6ApprovalJob, nil, nil)
 	if !errors.Is(err, identity.ErrNotPendingApproval) {
 		t.Fatalf("duplicate approve=%v", err)
 	}
@@ -140,7 +140,7 @@ func TestApproveAndAcceptRejectsUnsupportedTargetBeforeMutation(t *testing.T) {
 		func(ctx context.Context, tx pgx.Tx, messageID string) (int64, error) {
 			enqueued++
 			return enqueueTask6ApprovalJob(ctx, tx, messageID)
-		}, nil)
+		}, nil, nil)
 	if !errors.Is(err, identity.ErrInvalidApprovalTarget) || !strings.Contains(err.Error(), identity.MessageStatusReviewRejected) {
 		t.Fatalf("ApproveAndAccept(invalid target) error = %v, want clear invalid-target error", err)
 	}
@@ -195,7 +195,7 @@ func TestApproveAndAcceptHumanExpiryRaceHasOneAtomicWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := store.ApproveAndAccept(ctx, msg.ID, target.reviewer, target.status, false, acc, enqueueTask6ApprovalJob, nil)
+			_, err := store.ApproveAndAccept(ctx, msg.ID, target.reviewer, target.status, false, acc, enqueueTask6ApprovalJob, nil, nil)
 			errs <- err
 		}()
 	}
@@ -279,11 +279,11 @@ func TestApproveAndAcceptLifecycleFailureRollsBack(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS test_fail_approved_lifecycle ON message_lifecycle_transitions; DROP FUNCTION IF EXISTS test_fail_approved_lifecycle();`)
 	})
 	acc := identity.AcceptedSend{To: []string{"a@example.net"}, Subject: "Subj", Method: "smtp", SentAs: "relay", Raw: []byte("raw")}
-	_, err = store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueueTask6ApprovalJob, nil)
+	_, err = store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueueTask6ApprovalJob, nil, nil)
 	if err == nil {
 		t.Fatal("approve succeeded despite lifecycle failure")
 	}
-	_, err = store.ApproveAndAccept(ctx, expiredMsg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueueTask6ApprovalJob, nil)
+	_, err = store.ApproveAndAccept(ctx, expiredMsg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueueTask6ApprovalJob, nil, nil)
 	if err == nil {
 		t.Fatal("expired approve succeeded despite lifecycle failure")
 	}
@@ -418,7 +418,7 @@ func TestRejectAndExpireLifecycle(t *testing.T) {
 	}
 	expiredApprove := newHold("expired approve")
 	acc := identity.AcceptedSend{To: []string{"a@example.net"}, Subject: "expired approve", Method: "smtp", SentAs: "relay", Raw: []byte("raw")}
-	if _, err := store.ApproveAndAccept(ctx, expiredApprove.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, func(context.Context, pgx.Tx, string) (int64, error) { return 77, nil }, nil); err != nil {
+	if _, err := store.ApproveAndAccept(ctx, expiredApprove.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, func(context.Context, pgx.Tx, string) (int64, error) { return 77, nil }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -494,7 +494,7 @@ func TestApproveAndAccept(t *testing.T) {
 		EnvelopeFrom: "bot@aa.example.com", SentAs: "relay", Raw: []byte("raw-mime"),
 	}
 
-	out, err := store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueue, nil)
+	out, err := store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueue, nil, nil)
 	if err != nil {
 		t.Fatalf("ApproveAndAccept: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestApproveAndAccept(t *testing.T) {
 	}
 
 	// Idempotent: a second attempt (row no longer pending_review) is a no-op.
-	if _, err := store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueue, nil); err != identity.ErrNotPendingApproval {
+	if _, err := store.ApproveAndAccept(ctx, msg.ID, user.ID, identity.MessageStatusReviewApproved, false, acc, enqueue, nil, nil); err != identity.ErrNotPendingApproval {
 		t.Errorf("second ApproveAndAccept err = %v, want ErrNotPendingApproval", err)
 	}
 	if enqueued != 1 {

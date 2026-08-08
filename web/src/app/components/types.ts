@@ -39,6 +39,9 @@ export type HoldReason = {
 
 export type PendingMessageSummary = {
   id: string;
+  // Server-owned email topology identity. Optional because review payloads
+  // and older servers omit it.
+  thread_id?: string;
   // Owning agent's email address. In `/v1` this is how detail/approve/
   // reject are addressed (the path's {address}). Displayed in the queue
   // row's "from" line.
@@ -61,6 +64,10 @@ export type PendingMessageSummary = {
   // Product-facing explanation from the review API. Render summary directly;
   // code is an open machine-readable value for automation.
   hold_reason?: HoldReason;
+  // Future send_at an outbound hold carried (#815). The schedule survives the
+  // hold, so the queue shows when this message will send once approved. Present
+  // only on outbound holds with a schedule; absent otherwise.
+  scheduled_at?: string;
 };
 
 export type PendingAttachment = {
@@ -159,6 +166,9 @@ export type EmailAuthentication = {
 // dashboard inbox uses this projection directly.
 export type MessageSummary = {
   id: string;
+  // Server-owned email topology identity (beta). Older servers and legacy
+  // rows omit it; those rows retain conversation/orphan grouping.
+  thread_id?: string;
   direction: "inbound" | "outbound";
   from: string;
   verified_domain?: string | null;
@@ -175,6 +185,10 @@ export type MessageSummary = {
   // Review lifecycle (from v1 review_status): pending_review | sent |
   // review_rejected | review_expired_approved | review_expired_rejected.
   review_status?: string;
+  // Future instant a scheduled outbound send will be submitted (from v1
+  // scheduled_at). Present only while a future send_at is set; absent on
+  // immediate sends and inbound rows. Drives the "Scheduled" chip + send time.
+  scheduled_at?: string;
   // Inbound read state (from v1 read_status): "unread" | "read". Empty on
   // outbound rows. Drives the inbox's unread/bold affordance.
   read_status?: string;
@@ -198,12 +212,15 @@ export type ListMessagesResponse = {
 };
 
 // MessageView from `GET /v1/agents/{address}/messages/{id}`. Used by the
-// focus page's inbound branch. The `/v1` detail endpoint returns the
+// inline inbox thread. The `/v1` detail endpoint returns the
 // same MessageView shape for inbound and outbound; inbound rows carry
 // canonical authentication evidence + `raw_message`, and the parsed text/plain body comes
 // through `body.text`.
 export type InboundMessageDetail = {
   id: string;
+  // Server-owned email topology identity (beta). Optional for legacy rows
+  // and older servers.
+  thread_id?: string;
   direction: "inbound";
   header_from: string | null;
   envelope_from: string | null;

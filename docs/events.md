@@ -70,8 +70,18 @@ async with AsyncE2AClient(api_key=os.environ["E2A_API_KEY"]) as client:
 | `agent.suppression_added` | A recipient was suppressed for one exact sending agent through managed unsubscribe or the management API | Best-effort; **beta** |
 | `domain.sending_verified` | A domain's async SES sending identity reached the verified terminal state | Best-effort |
 | `domain.sending_failed` | A domain's async SES sending identity reached a failed terminal state | Best-effort |
+| `contact.due` | An outreach engagement's `next_action_at` passed — a notification that the contact is due for attention | **At-least-once**; **beta** |
 
-The review-hold + screening events (`email.flagged`, `email.blocked`, `email.review_requested`, `email.review_approved`, `email.review_rejected`) and `agent.suppression_added` are **beta** — their payloads may change before they are declared stable.
+The review-hold + screening events (`email.flagged`, `email.blocked`, `email.review_requested`, `email.review_approved`, `email.review_rejected`), `agent.suppression_added`, and `contact.due` are **beta** — their payloads may change before they are declared stable.
+
+`contact.due` is a notification, not an execution mechanism: e2a sends no mail
+and starts no agent when it fires. Only a **deployed webhook receiver** (or a
+process polling the events log) can react to it and wake an agent runtime — it
+does not start an MCP, WebSocket, Claude Code, or Codex session by itself.
+Interactive clients work the due queue when a user starts or resumes them; to
+have e2a itself submit an already-composed message at a future time, use the
+separate beta scheduled-sending capability (`send_at` — see
+[api.md](api.md#messages-v1agentsemailmessages)).
 
 One `email.blocked` asymmetry to know: an **outbound** gate-block refuses the send outright, so no message row exists — its `data.message_id` is a stable rowless soft-ref (`msgblk_…`), the event's top-level `message_id` is absent, and `GET /v1/events?message_id=…` cannot match it (filter by `type` + `agent_email`, or by `conversation_id`, instead). **Inbound** blocks are accept-then-quarantine, reference a real message, and filter normally.
 
@@ -146,6 +156,11 @@ string: a future version and an unknown `type` must still parse into the generic
 envelope. SDK stable-event guards narrow `data` only when both the type matches
 and `schema_version === "1"`.
 
+Event `conversation_id` values are caller-owned application correlation, not
+email-thread identity. The optional beta `thread_id` available on authenticated
+message list/detail reads is deliberately absent from stored events, webhook
+payloads, and WebSocket notifications.
+
 `data` is deliberately **open at the envelope level** (no discriminator,
 `oneOf`, or closed event enum). OpenAPI publishes the non-constraining
 `x-e2a-event-data-schemas` map on `EventEnvelope.data`; it maps each stable
@@ -155,15 +170,23 @@ beta event types must still parse. The stable mapping is:
 | Event type | `data` schema | Required fields | Optional fields |
 |---|---|---|---|
 | `email.received` | `EmailReceivedData` | `message_id`, `agent_email`, `direction` (`inbound`), `header_from` (nullable RFC 5322 From), `envelope_from` (nullable SMTP MAIL FROM), `verified_domain` (nullable; non-null only for DMARC pass), `authentication` (nullable for providerless delivery), `to[]`, `cc[]`, `reply_to[]`, `delivered_to` (scalar — the one per-agent copy; the fetch key), `subject`, `received_at` | `conversation_id`, `attachments[]` (metadata only: `filename`, `content_type`, `size_bytes` — the DECODED payload size, `index`) |
-| `email.sent` | `EmailSentData` | `message_id`, `agent_email`, `direction` (`outbound`), `provider_message_id`, `method`, `from`, `to[]`, `subject`, `message_type` | `conversation_id`, `cc[]`, `bcc[]` |
+| `email.sent` | `EmailSentData` | `message_id`, `agent_email`, `direction` (`outbound`), `method`, `from`, `to[]`, `subject`, `message_type` | `conversation_id`, `cc[]`, `bcc[]`, `provider_message_id` (omitted for providerless local-loopback sends) |
 | `email.failed` | `EmailFailedData` | `message_id`, `agent_email`, `direction`, `method`, `from`, `to[]`, `subject`, `message_type`, `reason` | `conversation_id`, `cc[]`, `bcc[]`, `reason_code`, `retryable` (present only when genuinely known) |
 | `email.delivered` | `EmailDeliveredData` | `message_id`, `agent_email`, `direction`, `delivered_to` (the one recipient this outcome is about) | `subject`, `smtp_detail` |
 | `email.bounced` | `EmailBouncedData` | `EmailDeliveredData` fields + `bounce_type` (`permanent` \| `transient` \| `undetermined`, from the SES bounce classification) | `subject`, `smtp_detail`, `bounce_sub_type` (raw SES sub-type, e.g. `General`) |
 | `email.complained` | `EmailComplainedData` | `message_id`, `agent_email`, `direction`, `delivered_to` | `subject`, `smtp_detail` |
 | `domain.sending_verified` | `DomainSendingVerifiedData` | `domain`, `sending_status` | — |
 | `domain.sending_failed` | `DomainSendingFailedData` | `domain`, `sending_status` | `reason` |
-| `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (`bounce` \| `complaint`) | `reason`, `message_id` |
+| `domain.suppression_added` | `DomainSuppressionAddedData` | `address`, `source` (open set — known values `bounce`, `complaint`; tolerate unknown values) | `reason`, `message_id` |
 | `agent.suppression_added` (**beta**) | `AgentSuppressionAddedData` | `agent_email`, `address`, `source` (`unsubscribe` \| `manual`) | — |
+| `contact.due` (**beta**) | `ContactDueData` | `agent_email`, `address`, `stage` (caller-owned; empty string when unset), `next_action_at`, `replied`, `outbound_count`, `contact` (`address`, `display_name` — empty string when unset, `metadata` — empty object when none) | `last_outbound_at`, `last_conversation_id` |
+
+The last two rows are **beta**: their `data` schemas are published under the
+separate `x-e2a-beta-event-data-schemas` map on `EventEnvelope.data`, never the
+stable one, and their components carry `x-stability-level: beta`. They are
+fixture-locked exactly like the stable payloads — beta means the shape may
+still change deliberately, not that it may change by accident — but they sit
+outside the GA compatibility guarantee.
 
 Notes:
 

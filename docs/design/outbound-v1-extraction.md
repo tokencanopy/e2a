@@ -1,9 +1,12 @@
 # Outbound `/v1` — `deliverOutbound` extraction plan
 
 > **✅ Shipped — historical plan.** The `DeliverOutbound` core extraction landed,
-> and `send` ships nested at `POST /v1/agents/{address}/messages` (the unified
+> and `send` ships nested at `POST /v1/agents/{email}/messages` (the unified
 > shape this doc framed as "Slice 2"). Kept as the original extraction plan; see
-> api-v1-redesign §9/§11 for the as-built.
+> api-v1-redesign §9/§11 for the as-built. The body below is design-time
+> vocabulary: as built, every `{address}` placeholder is `{email}`, and a held
+> send returns **200** with `status:"pending_review"` (not 202
+> `pending_approval` — 202 was retired as a GA success code).
 
 | | |
 |---|---|

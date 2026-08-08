@@ -1,5 +1,74 @@
 # Changelog
 
+## 5.6.0
+
+Additive only. Every 5.5.0 call site keeps compiling and behaving identically.
+
+### Changed
+- **`replyTo` on `client.messages.send` / `.reply` / `.forward` now accepts a
+  list.** It keeps taking a single RFC 5322 address string (unchanged, and
+  still the byte-identical wire form), or an array of up to 5 addresses to
+  direct replies to several destinations (e.g. a shared triage inbox and an
+  individual owner). Each address is validated server-side; a violation is a
+  typed 400.
+
+## 5.5.0
+
+Additive only. Every 5.4.0 call site keeps compiling and behaving identically.
+The new contacts/outreach and scheduled-sending surfaces are **beta** and may
+change before they are declared stable. The complete GA-vs-beta stability
+matrix for the whole `/v1` surface is documented in
+[docs/api.md → Stability: GA and beta surface](../../docs/api.md#stability-ga-and-beta-surface).
+
+### Added
+- **`client.contacts` — account contacts and per-agent outreach (beta).**
+  Account-level contact identity: `list` (filter by `source`, `importBatchId`,
+  creation window; auto-paging), `get` / `getWithETag`, `create` (honors
+  `idempotencyKey`), `update` (optional `ifMatch` rejects a stale editor with
+  a typed 412), and `delete` (the SDK supplies the `?confirm=DELETE` guard).
+  Bulk import: `import` accepts up to 1,000 rows per request and returns a
+  per-row outcome (`created | updated | skipped | failed`, plus a
+  `suppressed` flag), so one malformed row never rejects the upload — pass a
+  stable `idempotencyKey` so a timed-out import can be retried without
+  double-importing. `deleteImport(batchId)` reverses an import; the server
+  removes only verifiably untouched rows the batch created — anything edited,
+  corresponded with, or enrolled in surviving outreach since the import is
+  retained and reported in the returned counts.
+- **Per-agent outreach on `client.contacts` (beta).** `outreach(email, {...})`
+  lists the contacts an agent is working, with server-derived reply and
+  delivery facts (`replied`, `lastOutboundAt`, `outboundCount`, …). For a
+  duplicate-safe follow-up sweep pass `replied: false` together with **both**
+  `nextActionBefore` and `lastOutboundBefore` — `lastOutboundAt` is
+  server-maintained, so the second filter excludes anyone just contacted even
+  if your own state write was lost. `getOutreach` / `getOutreachWithETag`,
+  `setOutreach` (caller-owned `stage`, `next_action_at`, `metadata`; derived
+  fields are server-owned and rejected; optional `ifMatch`), and
+  `deleteOutreach` complete the loop. An agent-scoped credential may drive
+  outreach for its own inbox; the account-level contact methods need account
+  scope.
+- **Scheduled sending via `sendAt` (beta)** on the `messages.send` / `.reply`
+  / `.forward` request bodies. A future `sendAt` (RFC 3339 with an explicit
+  UTC offset, at most 90 days ahead) returns `status: "scheduled"` — durable
+  acceptance, **do not re-send** — with `scheduledAt` echoing the future
+  submission time (a "not before" bound, accurate to the scheduler poll
+  interval). `wait: "sent"` does **not** wait for the scheduled time: a
+  future `sendAt` returns `status: "scheduled"` immediately. Scheduling does
+  not survive a review hold (approval sends immediately). Cancel by trashing
+  the message before provider submission starts (`messages.delete`); restoring
+  before `scheduledAt` re-arms it, restoring at or after leaves the message
+  live with `delivery_status: "failed"` and the send canceled.
+- **Beta `threadId` on message reads** (`MessageView` / `MessageSummaryView`)
+  — a server-owned, read-only, mailbox-local email-topology identity. It is
+  omitted for legacy messages without an assignment; `conversationId` remains
+  caller-owned application correlation and its filter is unchanged. There is
+  no thread filter, request field, or thread endpoint.
+- **`contact.due` (beta)** joins the webhook event vocabulary: emitted
+  at-least-once when an engagement's `next_action_at` passes. It is a
+  notification for a deployed webhook receiver; see `docs/events.md`.
+- **`account.suppressions.list({ limit })`** — the account suppression list
+  now accepts the same optional page-size parameter its sibling resources
+  (`account.apiKeys.list`, `agents.listSuppressions`) already take.
+
 ## 5.4.0
 
 Additive only. Every 5.3.0 call site keeps compiling and behaving identically.
@@ -28,6 +97,23 @@ Additive only. Every 5.3.0 call site keeps compiling and behaving identically.
   `outbound` restates whether agents can send as their own address (`none` |
   `pending` | `verified` | `failed`, with detail in `sendingError`). Both are
   open string sets — tolerate unknown values.
+
+- **`client.contacts`** — manage the people an account corresponds with:
+  `list`/`get`/`getWithETag`/`create`/`update`/`delete` (account-scoped,
+  optimistic concurrency via `ifMatch`), plus `import`/`deleteImport` for
+  structured-row bulk imports. `client.contacts.outreach(email, params)` and
+  its `getOutreach`/`getOutreachWithETag`/`setOutreach`/`deleteOutreach`
+  counterparts track one agent's per-contact engagement (stage, next action,
+  reply/suppression state) and may be driven by an agent-scoped credential.
+- **`sendAt` on `messages.send` / `.reply` / `.forward`** — schedule a future
+  send by passing a `Date`, no more than 90 days ahead. Beta and may change
+  before it is declared stable. The durable `scheduled` result is success, not
+  a reason to retry; even with `wait: "sent"` it returns immediately rather
+  than holding the HTTP request until the future time.
+- **`message.threadId`** — an optional beta, server-owned, read-only identity
+  for the mailbox-local reply graph, exposed on message list/detail models.
+  Legacy messages can omit it. There is no `threadId` request field, list
+  filter, thread endpoint, or complete-thread retrieval method.
 
 ### Fixed
 - **HTTP 410 now maps to `E2ANotFoundError`** in the status fallback, matching
@@ -80,14 +166,14 @@ in this release, so read those three sections together when upgrading from 4.x.
   Generated types: `EventJSON` → `EventView`, `PageEventJSON` →
   `PageEventView`, `Suppression` → `SuppressionView`, `PageSuppression` →
   `PageSuppressionView`; the duplicate `Result` collapsed into the existing
-  `AuthVerdict`, and the duplicate `AttachmentMeta` collapsed into the
+  `Authentication`, and the duplicate `AttachmentMeta` collapsed into the
   canonical `AttachmentMetaView` (one attachment-metadata shape for REST
   responses, stable event payloads, and the account export — the hand-written
   webhook payload interface in `webhook-signature.ts` follows the same
   rename). The wire JSON is unchanged — field names, optionality, and values
   are identical; only the exported type names changed. Migrate:
   `EventJSON` → `EventView`, `Suppression` → `SuppressionView`,
-  `Result` → `AuthVerdict`, `AttachmentMeta` → `AttachmentMetaView`.
+  `Result` → `Authentication`, `AttachmentMeta` → `AttachmentMetaView`.
 
 - **The reserved-word wire field `from` is exposed as `from_` where a sender is
   still projected** (was the private-looking `_from`, an OpenAPI Generator

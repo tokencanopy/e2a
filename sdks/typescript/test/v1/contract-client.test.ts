@@ -12,11 +12,12 @@
  *   E2A_TEST_BASE_URL  — test server URL
  *   E2A_TEST_API_KEY   — valid API key for the test user
  *
- * Contract-server send topology (cmd/e2a-contract-server): no outbound River
- * worker is wired, so external sends fail closed (500 outbound queue
- * unavailable). The deterministic terminal path is the self-send LOOPBACK,
- * which delivers synchronously — `wait: "sent"` on it observes `status:
- * "sent"` immediately rather than polling to the 15s ceiling.
+ * Contract-server send topology (cmd/e2a-contract-server): the real River
+ * enqueuer is wired but its outbound worker is not started, so external sends
+ * can prove accepted/scheduled queue contracts without submitting real mail.
+ * The deterministic terminal path is the self-send LOOPBACK, which delivers
+ * synchronously — `wait: "sent"` on it observes `status: "sent"` immediately
+ * rather than polling to the 15s ceiling.
  */
 import { describe, it, expect } from "vitest";
 import { E2AClient } from "../../src/v1/client.js";
@@ -77,6 +78,47 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
       expect(replay.key).toBe(first.key);
     } finally {
       await client.account.apiKeys.delete(first.id);
+    }
+  });
+
+  it("contacts.update / contacts.setOutreach without an etag are unconditional", async () => {
+    // Regression (staging release-pipeline run 30612956986): the generated
+    // layer used to emit `If-Match: undefined` when no etag was supplied,
+    // turning both calls into conditional requests that always failed 412 —
+    // on update the stored validator never matches "undefined", and a
+    // conditional request never creates a first enrolment. Only a live server
+    // can prove the header truly stays off the wire end to end.
+    const email = `${slug("sdkc-ifm")}@agents.e2a.dev`;
+    const address = `${slug("sdkc-ifm-c")}@fund.vc`;
+    await client.agents.create({ email });
+    try {
+      await client.contacts.create({ address });
+      try {
+        const updated = await client.contacts.update(address, { displayName: "Unconditional" });
+        expect(updated.displayName).toBe("Unconditional");
+
+        const enrolment = await client.contacts.setOutreach(email, address, { stage: "touch1" });
+        expect(enrolment.stage).toBe("touch1");
+
+        // A caller-supplied etag still arrives verbatim: the current validator
+        // is accepted, and replaying it after the write proves the header was
+        // really sent (412 on the now-stale value).
+        const { etag } = await client.contacts.getWithETag(address);
+        expect(etag).toBeTruthy();
+        const guarded = await client.contacts.update(
+          address,
+          { displayName: "Guarded" },
+          { ifMatch: etag },
+        );
+        expect(guarded.displayName).toBe("Guarded");
+        await expect(
+          client.contacts.update(address, { displayName: "Stale" }, { ifMatch: etag }),
+        ).rejects.toMatchObject({ status: 412 });
+      } finally {
+        await client.contacts.delete(address);
+      }
+    } finally {
+      await client.agents.delete(email, { permanent: true });
     }
   });
 });

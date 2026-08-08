@@ -435,6 +435,67 @@ VACUUM users;`,
 	})
 }
 
+func TestRunMigrations_NoTransactionConcurrentIndexRetryRejectsInvalidIndex(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	const (
+		filename = "invalid_concurrent_index.sql"
+		table    = "migrate_test_invalid_concurrent"
+		index    = "migrate_test_invalid_concurrent_idx"
+	)
+	_, _ = pool.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+index)
+	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS `+table)
+	_, _ = pool.Exec(ctx, "DELETE FROM schema_migrations WHERE filename = $1", filename)
+	if _, err := pool.Exec(ctx,
+		`CREATE TABLE `+table+` (value integer NOT NULL);
+		 INSERT INTO `+table+` (value) VALUES (1), (1)`,
+	); err != nil {
+		t.Fatalf("seed duplicate values: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP INDEX CONCURRENTLY IF EXISTS `+index)
+		_, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS `+table)
+		_, _ = pool.Exec(context.Background(), "DELETE FROM schema_migrations WHERE filename = $1", filename)
+	})
+
+	fsys := stubFS(map[string]string{
+		filename: `-- e2a:no-transaction
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ` + index + ` ON ` + table + ` (value);`,
+	})
+
+	if err := identity.RunMigrations(ctx, pool, fsys, identity.ModeAuto); err == nil {
+		t.Fatal("first concurrent unique build unexpectedly succeeded on duplicate values")
+	}
+	var valid bool
+	if err := pool.QueryRow(ctx,
+		`SELECT indisvalid FROM pg_index WHERE indexrelid = $1::regclass`,
+		index,
+	).Scan(&valid); err != nil {
+		t.Fatalf("read interrupted-build artifact: %v", err)
+	}
+	if valid {
+		t.Fatal("failed concurrent build did not leave the expected invalid index")
+	}
+
+	err := identity.RunMigrations(ctx, pool, fsys, identity.ModeAuto)
+	if err == nil {
+		t.Fatal("retry silently recorded an invalid same-name index")
+	}
+	if !strings.Contains(err.Error(), index) || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("retry error does not identify invalid index recovery: %v", err)
+	}
+	var recorded int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE filename = $1`,
+		filename,
+	).Scan(&recorded); err != nil {
+		t.Fatalf("read tracker: %v", err)
+	}
+	if recorded != 0 {
+		t.Fatalf("invalid concurrent index migration recorded %d time(s), want 0", recorded)
+	}
+}
+
 // TestRunMigrations_NoTransactionDirective_RejectsMultiStatement
 // verifies that a migration with the directive AND multiple statements
 // fails with a clear, actionable error — rather than the confusing

@@ -35,6 +35,17 @@ test("the e2a skill description is quoted YAML", async () => {
   assert.match(source, /^description: "(?:[^"\\]|\\.)*"$/m);
 });
 
+test("the e2a skill teaches concise multipart email composition", async () => {
+  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
+
+  assert.match(source, /### Compose before sending/);
+  assert.match(source, /Lead with the outcome, decision, request, or blocker/i);
+  assert.match(source, /120[–-]180 words/);
+  assert.match(source, /complete plain-text body/i);
+  assert.match(source, /equivalent `html` body/i);
+  assert.match(source, /message can be understood in ten seconds/i);
+});
+
 test("the e2a skill bootstraps and verifies an MCP connection", async () => {
   const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
   const bootstrap = source.match(
@@ -56,6 +67,37 @@ test("the e2a skill bootstraps and verifies an MCP connection", async () => {
   assert.match(bootstrap, /list_messages/);
   assert.match(bootstrap, /resume.*original/i);
   assert.match(bootstrap, /never ask.*API key/i);
+});
+
+test("the e2a skill teaches the contacts and outreach loop without overclaiming wake-up", async () => {
+  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
+  const outreach = source.match(
+    /### Manage contacts and outreach \(beta\)[\s\S]*?(?=\n### |\n## )/,
+  )?.[0] ?? "";
+
+  assert.match(outreach, /import_contacts/);
+  assert.match(outreach, /list_outreach_contacts/);
+  assert.match(outreach, /replied=false/);
+  assert.match(outreach, /suppressed=false/);
+  assert.match(outreach, /next_action_before/);
+  assert.match(outreach, /last_outbound_before/);
+  assert.match(outreach, /reply_to_message/);
+  assert.match(outreach, /set_outreach_contact/);
+  assert.match(outreach, /deployed webhook/i);
+  assert.match(outreach, /does not launch.*local coding-agent/i);
+  // Derive the expected total from the frozen tool-name baseline rather than
+  // repeating it here: hardcoding the count meant every tool addition had to
+  // update the skill AND this assertion, and the second one was easy to miss.
+  const toolNames = JSON.parse(await readFile("mcp/tool-names.v1.json", "utf8"));
+  const claim = source.match(
+    /MCP surface is \*\*(\d+) tools\*\* \((\d+) runtime\/inbox \+ (\d+) admin\/setup\)/,
+  );
+  assert.ok(claim, "the e2a skill must state the MCP surface size");
+  const [, total, runtime, admin] = claim.map(Number);
+  assert.equal(total, toolNames.length,
+    "skill tool count must match mcp/tool-names.v1.json");
+  assert.equal(runtime + admin, total,
+    "the runtime + admin split must add up to the stated total");
 });
 
 test("the setup guide reaches a verified first inbox", async () => {

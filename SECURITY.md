@@ -37,15 +37,15 @@ anonymous. We don't currently run a paid bounty program.
 
 | Version | Status |
 |---------|--------|
-| `1.x` (current release-candidate line) | ✅ Receives security fixes |
+| `1.x` (current line; `/v1` GA as of 1.5.0) | ✅ Receives security fixes |
 | `0.x` (pre-GA) | ❌ Please upgrade to the latest 1.x release |
 
-e2a has not yet published its official GA release. The latest `1.x`
-release-candidate receives security fixes; existing `v1.0.x` application and
-cherry-pick tags do not establish the stable `/v1` API baseline. Fixes are
-delivered in the latest `1.x` release (we don't backport to older `1.x` patch
-versions). Self-hosters running pinned versions should plan to upgrade promptly
-when an advisory is published.
+The `/v1` API is generally available as of e2a **1.5.0**; earlier `v1.0.x`
+application and cherry-pick tags predate the API freeze and do not establish
+the stable `/v1` API baseline. The latest `1.x` release receives security
+fixes. Fixes are delivered in the latest `1.x` release (we don't backport to
+older `1.x` patch versions). Self-hosters running pinned versions should plan
+to upgrade promptly when an advisory is published.
 
 ## Scope
 
@@ -68,8 +68,9 @@ In scope (please report):
 Out of scope:
 
 - Deployments running with the example `change-me-in-production` HMAC
-  secret (the server refuses to start with it; reaching this state
-  requires deliberate misconfiguration)
+  secret (the server refuses to start with it only when `env=production`;
+  outside production the example value is the shipped default, and such a
+  deployment must never be exposed to the network)
 - Lack of features (e.g. "no rate limit on X" — open an issue or PR)
 - Vulnerabilities in dependencies that don't have a reachable code
   path through e2a (please file with the upstream project)

@@ -197,27 +197,28 @@ type API struct {
 	// it when the deployment serves the API on a different host than the web
 	// app (e.g. api.e2a.dev vs e2a.dev). The OAuth authorization_endpoint
 	// and login/consent pages stay on publicURL (the browser-facing web app).
-	apiURL              string
-	production          bool
-	sendLimit           *ratelimit.Limiter
-	regLimit            *ratelimit.Limiter
-	pollLimit           *ratelimit.Limiter
-	feedbackLimit       *ratelimit.Limiter
-	dcrLimit            *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
-	downloadLimit       *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
-	unsubscribeLimit    *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
-	approvalSigner      *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
-	notifyEnq           NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
-	oauthProvider       fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
-	oauthStorage        *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
-	signer              *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
-	idempotency         *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
-	enforcer            limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
-	usageStore          *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
-	internalAPISecret   string                // optional; when empty, /api/internal/* endpoints return 503
-	provisioningEnabled bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
-	provisioningSecret  string                // required with provisioningEnabled; signs /api/internal/users/provision
-	billingHookURL      string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	apiURL                string
+	production            bool
+	sendLimit             *ratelimit.Limiter
+	regLimit              *ratelimit.Limiter
+	pollLimit             *ratelimit.Limiter
+	feedbackLimit         *ratelimit.Limiter
+	dcrLimit              *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
+	downloadLimit         *ratelimit.Limiter    // attachment byte-download — capability-token route (no bearer), per-IP
+	unsubscribeLimit      *ratelimit.Limiter    // managed unsubscribe — separate capability-token budget, per-IP
+	approvalSigner        *approvaltoken.Signer // optional; if nil, magic-link endpoints return 404
+	notifyEnq             NotifyEnqueuer        // optional; if nil, holdForApproval persists the hold but sends no notification
+	oauthProvider         fosite.OAuth2Provider // optional; if nil, /oauth2/* endpoints return 404
+	oauthStorage          *oauth.Storage        // optional; consent handler needs Pool() for cross-package tx
+	signer                *agentauth.Signer     // optional; nil ⇒ JWKS serves an empty set (agent-auth disabled)
+	idempotency           *idempotency.Store    // optional; when nil, Idempotency-Key header is ignored
+	enforcer              limits.Enforcer       // optional; when nil, all limit checks are skipped (effectively unlimited)
+	outboundFooterEnabled bool                  // config outbound_footer.enabled — master switch for the send-time outbound footer
+	usageStore            *usage.Store          // optional; needed by handleGetMyLimits to surface current counts
+	internalAPISecret     string                // optional; when empty, /api/internal/* endpoints return 503
+	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
+	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
+	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -455,6 +456,67 @@ func (a *API) SetIdempotencyStore(s *idempotency.Store) { a.idempotency = s }
 // unlimited capacity. The cmd/e2a runtime always sets it; tests that
 // don't care about limits omit it and continue to work as before.
 func (a *API) SetEnforcer(e limits.Enforcer) { a.enforcer = e }
+
+// SetOutboundFooterEnabled wires the outbound_footer.enabled master switch.
+// False (the default) keeps the outbound-footer resolution entirely off —
+// no limits read, no footer, zero behavior change.
+func (a *API) SetOutboundFooterEnabled(enabled bool) { a.outboundFooterEnabled = enabled }
+
+// resolveOutboundFooter decides whether an external outbound send carries the
+// operator-configured outbound footer:
+//
+//	append := cfg.Enabled
+//	       && (row present ? row.OutboundFooterEnabled : cfg.DefaultEnabled)
+//	       && user.AccountClass == standard
+//
+// The row-present/row-absent ternary is exactly what the enforcer's Get
+// already resolves (limits.Defaults.OutboundFooterEnabled is wired from
+// outbound_footer.default_enabled), so the decision rides the existing limits
+// cache + invalidate flow untouched. Fail-closed: any limits read error means
+// NO footer — a missing footer is a lost impression, while a wrongly-added
+// footer on entitled-off mail is a customer-facing bug. Non-standard account
+// classes (internal/system/demo — probers, monitors, conformance accounts)
+// never get the footer, so body-asserting gates stay green. Strict equality
+// also means an EMPTY AccountClass (principals not resolved via API key) gets
+// no footer — the same fail-closed direction, deliberately.
+func (a *API) resolveOutboundFooter(ctx context.Context, user *identity.User) bool {
+	if !a.outboundFooterEnabled || a.enforcer == nil {
+		return false
+	}
+	if user == nil || usage.AccountClass(user.AccountClass) != usage.ClassStandard {
+		return false
+	}
+	lim, err := a.enforcer.Get(ctx, user.ID)
+	if err != nil {
+		return false
+	}
+	return lim.OutboundFooterEnabled
+}
+
+// OutboundFooterForAccount is the exported form of resolveOutboundFooterByUserID
+// for out-of-package composers that finalize held mail — today the hitlworker
+// TTL sweep, whose auto-approve composes at expiry time and therefore needs
+// the same per-account decision the human approve funnel resolves. Fail-closed
+// like the internal resolver.
+func (a *API) OutboundFooterForAccount(ctx context.Context, userID string) bool {
+	return a.resolveOutboundFooterByUserID(ctx, userID)
+}
+
+// resolveOutboundFooterByUserID is resolveOutboundFooter for call sites that
+// hold only the owning account's user id (the HITL approval funnel, where the
+// held row composes at approval time). Loads the user for its account_class;
+// fail-closed on any lookup error. The master-switch short-circuit keeps the
+// common self-host case (feature off) free of the extra user read.
+func (a *API) resolveOutboundFooterByUserID(ctx context.Context, userID string) bool {
+	if !a.outboundFooterEnabled || a.enforcer == nil {
+		return false
+	}
+	u, err := a.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return false
+	}
+	return a.resolveOutboundFooter(ctx, u)
+}
 
 // SendLimitAllow exposes the per-agent outbound rate limiter so the v1 httpapi
 // layer shares the *same* token bucket as the legacy handlers (a caller hitting
@@ -918,18 +980,6 @@ func (a *API) WWWAuthenticateChallenge(r *http.Request) string {
 	return a.authChallenge(r, err)
 }
 
-// resolveAgentForUser loads an agent by email address and verifies the user owns it.
-func (a *API) resolveAgentForUser(r *http.Request, email string, user *identity.User) (*identity.AgentIdentity, error) {
-	agent, err := a.store.GetAgentByEmail(r.Context(), email)
-	if err != nil {
-		return nil, fmt.Errorf("agent not found")
-	}
-	if agent.UserID != user.ID {
-		return nil, fmt.Errorf("forbidden")
-	}
-	return agent, nil
-}
-
 // --- Domain Management ---
 
 // dnsRecordCheck holds the per-record probe results for the verify
@@ -1079,6 +1129,10 @@ var errHoldAttachments = errors.New("failed to serialize attachments")
 // legacy handler and the v1 httpapi layer call it so there is exactly one
 // hold-and-notify path (api-v1-redesign — outbound extraction).
 func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string) (*identity.Message, error) {
+	return a.HoldForApprovalCoreThreaded(ctx, agent, req, msgType, replyToEmailMessageID, "", nil)
+}
+
+func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID, parentMessageID string, idemCompleteTx AcceptIdemCompleter) (*identity.Message, error) {
 	var attachmentsJSON []byte
 	if len(req.Attachments) > 0 {
 		b, err := json.Marshal(req.Attachments)
@@ -1098,8 +1152,8 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 		// accept-tx. A same-tx enqueue failure fails the whole hold (500) — the same
 		// DB fault would have failed the message insert anyway.
 		if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
-			m, err := a.store.CreatePendingOutboundMessageManagedTx(
-				ctx, tx, agent.ID,
+			m, err := a.store.CreatePendingOutboundMessageManagedThreadedTx(
+				ctx, tx, parentMessageID, agent.ID,
 				req.To, req.CC, req.BCC,
 				req.Subject, req.Body, req.HTMLBody,
 				attachmentsJSON,
@@ -1116,6 +1170,26 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 			if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
 				return err
 			}
+			// Preserve the caller's schedule across the hold (#815). The column is
+			// stamped in the same tx as the row so the held draft carries send_at
+			// through to the approval path, which re-arms it. Mirrors the direct
+			// scheduled-accept path's StampScheduledAtTx.
+			if req.ScheduledAt != nil {
+				if err := a.store.StampScheduledAtTx(ctx, tx, m.ID, *req.ScheduledAt); err != nil {
+					return err
+				}
+				m.ScheduledAt = req.ScheduledAt
+			}
+			if idemCompleteTx != nil {
+				if err := idemCompleteTx(ctx, tx, &OutboundResult{
+					Held:              true,
+					PendingMessageID:  m.ID,
+					ApprovalExpiresAt: m.ApprovalExpiresAt,
+					ScheduledAt:       m.ScheduledAt,
+				}); err != nil {
+					return err
+				}
+			}
 			msg = m
 			return nil
 		}); txErr != nil {
@@ -1123,20 +1197,44 @@ func (a *API) HoldForApprovalCore(ctx context.Context, agent *identity.AgentIden
 			return nil, txErr
 		}
 	} else {
-		// No notifier configured: plain hold, no notification (behavior unchanged).
-		m, err := a.store.CreatePendingOutboundMessageManaged(
-			ctx, agent.ID,
-			req.To, req.CC, req.BCC,
-			req.Subject, req.Body, req.HTMLBody,
-			attachmentsJSON,
-			msgType, req.ConversationID, replyToEmailMessageID, req.ReplyTo,
-			agent.HITLTTLSeconds, req.Unsubscribe != nil,
-		)
-		if err != nil {
-			log.Printf("[api] hitl: create pending message: agent=%s err=%v", agent.ID, err)
-			return nil, err
+		// No notifier configured: the row and optional keyed replay response still
+		// share one transaction, so a crash cannot create a second held thread.
+		if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
+			m, err := a.store.CreatePendingOutboundMessageManagedThreadedTx(
+				ctx, tx, parentMessageID, agent.ID,
+				req.To, req.CC, req.BCC,
+				req.Subject, req.Body, req.HTMLBody,
+				attachmentsJSON,
+				msgType, req.ConversationID, replyToEmailMessageID, req.ReplyTo,
+				agent.HITLTTLSeconds, req.Unsubscribe != nil,
+			)
+			if err != nil {
+				return err
+			}
+			// Preserve the caller's schedule across the hold (#815) — see the
+			// notifier branch above.
+			if req.ScheduledAt != nil {
+				if err := a.store.StampScheduledAtTx(ctx, tx, m.ID, *req.ScheduledAt); err != nil {
+					return err
+				}
+				m.ScheduledAt = req.ScheduledAt
+			}
+			if idemCompleteTx != nil {
+				if err := idemCompleteTx(ctx, tx, &OutboundResult{
+					Held:              true,
+					PendingMessageID:  m.ID,
+					ApprovalExpiresAt: m.ApprovalExpiresAt,
+					ScheduledAt:       m.ScheduledAt,
+				}); err != nil {
+					return err
+				}
+			}
+			msg = m
+			return nil
+		}); txErr != nil {
+			log.Printf("[api] hitl: create pending message: agent=%s err=%v", agent.ID, txErr)
+			return nil, txErr
 		}
-		msg = m
 	}
 
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
@@ -1159,8 +1257,16 @@ type OutboundResult struct {
 	// Status is the send progression the wire maps to `status`. Empty on the
 	// synchronous path (the caller renders "sent"); "accepted" on the async path
 	// (durably persisted + queued; the terminal outcome arrives via email.sent /
-	// email.failed). See async-message-pipeline.md, slice C.
+	// email.failed); "scheduled" when the send was deferred to a future instant
+	// (ScheduledAt). See async-message-pipeline.md, slice C.
 	Status string
+	// ScheduledAt is the future instant a queued send will be submitted. Set when
+	// Status=="scheduled" (direct scheduled accept) AND on a Held result whose
+	// draft carried a future send_at (#815) — the hold preserves the schedule so
+	// approval can re-arm it. It must be carried on BOTH the live return and the
+	// in-transaction idempotency completion so a keyed replay renders the identical
+	// view (never a bare "accepted"/"pending_review" that has silently dropped it).
+	ScheduledAt *time.Time
 }
 
 // OutboundError carries an HTTP status + message so both the legacy handler
@@ -1262,6 +1368,10 @@ func resolveOutboundConversationID(explicit, msgType string, referenced *identit
 }
 
 func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx AcceptIdemCompleter) (*OutboundResult, *OutboundError) {
+	parentMessageID := ""
+	if msgType == "reply" && referenced != nil {
+		parentMessageID = referenced.ID
+	}
 	// Validate the canonical envelope before screening can durably hold the
 	// draft, but deliberately do not mint while it is pending human review.
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, false); uerr != nil {
@@ -1281,6 +1391,16 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// the same value.
 	req.ConversationID = resolveOutboundConversationID(req.ConversationID, msgType, referenced)
 
+	// A future send_at can never be honored for a self-send: delivery is an
+	// immediate in-process loopback (both on the direct path and on approval of a
+	// held self-send), which has no scheduled arm. Reject up front — BEFORE the
+	// review hold — so the schedule is never silently persisted-then-dropped. This
+	// supersedes the old "hold takes precedence over the loopback check" behavior,
+	// under which a held self-send discarded send_at without a word (#815).
+	if req.ScheduledAt != nil && isSelfSend(req, agent.EmailAddress()) {
+		return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "scheduled send (send_at) is not supported when delivering to the agent's own address"}
+	}
+
 	// Outbound screening (Slice 5): the recipient gate (outbound_policy) + content
 	// scan (outbound_scan) combine into one applied action. block ⇒ refuse;
 	// review ⇒ hold; flag ⇒ send + annotate; allow ⇒ send.
@@ -1299,7 +1419,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// fully own the hold decision — hitl_enabled/hitl_mode were retired in
 	// Slice 5b (their behavior is mapped forward by migration 042).
 	if verdict.Review() {
-		msg, err := a.HoldForApprovalCore(ctx, agent, req, msgType, replyToEmailMessageID)
+		msg, err := a.HoldForApprovalCoreThreaded(ctx, agent, req, msgType, replyToEmailMessageID, parentMessageID, idemCompleteTx)
 		if err != nil {
 			if errors.Is(err, errHoldAttachments) {
 				return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to serialize attachments"}
@@ -1311,7 +1431,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		if verdict.Annotate() {
 			a.annotateAndAudit(ctx, agent, msg.ID, req, verdict)
 		}
-		return &OutboundResult{Held: true, PendingMessageID: msg.ID, ApprovalExpiresAt: msg.ApprovalExpiresAt}, nil
+		return &OutboundResult{Held: true, PendingMessageID: msg.ID, ApprovalExpiresAt: msg.ApprovalExpiresAt, ScheduledAt: msg.ScheduledAt}, nil
 	}
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, true); uerr != nil {
 		return nil, uerr
@@ -1321,7 +1441,10 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// §7.2 / async-send-contract.md): billing must not run ahead of a durable
 	// message row, or a crash between meter and persist bills an invisible send.
 	if isSelfSend(req, agent.EmailAddress()) {
-		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, idemCompleteTx)
+		// Self-send is an immediate in-process loopback; a future send_at was
+		// already rejected up front (before the review hold), so req.ScheduledAt is
+		// nil here by construction.
+		outMsg, err := a.performSelfSend(ctx, agent, req, msgType, parentMessageID, idemCompleteTx)
 		if err != nil {
 			log.Printf("[api] self-send failed: agent=%s error=%v", agent.EmailAddress(), err)
 			return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "self-send failed"}
@@ -1347,6 +1470,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		log.Printf("[api] outbound queue unavailable: agent=%s to_count=%d to_domains=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To))
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "outbound delivery queue unavailable"}
 	}
+	// Outbound branding/disclosure footer: resolved here — strictly after the
+	// self-send branch (loopback delivery never runs Sender.compose, so
+	// self-sends never carry it) and after the hold branch (held mail
+	// re-resolves at approval time, when it actually composes) — then frozen
+	// into the composed bytes below with the rest of the message.
+	req.AppendOutboundFooter = a.resolveOutboundFooter(ctx, user)
 	comp, cerr := a.sender.ComposeForAccept(agent, req)
 	if cerr != nil {
 		if sizeErr := composedSizeOutboundError(cerr); sizeErr != nil {
@@ -1358,6 +1487,16 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		log.Printf("[api] async compose failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), cerr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: fmt.Sprintf("compose failed: %v", cerr)}
 	}
+	// Scheduled send (migration 084): a future req.ScheduledAt defers WHEN the
+	// send job runs (river ScheduledAt) — the message is still accepted + queued
+	// atomically here, and the row stays delivery_status='accepted'. The edge has
+	// already validated that ScheduledAt, when set, is in the future and within
+	// the max horizon; a nil/past value is an ordinary immediate send.
+	scheduledAt := req.ScheduledAt
+	acceptStatus := "accepted"
+	if scheduledAt != nil {
+		acceptStatus = "scheduled"
+	}
 	var accepted *identity.Message
 	// Crash boundary:
 	//   - Before Commit returns, WithTx rolls back the message, River job, and
@@ -1368,11 +1507,22 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	//     202/message id. Without a key, that ambiguous retry is a new request and
 	//     may enqueue a duplicate (the public guarantee is at-least-once).
 	if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
-		msg, err := a.store.CreateOutboundMessageTx(ctx, tx, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
+		msg, err := a.store.CreateOutboundMessageThreadedTx(ctx, tx, parentMessageID, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
 		if err != nil {
 			return err
 		}
-		jobID, err := a.outboundEnq.EnqueueSendTx(ctx, tx, msg.ID)
+		// Stamp the schedule marker + enqueue the job to run at that instant. Both
+		// happen in this same tx, so scheduled_at and the River job's ScheduledAt
+		// are committed together with the message.
+		var jobID int64
+		if scheduledAt != nil {
+			if err := a.store.StampScheduledAtTx(ctx, tx, msg.ID, *scheduledAt); err != nil {
+				return err
+			}
+			jobID, err = a.outboundEnq.EnqueueScheduledSendTx(ctx, tx, msg.ID, *scheduledAt)
+		} else {
+			jobID, err = a.outboundEnq.EnqueueSendTx(ctx, tx, msg.ID)
+		}
 		if err != nil {
 			return err
 		}
@@ -1380,7 +1530,7 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 			return err
 		}
 		if idemCompleteTx != nil {
-			if err := idemCompleteTx(ctx, tx, &OutboundResult{MessageID: msg.ID, Status: "accepted"}); err != nil {
+			if err := idemCompleteTx(ctx, tx, &OutboundResult{MessageID: msg.ID, Status: acceptStatus, ScheduledAt: scheduledAt}); err != nil {
 				return err
 			}
 		}
@@ -1394,8 +1544,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		a.annotateAndAudit(ctx, agent, accepted.ID, req, verdict)
 	}
 	slug, _, _ := strings.Cut(agent.EmailAddress(), "@")
-	log.Printf("[mail:%s] dir=outbound type=%s status=accepted from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
-	return &OutboundResult{MessageID: accepted.ID, Status: "accepted", SentAs: comp.SentAs, Method: comp.Method}, nil
+	scheduledLog := "-"
+	if scheduledAt != nil {
+		scheduledLog = scheduledAt.UTC().Format(time.RFC3339)
+	}
+	log.Printf("[mail:%s] dir=outbound type=%s status=%s scheduled_at=%s from=%s to_count=%d to_domains=%v slug=%s conv_id=%s subject_len=%d", accepted.ID, msgType, acceptStatus, scheduledLog, agent.EmailAddress(), len(comp.To), logredact.AddressDomains(comp.To), slug, req.ConversationID, utf8.RuneCountInString(req.Subject))
+	return &OutboundResult{MessageID: accepted.ID, Status: acceptStatus, ScheduledAt: scheduledAt, SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
 // SendTestCore accepts (or HITL-holds) a platform test email to the agent's
@@ -1859,12 +2013,14 @@ func ValidateRecipients(groups ...[]string) error { return validateRecipients(gr
 // recipient item in to/cc/bcc, a reply_to override, or an agent email — as the
 // FULL string (optional display name + <addr>), so a multi-megabyte display
 // name can't ride in on an otherwise-valid address. 320 is the classic
-// 64+1+255 addr-spec ceiling with the display-name form held to the same
+// historical addr-spec envelope with the display-name form held to the same
 // budget. Counted in Unicode code points (runes), NOT bytes, to match the
 // OpenAPI maxLength semantics of the /v1 request schemas (JSON Schema counts
 // code points; Huma validates with utf8.RuneCountInString). The /v1 schemas
 // declare the same value declaratively; this runtime check is the shared
-// backstop for every recipient list that reaches the send path.
+// backstop for every recipient list that reaches the send path. After parsing,
+// outbound.ValidateMailboxAddress separately enforces SMTP's octet limits on
+// the addr-spec itself.
 const MaxAddressLen = 320
 
 func validateRecipients(groups ...[]string) error {
@@ -1878,7 +2034,11 @@ func validateRecipients(groups ...[]string) error {
 			if n := utf8.RuneCountInString(addr); n > MaxAddressLen {
 				return fmt.Errorf("recipient address too long — %d characters, max %d (display name + address combined)", n, MaxAddressLen)
 			}
-			if _, err := mail.ParseAddress(addr); err != nil {
+			parsed, err := mail.ParseAddress(addr)
+			if err != nil {
+				return fmt.Errorf("invalid recipient %q: %w", addr, err)
+			}
+			if err := outbound.ValidateMailboxAddress(parsed.Address); err != nil {
 				return fmt.Errorf("invalid recipient %q: %w", addr, err)
 			}
 		}

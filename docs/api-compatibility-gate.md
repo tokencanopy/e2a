@@ -23,23 +23,23 @@ event- or error-specific schema lookup.
 
 ## Freeze baseline
 
-The cumulative pre-release `/v1` freeze anchor is commit
-`af5d3c7486db76cf7e62ba18763b47e4a5b95b35`, the mainline contract immediately
-before the strict GA policy was enabled. This intentionally comes after the
-pre-GA bounds program; an earlier gate-introduction commit would make those
-approved pre-freeze request bounds look retroactively breaking. Until the first
-explicitly announced API GA release tag exists, release audits compare the
-candidate against this anchor as well as the normal pull-request base:
+**`/v1` went generally available with `v1.5.0` (2026-08-02).** That tag is the
+compatibility baseline: release audits compare the candidate against the most
+recent GA tag, in addition to the normal pull-request base.
 
 ```sh
-make openapi-compat-check \
-  OPENAPI_BASE=af5d3c7486db76cf7e62ba18763b47e4a5b95b35:api/openapi.yaml
+make openapi-compat-check OPENAPI_BASE=v1.5.0:api/openapi.yaml
 ```
 
 Existing `v1.0.x` tags are application/cherry-pick releases that predate the
-API contract freeze; they are not `/v1` compatibility baselines. The first
-official API GA tag supersedes the commit anchor, and every later release must
-compare against the most recent GA tag.
+API contract freeze; they are not `/v1` compatibility baselines.
+
+Superseded — kept because audits of pre-GA history still need it: before a GA
+tag existed, the anchor was commit `af5d3c7486db76cf7e62ba18763b47e4a5b95b35`,
+the mainline contract immediately before the strict GA policy was enabled. It
+deliberately sits after the pre-GA bounds program, because an earlier
+gate-introduction commit would make those approved pre-freeze request bounds
+look retroactively breaking.
 
 ## Policy
 

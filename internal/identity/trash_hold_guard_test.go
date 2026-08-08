@@ -113,7 +113,7 @@ func TestApproveAndAcceptSkipsTrashedAgentHold(t *testing.T) {
 		To: []string{"x@example.com"}, Subject: "held subject", Method: "smtp",
 		EnvelopeFrom: "bot@trash-guard-app.example.com", SentAs: "relay", Raw: []byte("raw"),
 	}
-	_, err = store.ApproveAndAccept(ctx, msg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueue, nil)
+	_, err = store.ApproveAndAccept(ctx, msg.ID, "", identity.MessageStatusReviewExpiredApproved, false, acc, enqueue, nil, nil)
 	if !errors.Is(err, identity.ErrNotPendingApproval) {
 		t.Fatalf("ApproveAndAccept on trashed agent's hold = %v, want ErrNotPendingApproval (no-op)", err)
 	}
@@ -232,7 +232,7 @@ func TestRestoreAgentShiftsHoldClockAndKeepsHoldPending(t *testing.T) {
 		`UPDATE messages SET approval_expires_at = now() - interval '5 minutes' WHERE id=$1`, msg.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RestoreAgent(ctx, a.ID, user.ID); err != nil {
+	if _, err := store.RestoreAgent(ctx, a.ID, user.ID); err != nil {
 		t.Fatalf("RestoreAgent: %v", err)
 	}
 

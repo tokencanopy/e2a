@@ -435,6 +435,23 @@ func TestSendWorker_FailsRampDeferredMessagePastHorizon(t *testing.T) {
 	}
 }
 
+// A scheduled send measures its retry horizon from scheduled_at, not accept:
+// accepted 10 days ago but firing ~now, a ramp deferral must snooze/retry — NOT
+// terminally fail as the immediate-send case above does at the same accept age.
+// Guards the fix for the long-scheduled-send false-failure blocker.
+func TestSendWorker_ScheduledSendHorizonMeasuredFromScheduledAt(t *testing.T) {
+	j := acceptedJob("msg_sched_horizon")
+	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
+	j.AcceptedAt = time.Now().Add(-10 * 24 * time.Hour) // long before fire
+	j.ScheduledAt = time.Now()                          // just fired — inside the horizon
+	st := &fakeStore{job: j}
+	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: false, RetryAt: time.Now().Add(time.Hour)}}
+	err := outboundsend.NewSendWorker(st, &fakeDeliverer{}, gate).Work(context.Background(), job(j.MessageID, 1))
+	if len(st.failed) != 0 {
+		t.Fatalf("a just-fired long-scheduled send must not be terminated on a ramp deferral; failed=%v err=%v", st.failed, err)
+	}
+}
+
 func TestSendWorker_RetryableFailureDoesNotMarkFailed(t *testing.T) {
 	st := &fakeStore{job: acceptedJob("msg_1")}
 	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("transient 421")}}

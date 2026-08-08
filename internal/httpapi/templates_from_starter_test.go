@@ -80,9 +80,9 @@ func TestCreateTemplateFromStarterOverrides(t *testing.T) {
 func TestCreateTemplateFromStarterExclusiveWithLiteralSource(t *testing.T) {
 	srv := testServer(t)
 	for part, extra := range map[string]map[string]any{
-		"subject":   {"subject": "literal"},
-		"text":      {"text": "literal"},
-		"html": {"html": "<p>literal</p>"},
+		"subject": {"subject": "literal"},
+		"text":    {"text": "literal"},
+		"html":    {"html": "<p>literal</p>"},
 	} {
 		payload := map[string]any{"from_starter": "receipt"}
 		for k, v := range extra {

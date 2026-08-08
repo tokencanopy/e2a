@@ -44,8 +44,35 @@ type DBEnforcer struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedLimits
+
+	// gen is the process-wide invalidation epoch. Get samples it (via
+	// cacheGet, under mu) strictly BEFORE its DB read and hands it back
+	// to cachePut, which stores the fill only if the epoch has not
+	// advanced in between. Without that check this interleaving silently
+	// defeats an explicit invalidation:
+	//
+	//	T1 Get        -> cache miss, reads the OLD account_limits row
+	//	T2 sidecar    -> commits NEW limits, POSTs /api/internal/limits/invalidate
+	//	T2 Invalidate -> evicts the entry
+	//	T1 cachePut   -> stores the PRE-write limits with a FRESH TTL
+	//
+	// A user who had just upgraded would then keep hitting 402
+	// limit_exceeded for up to cacheTTL (60s in prod) even though
+	// billing did everything right — defeating the one mechanism billing
+	// has to make an upgrade take effect immediately. A counter rather
+	// than a timestamp because two events inside one clock tick must
+	// still compare as different.
+	//
+	// The epoch is process-wide, not per-user — see Invalidate for why
+	// (memory bound) and for the tradeoff that buys.
+	gen uint64
 }
 
+// cachedLimits is one user's cache slot: the resolved Limits and their
+// expiry. Invalidation state does not live here — the invalidation
+// epoch is the process-wide DBEnforcer.gen, which is what lets
+// Invalidate delete slots outright instead of retaining per-user
+// tombstones.
 type cachedLimits struct {
 	limits  Limits
 	expires time.Time
@@ -77,9 +104,13 @@ func newEnforcerWithReader(reader limitsReader, counter Counter, defaults Defaul
 }
 
 func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
-	if cached, ok := e.cacheGet(userID); ok {
+	cached, gen, ok := e.cacheGet(userID)
+	if ok {
 		return cached, nil
 	}
+	// gen was sampled together with the miss, i.e. strictly BEFORE the
+	// DB read below. cachePut re-checks it so a fill that raced an
+	// Invalidate is dropped instead of re-caching pre-write limits.
 	row, found, err := e.store.Get(ctx, userID)
 	if err != nil {
 		return Limits{}, err
@@ -89,21 +120,62 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 		resolved = row
 	} else {
 		resolved = Limits{
-			PlanCode:         e.defaults.PlanCode,
-			MaxAgents:        e.defaults.MaxAgents,
-			MaxDomains:       e.defaults.MaxDomains,
-			MaxMessagesMonth: e.defaults.MaxMessagesMonth,
-			MaxStorageBytes:  e.defaults.MaxStorageBytes,
+			PlanCode:              e.defaults.PlanCode,
+			MaxAgents:             e.defaults.MaxAgents,
+			MaxDomains:            e.defaults.MaxDomains,
+			MaxMessagesMonth:      e.defaults.MaxMessagesMonth,
+			MaxStorageBytes:       e.defaults.MaxStorageBytes,
+			OutboundFooterEnabled: e.defaults.OutboundFooterEnabled,
 		}
 	}
-	e.cachePut(userID, resolved)
+	e.cachePut(userID, resolved, gen)
 	return resolved, nil
 }
 
+// Invalidate evicts the user's cached Limits and advances the
+// process-wide invalidation epoch, so any fill already in flight (one
+// that read account_limits before the caller's write committed) is
+// discarded by cachePut rather than stored with a fresh TTL.
+//
+// The epoch is process-wide rather than per-user so that Invalidate can
+// DELETE the slot instead of retaining a per-user generation tombstone.
+// A per-user generation must survive the invalidate (an uncached user
+// is precisely the racing case: miss → DB read → invalidate → cachePut),
+// which means every distinct userID ever passed here keeps a map entry
+// for the process lifetime — an unbounded-growth vector, since this is
+// reachable via the HMAC-authenticated /api/internal/limits/invalidate
+// endpoint and the map has no TTL sweep. The global epoch preserves the
+// race guard — it drops a strict superset of the fills a per-user
+// counter would drop — while making deletion the only map effect, so
+// the map is again bounded by users actually cached by real fills.
+//
+// Tradeoff: an Invalidate for user A that lands inside user B's fill
+// window also drops B's fill (a false drop: B's result is still
+// returned to its caller, just not cached, costing one extra DB read on
+// B's next request). Prod invalidates are Stripe-event-driven — a
+// handful per day — against millisecond fill windows, so the collision
+// rate is noise, and correctness is unaffected either way because a
+// dropped fill is simply re-read.
 func (e *DBEnforcer) Invalidate(userID string) {
+	if e.cacheTTL <= 0 {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.cache, userID)
+	e.gen++
+	delete(e.cache, userID) // delete is safe even on a nil map
+}
+
+// ensureCacheLocked lazily allocates the cache map, because writing to a
+// nil map panics. Only cachePut writes the map now (Invalidate is back
+// to delete, which is nil-safe), and the constructors always allocate,
+// so this only covers a zero-value DBEnforcer built inside the package
+// (the fields are unexported, so no external package can construct one
+// that way). Caller must hold e.mu.
+func (e *DBEnforcer) ensureCacheLocked() {
+	if e.cache == nil {
+		e.cache = make(map[string]cachedLimits)
+	}
 }
 
 func (e *DBEnforcer) CheckAgentCreate(ctx context.Context, userID string) error {
@@ -201,25 +273,41 @@ func safeInt64ToInt(v int64) int {
 	return int(v)
 }
 
-func (e *DBEnforcer) cacheGet(userID string) (Limits, bool) {
+// cacheGet returns the cached limits when they are present and unexpired.
+// It always returns the current process-wide invalidation epoch alongside
+// the result — sampled under the same lock acquisition as the lookup —
+// so a caller that observes a miss can pass that epoch to cachePut and
+// have the store rejected if any Invalidate landed in between.
+func (e *DBEnforcer) cacheGet(userID string) (Limits, uint64, bool) {
 	if e.cacheTTL <= 0 {
-		return Limits{}, false
+		return Limits{}, 0, false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	c, ok := e.cache[userID]
 	if !ok || time.Now().After(c.expires) {
-		return Limits{}, false
+		return Limits{}, e.gen, false
 	}
-	return c.limits, true
+	return c.limits, e.gen, true
 }
 
-func (e *DBEnforcer) cachePut(userID string, l Limits) {
+// cachePut stores a fill only if the invalidation epoch is still the one
+// the caller sampled before its DB read. A stale fill is dropped
+// outright rather than stored with a shorter TTL: the next Get simply
+// re-reads account_limits, which is the correct post-write value and
+// costs one query. The epoch being process-wide means an unrelated
+// user's invalidate can also drop this fill — intentionally conservative;
+// see Invalidate for the tradeoff.
+func (e *DBEnforcer) cachePut(userID string, l Limits, gen uint64) {
 	if e.cacheTTL <= 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.gen != gen {
+		return
+	}
+	e.ensureCacheLocked()
 	e.cache[userID] = cachedLimits{limits: l, expires: time.Now().Add(e.cacheTTL)}
 }
 

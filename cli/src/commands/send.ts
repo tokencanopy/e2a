@@ -3,6 +3,7 @@ import { basename, extname } from "node:path";
 import type { SendResultView, Attachment } from "@e2a/sdk/v1";
 import { createClient, requireAgentEmail } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
+import { parseRfc3339 } from "../time.js";
 import { htmlToText } from "../html.js";
 
 export interface SendOptions {
@@ -12,22 +13,34 @@ export interface SendOptions {
   bodyFile?: string;
   htmlFile?: string;
   conversationId?: string;
-  replyTo?: string;
+  replyTo?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
   attach?: string[];
+  sendAt?: string;
 }
 
 export interface ReplyOptions {
   body?: string;
   bodyFile?: string;
   htmlFile?: string;
-  replyTo?: string;
+  replyTo?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
   attach?: string[];
+  sendAt?: string;
+}
+
+// --reply-to is repeatable (an RFC 5322 Reply-To may name several addresses).
+// An empty list means the flag was not given, so the field is omitted and the
+// server defaults Reply-To to the agent's own address. A SINGLE --reply-to is
+// sent as a scalar string — byte-identical to the pre-list CLI wire shape and
+// maximally compatible with older servers; several become an array.
+function replyToArg(replyTo?: string[]): string | string[] | undefined {
+  if (!replyTo || replyTo.length === 0) return undefined;
+  return replyTo.length === 1 ? replyTo[0] : replyTo;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -62,9 +75,24 @@ function readAttachments(paths: string[] | undefined): Attachment[] | undefined 
 }
 
 const SEND_USAGE =
-  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--agent <inbox>] [--json]";
+  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
 const REPLY_USAGE =
-  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--agent <inbox>] [--json]";
+  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
+
+/**
+ * Parse the optional --send-at flag into a Date for scheduled send. Requires an
+ * RFC 3339 timestamp with an explicit offset so the instant is unambiguous. A
+ * value at or before now sends immediately; a value more than 90 days ahead is
+ * rejected server-side. Direct loopback to the sending agent's own address
+ * cannot be scheduled and returns 400 invalid_request unless a review hold
+ * takes precedence (holds drop send_at). Returns undefined when absent.
+ */
+export function parseSendAt(value: string | undefined, usage: string): Date | undefined {
+  if (value === undefined) return undefined;
+  // The strict shared parser requires the explicit offset — see time.ts for
+  // why a bare date-time can never be guessed at.
+  return parseRfc3339(value, "--send-at", usage);
+}
 
 function readFileOrUsage(path: string, flag: string): string {
   try {
@@ -114,6 +142,15 @@ function emitSendResult(result: SendResultView, json?: boolean): void {
     // stdout before the message id above flushes, and scripts need that id to
     // approve the held message.
     process.exitCode = EXIT.HELD;
+  } else if (result.status === "scheduled") {
+    // Scheduled is a SUCCESSFUL, intended acceptance (exit 0): the message is
+    // durably queued to go out at send_at, not held by mistake. Note it so a
+    // human sees the deferral, and point at how to cancel.
+    const when = result.scheduledAt ? new Date(result.scheduledAt).toISOString() : "the requested time";
+    process.stderr.write(
+      `NOTE: send accepted as "scheduled" — it will be submitted at ${when} (not before), not now. ` +
+        `Cancel it before then by moving message ${result.messageId} to trash (via the dashboard or the delete-message API); restoring it before ${when} re-arms the send, while restoring at or after that time leaves the send canceled.\n`,
+    );
   } else if (result.status === "failed") {
     process.stderr.write(
       `WARNING: send reached terminal status "failed" for message "${result.messageId}". ` +
@@ -141,6 +178,7 @@ export async function send(opts: SendOptions): Promise<void> {
 
   const client = createClient();
   const agentEmail = requireAgentEmail(opts.agent);
+  const sendAt = parseSendAt(opts.sendAt, SEND_USAGE);
   // Optional fields may be undefined — the generated serializer drops
   // undefined-valued keys before they reach the wire. An explicit
   // --idempotency-key makes a *re-invocation* after an ambiguous failure
@@ -154,8 +192,9 @@ export async function send(opts: SendOptions): Promise<void> {
       text: body,
       html: htmlBody,
       conversationId: opts.conversationId,
-      replyTo: opts.replyTo,
+      replyTo: replyToArg(opts.replyTo),
       attachments: readAttachments(opts.attach),
+      sendAt,
     },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
@@ -168,10 +207,11 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
 
   const client = createClient();
   const agentEmail = requireAgentEmail(opts.agent);
+  const sendAt = parseSendAt(opts.sendAt, REPLY_USAGE);
   const result = await client.messages.reply(
     agentEmail,
     messageId,
-    { text: body, html: htmlBody, replyTo: opts.replyTo, attachments: readAttachments(opts.attach) },
+    { text: body, html: htmlBody, replyTo: replyToArg(opts.replyTo), attachments: readAttachments(opts.attach), sendAt },
     opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
   );
   emitSendResult(result, opts.json);

@@ -176,7 +176,7 @@ func issuePending(t *testing.T, store *identity.Store, agentID string) *identity
 	msg, err := store.CreatePendingOutboundMessage(context.Background(), agentID,
 		[]string{"alice@example.com"}, nil, nil,
 		"Held", "plain body", "<p>html</p>", nil,
-		"send", "", "", "", 3600)
+		"send", "客户 1% ready", "", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +317,7 @@ func TestMagicApprovePOSTQueues(t *testing.T) {
 	if !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' in body, got: %s", body)
 	}
+	assertViewMessageCTA(t, body, a.EmailAddress(), msg.ConversationID, msg.ID)
 
 	if msgs := smtpDone(); len(msgs) != 0 {
 		t.Fatalf("approval submitted %d SMTP messages inline, want zero", len(msgs))
@@ -361,6 +362,8 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	}
 	if body := readBody(t, resp); !strings.Contains(body, "Approved") {
 		t.Errorf("expected 'Approved' on the result page, got: %s", body)
+	} else {
+		assertViewMessageCTA(t, body, a.EmailAddress(), held.ConversationID, held.ID)
 	}
 
 	if msgs := smtpDone(); len(msgs) != 0 {
@@ -391,6 +394,31 @@ func TestMagicApprovePOSTSelfSendDeliversViaLoopback(t *testing.T) {
 	}
 }
 
+// assertViewMessageCTA pins the approve result page's call to action to the
+// canonical inbox thread. Messages with a conversation select that thread;
+// legacy/orphan messages fall back to their synthetic single-message thread.
+func assertViewMessageCTA(t *testing.T, body, agentEmail, conversationID, messageID string) {
+	t.Helper()
+	prefix, value := "conv:", conversationID
+	if conversationID == "" {
+		prefix, value = "orphan:", messageID
+	}
+	want := "/inboxes/messages?email=" + url.QueryEscape(agentEmail) + "#" +
+		prefix + url.PathEscape(value)
+	if !strings.Contains(body, `href="`+want+`"`) {
+		t.Errorf("result page missing view-message href %q, got: %s", want, body)
+	}
+	if strings.Contains(body, "/inboxes/messages/view") {
+		t.Errorf("result page should not link to the retired focus view, got: %s", body)
+	}
+	if !strings.Contains(body, ">View message</a>") {
+		t.Errorf("result page missing 'View message' button label, got: %s", body)
+	}
+	if strings.Contains(body, "Open the dashboard") {
+		t.Errorf("approve result page should not fall back to the dashboard CTA, got: %s", body)
+	}
+}
+
 // subjectsOf is a small helper to keep error messages readable when an
 // inbox-shape assertion fails.
 func subjectsOf(msgs []identity.Message) []string {
@@ -414,6 +442,11 @@ func TestMagicRejectPOSTWithReason(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST reject: status = %d", resp.StatusCode)
+	}
+	// Only approve deep-links the message; a rejected draft is discarded, so
+	// reject keeps the generic dashboard CTA.
+	if body := readBody(t, resp); !strings.Contains(body, "Open the dashboard") {
+		t.Errorf("reject result page should keep the dashboard CTA, got: %s", body)
 	}
 
 	if msgs := smtpDone(); len(msgs) != 0 {
@@ -476,6 +509,122 @@ func TestMagicRejectPOSTWithoutReasonUsesDefault(t *testing.T) {
 	got, _ := store.GetOutboundMessageForUser(context.Background(), msg.ID, userID)
 	if got.RejectionReason != "magic-link rejection" {
 		t.Errorf("default reason = %q", got.RejectionReason)
+	}
+}
+
+// TestMagicRejectPOSTRefusesIllFormedReason is the /v1/reject arm of the
+// request-content rules. /v1/approve and /v1/reject are registered on the chi
+// root OUTSIDE Huma, so neither the raw-body format guard nor the registerOp
+// walk sees them — and `reason` is persisted verbatim into
+// messages.rejection_reason. Before the handler check, a raw 0xFF byte reached
+// the UPDATE, Postgres refused it (SQLSTATE 22021) and the reviewer got a
+// 500 "Rejection failed": a permanent client error dressed as an outage, with
+// the review hold still open. Both rules are asserted against the real
+// database, which is the only thing that actually produces 22021.
+func TestMagicRejectPOSTRefusesIllFormedReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"invalid utf-8", "bad\xffbytes"},
+		{"NUL", "bad\x00bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, store, signer, _ := setupMagicLinkAPI(t)
+			a, userID := prepareHITLAgent(t, store, "post-reject-illformed")
+			msg := issuePending(t, store, a.ID)
+
+			tok, _ := signer.Sign(msg.ID, approvaltoken.ActionReject, time.Now().Add(1*time.Hour))
+			resp := postForm(t, server.URL+"/v1/reject", map[string]string{"t": tok, "reason": tc.reason})
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 — ill-formed text is a permanent client error, never a 5xx", resp.StatusCode)
+			}
+
+			// The message must be untouched: refusing the note must not
+			// half-resolve the hold, and must never store a laundered
+			// (U+FFFD-substituted) reason.
+			got, err := store.GetOutboundMessageForUser(context.Background(), msg.ID, userID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != identity.MessageStatusPendingReview {
+				t.Errorf("status = %q, want the message still pending_review", got.Status)
+			}
+			if got.RejectionReason != "" {
+				t.Errorf("rejection_reason = %q, want empty — nothing may be persisted", got.RejectionReason)
+			}
+		})
+	}
+}
+
+// TestMagicRejectPOSTAcceptsValidMultiByteReason is the negative control for
+// the check above: refusing ill-formed bytes must not refuse a single byte of
+// legitimate international text. A properly ENCODED U+FFFD is legal input —
+// only raw malformed sequences are refused — and the reason round-trips into
+// the column byte-for-byte.
+func TestMagicRejectPOSTAcceptsValidMultiByteReason(t *testing.T) {
+	const reason = "日本語 ✉ 😀 — a�b"
+	server, store, signer, _ := setupMagicLinkAPI(t)
+	a, userID := prepareHITLAgent(t, store, "post-reject-intl")
+	msg := issuePending(t, store, a.ID)
+
+	tok, _ := signer.Sign(msg.ID, approvaltoken.ActionReject, time.Now().Add(1*time.Hour))
+	resp := postForm(t, server.URL+"/v1/reject", map[string]string{"t": tok, "reason": reason})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for valid multi-byte UTF-8", resp.StatusCode)
+	}
+
+	got, err := store.GetOutboundMessageForUser(context.Background(), msg.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != identity.MessageStatusReviewRejected {
+		t.Fatalf("status = %q, want rejected", got.Status)
+	}
+	if got.RejectionReason != reason {
+		t.Errorf("rejection_reason = %q, want %q byte-for-byte", got.RejectionReason, reason)
+	}
+}
+
+// TestMagicApproveHasNoUnguardedCallerText pins the other half of the
+// non-Huma-route audit: /v1/approve persists nothing the caller authored. Its
+// only form input is the HMAC magic-link token, which is self-validating — an
+// ill-formed token cannot verify, so it is refused at the signature check and
+// never reaches the store. Any future free-text field added to this form would
+// need the same isWellFormedText guard /v1/reject's `reason` has.
+func TestMagicApproveHasNoUnguardedCallerText(t *testing.T) {
+	server, store, signer, smtpDone := setupMagicLinkAPI(t)
+	defer smtpDone()
+	a, _ := prepareHITLAgent(t, store, "approve-no-caller-text")
+	msg := issuePending(t, store, a.ID)
+
+	for _, bad := range []string{"bad\xfftoken", "bad\x00token"} {
+		resp := postForm(t, server.URL+"/v1/approve", map[string]string{"t": bad})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST /v1/approve with an ill-formed token: status = %d, want 400", resp.StatusCode)
+		}
+		resp.Body.Close()
+
+		r2, err := http.Get(server.URL + "/v1/reject?t=" + url.QueryEscape(bad))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r2.StatusCode != http.StatusBadRequest {
+			t.Errorf("GET /v1/reject with an ill-formed token: status = %d, want 400", r2.StatusCode)
+		}
+		r2.Body.Close()
+	}
+
+	// A valid token plus an ill-formed EXTRA field still approves: the approve
+	// form has no free-text field, so an unknown one is simply not read.
+	tok, _ := signer.Sign(msg.ID, approvaltoken.ActionApprove, time.Now().Add(1*time.Hour))
+	resp := postForm(t, server.URL+"/v1/approve", map[string]string{"t": tok, "reason": "bad\xffbytes"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("approve with a stray ill-formed field: status = %d, want 200", resp.StatusCode)
 	}
 }
 

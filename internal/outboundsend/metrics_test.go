@@ -14,10 +14,11 @@ import (
 
 // recordingMetrics captures every SLI emission for assertion.
 type recordingMetrics struct {
-	queueWaits []float64
-	terminals  []string
-	latencies  []float64
-	attempts   []attemptSample
+	queueWaits   []float64
+	terminals    []string
+	latencies    []float64
+	attempts     []attemptSample
+	rateDeferred int
 }
 
 type attemptSample struct {
@@ -36,6 +37,9 @@ func (r *recordingMetrics) OutboundTerminalLatency(seconds float64) {
 }
 func (r *recordingMetrics) OutboundAttempt(outcome string, seconds float64) {
 	r.attempts = append(r.attempts, attemptSample{outcome: outcome, seconds: seconds})
+}
+func (r *recordingMetrics) OutboundRateDeferred() {
+	r.rateDeferred++
 }
 
 func (r *recordingMetrics) attemptOutcomes() []string {
@@ -390,5 +394,90 @@ func TestSendWorker_TerminalLatencyMarkFailedSettlesSentUsesWriteTime(t *testing
 	// provider-accept time − accepted_at ≈ 60s, NOT now − accepted_at ≈ 90s.
 	if got := rec.latencies[0]; got < 55 || got > 65 {
 		t.Errorf("latency = %.1fs, want ~60s (the write's effective occurred_at − accepted_at)", got)
+	}
+}
+
+// A HITL hold sits in pending_review until a human (or the TTL sweep) resolves
+// it. That dwell is the reviewer's time, not e2a's, and measuring it from
+// messages.created_at put every hold approved more than 5 minutes after
+// drafting outside the acceptance→terminal SLO window — the failure mode that
+// burned the prod error budget on 2026-08-03.
+func TestSendWorker_TerminalLatencyExcludesHumanReviewDwell(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-2 * time.Hour)
+	j.ReviewedAt = time.Now().Add(-30 * time.Second)
+	st := &fakeStore{job: j}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-1", SentAs: "relay"}}
+	rec := &recordingMetrics{}
+	if err := outboundsend.NewSendWorker(st, dl).WithMetrics(rec).Work(context.Background(), job("msg_1", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(rec.latencies) != 1 {
+		t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+	}
+	if got := rec.latencies[0]; got < 25 || got > 35 {
+		t.Errorf("terminal latency = %.1fs, want ~30s (occurred_at − reviewed_at); a 2h hold must not be charged to e2a", got)
+	}
+}
+
+// A scheduled send waits for its fire time by construction, so anchoring at
+// created_at made every send scheduled further out than the 300s window a
+// guaranteed SLO miss. Same defect class as the HITL hold above.
+func TestSendWorker_TerminalLatencyExcludesScheduledDelay(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-48 * time.Hour)
+	j.ScheduledAt = time.Now().Add(-30 * time.Second)
+	st := &fakeStore{job: j}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-1", SentAs: "relay"}}
+	rec := &recordingMetrics{}
+	if err := outboundsend.NewSendWorker(st, dl).WithMetrics(rec).Work(context.Background(), job("msg_1", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(rec.latencies) != 1 {
+		t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+	}
+	if got := rec.latencies[0]; got < 25 || got > 35 {
+		t.Errorf("terminal latency = %.1fs, want ~30s (occurred_at − scheduled_at)", got)
+	}
+}
+
+// The ordinary path must be untouched: an unheld, unscheduled message still
+// measures from accept, so the SLI keeps reporting real pipeline latency.
+func TestSendWorker_TerminalLatencyUnheldMessageStillAnchorsAtAccept(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-90 * time.Second)
+	st := &fakeStore{job: j}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-1", SentAs: "relay"}}
+	rec := &recordingMetrics{}
+	if err := outboundsend.NewSendWorker(st, dl).WithMetrics(rec).Work(context.Background(), job("msg_1", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(rec.latencies) != 1 {
+		t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+	}
+	if got := rec.latencies[0]; got < 85 || got > 95 {
+		t.Errorf("terminal latency = %.1fs, want ~90s — zero reviewed_at/scheduled_at must be inert", got)
+	}
+}
+
+// A hold whose send then fails is measured the same way: the reviewer's dwell
+// is excluded from the failure's latency sample too, so the two terminal arms
+// cannot disagree about what "acceptance" means.
+func TestSendWorker_TerminalLatencyExcludesReviewDwellOnFailureOutcome(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-2 * time.Hour)
+	j.ReviewedAt = time.Now().Add(-30 * time.Second)
+	st := &fakeStore{job: j, suppressed: []string{"blocked@example.com"}}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{}}
+	rec := &recordingMetrics{}
+	err := outboundsend.NewSendWorker(st, dl).WithMetrics(rec).Work(context.Background(), job("msg_1", 1))
+	if err == nil {
+		t.Fatal("Work: want a cancel error for a suppressed recipient")
+	}
+	if len(rec.latencies) != 1 {
+		t.Fatalf("latencies = %v, want exactly one sample", rec.latencies)
+	}
+	if got := rec.latencies[0]; got < 25 || got > 35 {
+		t.Errorf("terminal latency = %.1fs, want ~30s (occurred_at − reviewed_at)", got)
 	}
 }

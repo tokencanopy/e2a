@@ -10,7 +10,8 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { CounterpartyAvatar } from "./CounterpartyAvatar";
-import { MessageStatusChip } from "./MessageStatusChip";
+import { MessageStatusChip, isFutureScheduled } from "./MessageStatusChip";
+import { formatScheduledSend } from "../../../lib/scheduledTime";
 import { EmailHtmlBody } from "./EmailHtmlBody";
 import { AttachmentChips, downloadableAttachments } from "./AttachmentChips";
 import { MessageLifecycleData } from "./MessageLifecycleTimeline";
@@ -26,7 +27,7 @@ import {
   messageDetailKey,
 } from "../../../lib/swrKeys";
 import type { AttachmentMeta, MessageSummary } from "../types";
-import type { Counterparty } from "./threading";
+import { nameFromEmail } from "./threading";
 
 // Absolute, human time for the message header (e.g. "Jun 21, 8:07 PM").
 // title carries the full locale string for hover.
@@ -69,15 +70,17 @@ function MetaRow({ label, value }: { label: string; value: string }) {
 
 export function ThreadBubble({
   message,
-  counterparty,
   agentEmail,
 }: {
   message: MessageSummary;
-  counterparty: Counterparty;
   agentEmail: string;
 }) {
   const isInbound = message.direction === "inbound";
   const pending = message.review_status === "pending_review";
+  const scheduled = isFutureScheduled({
+    direction: message.direction,
+    scheduled_at: message.scheduled_at,
+  });
   const [showDetails, setShowDetails] = useState(false);
   const [showLifecycle, setShowLifecycle] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -108,7 +111,7 @@ export function ThreadBubble({
   const wasUnreadInbound = isInbound && message.read_status === "unread";
 
   // Fetch this message's body, cached as the RAW wire under the shared
-  // per-message key so this bubble and the focus page read one entry in
+  // per-message key so this bubble and the Review row read one entry in
   // one shape (see lib/swrKeys.ts). Projected below.
   const { data: wire, isLoading } = useSWR(
     messageDetailKey(message.id),
@@ -159,8 +162,11 @@ export function ThreadBubble({
   // surface as download chips beneath it.
   const chipAttachments = downloadableAttachments(attachments, htmlBody);
 
-  const senderName = isInbound ? counterparty.name : "Inbox";
-  const senderEmail = isInbound ? counterparty.email : agentEmail;
+  // Identify inbound mail by the message's own From, never the thread-level
+  // counterparty: in a multi-party thread (agent Cc'd on mail between other
+  // parties) the counterparty can be a different participant entirely.
+  const senderName = isInbound ? nameFromEmail(message.from) : "Inbox";
+  const senderEmail = isInbound ? message.from : agentEmail;
   const toList = (message.to ?? []).join(", ");
 
   return (
@@ -170,10 +176,10 @@ export function ThreadBubble({
       className="flex"
       style={{ gap: 12, marginBottom: 20, alignItems: "flex-start" }}
     >
-      {/* Avatar — counterparty face for inbound, e2a tile for outbound. */}
+      {/* Avatar — sender face for inbound, e2a tile for outbound. */}
       <div style={{ flexShrink: 0, paddingTop: 2 }}>
         {isInbound ? (
-          <CounterpartyAvatar email={counterparty.email} name={counterparty.name} size={32} />
+          <CounterpartyAvatar email={senderEmail} name={senderName} size={32} />
         ) : (
           <span
             aria-hidden
@@ -241,7 +247,21 @@ export function ThreadBubble({
               direction="outbound"
               delivery_status={message.status}
               review_status={message.review_status}
+              scheduled_at={message.scheduled_at}
             />
+          )}
+          {scheduled && (
+            <span
+              className="shrink-0"
+              style={{
+                fontFamily: "var(--f-mono)",
+                fontSize: 11,
+                color: "var(--fg-subtle)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {formatScheduledSend(message.scheduled_at)}
+            </span>
           )}
           <span className="flex-1" />
           <span

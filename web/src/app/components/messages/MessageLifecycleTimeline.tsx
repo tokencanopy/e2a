@@ -1,6 +1,6 @@
 "use client";
 
-// Canonical observation timeline shown in the conversation and focus views.
+// Canonical observation timeline shown in conversation and Review details.
 
 import { useState } from "react";
 import useSWRInfinite from "swr/infinite";

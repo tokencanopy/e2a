@@ -92,9 +92,197 @@ describe("Webhooks page", () => {
       expect(screen.getByText(webhook.url)).toBeInTheDocument();
     });
     expect(screen.getByText("email.received")).toBeInTheDocument();
-    expect(screen.getByText("enabled")).toBeInTheDocument();
+    // The Status column reports health, not the raw enabled flag: an enabled
+    // endpoint that has never delivered is not a healthy one. This fixture
+    // has no last_delivered_at.
+    expect(screen.getByText("never delivered")).toBeInTheDocument();
     // No secret column / value in the list view.
     expect(document.body.innerHTML).not.toContain("signing_secret");
+  });
+
+  // e2a switching an endpoint off is louder than the user doing it, and it is
+  // the state most likely to be silently losing events.
+  it("calls out an auto-disabled subscription", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              enabled: false,
+              auto_disabled_at: "2026-07-20T00:00:00Z",
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/auto-disabled/i)).toBeInTheDocument();
+    });
+  });
+
+  it("reports a subscription that has never delivered", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/never delivered/i)).toBeInTheDocument();
+    });
+  });
+
+  // Health is derived from fields already on the list response. If a future
+  // change starts probing per row, this catches it: N webhooks must still
+  // cost one request.
+  it("derives health without issuing a request per row", async () => {
+    const fetchMock = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            { ...webhook, id: "wh_a", url: "https://a.test/h" },
+            { ...webhook, id: "wh_b", url: "https://b.test/h" },
+            { ...webhook, id: "wh_c", url: "https://c.test/h" },
+          ],
+        }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText("https://c.test/h")).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // A bare URL doesn't read as a control. The row needs a signposted action
+  // for the per-endpoint view, not just a clickable identifier.
+  it("offers an explicit action into the per-webhook view", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    const action = screen.getByRole("link", { name: /deliveries/i });
+    expect(action).toHaveAttribute(
+      "href",
+      "/webhooks/detail?id=wh_default0001",
+    );
+  });
+
+  it("links each row to that webhook's detail page", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText(webhook.url).closest("a")).toHaveAttribute(
+      "href",
+      "/webhooks/detail?id=wh_default0001",
+    );
+  });
+
+  it("shows the coding-agent prompt card with the scoping nudge", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("region", { name: "Set up with a coding agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/register the subscription/i),
+    ).toBeInTheDocument();
+    // The scoping nudge is the whole point of putting a notice here.
+    expect(
+      screen.getByText(/Only want events from certain inboxes\?/i),
+    ).toBeInTheDocument();
+  });
+
+  // Scope column. An unscoped subscription receives every agent's events;
+  // before this column existed, that was indistinguishable in the UI from a
+  // narrowly-scoped one — which is exactly how an account-wide webhook went
+  // unnoticed in production.
+  it("renders an unscoped webhook as 'all agents' rather than blank", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [{ ...webhook, filters: {} }] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("all agents")).toBeInTheDocument();
+  });
+
+  it("treats a missing filters object as unscoped", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () => jsonResp({ items: [webhook] }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("all agents")).toBeInTheDocument();
+  });
+
+  it("lists the agents a scoped webhook is filtered to", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              filters: { agent_emails: ["agent@inbox.example.com"] },
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(screen.getByText("agent@inbox.example.com")).toBeInTheDocument();
+    expect(screen.queryByText("all agents")).not.toBeInTheDocument();
+  });
+
+  it("summarizes conversation and label filters alongside agents", async () => {
+    global.fetch = makeFetchMock({
+      "/v1/webhooks": () =>
+        jsonResp({
+          items: [
+            {
+              ...webhook,
+              filters: {
+                agent_emails: ["a@example.com"],
+                conversation_ids: ["conv_1", "conv_2"],
+                labels: ["urgent"],
+              },
+            },
+          ],
+        }),
+    }) as unknown as typeof fetch;
+
+    render(<WebhooksPage />);
+    await waitFor(() => {
+      expect(screen.getByText(webhook.url)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText("a@example.com · 2 conversations · labels: urgent"),
+    ).toBeInTheDocument();
   });
 
   it("creates a webhook, reveals the signing secret once, and hides it on dismiss", async () => {

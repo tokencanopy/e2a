@@ -8,12 +8,38 @@ import (
 	"log"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/mailfrom"
 )
+
+// appendOutboundFooter appends the operator-configured branding/disclosure
+// footer (config `outbound_footer:` block) to both body parts. Called BEFORE
+// appendUnsubscribeFooter so the unsubscribe line keeps its compliance
+// position as the last body content, and before the composed-size check and
+// the MIME build / DKIM signing — the footer is inside the signed,
+// size-capped bytes. The text footer is appended even when the text body is
+// empty (HTML-only sends), keeping the disclosure visible to text-part
+// readers; the HTML fragment is appended only when the message has an HTML
+// part. Both fragments are operator-trusted config, not user input — the
+// HTML is appended verbatim, so the operator owns its escaping. Empty
+// text+html = no-op.
+//
+// The text separator is the RFC 3676 signature delimiter "-- \n"
+// (dash-dash-SPACE-newline) — the convention mail clients recognize to trim
+// signatures when quoting a reply. The trailing space is load-bearing.
+func appendOutboundFooter(textBody, htmlBody, text, htmlFragment string) (string, string) {
+	if text != "" {
+		textBody += "\n\n-- \n" + text
+	}
+	if htmlBody != "" && htmlFragment != "" {
+		htmlBody += htmlFragment
+	}
+	return textBody, htmlBody
+}
 
 func appendUnsubscribeFooter(textBody, htmlBody, agentAddress, link string) (string, string) {
 	textBody += "\n\nUnsubscribe from emails sent by " + agentAddress + ": " + link
@@ -46,7 +72,7 @@ type DKIMKeyLookup interface {
 
 // Attachment is a base64-encoded file attachment.
 type Attachment struct {
-	Filename    string `json:"filename" example:"report.pdf"`
+	Filename    string `json:"filename" example:"report.pdf" doc:"Attachment filename. Maximum 1024 UTF-8 bytes; longer names are rejected as invalid_attachment."`
 	ContentType string `json:"content_type" example:"application/pdf"`
 	Data        string `json:"data" example:"base64-encoded-content" doc:"Base64-encoded file content. Each attachment must be ≤ 10 MiB decoded; a message may carry at most 10 attachments totaling ≤ 25 MiB decoded."` // base64-encoded
 } // @name Attachment
@@ -78,6 +104,19 @@ type SendRequest struct {
 	ConversationID   string              `json:"conversation_id,omitempty"`
 	Attachments      []Attachment        `json:"attachments,omitempty"`
 	Unsubscribe      *UnsubscribeOptions `json:"unsubscribe,omitempty"`
+	// AppendOutboundFooter, when true, makes compose append the
+	// operator-configured outbound footer (Sender.SetOutboundFooter) to the
+	// message body, above any managed-unsubscribe line. Resolved server-side
+	// by the agent layer (per-account entitlement + account class + config
+	// master switch) — never caller-supplied, never part of the wire API
+	// contract.
+	AppendOutboundFooter bool `json:"-"`
+	// ScheduledAt, when non-nil, defers this send to a future instant: the
+	// message is accepted + queued immediately (delivery_status='accepted'), but
+	// its River outbound_send job is held until this time. Nil means send now.
+	// The API edge validates it (future + within the max horizon) and normalizes
+	// a nil/past value to nil before this reaches DeliverOutbound.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 }
 
 type UnsubscribeOptions struct {
@@ -153,6 +192,21 @@ type Sender struct {
 	// SES publishes delivery/bounce/complaint events (decision 9 / Slice 4b).
 	// Empty (the default) = no header, no events — dev/self-host without SES.
 	sesConfigSet string
+	// footerText / footerHTML are the operator-configured outbound-footer
+	// fragments (config outbound_footer.text / .html), appended by compose
+	// only when the request carries AppendOutboundFooter. Both empty (the
+	// default) makes the append a no-op.
+	footerText string
+	footerHTML string
+}
+
+// SetOutboundFooter configures the operator-defined footer content appended
+// when a SendRequest carries AppendOutboundFooter. Optional-setter pattern
+// (cf. SetSendingStatusLookup) so existing call sites and tests are
+// unaffected; empty text+html leaves the append a no-op.
+func (s *Sender) SetOutboundFooter(text, html string) {
+	s.footerText = text
+	s.footerHTML = html
 }
 
 // SetSESConfigurationSet enables SES event publishing for outbound mail by
@@ -335,7 +389,12 @@ func (s *Sender) ComposeForAccept(agent *identity.AgentIdentity, req SendRequest
 // Keeping the header logic here (not in the worker) means Send and the async
 // path share one source of truth for what SES actually receives.
 func (s *Sender) SubmitOnce(messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
-	return s.smtpRelay.SendOnce(envelopeFrom, recipients, s.applySESConfigSet(applyCorrelationHeader(sentBody, messageID)))
+	return s.SubmitOnceContext(context.Background(), messageID, envelopeFrom, recipients, sentBody)
+}
+
+// SubmitOnceContext is SubmitOnce with caller cancellation propagated to SMTP.
+func (s *Sender) SubmitOnceContext(ctx context.Context, messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
+	return s.smtpRelay.SendOnceContext(ctx, envelopeFrom, recipients, s.applySESConfigSet(applyCorrelationHeader(sentBody, messageID)))
 }
 
 // applyCorrelationHeader prepends the X-E2A-Message-ID marker. The id is
@@ -355,6 +414,13 @@ func (s *Sender) compose(agent *identity.AgentIdentity, req SendRequest) (*compo
 	if err != nil {
 		return nil, err
 	}
+	// Operator-configured outbound footer — appended strictly before the
+	// unsubscribe footer (compliance: the unsubscribe line stays last) and
+	// therefore before the composed-size check and the MIME build / DKIM
+	// signing below.
+	if req.AppendOutboundFooter {
+		req.Body, req.HTMLBody = appendOutboundFooter(req.Body, req.HTMLBody, s.footerText, s.footerHTML)
+	}
 	if req.Unsubscribe != nil {
 		if req.Unsubscribe.Mode != "managed" || req.Unsubscribe.URL == "" {
 			return nil, &ValidationError{Message: "managed unsubscribe URL is unavailable"}
@@ -363,6 +429,9 @@ func (s *Sender) compose(agent *identity.AgentIdentity, req SendRequest) (*compo
 			return nil, &ValidationError{Message: "managed unsubscribe requires exactly one recipient"}
 		}
 		req.Body, req.HTMLBody = appendUnsubscribeFooter(req.Body, req.HTMLBody, agent.EmailAddress(), req.Unsubscribe.URL)
+	}
+	if err := ValidateAttachmentFilenames(req.Attachments); err != nil {
+		return nil, err
 	}
 	if total := ComposedSize(req.Subject, req.Body, req.HTMLBody, req.Attachments); total > MaxComposedMessageBytes {
 		return nil, &ComposedSizeError{ActualBytes: total, MaxBytes: MaxComposedMessageBytes}
@@ -535,9 +604,35 @@ func normalizeAddrs(addrs []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%q: %w", a, err)
 		}
+		if err := ValidateMailboxAddress(parsed.Address); err != nil {
+			return nil, fmt.Errorf("%q: %w", a, err)
+		}
 		out = append(out, strings.ToLower(parsed.Address))
 	}
 	return out, nil
+}
+
+const (
+	maxSMTPLocalPartOctets = 64
+	maxSMTPMailboxOctets   = 254 // 256-byte SMTP path limit minus "<" and ">"
+)
+
+// ValidateMailboxAddress enforces SMTP's octet limits on a parsed addr-spec.
+// Unicode code-point limits alone are insufficient: a syntactically valid
+// SMTPUTF8 local part can occupy four bytes per rune and become an indivisible
+// header token that exceeds both the mailbox and header-line limits.
+func ValidateMailboxAddress(address string) error {
+	at := strings.LastIndexByte(address, '@')
+	if at <= 0 || at == len(address)-1 {
+		return fmt.Errorf("mailbox must contain a local part and domain")
+	}
+	if n := len(address[:at]); n > maxSMTPLocalPartOctets {
+		return fmt.Errorf("mailbox local part is %d octets; maximum is %d", n, maxSMTPLocalPartOctets)
+	}
+	if n := len(address); n > maxSMTPMailboxOctets {
+		return fmt.Errorf("mailbox is %d octets; maximum is %d", n, maxSMTPMailboxOctets)
+	}
+	return nil
 }
 
 // removeAddrs removes any address in exclude from addrs (case-insensitive).

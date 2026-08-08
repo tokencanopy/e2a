@@ -43,6 +43,12 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$ROOT:/work" "$IMG" 
 find "$OUT" -name '*.ts' -print0 | xargs -0 perl -i -ne \
   'print unless /^\s*import\s+["'"'"']whatwg-fetch["'"'"'];\s*$/'
 
+# The generator emits setHeaderParam(...) unconditionally for OPTIONAL header
+# params (e.g. If-Match); an omitted param then reaches the wire as the literal
+# string "undefined". Wrap those emissions in `if (param !== undefined)` guards
+# (Idempotency-Key stays unguarded — retry.ts depends on the stub; see script).
+python3 "$ROOT/scripts/guard-optional-header-params.py" "$OUT/apis"
+
 # OpenAPI Generator imports every schema into its API wrapper variants and
 # imports HttpFile into standalone models even when those symbols are unused.
 # Normalize selected generator-known unused imports so static analysis and the
@@ -87,6 +93,21 @@ perl -pi -e 's/[ \t]+$//' \
   "$OUT/types/ObjectParamAPI.ts"
 
 perl -0pi -e 's/\n+\z/\n/' "$OUT/models/UnsubscribeOptions.ts"
+
+# OpenAPI Generator's TypeScript ObjectSerializer cannot serialize a oneOf of
+# SCALARS/arrays — reply_to is `string | string[]` (ForwardRequestReplyTo). It
+# registers the synthesized union class in typeMap but emits NO
+# getAttributeTypeMap on it, so ObjectSerializer.serialize() throws
+# "typeMap[type].getAttributeTypeMap is not a function" on any send/reply/forward
+# carrying reply_to. Dropping the union from typeMap (and its now-unused import)
+# makes serialize() take its "unknown type → return data unchanged" branch —
+# exactly right, since the wire form of reply_to IS the raw string or array, and
+# reply_to is request-only so it is never deserialized back. Re-applied on every
+# regen; the drift gate proves it stays in sync.
+perl -ni -e 'print unless
+  /^\s*import \{ ForwardRequestReplyToClass \} from /
+  || /^\s*"ForwardRequestReplyTo": ForwardRequestReplyToClass,\s*$/' \
+  "$OUT/models/ObjectSerializer.ts"
 
 rm -f "$CODEGEN_SPEC"
 trap - EXIT

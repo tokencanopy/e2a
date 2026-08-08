@@ -49,6 +49,18 @@ func TestSMTPRelaySendWithContextCancelsHangingServer(t *testing.T) {
 	}
 }
 
+func TestSMTPRelaySendOnceContextHonorsCancellation(t *testing.T) {
+	relay := NewSMTPRelay(&config.OutboundSMTPConfig{Host: "127.0.0.1", Port: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := relay.SendOnceContext(ctx, "noreply@example.com",
+		[]string{"recipient@example.com"}, []byte("Subject: test\r\n\r\nbody"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SendOnceContext error = %v, want context canceled", err)
+	}
+}
+
 // smtpErr mirrors PRODUCTION's error shape: net/smtp returns a *textproto.Error for
 // a non-2xx reply, which sendOnce wraps with a command prefix via %w. The
 // classifiers must key on the wrapped code, not the string — a bare

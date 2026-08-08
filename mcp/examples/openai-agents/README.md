@@ -23,7 +23,7 @@ python agent.py "reply to the most recent message politely"
 ```
 
 The example deliberately uses an agent-scoped key. An account-scoped key exposes
-admin/setup tools as well and requires `agent_email` on inbox calls when the
+admin/setup tools as well and requires `email` on inbox calls when the
 account owns multiple agents; use that broader scope only for a provisioning UI.
 
 ## How it works

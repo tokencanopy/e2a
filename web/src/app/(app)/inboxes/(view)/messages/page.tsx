@@ -8,8 +8,9 @@
 // lands, the window may starve old threads for accounts with >100
 // recent messages.
 //
-// Selection state lives in `window.location.hash` (#conv:X or #orphan:X)
-// so deep-links work and the back button moves between threads.
+// Selection state lives in `window.location.hash` (#thr:X for new rows, with
+// #conv:X / #orphan:X retained for unambiguous legacy rows) so deep-links
+// work and the back button moves between threads.
 
 import { Suspense, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -18,7 +19,12 @@ import { listAgentMessages } from "../../../../components/onboarding/api";
 import type { MessageSummary } from "../../../../components/types";
 import { ThreadList } from "../../../../components/messages/ThreadList";
 import { ThreadDetail } from "../../../../components/messages/ThreadDetail";
-import { groupIntoThreads } from "../../../../components/messages/threading";
+import {
+  decodeThreadFragment,
+  encodeThreadFragment,
+  findThread,
+  groupIntoThreads,
+} from "../../../../components/messages/threading";
 import { inboxPolling } from "../../../../../lib/livePolling";
 import { agentMessagesKey } from "../../../../../lib/swrKeys";
 
@@ -26,7 +32,9 @@ import { agentMessagesKey } from "../../../../../lib/swrKeys";
 // idiomatic way to read browser-owned state without effect ping-pong.
 function getHash(): string {
   if (typeof window === "undefined") return "";
-  return window.location.hash ? window.location.hash.slice(1) : "";
+  return window.location.hash
+    ? decodeThreadFragment(window.location.hash.slice(1))
+    : "";
 }
 function subscribeHash(onChange: () => void) {
   window.addEventListener("hashchange", onChange);
@@ -58,8 +66,7 @@ function AgentInboxContent({ email }: { email: string }) {
   const router = useRouter();
 
   // Initial 100-row window. SWR keys by email so navigating between
-  // agents fetches independently; mutations on the focus page call
-  // `invalidateAgentMessages(email)` to refresh this query.
+  // agents fetches independently; review actions invalidate this query.
   const {
     data: initialPage,
     error: fetchError,
@@ -83,16 +90,16 @@ function AgentInboxContent({ email }: { email: string }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  const initialMessages = initialPage?.items ?? [];
   // Concatenate the initial page with any imperatively-loaded older
   // pages, then de-dupe by `id`. The de-dupe matters because
   // SWR can revalidate the initial page mid-session (focus event,
-  // explicit invalidation from the focus page's approve flow). New
+  // explicit invalidation from the Review page). New
   // messages arriving at the top push the initial-page boundary
   // down, which can re-include rows that already live in
   // `olderPages`. Without this de-dupe, the same message renders
   // twice in the thread bucket and `msgCount` lies.
   const rows: MessageSummary[] = useMemo(() => {
+    const initialMessages = initialPage?.items ?? [];
     const seen = new Set<string>();
     const out: MessageSummary[] = [];
     for (const m of [...initialMessages, ...olderPages.flat()]) {
@@ -101,7 +108,7 @@ function AgentInboxContent({ email }: { email: string }) {
       out.push(m);
     }
     return out;
-  }, [initialMessages, olderPages]);
+  }, [initialPage?.items, olderPages]);
   // The cursor to use for the next "Load older" click is the most
   // recent next_cursor we've seen (either from the initial fetch or
   // the latest appended page).
@@ -116,7 +123,7 @@ function AgentInboxContent({ email }: { email: string }) {
   // Gmail model: an empty hash shows the inbox LIST; a hash selects a
   // thread and shows that conversation full-width. (No auto-select of
   // threads[0] — the list is the default landing.)
-  const selected = hash ? threads.find((t) => t.key === hash) ?? null : null;
+  const selected = findThread(threads, hash);
   const pendingCount = threads.filter((t) => t.state === "pending").length;
   const error = loadError || (fetchError ? fetchError.message || "Failed to load messages" : "");
 
@@ -125,7 +132,7 @@ function AgentInboxContent({ email }: { email: string }) {
       // pushState (not replace) so opening a conversation adds a history
       // entry — the browser Back button then returns to the thread list
       // instead of skipping it and jumping to the top-level inbox list.
-      window.history.pushState(null, "", `#${key}`);
+      window.history.pushState(null, "", `#${encodeThreadFragment(key)}`);
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     }
   };
@@ -141,24 +148,10 @@ function AgentInboxContent({ email }: { email: string }) {
     }
   };
 
-  // MessageView now carries direction and review_status. Keep copies from the
-  // list row in the URL for compatibility with older cached detail payloads:
-  //   &direction=<inbound|outbound>  → picks the detail projection
-  //   &pending=1                     → gates approve/reject
-  // The focus page defaults to inbound / not-pending when absent.
-  const focusUrl = (m: MessageSummary, withHeaders: boolean) => {
-    const pending = m.review_status === "pending_review" ? "&pending=1" : "";
-    return (
-      `/inboxes/messages/view?email=${encodeURIComponent(email)}` +
-      `&id=${encodeURIComponent(m.id)}` +
-      `&direction=${m.direction}${pending}` +
-      (withHeaders ? "&headers=1" : "")
-    );
-  };
-  // Only the pending-review callout navigates to the approve/reject
-  // surface; reading happens inline in the conversation.
+  // Reading stays inline in the conversation. A held draft opens the same
+  // account-wide Review row used by the sidebar and notification email.
   const openMessage = (m: MessageSummary) => {
-    router.push(focusUrl(m, false));
+    router.push(`/reviews?id=${encodeURIComponent(m.id)}`);
   };
 
   const loadOlder = async () => {
@@ -233,6 +226,7 @@ function AgentInboxContent({ email }: { email: string }) {
               agentEmail={email}
               onBack={clearSelection}
               onOpenMessage={openMessage}
+              historyIncomplete={!!nextCursor}
             />
           ) : (
             <ThreadList

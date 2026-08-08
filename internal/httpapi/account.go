@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"time"
@@ -62,7 +63,7 @@ type accountOutput struct{ Body AccountView }
 const limitsUnavailableRetrySeconds = 5
 
 func (s *Server) registerAccount() {
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "getAccount", Method: http.MethodGet, Path: "/v1/account",
 		Summary: "Get account: identity + plan limits + usage (whoami)", Tags: []string{"account"},
 		Description: "The authenticated principal's identity (user + scope; agent_email for agent-scoped credentials), plan caps, and current usage. Works for both account- and agent-scoped credentials. (Deployment discovery — shared domain, slug registration — is the separate public GET /v1/info.)",
@@ -74,7 +75,7 @@ func (s *Server) registerAccount() {
 		},
 	}, s.handleGetMyLimits)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "exportAccount", Method: http.MethodGet, Path: "/v1/account/export",
 		Summary: "Export your data (GDPR right-of-access)", Tags: []string{"account"},
 		Description: "A JSON dump of every record the authenticated account owns. " +
@@ -86,21 +87,26 @@ func (s *Server) registerAccount() {
 		Security: []map[string][]string{{"bearer": {}}},
 	}, s.handleExportUserData)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
 		Summary: "Delete your account + all data (irreversible)", Tags: []string{"account"},
-		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
+		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
 		Security:    []map[string][]string{{"bearer": {}}},
+		Responses: map[string]*huma.Response{
+			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
+				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."),
+			"default": s.errorEnvelopeResponse(),
+		},
 	}, s.handleDeleteAccount)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "listSuppressions", Method: http.MethodGet, Path: "/v1/account/suppressions",
 		Summary: "List suppressed recipient addresses", Tags: []string{"account"},
 		Description: "Addresses e2a will refuse to send to (auto-added on a hard bounce or complaint, or added manually). Sends to a suppressed address fail with recipient_suppressed.",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleListSuppressions)
 
-	huma.Register(s.API, huma.Operation{
+	registerOp(s.API, huma.Operation{
 		OperationID: "deleteSuppression", Method: http.MethodDelete, Path: "/v1/account/suppressions/{address}",
 		Summary: "Remove an address from the suppression list", Tags: []string{"account"},
 		Description: "Un-suppress a recipient. A previously-blocked send to it then succeeds (idempotency keys are released, so no fresh key is needed). Requires ?confirm=DELETE. Returns 200 with a deletion object ({deleted:true, address}).",
@@ -161,8 +167,8 @@ func (s *Server) handleListSuppressions(ctx context.Context, in *listSuppression
 	var afterAddress string
 	if in.Cursor != "" {
 		var cur suppressionsCursor
-		if err := DecodeCursor([]string{s.deps.CursorSecret}, in.Cursor, &cur); err != nil {
-			return nil, NewError(http.StatusBadRequest, "invalid_cursor", "invalid pagination cursor")
+		if err := s.decodeCursor(user.ID, cursorAccountSuppressions, in.Cursor, &cur); err != nil {
+			return nil, err
 		}
 		afterCreatedAt = cur.CreatedAt
 		afterAddress = cur.Address
@@ -183,7 +189,7 @@ func (s *Server) handleListSuppressions(ctx context.Context, in *listSuppression
 	var nextCursor string
 	if hasMore {
 		last := list[len(list)-1]
-		nextCursor, err = EncodeCursor(s.deps.CursorSecret, suppressionsCursor{CreatedAt: last.CreatedAt, Address: last.Address})
+		nextCursor, err = EncodeCursor(s.deps.CursorSecret, user.ID, cursorAccountSuppressions, suppressionsCursor{CreatedAt: last.CreatedAt, Address: last.Address})
 		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to build pagination cursor")
 		}
@@ -271,6 +277,10 @@ func (s *Server) handleDeleteAccount(ctx context.Context, in *deleteAccountInput
 	}
 	res, err := s.deps.DeleteUserData(ctx, user)
 	if err != nil {
+		if errors.Is(err, identity.ErrSendInProgress) {
+			return nil, NewError(http.StatusConflict, "send_in_progress",
+				"an outbound provider call is still in progress; retry after it finishes")
+		}
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
 	}
 	// Conform to the uniform delete-object shape: every delete op returns

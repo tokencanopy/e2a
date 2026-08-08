@@ -46,6 +46,10 @@ type ApproveIdemCompleter func(ctx context.Context, tx pgx.Tx, approved *identit
 // closed before provider I/O.
 type OutboundEnqueuer interface {
 	EnqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error)
+	// EnqueueScheduledSendTx enqueues the send job to run no earlier than `at`
+	// (scheduled send). Same outbox transaction as EnqueueSendTx; only the job's
+	// first-run time differs. *outboundsend.Jobs satisfies it.
+	EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error)
 }
 
 // outboundSendStore implements outboundsend.Store over identity.Store +
@@ -57,6 +61,22 @@ type outboundSendStore struct {
 	store  *identity.Store
 	outbox webhookpub.Outbox
 	usage  usage.UsageTracker
+	// overQuota, when set, is consulted at FIRE time for SCHEDULED sends only:
+	// it reports whether the owning account is over its monthly message cap in
+	// the fire month. A send scheduled into a later month was never counted
+	// against that month's cap (accept-time enforcement can't know the fire
+	// month), so this closes the "schedule into a future month to bypass quota"
+	// gap. nil disables the gate (tests / plans without limits). The wrapper
+	// returns (false, err) on a transient lookup failure so a quota-check glitch
+	// never drops a legitimate send (fail open).
+	overQuota func(ctx context.Context, userID string) (bool, error)
+}
+
+// SetScheduledSendQuota installs the fire-time monthly-cap gate for scheduled
+// sends (see outboundSendStore.overQuota). Wired in main from the limits
+// enforcer; left nil in tests and plan-agnostic setups.
+func (a *outboundSendStore) SetScheduledSendQuota(f func(ctx context.Context, userID string) (bool, error)) {
+	a.overQuota = f
 }
 
 // NewOutboundSendStore builds the outboundsend.Store adapter for main.go.
@@ -123,7 +143,24 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 	if err != nil || p == nil {
 		return nil, err
 	}
-	return &outboundsend.SendJob{
+	// Fire-time monthly-cap gate for scheduled sends: a send scheduled into a
+	// future month was never counted against that month's cap, so enforce it now
+	// and refuse terminally (email.failed via MarkFailed) rather than deliver an
+	// uncapped send. Immediate sends are already gated at accept and skip this.
+	if p.ScheduledAt != nil && a.overQuota != nil {
+		over, qerr := a.overQuota(ctx, p.UserID)
+		if qerr != nil {
+			log.Printf("[outbound-send:%s] scheduled-send quota check failed, proceeding (fail open): %v", p.ID, qerr)
+		} else if over {
+			if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+				"scheduled send canceled: monthly message limit exceeded at send time",
+				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
+				return nil, failErr
+			}
+			return nil, nil // refused at fire — the worker delivers nothing
+		}
+	}
+	sj := &outboundsend.SendJob{
 		MessageID:          p.ID,
 		UserID:             p.UserID,
 		AgentID:            p.AgentID,
@@ -138,7 +175,14 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 		ProviderAccepted:   p.ProviderAccepted,
 		ProviderAcceptedAt: p.ProviderAcceptedAt,
 		ProviderMessageID:  p.ProviderMessageID,
-	}, nil
+	}
+	if p.ScheduledAt != nil {
+		sj.ScheduledAt = *p.ScheduledAt
+	}
+	if p.ReviewedAt != nil {
+		sj.ReviewedAt = *p.ReviewedAt
+	}
+	return sj, nil
 }
 
 // SuppressedRecipients backs the SendWorker's pre-provider suppression guard:
@@ -188,6 +232,18 @@ func (a *outboundSendStore) finalizeSentTx(ctx context.Context, tx pgx.Tx, info 
 	if err := a.meterSentTx(ctx, tx, info); err != nil {
 		return err
 	}
+	// A terminally accepted send and the timestamps used by the safe follow-up
+	// query are one invariant. Keep them in this transaction so a crash cannot
+	// leave a recently contacted person eligible for another send.
+	for _, rcpt := range info.Message.ToRecipients {
+		if rcpt == "" {
+			continue
+		}
+		if _, err := a.store.RecordOutboundActivityTx(ctx, tx, info.UserID,
+			info.Message.AgentID, rcpt, info.Message.ConversationID, occurredAt); err != nil {
+			return err
+		}
+	}
 	transition, err := appendSubmissionTransition(ctx, tx, info.Message.ID, jobID, attempt, occurredAt,
 		messagelifecycle.ReasonSubmissionUpstreamAccepted, "", providerMessageID)
 	if err != nil {
@@ -212,6 +268,53 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 	}
 	_, err := tracker.RecordAndCheckTx(ctx, tx, info.UserID, info.Message.AgentID, info.Domain, "outbound")
 	return err
+}
+
+// FinalizeScheduledCancellationTx performs the canonical guarded terminal
+// transition for a scheduled message restored after its cutoff. Authoritative
+// provider-accept evidence wins and is settled as sent; otherwise the
+// cancellation becomes failed with a deterministic email.failed event.
+func (a *outboundSendStore) FinalizeScheduledCancellationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	messageID string,
+	jobID int64,
+	occurredAt time.Time,
+) error {
+	info, providerID, err := a.store.ResolveOutboundProviderAcceptedTx(ctx, tx, messageID)
+	if err != nil {
+		return err
+	}
+	if info != nil {
+		return a.finalizeSentTx(ctx, tx, info, jobID, 0, info.ProviderAcceptedAt, providerID)
+	}
+
+	const detail = "scheduled send canceled because it was restored after scheduled_at"
+	finfo, err := a.store.MarkOutboundFailedTx(ctx, tx, messageID, detail, delivery.FailureSourceLocal)
+	if err != nil {
+		return err
+	}
+	if finfo == nil {
+		// Provider evidence raced the guarded update, or another terminal
+		// transition already won. The reconciler will settle evidence-bearing
+		// rows; never overwrite them with a false failure.
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE messages SET delivery_failure_reason_code=$2 WHERE id=$1`,
+		messageID, string(messagelifecycle.ReasonSubmissionCancelled)); err != nil {
+		return err
+	}
+	transition, err := appendSubmissionTransition(
+		ctx, tx, messageID, jobID, 0, occurredAt,
+		messagelifecycle.ReasonSubmissionCancelled, finfo.Message.DeliveryDetail, "",
+	)
+	if err != nil {
+		return err
+	}
+	e := buildEmailFailedEventFromRow(finfo, finfo.Message.DeliveryDetail, transition)
+	e.ID = webhookpub.DeterministicEventID(messageID, webhookpub.EventEmailFailed)
+	return a.outbox.PublishTx(ctx, tx, e)
 }
 
 // MarkFailed is the guarded terminal write (async-send-contract §3.1): inside
@@ -442,7 +545,7 @@ func NewOutboundDeliverer(sender *outbound.Sender) outboundsend.Deliverer {
 }
 
 func (d *outboundDeliverer) Deliver(ctx context.Context, j *outboundsend.SendJob) outboundsend.DeliverOutcome {
-	providerID, err := d.sender.SubmitOnce(j.MessageID, j.EnvelopeFrom, j.Recipients, j.RawMessage)
+	providerID, err := d.sender.SubmitOnceContext(ctx, j.MessageID, j.EnvelopeFrom, j.Recipients, j.RawMessage)
 	if err != nil {
 		// Classify (design §8): a definitely-permanent 5xx is terminal (JobCancel);
 		// a provider-connection failure (relay unreachable/misconfigured) is an

@@ -5,15 +5,23 @@
   <img src="assets/e2a-wordmark-light.svg" width="320" alt="e2a">
 </picture>
 
+### The first open-source email service built for AI agents.
+
 ### Give your AI agents a real, authenticated email address.
 
 Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Every sender — human or agent — **identity-verified**.
+
+<sub>A [Token Canopy](https://tokencanopy.com) product</sub>
 
 [![Tests](https://github.com/tokencanopy/e2a/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/test.yml)
 [![Build image](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml)
 [![License](https://img.shields.io/github/license/tokencanopy/e2a)](LICENSE)
 [![npm @e2a/sdk](https://img.shields.io/npm/v/%40e2a%2Fsdk?label=%40e2a%2Fsdk)](https://www.npmjs.com/package/@e2a/sdk)
 [![PyPI e2a](https://img.shields.io/pypi/v/e2a)](https://pypi.org/project/e2a/)
+[![MCP Toplist](https://img.shields.io/badge/MCP%20Toplist-Top%201%25-4F46FF)](https://mcptoplist.com/server/dev.e2a%2Fmcp-server)
+[![Release](https://img.shields.io/github/v/release/tokencanopy/e2a?label=release&color=2ea44f)](https://github.com/tokencanopy/e2a/releases/latest)
+
+**`/v1` is now generally available** — shipped in [**v1.5.0**](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0).
 
 [Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
@@ -24,7 +32,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 ---
 
 > [!IMPORTANT]
-> **The `/v1` API and SDKs are release candidates and are not yet stable. GA is planned by July 31, 2026; stable compatibility guarantees begin only with the explicitly announced GA release tag.** Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines. Pin your SDK versions and watch [Releases](https://github.com/tokencanopy/e2a/releases).
+> **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
 e2a is an **authenticated email gateway for AI agents**. It receives inbound mail, evaluates SPF, every DKIM signature, and DMARC, and delivers structured authentication evidence over whichever channel fits your runtime. Outbound goes back out through an HTTP API, with an optional human-in-the-loop approval gate.
 
@@ -41,9 +49,11 @@ What you get on top of bare SMTP:
 - **No public URL required** — WebSocket, REST polling, and MCP all work from a laptop or behind a firewall
 - **Outbound API** — agents send to other agents (SMTP relay) or humans (upstream SMTP, e.g. SES, Resend)
 - **Human in the loop** — opt-in approval gate that holds outbound mail until a reviewer approves via dashboard, magic-link email, the MCP tools, or the API
-- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening)
-- **Conversation threading** — a stable `conversation_id` that survives the email ↔ structured-data boundary
+- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening). *Available on self-hosted deployments; not yet enabled on the hosted service.*
+- **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
 - **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
+- **Contacts & outreach (beta)** — account-level contact identity (CRUD + bulk import with safe reversal) and per-agent outreach state with server-derived reply/delivery facts, plus the `contact.due` due-queue notification event → [docs/api.md](docs/api.md#contacts--outreach-v1contacts-v1agentsemailcontacts-beta)
+- **Scheduled sending (beta)** — `send_at` on send/reply/forward defers submission up to 90 days ahead; a scheduled send is durable acceptance (`status=scheduled`) and can be canceled by trashing the message before submission
 
 ## Quickstart
 
@@ -83,6 +93,14 @@ You can either use the hosted instance or self-host.
 - **Hosted** — sign up at [e2a.dev](https://e2a.dev). Includes the shared `agents.e2a.dev` domain for instant slug-based onboarding (no DNS setup), a dashboard, the hosted MCP server, and managed deliverability.
 - **Self-host** — see [Self-host (Docker)](#self-host-docker) and [Deployment](#deployment). Every feature works the same; the shared-domain slug shortcut just needs you to point a mail domain at your relay and set `shared_domain` in `config.yaml`.
 
+## What you can build
+
+- **A support inbox for your AI assistant** — give an agent `support@yourbrand.com`, receive customer mail with SPF/DKIM/DMARC already evaluated as structured evidence, and reply in-thread. Add HITL so anything sensitive waits for a human to approve before it goes out.
+- **Email between agents — yours and other organizations'** — every agent has a real, verified address, so two companies' agents can exchange mail the same way humans do: no new client, protocol, or shared platform to install.
+- **A personal concierge on your laptop** — subscribe over WebSocket (no public URL, no ngrok, no port forwarding), so a local agent can watch an inbox from behind any firewall, triage it, draft replies, and take actions.
+- **Email-triggered workflows** — turn inbound mail into structured events: order confirmations, forms, support tickets, notifications, and receipts rendered server-side from templates, with `conversation_id` correlated back to your app's state.
+- **Autopilot with human oversight** — an agent drafts outbound mail (newsletters, outreach, reports) and holds each send for one-click approval via magic-link email or the review queue, with automatic expiry policy if no one reviews in time.
+
 ## How it works
 
 ```
@@ -116,7 +134,7 @@ Inbound mail reaches you several complementary ways — **chosen per integration
 
 | Channel | How | Public URL needed? |
 |---------|-----|---------------------|
-| **Webhooks** | Account-level subscriptions (`POST /v1/webhooks`) — HTTPS POST per event, filterable by agent / conversation / event type | Yes |
+| **Webhooks** | Account-level subscriptions (`POST /v1/webhooks`) — HTTPS POST per event, filterable by agent / application conversation / event type | Yes |
 | **WebSocket** | Per-agent real-time notification stream (`/v1/agents/{email}/ws`) + REST fetch | No |
 | **REST polling** | Pull messages via `GET /v1/agents/{email}/messages` — the default path for MCP-based agents | No |
 | **MCP tools** | The e2a [MCP server](#mcp-server)'s inbox tools (`list_messages`, `get_message`, `get_attachment`, `list_conversations`, …) layered over the REST API | No |
@@ -176,16 +194,33 @@ if (event.type === "email.received") {
 
 Messages fetched over an authenticated channel — `client.messages.get(address, id)` or the `client.listen(...)` stream — are already trusted (the bearer token authenticated the call), so no verify step is needed there.
 
-### Conversation threading
+### Email threads and application conversations
 
-Both `send` and `reply` accept an optional opaque `conversation_id` (server-minted when omitted). e2a propagates it to the recipient on delivery via `payload.conversation_id`, surfaced in this priority order:
+Email clients build reply threads from the RFC `Message-ID`, `In-Reply-To`,
+and `References` graph. Use `reply` with the original e2a message ID so e2a can
+emit those headers; a fresh `send` or `forward` starts a new email thread.
 
-1. **`X-E2A-Conversation-Id` header** — authoritative for e2a-to-e2a traffic. Only honored when the SMTP envelope `MAIL FROM` originates from this relay, so external senders cannot forge it.
-2. **`In-Reply-To` / `References` lookup** — standard RFC 5322 threading, scoped to the recipient agent's own messages. Covers humans replying from Gmail/Outlook.
+`conversation_id` is separate, caller-owned application correlation. Both
+`send` and `reply` accept the optional opaque value, and e2a keeps its existing
+minting, inheritance, and delivery-correlation behavior when it is omitted.
+Applications can use it to associate mail with a workflow, ticket, or model
+session, but reusing it does not join fresh sends into one email thread, and
+changing it does not split replies out of their RFC thread.
 
-First contact from a human arrives with `conversation_id: null` — the inbound relay assigns no thread id by design. You don't have to mint one yourself: when the agent replies with `conversation_id` omitted, e2a auto-generates a stable `conv_…` anchor that later replies thread onto, and replies within an existing thread inherit the referenced message's id. An explicit `conversation_id` you pass always takes precedence; a `forward` starts a new thread.
+Existing message list and detail responses may also include `thread_id`
+(`threadId` in TypeScript and SDK-shaped CLI JSON). This optional beta field is
+server-owned, read-only, scoped to one agent mailbox, and derived from reply
+topology. It is omitted for legacy rows without an assignment. There is no
+`thread_id` request field, message filter, or thread list/detail endpoint, and
+the field is not added to webhook events, WebSocket notifications, exports, or
+MCP output.
 
-Agent frameworks should use that explicit override to bind email to model memory: create or resume the runtime's internal conversation when mail arrives, then pass its stable, non-sensitive thread/session ID (or an opaque stored alias) as `conversation_id` on the first reply and reuse it thereafter. Continue replying by the original message ID—the conversation ID aligns e2a's grouping with the runtime, while `In-Reply-To` / `References` preserve the Gmail/Outlook thread. Scope stored bindings to the inbox and sender, and never treat `conversation_id` as authorization.
+Agent frameworks should bind model memory with `conversation_id`: create or
+resume the runtime's internal conversation, pass its stable, non-sensitive
+session ID (or an opaque stored alias), and scope that binding to the inbox and
+sender. Continue replying by the original message ID—the correlation value
+aligns application state, while RFC reply headers preserve the Gmail/Outlook
+thread. Never treat either identifier as authorization.
 
 ### Content screening
 
@@ -194,6 +229,9 @@ Inbound email is a prime **indirect prompt-injection** vector — a message can 
 A built-in, dependency-free **heuristics** detector flags prompt-injection, jailbreak, obfuscation, and data-exfiltration patterns (mapped to OWASP LLM01 / MITRE ATLAS); an optional LLM detector adds semantic injection **and phishing** classification. Each message gets a verdict — **allow · review · block** — set by the agent's scan sensitivity (`off · low · medium · high`): `review` routes it into the shared [HITL](#human-in-the-loop-hitl) queue, `block` drops it before delivery. Screening is **fail-safe** — if a detector times out or degrades, the message fails *to review*, never to a silent allow — and every verdict is written to `protection_events` for audit and threshold tuning.
 
 Turn it on with `PUT /v1/agents/{email}/protection` (the same sub-resource as HITL holds), which carries the inbound/outbound × gate/scan posture.
+
+> [!NOTE]
+> Content screening is currently available on **self-hosted** deployments only — it is **not yet enabled on the hosted service** at [e2a.dev](https://e2a.dev). Self-host the image (see [Deployment](#deployment)) to use it today.
 
 ### Human in the loop (HITL)
 
@@ -227,7 +265,7 @@ Authenticate either with **OAuth 2.1** (add e2a as a connector and authorize in 
 
 The toolset covers the full agent loop — inbox (`list_messages`, `get_message`, `get_attachment`, `list_conversations`, `get_conversation`, `update_message_labels`), outbound (`send_message`, `reply_to_message`, `forward_message`), HITL review (`list_reviews`, `get_review`, `approve_review`, `reject_review`), plus agent/domain/webhook management. Inbound is consumed by polling (`list_messages`) or a `create_webhook` subscription.
 
-The hosted server is the primary path; npm publishing of `@e2a/mcp-server` is retired (frozen at `0.4.0`). See [mcp/README.md](mcp/README.md) for per-framework setup and the full tool reference.
+The hosted server is the primary path; npm publishing of `@e2a/mcp-server` is retired (frozen at `0.5.0`). See [mcp/README.md](mcp/README.md) for per-framework setup and the full tool reference.
 
 ## CLI
 
@@ -249,6 +287,8 @@ domains/webhooks in the **web dashboard**.
 | `e2a agents list\|create\|get` | Manage inboxes (requires an account-scoped key) |
 | `e2a keys create\|list\|delete` | Mint, list, and revoke API keys (requires an account-scoped key) |
 | `e2a protection get\|set` | Show or update an agent's HITL screening/review config |
+| `e2a contacts list\|get\|create\|update\|delete\|import\|outreach ...` | Manage account contacts and per-agent outreach state, with suppression visibility |
+| `e2a suppressions list\|add\|remove` | Inspect and manage recipient block lists (account-wide GA; agent-scoped is beta) |
 | `e2a send` / `e2a reply` | Send an email as the agent, or reply in-thread |
 | `e2a messages list\|get` | List or fetch messages for an agent |
 | `e2a listen --agent <email>` | Stream inbound email for an agent over WebSocket (real-time; `--json` for raw, `--forward <url>` to bridge to a local HTTP handler) |
@@ -328,7 +368,7 @@ See [docs/deployment.md](docs/deployment.md) for the full env-var reference, sha
 
 - **Identity** — agent registration requires DNS TXT verification of domain ownership (custom domains)
 - **Domain auth** — SPF and DKIM checked on every inbound message
-- **Header signatures** — HMAC-SHA256 over canonical auth-header string; reject if timestamp older than 5 minutes
+- **Header signatures** — HMAC-SHA256 over the `<t>.<body>` signing string delivered in the `X-E2A-Signature` header; receivers reject timestamps older than 5 minutes
 - **SSRF protection** — webhook URLs must be HTTPS (in production), resolve to public IPs, use domain names (no raw IPs, no private/loopback ranges)
 - **OAuth CSRF** — single-use, time-limited nonce in the `state` parameter
 - **Production mode** (`env: production` in `config.yaml`) enforces the above where development mode is more permissive
@@ -349,7 +389,13 @@ Four things that aren't possible to bolt on without significant rework:
 
 1. **Inbound with no public URL.** Agents authenticate with their API key and consume inbound mail over a WebSocket to `/v1/agents/{email}/ws`, by polling the REST API, or through the MCP tools — no webhook URL, no ngrok, no port forward. Useful for agents on developer laptops, edge devices, or behind corporate firewalls. SendGrid/Resend are webhook-only by design.
 
-2. **Conversation threading on every reply.** Whether a human replies from Gmail or another e2a agent replies via the API, the inbound message arrives at the agent with a stable `conversation_id` already mapped to the original thread. For human senders, the relay does standard `In-Reply-To` / `References` lookup scoped to the recipient agent's own messages. For agent-to-agent where both sides are on e2a, it also trusts an `X-E2A-Conversation-Id` header it controls (envelope-from is its own domain), which survives clients that rewrite threading headers. SendGrid/Resend never see inbound mail — they aren't receivers — so neither path is available without you building both yourself.
+2. **Email threading on every reply.** e2a resolves the RFC
+   `Message-ID` / `In-Reply-To` / `References` graph within each agent mailbox,
+   emits correct reply headers, and keeps a server-owned topology identity for
+   message reads. `conversation_id` remains independent application
+   correlation. SendGrid/Resend never see inbound mail—they are not
+   receivers—so they cannot provide this bidirectional mailbox-local topology
+   without you building the receiving side yourself.
 
 3. **Slug provisioning on a shared domain.** Operators set `shared_domain: agents.e2a.dev` and users `POST {"email": "my-agent@agents.e2a.dev"}` to immediately register an agent on the shared domain with no DNS configuration. Possible because e2a *is* the SMTP relay claiming the domain — Resend / SendGrid are providers, not platforms, and can't multi-tenant a shared address space without you running the relay yourself.
 
@@ -377,7 +423,7 @@ Yes — and the extra steps are the point. Concretely:
 - Structured SPF/DKIM/DMARC evidence with explicit identifier alignment
 - WebSocket / REST / MCP transport for agents without public URLs
 - HITL approval flow with auto-expiration and stateless magic-link review
-- Conversation-Id threading that survives the email ↔ structured-data boundary
+- Mailbox-local reply topology plus caller-owned application correlation
 - Slug-based agent provisioning on a shared domain
 - Per-agent webhook routing, rate limits, and HITL config
 
@@ -452,7 +498,7 @@ Save the key — it's only shown once. Register an agent and confirm it works:
 KEY=e2a_...
 curl -X POST http://localhost:8080/v1/agents \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"email":"my-bot@agents.e2a.dev"}'   # an email on the deployment shared domain (or a domain you've verified)
+  -d '{"email":"my-bot@agents.localhost"}'   # the local compose shared domain (or a domain you've verified)
 
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/agents
 ```
@@ -465,6 +511,12 @@ To receive real inbound mail, point a domain's MX record at your relay host:
 Then register and verify the domain through the API (see [Domains](docs/api.md)). Without DNS, the API still works for testing — but external email won't reach your relay.
 
 > **Upgrades and migrations.** The e2a binary embeds `migrations/*.sql` and **auto-applies any pending ones at startup** (tracked in a `schema_migrations` table). When you upgrade e2a, restarting the container applies new schema migrations automatically — no manual step. `E2A_MIGRATION_MODE` controls this: `auto` (default, applies pending), `verify` (refuse startup and report pending), or `skip` (emergency surgery). Migrations are idempotent and non-destructive, so re-applying is safe.
+
+> Thread-identity upgrades include several `CREATE INDEX CONCURRENTLY` migrations. The
+> direction-aware legacy-anchor indexes inspect existing message rows and can keep the
+> first upgraded process in migration startup until each build completes; schedule the
+> rollout with normal migration headroom and monitor startup logs. They take the
+> migration advisory lock but do not block ordinary reads or writes.
 >
 > (The compose file also mounts `migrations/` into Postgres' init directory, but that path only runs on first start with an empty data volume — the binary's startup auto-apply is what keeps an upgraded deployment current.)
 

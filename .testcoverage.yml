@@ -26,12 +26,20 @@ override:
   # /v1 HTTP handlers (includes the webhook endpoints + idempotency).
   - threshold: 73
     path: ^internal/httpapi$
+  # contact.due outreach wake-up sweep — claim-and-mark plus the event payload,
+  # which is a published contract webhook subscribers depend on.
+  - threshold: 75
+    path: ^internal/contactdue$
   # Outbound send on River — the at-least-once send worker + accept-tx enqueue.
   - threshold: 75
     path: ^internal/outboundsend$
   # Sending-ramp storage + River janitor — pre-provider abuse-control state.
   - threshold: 80
     path: ^internal/sendramp$
+  # Fire-time per-agent send rate limiter — the durable sliding-window store
+  # guarding provider-visible throughput.
+  - threshold: 80
+    path: ^internal/sendrate$
   # Inbound processing on River — the at-least-once worker + reconciler + retention.
   # (The relay-side ProcessIntake adapter is covered cross-package by relay tests.)
   - threshold: 65

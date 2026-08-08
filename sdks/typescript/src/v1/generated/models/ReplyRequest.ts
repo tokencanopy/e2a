@@ -11,6 +11,7 @@
  */
 
 import { Attachment } from '../models/Attachment.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { HttpFile } from '../http/http.js';
 
@@ -20,23 +21,24 @@ export class ReplyRequest {
     */
     'attachments'?: Array<Attachment>;
     /**
-    * Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+    * Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP\'s mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
     */
     'bcc'?: Array<string>;
     /**
-    * Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+    * Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP\'s mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
     */
     'cc'?: Array<string>;
     /**
-    * Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+    * Caller-assigned application conversation/grouping id override. This value is independent of email thread topology, which is derived from the referenced message. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
     */
     'conversationId'?: string;
     'html'?: string;
     'replyAll'?: boolean;
+    'replyTo'?: ForwardRequestReplyTo;
     /**
-    * Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent\'s own address.
+    * Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent\'s own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the reply would otherwise be held for review. Scheduling survives a review hold: if held, send_at is preserved on the pending_review message (surfaced as scheduled_at) and re-armed on approval — submitted at send_at if still future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.
     */
-    'replyTo'?: string;
+    'sendAt'?: Date;
     'text': string;
     /**
     * Beta: opts this message into e2a-managed unsubscribe handling. This field may change before it is declared stable.
@@ -87,8 +89,14 @@ export class ReplyRequest {
         {
             "name": "replyTo",
             "baseName": "reply_to",
-            "type": "string",
+            "type": "ForwardRequestReplyTo",
             "format": ""
+        },
+        {
+            "name": "sendAt",
+            "baseName": "send_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "text",

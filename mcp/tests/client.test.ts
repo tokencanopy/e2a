@@ -32,6 +32,48 @@ function mockSdk() {
   };
 }
 
+describe("McpClient outbound reply_to delegation", () => {
+  function mockSendSdk() {
+    return {
+      messages: {
+        send: vi.fn(async () => ({ messageId: "msg_s", status: "sent" })),
+      },
+    };
+  }
+
+  it("send forwards a multi-address reply_to array to the SDK", async () => {
+    const sdk = mockSendSdk();
+    const c = new McpClient(sdk as never, "bot@test.dev", "agent");
+    await c.send({
+      to: ["you@example.com"],
+      subject: "hi",
+      text: "hello",
+      replyTo: ["a@x.test", "b@y.test"],
+    });
+    expect(sdk.messages.send).toHaveBeenCalledWith(
+      "bot@test.dev",
+      expect.objectContaining({ replyTo: ["a@x.test", "b@y.test"] }),
+      {},
+    );
+  });
+
+  it("send still forwards a single-string reply_to unchanged", async () => {
+    const sdk = mockSendSdk();
+    const c = new McpClient(sdk as never, "bot@test.dev", "agent");
+    await c.send({
+      to: ["you@example.com"],
+      subject: "hi",
+      text: "hello",
+      replyTo: "Support <s@x.test>",
+    });
+    expect(sdk.messages.send).toHaveBeenCalledWith(
+      "bot@test.dev",
+      expect.objectContaining({ replyTo: "Support <s@x.test>" }),
+      {},
+    );
+  });
+});
+
 describe("McpClient trash/restore delegation", () => {
   function mockTrashSdk() {
     const agentsPage = vi.fn(async () => ({ items: [{ email: "trashed@test.dev" }], next_cursor: "agents_next" }));
@@ -43,6 +85,7 @@ describe("McpClient trash/restore delegation", () => {
         agents: {
           list: vi.fn(() => ({ page: agentsPage })),
           restore: vi.fn(async (email: string) => ({ email })),
+          delete: vi.fn(async (email: string) => ({ deleted: true, email, messages_deleted: 0 })),
         },
         messages: {
           list: vi.fn(() => ({ page: messagesPage })),
@@ -67,6 +110,24 @@ describe("McpClient trash/restore delegation", () => {
     const c = new McpClient(sdk as never, "", "account");
     await c.restoreAgent("trashed@test.dev");
     expect(sdk.agents.restore).toHaveBeenCalledWith("trashed@test.dev");
+  });
+
+  it("deleteAgent forwards permanent to the SDK, not just to the tool layer", async () => {
+    const { sdk } = mockTrashSdk();
+    const c = new McpClient(sdk as never, "", "account");
+    await c.deleteAgent("doomed@test.dev", true);
+    // The tool-layer test in tools.test.ts stubs McpClient, so this is the only
+    // coverage that the flag survives the client → SDK hop. Dropping the second
+    // argument here would silently downgrade every purge to a trash move, and
+    // the receipt shape is identical, so the caller could not tell.
+    expect(sdk.agents.delete).toHaveBeenCalledWith("doomed@test.dev", { permanent: true });
+  });
+
+  it("deleteAgent defaults to the recoverable trash move", async () => {
+    const { sdk } = mockTrashSdk();
+    const c = new McpClient(sdk as never, "", "account");
+    await c.deleteAgent("doomed@test.dev");
+    expect(sdk.agents.delete).toHaveBeenCalledWith("doomed@test.dev", { permanent: undefined });
   });
 
   it("listMessages forwards deleted and explicitAddress without leaking it to the SDK filter", async () => {

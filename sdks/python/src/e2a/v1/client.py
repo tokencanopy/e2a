@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, Awaitable, Callable, List, Literal, Optional, Protocol, Sequence, Type, TypeVar, Union
+from datetime import datetime
+from typing import Any, Awaitable, Callable, List, Literal, Mapping, Optional, Protocol, Sequence, Tuple, Type, TypeVar, Union
 
 from pydantic import ValidationError
 
@@ -26,6 +27,7 @@ from .generated.api.messages_api import MessagesApi
 from .generated.api.meta_api import MetaApi
 from .generated.api.reviews_api import ReviewsApi
 from .generated.api.templates_api import TemplatesApi
+from .generated.api.contacts_api import ContactsApi
 from .generated.api.webhooks_api import WebhooksApi
 from .generated.api_client import ApiClient
 from .generated.configuration import Configuration
@@ -54,6 +56,7 @@ from .generated.models import (
     DomainView,
     EventView,
     ForwardRequest,
+    ForwardRequestReplyTo,
     AccountView,
     AttachmentView,
     MessageSummaryView,
@@ -80,6 +83,16 @@ from .generated.models import (
     ProtectionConfigView,
     ProtectionConfigRequest,
     CreateTemplateRequest,
+    ContactView,
+    CreateContactRequest,
+    UpdateContactRequest,
+    DeleteContactResult,
+    ImportContactsRequest,
+    ContactImportResult,
+    DeleteImportBatchResult,
+    ContactEngagementView,
+    UpsertEngagementRequest,
+    DeleteEngagementResult,
     UpdateAgentRequest,
     UpdateMessageRequest,
     UpdateMessageResultView,
@@ -149,6 +162,25 @@ def _resolve_base_url() -> Optional[str]:
             stacklevel=3,
         )
     return legacy
+
+
+def _reply_to_union(body: Optional[Body]) -> Optional[Body]:
+    """Wrap a raw ``reply_to`` on a dict body in the generated oneOf union.
+
+    Reply-To is an RFC 5322 address-list: the API accepts one address or a list
+    of up to five. The generated request models type ``reply_to`` as the
+    ``ForwardRequestReplyTo`` oneOf, which pydantic will NOT build from a bare
+    ``str``/``list`` when :func:`_coerce` validates the body — so wrap those here
+    so both ``{"reply_to": "a@x"}`` (the historical single-address form) and
+    ``{"reply_to": ["a@x", "b@y"]}`` keep working. Non-dict bodies and values
+    that are already a ``ForwardRequestReplyTo`` (or ``None``) pass through
+    unchanged. The body dict is copied, never mutated in place.
+    """
+    if isinstance(body, dict):
+        rt = body.get("reply_to")
+        if isinstance(rt, (str, list)):
+            return {**body, "reply_to": ForwardRequestReplyTo(actual_instance=rt)}
+    return body
 
 
 def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
@@ -267,6 +299,7 @@ class AsyncE2AClient:
         self.account = AccountResource(AccountApi(self._api_client), self)
         self.reviews = ReviewsResource(ReviewsApi(self._api_client), self)
         self.templates = TemplatesResource(TemplatesApi(self._api_client), self)
+        self.contacts = ContactsResource(ContactsApi(self._api_client), self)
         self._meta = MetaApi(self._api_client)
 
     # ── lifecycle ───────────────────────────────────────────────────
@@ -331,6 +364,17 @@ def _page(items: Optional[Sequence[T]], next_cursor: Optional[str] = None) -> Pa
     return Page(items=items or [], next_cursor=next_cursor)
 
 
+def _header(headers: Optional[Mapping[str, str]], name: str) -> Optional[str]:
+    """Read a response header without relying on transport-specific casing."""
+    if not headers:
+        return None
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
 class AgentsResource:
     """Agent administration. Exact-agent suppression management is beta and
     may change before it is declared stable."""
@@ -388,7 +432,9 @@ class AgentsResource:
         return await self._c._write_idempotent(lambda h: self._api.delete_agent(email, confirm="DELETE", _headers=h))
 
     async def restore(self, email: str) -> AgentView:
-        """Restore an agent from the 30-day trash. Account scope only."""
+        """Restore an agent from the 30-day trash. Scheduled messages restored
+        before scheduled_at re-arm; at/after scheduled_at they return live as
+        failed with submission canceled. Account scope only."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_agent(email, _headers=h)
         )
@@ -429,9 +475,12 @@ class AgentsResource:
 
 
 class MessagesResource:
-    """Message operations. The managed-unsubscribe option and its raw
-    ``GET|POST /u/{token}`` confirmation flow are beta and may change before
-    they are declared stable."""
+    """Message operations.
+
+    Scheduled sending via ``send_at`` / ``scheduled_at`` and the managed-
+    unsubscribe option (including its raw ``GET|POST /u/{token}`` confirmation
+    flow) are beta and may change before they are declared stable.
+    """
 
     def __init__(self, api: MessagesApi, client: AsyncE2AClient) -> None:
         self._api = api
@@ -535,7 +584,9 @@ class MessagesResource:
         )
 
     async def restore(self, email: str, message_id: str) -> MessageView:
-        """Restore a soft-deleted message and resume its retention clock."""
+        """Restore a soft-deleted message. A scheduled message restored before
+        scheduled_at re-arms; at/after scheduled_at it returns live as failed
+        with submission canceled."""
         return await self._c._write_unsafe(
             lambda h: self._api.restore_message(email, message_id, _headers=h)
         )
@@ -558,20 +609,28 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Send a message. The optional managed-unsubscribe field is beta.
+        """Send a message.
+
+        Scheduled sending via ``body.send_at`` and the resulting
+        ``scheduled_at`` / ``status="scheduled"`` fields is beta and may
+        change before it is declared stable. The optional managed-unsubscribe
+        field is also beta.
 
         Pass ``unsubscribe={"mode": "managed"}`` (or an
         :class:`UnsubscribeOptions`) to opt the message into e2a-managed
         unsubscribe handling; when given, it wins over any ``unsubscribe``
         already present in ``body``.
 
-        Pass ``wait="sent"`` for an optional bounded wait: the request is held
-        server-side until the asynchronously delivered message reaches a
-        terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed
-        state; on timeout the result stays ``status="accepted"``. Default: no
-        wait. Always branch on the result's ``status``, not the HTTP code.
+        Pass ``wait="sent"`` for an optional bounded wait on an immediate
+        send: the request is held server-side until the asynchronously
+        delivered message reaches a terminal-or-held state or at most 20
+        seconds elapse (currently ~15s), then returns the observed state; on
+        timeout the result stays ``status="accepted"``. A future ``send_at``
+        returns ``status="scheduled"`` immediately and does not wait for that
+        time. Default: no wait. Always branch on the result's ``status``, not
+        the HTTP code.
         """
-        req = _coerce(SendEmailRequest, body)
+        req = _coerce(SendEmailRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 # _coerce returns the caller's own model when body is already a
@@ -594,9 +653,14 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Reply to a message. The optional managed-unsubscribe field is beta,
-        and ``wait="sent"`` requests the same bounded wait (see :meth:`send`)."""
-        req = _coerce(ReplyRequest, body)
+        """Reply to a message.
+
+        Scheduled sending via ``body.send_at`` is beta and may change before
+        it is declared stable. The optional managed-unsubscribe field is also
+        beta, and ``wait="sent"`` requests the same bounded wait (see
+        :meth:`send`).
+        """
+        req = _coerce(ReplyRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 req = req.model_copy()
@@ -616,9 +680,14 @@ class MessagesResource:
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
-        """Forward a message. The optional managed-unsubscribe field is beta,
-        and ``wait="sent"`` requests the same bounded wait (see :meth:`send`)."""
-        req = _coerce(ForwardRequest, body)
+        """Forward a message.
+
+        Scheduled sending via ``body.send_at`` is beta and may change before
+        it is declared stable. The optional managed-unsubscribe field is also
+        beta, and ``wait="sent"`` requests the same bounded wait (see
+        :meth:`send`).
+        """
+        req = _coerce(ForwardRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 req = req.model_copy()
@@ -684,6 +753,186 @@ class ReviewsResource:
         req = _coerce(RejectRequest, body)
         return await self._c._write_unsafe(
             lambda h: self._api.reject_review(message_id, req, _headers=h)
+        )
+
+
+class ContactsResource:
+    """The people this account corresponds with (beta — shapes may change before
+    contacts are declared stable). Account scope only.
+
+    Contact identity is account-level on purpose: the same person may be worked
+    by more than one agent, and duplicating them per agent would make
+    "has anyone on our side already contacted this fund?" unanswerable."""
+
+    def __init__(self, api: ContactsApi, client: AsyncE2AClient) -> None:
+        self._api = api
+        self._c = client
+
+    def list(
+        self,
+        *,
+        source: Optional[str] = None,
+        import_batch_id: Optional[str] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> AutoPager[ContactView]:
+        """List contacts, newest first. Optionally narrow by provenance,
+        upload, or creation-time window."""
+
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_contacts(
+                    source=source, import_batch_id=import_batch_id,
+                    created_after=created_after, created_before=created_before,
+                    cursor=cursor, limit=limit, _headers=h,
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def get(self, address: str) -> ContactView:
+        """Fetch one contact. ``address`` may be bare or a display-name form
+        ("A. Partner <partner@fund.vc>") — both resolve to the same contact."""
+        return await self._c._read(lambda h: self._api.get_contact(address, _headers=h))
+
+    async def get_with_etag(self, address: str) -> Tuple[ContactView, Optional[str]]:
+        """Fetch one contact and its optimistic-concurrency validator. Pass the
+        returned ETag to :meth:`update` as ``if_match`` to reject stale edits."""
+        response = await self._c._read(
+            lambda h: self._api.get_contact_with_http_info(address, _headers=h)
+        )
+        return response.data, _header(response.headers, "etag")
+
+    async def create(
+        self, body: Body, *, idempotency_key: Optional[str] = None
+    ) -> ContactView:
+        """Create one contact. The address is canonicalized, so creating the same
+        person twice in any form is a conflict rather than a duplicate row."""
+        req = _coerce(CreateContactRequest, body)
+        return await self._c._write_keyed(
+            lambda h: self._api.create_contact(req, _headers=h),
+            idempotency_key,
+        )
+
+    async def update(
+        self, address: str, patch: Body, *, if_match: Optional[str] = None
+    ) -> ContactView:
+        """Partial update; omitted fields are left unchanged, so editing the name
+        never erases metadata. Address and provenance are immutable."""
+        req = _coerce(UpdateContactRequest, patch)
+        return await self._c._write_idempotent(
+            lambda h: self._api.update_contact(
+                address, req, if_match=if_match, _headers=h
+            )
+        )
+
+    async def delete(self, address: str) -> DeleteContactResult:
+        """Remove a contact. Suppressions are untouched — consent outlives the
+        record, so this never makes a blocked address sendable again."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_contact(address, confirm="DELETE", _headers=h)
+        )
+
+    async def import_(
+        self, body: Body, *, idempotency_key: Optional[str] = None
+    ) -> ContactImportResult:
+        """Import up to 1000 contacts in one request. Every submitted row gets its
+        own result, so one bad line never rejects the upload. Import is inert — it
+        records identity and sends nothing. A row that omits a field keeps the
+        stored value, so a narrower re-upload does not erase columns it no longer
+        carries."""
+        req = _coerce(ImportContactsRequest, body)
+        return await self._c._write_keyed(
+            lambda h: self._api.import_contacts(req, _headers=h),
+            idempotency_key,
+        )
+
+    async def delete_import(self, batch_id: str) -> DeleteImportBatchResult:
+        """Reverse an import, removing untouched contacts and agent enrolments it created."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
+        )
+
+    # ── Per-agent outreach ───────────────────────────────────────────────────
+    # Engagements are one agent's relationship with a contact. Unlike the
+    # account-level methods above, an agent-scoped credential may drive these
+    # for its own agent — that is the outreach loop.
+
+    def outreach(
+        self,
+        email: str,
+        *,
+        stage: Optional[str] = None,
+        replied: Optional[bool] = None,
+        suppressed: Optional[bool] = None,
+        next_action_before: Optional[datetime] = None,
+        last_outbound_before: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> AutoPager[ContactEngagementView]:
+        """List the contacts an agent is working, with the reply and delivery
+        facts e2a derives from real message activity.
+
+        For a follow-up sweep pass ``replied=False`` together with BOTH
+        ``next_action_before`` and ``last_outbound_before``. ``last_outbound_at``
+        is server-maintained, so including it drops anyone just contacted even
+        if your own state write was lost — omit it and a failed write can send
+        the same person twice."""
+
+        def _flag(v: Optional[bool]) -> Optional[str]:
+            return None if v is None else ("true" if v else "false")
+
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_engagements(
+                    email, stage=stage, replied=_flag(replied),
+                    suppressed=_flag(suppressed),
+                    next_action_before=next_action_before,
+                    last_outbound_before=last_outbound_before,
+                    cursor=cursor, limit=limit, _headers=h,
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def get_outreach(self, email: str, address: str) -> ContactEngagementView:
+        """Fetch one agent's outreach record for a contact."""
+        return await self._c._read(lambda h: self._api.get_engagement(email, address, _headers=h))
+
+    async def get_outreach_with_etag(
+        self, email: str, address: str
+    ) -> Tuple[ContactEngagementView, Optional[str]]:
+        """Fetch one outreach record and its validator for a guarded
+        read-modify-write loop."""
+        response = await self._c._read(
+            lambda h: self._api.get_engagement_with_http_info(
+                email, address, _headers=h
+            )
+        )
+        return response.data, _header(response.headers, "etag")
+
+    async def set_outreach(
+        self, email: str, address: str, body: Body, *, if_match: Optional[str] = None
+    ) -> ContactEngagementView:
+        """Enrol a contact in an agent's outreach, or update the agent-owned
+        fields. Omitted fields are left unchanged, so advancing the stage after a
+        send does not disturb the schedule."""
+        req = _coerce(UpsertEngagementRequest, body)
+        return await self._c._write_idempotent(
+            lambda h: self._api.upsert_engagement(
+                email, address, req, if_match=if_match, _headers=h
+            )
+        )
+
+    async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
+        """Un-enrol a contact from an agent's outreach. The contact itself
+        survives, and suppressions are untouched — this is not consent."""
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)
         )
 
 
@@ -966,10 +1215,10 @@ class SuppressionsResource:
         self._api = api
         self._c = client
 
-    def list(self) -> AutoPager[SuppressionView]:
+    def list(self, *, limit: Optional[int] = None) -> AutoPager[SuppressionView]:
         # Cursor-paginated (A-5): walks next_cursor to completion.
         async def fetch(cursor: Optional[str]) -> Page:
-            resp = await self._c._read(lambda h: self._api.list_suppressions(cursor=cursor, _headers=h))
+            resp = await self._c._read(lambda h: self._api.list_suppressions(cursor=cursor, limit=limit, _headers=h))
             return _page(resp.items, resp.next_cursor)
 
         return AutoPager(fetch)

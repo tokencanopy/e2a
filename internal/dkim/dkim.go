@@ -26,12 +26,14 @@
 package dkim
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -84,14 +86,107 @@ func GenerateKeypair() (*Keypair, error) {
 	}, nil
 }
 
+// signedHeaderCandidates is the whitelist of stable headers worth covering
+// when they are present. Signing every header is brittle — receivers reject
+// messages whose intermediary MTAs rewrite or fold a covered header — so the
+// list stays narrow and keeps DMARC alignment intact while tolerating typical
+// send-via-SES rewrites. Date is deliberately excluded because SES replaces
+// even a supplied value with its acceptance timestamp.
+//
+// Presence matters: see signedHeaderKeys for why a header on this list is
+// only signed when the message actually carries it.
+var signedHeaderCandidates = []string{
+	"From", "To", "Cc", "Subject",
+	"Message-ID", "In-Reply-To", "References",
+	"MIME-Version", "Content-Type", "Reply-To",
+	"List-Unsubscribe", "List-Unsubscribe-Post",
+}
+
+// signedHeaderKeys narrows the candidate list to headers the message
+// actually has, always keeping From (RFC 6376 § 5.4 requires it in h=).
+//
+// Why this matters: listing a header in h= that is absent at signing time
+// is "oversigning" — the signer hashes it as empty, and a verifier that
+// later finds the header present computes a different hash and reports
+// the signature as broken. That is deliberate tamper-detection, and it
+// fires on legitimate traffic the moment a downstream MTA adds one of
+// these headers.
+//
+// It did. internal/outbound deliberately omits Message-ID so SES can
+// assign one (and we capture it from the SMTP response), while this list
+// oversigned Message-ID — so SES added the header after signing and
+// invalidated the signature on every single outbound message. Delivered
+// mail carried three DKIM signatures: SES's own, SES's BYODKIM signature
+// for the sending domain, and ours, permanently failing.
+//
+// DMARC survived on the passing aligned signature, which is why this went
+// unnoticed, but a signature that never verifies is worse than no
+// signature: some receivers weigh a broken one against sender reputation.
+//
+// The trade-off is losing oversigning's protection against a header being
+// added in transit. That protection was worth nothing here — it was
+// producing a 100% invalid signature — and the narrow candidate list
+// means the exposure is a header the message chose not to set.
+//
+// Detection deliberately uses net/textproto, the same parser msgauth
+// reaches through go-message, because the two must agree. The failure
+// modes are not symmetric:
+//
+//   - Claiming a header is present when the signer disagrees puts it in
+//     h= unsigned-but-claimed, which is the oversigning bug all over
+//     again: a broken signature on every message.
+//   - Claiming it is absent when the signer would have seen it merely
+//     leaves that header uncovered. The signature still verifies.
+//
+// So when the header block is odd — a line missing its colon aborts
+// textproto mid-block, and "Subject : x" parses to the key "Subject "
+// with the space retained — this narrows h= rather than widening it, and
+// degrades to a valid signature over fewer headers. A more permissive
+// hand-rolled scan would find headers msgauth then does not, which is
+// the dangerous direction. Composed messages never take these paths;
+// headerWriter emits "Key: value" and strips CR/LF.
+func signedHeaderKeys(message []byte) []string {
+	count := map[string]int{}
+	hdr, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(message))).ReadMIMEHeader()
+	if err != nil && len(hdr) == 0 {
+		// Unparseable header block: fall back to the full candidate list
+		// rather than signing nothing. msgauth will fail the sign and the
+		// caller sends unsigned, which is the existing behavior.
+		return signedHeaderCandidates
+	}
+	for k, values := range hdr {
+		count[k] = len(values)
+	}
+
+	keys := make([]string, 0, 2*len(signedHeaderCandidates))
+	for _, k := range signedHeaderCandidates {
+		n := count[textproto.CanonicalMIMEHeaderKey(k)]
+		if n == 0 {
+			// From must be covered even when absent (RFC 6376 § 5.4).
+			if k == "From" {
+				keys = append(keys, k)
+			}
+			continue
+		}
+		// N+1 oversigning: list a present header once more than it
+		// occurs. A verifier binds each listed instance from the bottom
+		// up, so the extra entry asserts "there is no further instance".
+		// Without it, a hop can PREPEND a second Subject: the verifier
+		// still matches the original and reports pass, while the MUA
+		// displays the attacker's copy. Confirmed both ways — listing
+		// once accepts the spoof, listing n+1 times rejects it.
+		for i := 0; i < n+1; i++ {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 // Sign prepends a DKIM-Signature header to the given RFC 5322 message
 // body, signed with the supplied private key for "{selector}.{domain}".
 //
-// We only sign the From, To, Subject, Date and Message-ID headers (plus
-// any References / In-Reply-To that may be present). Signing every
-// header is brittle — receivers reject messages whose intermediary
-// MTAs rewrite or fold a covered header. The whitelist keeps DMARC
-// alignment intact while tolerating typical Send-via-SES rewrites.
+// Only the headers in signedHeaderCandidates that the message actually
+// carries are covered — see signedHeaderKeys.
 func Sign(message []byte, domain, selector string, privateKeyDER []byte) ([]byte, error) {
 	if domain == "" || selector == "" {
 		return nil, fmt.Errorf("dkim: domain and selector required")
@@ -110,12 +205,7 @@ func Sign(message []byte, domain, selector string, privateKeyDER []byte) ([]byte
 		Signer:                 key,
 		HeaderCanonicalization: msgauth.CanonicalizationRelaxed,
 		BodyCanonicalization:   msgauth.CanonicalizationRelaxed,
-		HeaderKeys: []string{
-			"From", "To", "Cc", "Subject", "Date",
-			"Message-ID", "In-Reply-To", "References",
-			"MIME-Version", "Content-Type", "Reply-To",
-			"List-Unsubscribe", "List-Unsubscribe-Post",
-		},
+		HeaderKeys:             signedHeaderKeys(message),
 	}
 
 	var signed bytes.Buffer

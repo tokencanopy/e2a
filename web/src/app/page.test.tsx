@@ -204,6 +204,69 @@ describe("Landing page", () => {
   });
 });
 
+// The landing page is the site's main answer surface. These assertions guard
+// the two properties that make it one: the FAQ answers are actually in the
+// HTML (not only in the markup), and the markup parses as a valid FAQPage.
+describe("FAQ and structured data", () => {
+  function ldNodes(container: HTMLElement): Record<string, unknown>[] {
+    return Array.from(
+      container.querySelectorAll('script[type="application/ld+json"]'),
+    ).map((s) => JSON.parse(s.innerHTML.replace(/\\u003c/g, "<")));
+  }
+
+  it("renders the FAQ answers as visible prose", () => {
+    render(<Home />);
+    expect(
+      screen.getByRole("heading", { name: /Questions people ask/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: "Can an AI agent have its own email address?",
+      }),
+    ).toBeInTheDocument();
+    // Google only honors FAQ markup whose answers are on the page, and an
+    // answer engine quotes the prose as readily as the JSON-LD.
+    expect(
+      screen.getByText(/The inbox belongs to the agent rather than to a human/),
+    ).toBeInTheDocument();
+  });
+
+  it("emits a valid FAQPage whose answers match the visible ones", () => {
+    const { container } = render(<Home />);
+    const faq = ldNodes(container).find((n) => n["@type"] === "FAQPage");
+    expect(faq).toBeDefined();
+
+    const questions = faq!.mainEntity as {
+      "@type": string;
+      name: string;
+      acceptedAnswer: { "@type": string; text: string };
+    }[];
+    expect(questions.length).toBeGreaterThanOrEqual(6);
+    for (const q of questions) {
+      expect(q["@type"]).toBe("Question");
+      expect(q.acceptedAnswer["@type"]).toBe("Answer");
+      // Self-contained means the answer names the product: a quoted fragment
+      // has to still attribute, with none of this page attached to it.
+      expect(q.acceptedAnswer.text).toMatch(/e2a/);
+      // Same strings in both copies, so a quote can't diverge from the page.
+      expect(screen.getByText(q.acceptedAnswer.text)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: q.name }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("links the FAQ from the Product menu", () => {
+    render(<Home />);
+    const product = screen.getByText(/^Product/).closest("div")!;
+    fireEvent.mouseEnter(product);
+    expect(screen.getByRole("link", { name: "FAQ" })).toHaveAttribute(
+      "href",
+      "#faq",
+    );
+  });
+});
+
 describe("Navigation auth state", () => {
   it("shows Sign in link when not authenticated", () => {
     render(<Home />);

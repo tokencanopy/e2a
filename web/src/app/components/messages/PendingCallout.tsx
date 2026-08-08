@@ -2,14 +2,14 @@
 
 // Dashed-accent cream card that appears under the bubbles when a thread
 // has a pending outbound draft. Provides one-click navigation to the
-// focus page where the reviewer approves/rejects.
+// expanded row on the account-wide Review page.
 
 export function PendingCallout({
   draftedBy,
   onReview,
 }: {
   /** "agent:claude-sonnet-4-6" or similar — comes from the pending row's
-   *  hint metadata. Today the wire doesn't carry this; the focus page
+   *  hint metadata. Today the wire doesn't carry this; the Review detail
    *  is the source of truth. The caller passes a best-effort label or
    *  the literal `agent` when unknown. */
   draftedBy: string;

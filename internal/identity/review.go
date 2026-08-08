@@ -35,6 +35,10 @@ type ReviewListItem struct {
 	// hold path — both directions, gate and scan — so it is the reason a reviewer
 	// should see. See identity.Message.ReviewReason (migration 037/040).
 	ReviewReason string
+	// ScheduledAt is the future send_at an outbound hold carried (#815), or nil.
+	// The schedule survives the hold, so a reviewer can see the message will send
+	// at this instant (or immediately if it has passed) once approved.
+	ScheduledAt *time.Time
 }
 
 // ListReviews returns one page of held (pending_review) messages — BOTH
@@ -54,7 +58,7 @@ func (s *Store) ListReviews(ctx context.Context, userID string, limit int, after
 		        COALESCE(m.subject, ''), COALESCE(m.conversation_id, ''),
 	        COALESCE(m.status, ''), m.created_at,
 	        COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''),
-	        COALESCE(m.review_reason, '')
+	        COALESCE(m.review_reason, ''), m.scheduled_at
 	   FROM messages m
 	   JOIN agent_identities a ON a.id = m.agent_id
 	  WHERE a.user_id = $1 AND a.deleted_at IS NULL
@@ -83,7 +87,7 @@ func (s *Store) ListReviews(ctx context.Context, userID string, limit int, after
 		if err := rows.Scan(&it.ID, &it.AgentID, &it.Direction, &method, &it.Sender,
 			&it.HeaderFrom, &it.EnvelopeFrom, &authentication, &legacyVerdict, &it.To,
 			&it.Subject, &it.ConversationID, &it.Status, &it.CreatedAt,
-			&it.Flagged, &it.FlagReason, &it.ReviewReason); err != nil {
+			&it.Flagged, &it.FlagReason, &it.ReviewReason, &it.ScheduledAt); err != nil {
 			return nil, err
 		}
 		message := Message{Direction: it.Direction, Method: method}
@@ -109,13 +113,13 @@ func (s *Store) GetReviewWithContent(ctx context.Context, userID, messageID stri
 	var authentication, authVerdict []byte
 	var outboundDeliveryStatus string
 	err := s.pool.QueryRow(ctx,
-		`SELECT m.id, m.agent_id, m.direction, COALESCE(m.method, ''), m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, m.conversation_id, COALESCE(m.inbox_status, ''), m.raw_message, m.auth_headers, m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), COALESCE(m.review_reason, ''), m.created_at, m.expires_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), COALESCE(m.body_text, ''), COALESCE(m.body_html, ''), COALESCE(m.status, ''), COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
+		`SELECT m.id, m.agent_id, m.direction, COALESCE(m.method, ''), m.sender, COALESCE(m.header_from, ''), COALESCE(m.envelope_from, ''), m.authentication, m.recipient, m.to_recipients, m.cc, m.reply_to, m.subject, m.email_message_id, m.conversation_id, COALESCE(m.inbox_status, ''), m.raw_message, m.auth_headers, m.auth_verdict, COALESCE(m.flagged, false), COALESCE(m.flag_reason, ''), COALESCE(m.review_reason, ''), m.created_at, m.expires_at, m.labels, COALESCE(m.delivery_status, ''), COALESCE(m.delivery_detail, ''), COALESCE(m.sent_as, ''), COALESCE(m.body_text, ''), COALESCE(m.body_html, ''), COALESCE(m.status, ''), m.scheduled_at, COALESCE(wd.status, ''), COALESCE(wd.last_error, '')
 		   FROM messages m
 		   JOIN agent_identities a ON a.id = m.agent_id
 		   LEFT JOIN webhook_deliveries wd ON wd.message_id = m.id
 		  WHERE m.id = $1 AND a.user_id = $2 AND a.deleted_at IS NULL`,
 		messageID, userID,
-	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Method, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.ReviewReason, &m.CreatedAt, &m.ExpiresAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.WebhookStatus, &m.WebhookError)
+	).Scan(&m.ID, &m.AgentID, &m.Direction, &m.Method, &m.Sender, &m.HeaderFrom, &m.EnvelopeFrom, &authentication, &m.Recipient, &m.ToRecipients, &m.CC, &m.ReplyTo, &m.Subject, &m.EmailMessageID, &m.ConversationID, &m.InboxStatus, &m.RawMessage, &authHeadersJSON, &authVerdict, &m.Flagged, &m.FlagReason, &m.ReviewReason, &m.CreatedAt, &m.ExpiresAt, &m.Labels, &outboundDeliveryStatus, &m.DeliveryDetail, &m.SentAs, &m.BodyText, &m.BodyHTML, &m.Status, &m.ScheduledAt, &m.WebhookStatus, &m.WebhookError)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +281,27 @@ func (s *Store) transitionReview(ctx context.Context, messageID, agentID, newSta
 		}
 		if tag.RowsAffected() == 0 {
 			return ErrNotPendingReview
+		}
+		if newStatus == MessageStatusReviewApproved || newStatus == MessageStatusReviewExpiredApproved {
+			// Releasing an authenticated hold is the moment it reaches the agent,
+			// so advance outreach state in the same transaction as the review
+			// transition. Rejections remain invisible and cannot manufacture a
+			// reply. The authentication predicate mirrors SMTP intake.
+			if _, err = tx.Exec(ctx, `
+				UPDATE contact_engagements ce
+				   SET last_inbound_at = GREATEST(COALESCE(ce.last_inbound_at, m.created_at), m.created_at),
+				       last_conversation_id = COALESCE(NULLIF(m.conversation_id, ''), ce.last_conversation_id),
+				       updated_at = `+monotonicUpdatedAt("ce")+`
+				  FROM messages m
+				  JOIN agent_identities ai ON ai.id = m.agent_id
+				 WHERE m.id = $1
+				   AND m.authentication #>> '{dmarc,status}' = 'pass'
+				   AND ce.user_id = ai.user_id
+				   AND ce.agent_id = m.agent_id
+				   AND ce.address = lower(COALESCE(m.header_from, m.sender))`,
+				messageID); err != nil {
+				return err
+			}
 		}
 		transition, err = messagelifecycle.AppendTx(ctx, tx, messagelifecycle.AppendInput{
 			MessageID: messageID, DedupeKey: "review:resolution", Direction: "inbound",

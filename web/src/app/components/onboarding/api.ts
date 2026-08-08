@@ -7,6 +7,10 @@ import type {
   ProtectionConfig,
 } from "./types";
 import type {
+  WebhookDeliveryView,
+  WebhookView,
+} from "../../../lib/webhooks";
+import type {
   AttachmentMeta,
   DashboardAgent,
   InboundMessageDetail,
@@ -17,9 +21,7 @@ import type {
 } from "../types";
 
 /** Thrown by `request` on any non-2xx HTTP response. Carries the raw
- *  status code so callers can branch on 404 vs 500 vs 401 (the
- *  messages focus page uses this to distinguish "fall back to inbound
- *  endpoint" from "surface the real server error"). */
+ *  status code so callers can branch on 404 vs 500 vs 401. */
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -187,6 +189,7 @@ export async function sendAgentTestEmail(
 // MessageSummary type the UI reads.
 type MessageSummaryWire = {
   id: string;
+  thread_id?: string;
   direction: "inbound" | "outbound";
   header_from: string | null;
   envelope_from: string | null;
@@ -207,6 +210,9 @@ type MessageSummaryWire = {
   size_bytes?: number;
   created_at: string;
   deleted_at?: string;
+  // Future submit instant for a scheduled outbound send (outbound-only,
+  // present only while a future send_at is set). Drives the "Scheduled" chip.
+  scheduled_at?: string;
 };
 
 type PageMessageSummaryWire = {
@@ -217,6 +223,7 @@ type PageMessageSummaryWire = {
 function projectSummary(w: MessageSummaryWire): import("../types").MessageSummary {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     direction: w.direction,
     from: w.header_from ?? "",
     verified_domain: w.verified_domain,
@@ -239,6 +246,7 @@ function projectSummary(w: MessageSummaryWire): import("../types").MessageSummar
     size_bytes: w.size_bytes,
     created_at: w.created_at,
     deleted_at: w.deleted_at,
+    scheduled_at: w.scheduled_at,
   };
 }
 
@@ -350,6 +358,7 @@ export async function getInboxUnread(
 // construction. See lib/swrKeys.ts.
 export type MessageViewWire = {
   id: string;
+  thread_id?: string;
   header_from: string | null;
   envelope_from: string | null;
   verified_domain: string | null;
@@ -396,6 +405,7 @@ export function projectPending(
 ): PendingMessageDetail {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     agent_email: email,
     direction: "outbound",
     subject: w.subject,
@@ -423,6 +433,7 @@ export function projectInbound(
 ): InboundMessageDetail {
   return {
     id: w.id,
+    thread_id: w.thread_id,
     direction: "inbound",
     header_from: w.header_from,
     envelope_from: w.envelope_from,
@@ -660,16 +671,17 @@ type ReviewWire = {
   review_status: string;
   hold_reason?: PendingMessageSummary["hold_reason"];
   created_at: string;
+  // Future send_at an outbound hold carried (#815); absent otherwise.
+  scheduled_at?: string;
 };
 
-// The pending-review queue: one account-scoped call to GET /v1/reviews
-// returns every hold (both directions) across the account's inboxes,
-// newest-first. (Replaces the old per-agent fan-out over /messages — the
-// dedicated /reviews resource is account-only, so agents can't see holds,
-// and held inbound is surfaced here without leaking onto the agent inbox.)
-export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
-  const page = await request<{ items?: ReviewWire[] | null }>("/v1/reviews");
-  return (page.items ?? []).map<PendingMessageSummary>((r) => ({
+type ReviewPageWire = {
+  items?: ReviewWire[] | null;
+  next_cursor?: string | null;
+};
+
+function pendingSummary(r: ReviewWire): PendingMessageSummary {
+  return {
     id: r.id,
     agent_email: r.agent_email,
     direction: r.direction,
@@ -681,7 +693,40 @@ export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
     status: r.review_status,
     created_at: r.created_at,
     hold_reason: r.hold_reason,
-  }));
+    scheduled_at: r.scheduled_at,
+  };
+}
+
+// The pending-review queue: one account-scoped call to GET /v1/reviews
+// returns every hold (both directions) across the account's inboxes,
+// newest-first. (Replaces the old per-agent fan-out over /messages — the
+// dedicated /reviews resource is account-only, so agents can't see holds,
+// and held inbound is surfaced here without leaking onto the agent inbox.)
+export async function listPendingMessages(): Promise<PendingMessageSummary[]> {
+  const page = await request<ReviewPageWire>("/v1/reviews");
+  return (page.items ?? []).map(pendingSummary);
+}
+
+// Resolve a notification deep link that points beyond the first queue page.
+// The detail endpoint does not carry agent_email, so walk the account-scoped
+// summaries until the target is found. Repeated cursors are treated as a
+// malformed terminal page rather than looping forever.
+export async function findPendingMessage(
+  id: string,
+): Promise<PendingMessageSummary | null> {
+  let cursor = "";
+  const seen = new Set<string>();
+  for (;;) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (cursor) query.set("cursor", cursor);
+    const page = await request<ReviewPageWire>(`/v1/reviews?${query}`);
+    const found = (page.items ?? []).find((item) => item.id === id);
+    if (found) return pendingSummary(found);
+    const next = page.next_cursor ?? "";
+    if (!next || seen.has(next)) return null;
+    seen.add(next);
+    cursor = next;
+  }
 }
 
 export type ApprovePayload = {
@@ -733,4 +778,49 @@ export async function rejectPendingMessage(
       body: JSON.stringify({ reason }),
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Webhook observability reads.
+//
+// The delivery log is per-subscriber: one row is one attempt series against
+// one endpoint. Rows are returned verbatim rather than projected — every
+// field the UI reads is either optional or an open-set string, so narrowing
+// here would silently drop values the server adds later. Classification into
+// a rendered state lives in lib/webhooks.ts.
+// ---------------------------------------------------------------------------
+
+export async function getWebhook(id: string): Promise<WebhookView> {
+  return request<WebhookView>("/v1/webhooks/" + encodeURIComponent(id));
+}
+
+export type WebhookDeliveryPage = {
+  items: WebhookDeliveryView[];
+  next_cursor: string | null;
+};
+
+export async function listWebhookDeliveries(
+  id: string,
+  opts: {
+    // Server-side filter; the API accepts pending | delivered | failed.
+    status?: string;
+    cursor?: string;
+    pageSize?: number;
+  } = {},
+): Promise<WebhookDeliveryPage> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.pageSize) params.set("limit", String(opts.pageSize));
+  const qs = params.toString();
+  const page = await request<{
+    items?: WebhookDeliveryView[];
+    next_cursor?: string | null;
+  }>(
+    "/v1/webhooks/" + encodeURIComponent(id) + "/deliveries" + (qs ? "?" + qs : ""),
+  );
+  return {
+    items: page.items ?? [],
+    next_cursor: page.next_cursor ?? null,
+  };
 }

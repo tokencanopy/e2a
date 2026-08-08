@@ -3,7 +3,10 @@
 > **GA resolution (2026-07-15):** queue-first external outbound delivery is
 > mandatory. `E2A_OUTBOUND_MODE` and the submit-inline fallback were removed.
 > Historical sync-mode branches below are retained only as design history;
-> self-send loopback remains a distinct local delivery path.
+> self-send loopback remains a distinct local delivery path. The agent-path
+> approve/reject endpoints were also removed in the pre-GA vocabulary freeze:
+> the human-approve path described below now lives at
+> `POST /v1/reviews/{id}/approve` (the `/v1/approve` magic link survives).
 
 Status: approved · Owner: backend · Related: `internal/hitlworker`, `internal/agent`, `internal/outboundsend`, `internal/identity`
 
@@ -160,6 +163,15 @@ is anchored to the message's `created_at` (hold-creation time), not the approve
 time — so a hold approved >72h after creation, during a provider outage at send
 time, would terminate immediately instead of snoozing. Narrow edge; shared with the
 normal-send anchor, out of scope here.
+
+**F2 addendum (2026-08-04):** the same `created_at` anchor also fed the
+acceptance→terminal latency SLI, so a hold's review dwell was recorded as e2a
+latency — a reviewer clearing a queue of held messages put every one of them
+outside the 300s SLO window and burned the hosted error budget (prod alert,
+2026-08-03). The **metric** now anchors at `messages.reviewed_at` for a held
+message via `outboundsend.submissionAnchor`; `SendJob.AcceptedAt` and the 72h
+retry horizon are deliberately untouched, so F2 itself remains open as
+described above.
 
 ## Scope / non-goals
 

@@ -315,7 +315,7 @@ func oidcResumeFromQuery(r *http.Request) (*oidcResume, error) {
 // rather than attempting a partial or misconfigured flow.
 //
 // Like the legacy Google door, it accepts the optional query parameters
-// return_to (a /oauth2/-prefixed server path to resume after login) and the
+// return_to (an allow-listed same-origin path to resume after login) and the
 // cli_callback/cli_state pair (a loopback handoff for terminal login).
 // Invalid values are rejected with 400 before any cookie is set; valid ones
 // ride the round trip in the resume transaction cookie.

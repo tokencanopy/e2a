@@ -191,6 +191,34 @@ if result.status == "sent":
 Always branch on the result's `status`, not the HTTP code — a timeout is not
 a failure, the message is still queued for delivery.
 
+Scheduled sending is **beta and may change before it is declared stable**.
+Schedule a send with a timezone-aware `datetime`. The durable `scheduled`
+result is success, not a reason to retry; even with `wait="sent"` it returns
+immediately rather than holding the HTTP request until the future time:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+result = await client.messages.send(
+    "sender@example.com",
+    {
+        "to": ["recipient@example.net"],
+        "subject": "Tomorrow's update",
+        "text": "Hello later",
+        "send_at": datetime.now(timezone.utc) + timedelta(days=1),
+    },
+    wait="sent",
+)
+if result.status == "scheduled":
+    print(result.scheduled_at)
+```
+
+`send_at` must be no more than 90 days ahead. Direct loopback to the sending
+agent's own address cannot be scheduled and returns `400 invalid_request` (even
+when the message would otherwise be held for review). A schedule survives a
+review hold: a held message keeps its `send_at`, and approving it submits at
+that instant if it is still in the future, or immediately if it has passed.
+
 ### Managed unsubscribe (beta)
 
 Opt a single-recipient send, reply, or forward into e2a-managed unsubscribe.
@@ -315,6 +343,14 @@ and inbound messages held by a screening gate), addressed by message id
 alone via `list`/`get`/`approve`/`reject`; and `client.templates` (beta) —
 reusable `{{variable}}` email templates plus the read-only starter catalog,
 referenced from `messages.send` via `template_id`/`template_alias`.
+
+`client.contacts` manages the people an account corresponds with:
+`list`/`get`/`get_with_etag`/`create`/`update`/`delete` (account-scoped,
+optimistic concurrency via `if_match`), plus `import_`/`delete_import` for
+structured-row bulk imports. `client.contacts.outreach(email, ...)` and its
+`get_outreach`/`get_outreach_with_etag`/`set_outreach`/`delete_outreach`
+counterparts track one agent's per-contact engagement (stage, next action,
+reply/suppression state) and may be driven by an agent-scoped credential.
 
 The sync `E2AClient` exposes the **same resource tree** — drop the `await`.
 It mirrors the async client dynamically (every async method is bridged, not
@@ -442,35 +478,40 @@ for event in client.listen("bot@agents.e2a.dev"):
 Calling `client.close()` from another thread unblocks a pending iteration and
 ends the loop cleanly.
 
-## Conversation threading
+## Application correlation and email threads
 
-`conversation_id` is an opaque string that ties multiple emails to one thread
-across the email boundary. Pass it on any `send` / `reply` (as a body field) and
-e2a surfaces it on the recipient's inbound — via `In-Reply-To` for humans, or a
-forge-resistant `X-E2A-Conversation-Id` header for same-platform agent-to-agent
-mail. It is not a security boundary; for sender-domain authentication require
-`message.authentication is not None and message.authentication.dmarc.status == "pass"`
-and compare the literal `message.header_from` address separately. On first
-contact from a human the conversation ID arrives `None`. Create the agent
-runtime's internal thread before replying, then pass its stable, non-sensitive
-thread/session ID (or an opaque stored alias) as `conversation_id`; reuse it on
-every later send or reply. If a later inbound ID matches a binding you
-previously stored, resume that internal thread. Keep replying by the original
-message ID as well — the conversation ID aligns e2a grouping with agent memory,
-while the reply endpoint sets the email headers Gmail/Outlook use. Scope
-bindings to the inbox and sender, and never use the conversation ID as
-authorization.
+`conversation_id` is an optional, caller-owned opaque value for correlating
+mail with an application workflow, ticket, or agent session. Pass it on
+`send` / `reply` as a body field; e2a preserves its existing minting,
+inheritance, and delivery-correlation behavior. It does not define RFC email
+topology: reusing one value on fresh sends does not join their email threads,
+and changing it during a reply does not split the reply from its parent.
+
+Create the agent runtime's internal session before replying, then pass its
+stable, non-sensitive ID (or an opaque stored alias) as `conversation_id`.
+If a later inbound value matches a binding you stored, resume that application
+session. Keep replying by the original message ID—the reply endpoint sets the
+`In-Reply-To` / `References` headers Gmail and Outlook use. Scope bindings to
+the inbox and sender, and never use `conversation_id` as authorization.
+For sender-domain authentication, separately require an authentication object
+whose `dmarc.status == "pass"` and compare the literal
+`message.header_from`.
+
+Message list and detail models may expose `message.thread_id`, an optional beta,
+server-owned, read-only identity for the mailbox-local reply graph. Legacy
+messages can omit it. There is no `thread_id` request field, list filter,
+thread endpoint, or complete-thread retrieval method.
 
 ```python
 await client.messages.send(address, {
     "to": ["alice@example.com"],
     "subject": "Hello",
     "text": "Hi from my agent!",
-    "conversation_id": "thread-42",
+    "conversation_id": "workflow-42",
 })
 
-# Filter an inbox down to a single thread:
-async for m in client.messages.list(address, conversation_id="thread-42"):
+# Filter by the caller-owned application conversation:
+async for m in client.messages.list(address, conversation_id="workflow-42"):
     ...
 ```
 

@@ -30,9 +30,11 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "get_attachment_data",
   // Soft delete + restore are both per-agent inbox hygiene: the REST handler
   // pins an agent-scoped credential to its own bound agent (resolveOwnedAgent).
-  // The PERMANENT purge is account-only server-side, and the MCP tool doesn't
+  // The PERMANENT purge is account-only server-side, and delete_message doesn't
   // expose it at all — so no agent-scoped session can destroy evidence
-  // irreversibly, which is why this stays runtime while delete_agent is admin.
+  // irreversibly, which is why this stays runtime. delete_agent does expose a
+  // purge (`permanent: true`), which is exactly why it is admin: reaching it at
+  // all requires account scope.
   "delete_message",
   "restore_message",
   "update_message_labels",
@@ -42,6 +44,10 @@ export const RUNTIME_TOOLS: ReadonlySet<string> = new Set([
   "send_email",
   "reply_to_message",
   "forward_message",
+  "list_outreach_contacts",
+  "get_outreach_contact",
+  "set_outreach_contact",
+  "delete_outreach_contact",
   // Review discovery and decisions are deliberately NOT here. They expose the
   // account-wide queue and belong to the account owner / human reviewer.
 ]);
@@ -114,6 +120,22 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   "list_api_keys",
   "create_api_key",
   "delete_api_key",
+  "list_contacts",
+  "get_contact",
+  "create_contact",
+  "update_contact",
+  "delete_contact",
+  "import_contacts",
+  "delete_contact_import",
+  // Suppression administration is account-only on the server for BOTH scopes:
+  // the agent-scoped endpoints deliberately reject agent credentials (an agent
+  // must not edit its own blocklist), so exposing these at runtime tier would
+  // only surface guaranteed-403 tools.
+  "list_suppressions",
+  "delete_suppression",
+  "list_agent_suppressions",
+  "create_agent_suppression",
+  "delete_agent_suppression",
 ]);
 
 export type Scope = "account" | "agent";

@@ -40,7 +40,7 @@ loops, no conditionals, no partials:
 Missing variables render as **empty strings**. Variable names match
 `[A-Za-z_][A-Za-z0-9_.]*`-style identifiers (e.g. `order_id`, `items_html`) —
 a dot path (e.g. `{{user.name}}`) resolves into a nested object, matching how
-`template_data`/`template_variables` are passed as nested JSON.
+`template_data` is passed as nested JSON.
 
 **Reserved-section note:** anything that is not a `{{…}}` / `{{{…}}}` slot is
 literal template text and is emitted verbatim — including `{` and `}`

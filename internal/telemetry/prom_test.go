@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +11,23 @@ import (
 // scrape renders the Prom backend's exposition output as text so tests can
 // assert on emitted series without depending on client_golang internals.
 func scrape(t *testing.T, p *Prom) string {
+	t.Helper()
+	body := scrapeRaw(t, p)
+	for _, line := range strings.Split(body, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Count(line, `build="unknown"`) != 1 {
+			t.Errorf("sample missing exactly one default build label: %s", line)
+		}
+	}
+	body = strings.ReplaceAll(body, `{build="unknown",`, "{")
+	body = strings.ReplaceAll(body, `,build="unknown"}`, "}")
+	body = strings.ReplaceAll(body, `{build="unknown"}`, "")
+	return body
+}
+
+func scrapeRaw(t *testing.T, p *Prom) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -21,12 +39,70 @@ func scrape(t *testing.T, p *Prom) string {
 	return string(body)
 }
 
+func TestPromAddsBuildLabelToEverySample(t *testing.T) {
+	p := NewProm("1.3.0")
+	p.HTTPRequest("GET", "/v1/agents", "2xx", 0.01)
+	p.SMTPInbound("accepted", 0.02)
+	p.SetPublisherLag(0)
+
+	for _, line := range strings.Split(scrapeRaw(t, p), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Count(line, `build="1.3.0"`) != 1 {
+			t.Errorf("sample missing exactly one build label: %s", line)
+		}
+	}
+}
+
+func TestPromHandlerOverHTTPIncludesBuildLabel(t *testing.T) {
+	p := NewProm("v1.3.0")
+	p.SetPublisherLag(0)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics: %v", err)
+	}
+	if !strings.Contains(string(body), `e2a_webhook_publisher_lag_seconds{build="v1.3.0"} 0`) {
+		t.Fatalf("wire exposition missing build label:\n%s", body)
+	}
+}
+
+func TestNormalizeBuildLabel(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"", "unknown"},
+		{"  ", "unknown"},
+		{"v1.3.0", "v1.3.0"},
+		{"sha-abc123", "sha-abc123"},
+		{"release\nsecret", "release_secret"},
+	} {
+		if got := NormalizeBuildLabel(tc.in); got != tc.want {
+			t.Errorf("NormalizeBuildLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestPromSatisfiesInterface(t *testing.T) {
-	var _ Metrics = NewProm()
+	var _ Metrics = NewProm("")
 }
 
 func TestPromEmitsHTTPSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.HTTPRequest("GET", "/v1/agents/{email}", "2xx", 0.042)
 	p.HTTPRequest("GET", "/v1/agents/{email}", "2xx", 0.010)
 	p.HTTPRequest("POST", "/v1/agents/{email}/messages", "5xx", 1.5)
@@ -44,7 +120,7 @@ func TestPromEmitsHTTPSeries(t *testing.T) {
 }
 
 func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.SMTPInbound("accepted", 0.2)
 	p.SMTPInbound("tempfail", 0.1)
 	p.SMTPInbound("rejected_unknown_recipient", 0)
@@ -54,8 +130,11 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.OutboundTerminal("failed_cancelled")
 	p.OutboundTerminalLatency(240)
 	p.OutboundAttempt("success", 0.8)
+	p.OutboundRateDeferred()
 	p.WebhookAttempt("delivered", "2xx", 0.3)
 	p.WebhookAttempt("retryable_failure", "5xx", 0.2)
+	p.WebhookTerminal("delivered", "initial", 1)
+	p.WebhookTerminal("e2a_failure", "unknown", 2)
 	p.WebhookFirstAttemptLatency(12.5)
 	p.WSConnected()
 	p.WSHandshakeRejected("unauthorized")
@@ -79,8 +158,11 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="failed_cancelled"} 1`,
 		`e2a_outbound_terminal_latency_seconds_count 1`,
 		`e2a_outbound_attempts_total{outcome="success"} 1`,
+		`e2a_outbound_rate_deferred_total 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="e2a_failure",scope="unknown"} 2`,
 		`e2a_webhook_first_attempt_latency_seconds_count 1`,
 		`e2a_ws_connects_total 1`,
 		`e2a_ws_handshake_rejected_total{reason="unauthorized"} 1`,
@@ -104,8 +186,27 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	}
 }
 
+func TestPromLatencyHistogramsExposeExactSLOThresholdBuckets(t *testing.T) {
+	p := NewProm("")
+	p.HTTPRequest("GET", "/v1/agents", "2xx", 3)
+	p.SMTPInbound("accepted", 3)
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_http_request_duration_seconds_bucket{method="GET",route="/v1/agents",le="0.75"}`,
+		`e2a_smtp_inbound_duration_seconds_bucket{le="2"}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing exact SLO threshold bucket %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
 func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	p.OutboxEventsPublished("email.received")
 	p.OutboxEventsFanOut("email.received", 3)
 	p.OutboxEventsNoMatch("email.sent")
@@ -140,17 +241,23 @@ func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
 // a bug (or attacker-influenced string) can never mint unbounded series or
 // leak message content / addresses / secrets into the metrics surface.
 func TestPromNormalizesUnknownLabelValues(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	secret := "hunter2-api-key"
 	addr := "victim@example.com"
 	p.SMTPInbound(addr, 0.1)                // raw address must not become a label
 	p.OutboundTerminal("weird_new_outcome") // unknown enum
 	p.WebhookAttempt(secret, "banana", 0.1) // junk outcome + junk status class
+	p.WebhookTerminal(secret, addr, 1)      // junk outcome + scope
 	p.WSDisconnected("some very long free text reason with details")
 	p.WSHandshakeRejected(addr) // raw address must not become a rejection-reason label
 	p.InboundProcess(secret, 0)
 	p.SetQueueDepth("attacker_queue", "exploded", 1)
 	p.HTTPRequest("PROPFIND", "/v1/agents/{email}", "7xx", 0.1) // unknown method + class
+	p.ThreadResolution(secret, 1)
+	p.ThreadHeaderParseFailure("not-a-header")
+	p.SetThreadNullMessages(addr, 2)
+	p.SetThreadInvariantViolations(secret, 3)
+	p.SetThreadRelationshipPercent(addr, 50)
 
 	out := scrape(t, p)
 	if strings.Contains(out, secret) || strings.Contains(out, addr) {
@@ -160,14 +267,47 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_smtp_inbound_total{outcome="other"} 1`,
 		`e2a_outbound_terminal_total{outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="other",status_class="other"} 1`,
+		`e2a_webhook_delivery_terminal_total{outcome="other",scope="other"} 1`,
 		`e2a_ws_disconnects_total{reason="other"} 1`,
 		`e2a_ws_handshake_rejected_total{reason="other"} 1`,
 		`e2a_inbound_process_total{outcome="other"} 1`,
 		`e2a_queue_depth{queue="other",state="other"} 1`,
 		`e2a_http_requests_total{method="other",route="/v1/agents/{email}",status_class="other"} 1`,
+		`e2a_thread_resolution_total{source="other"} 1`,
+		`e2a_thread_header_parse_failures_total{header="other"} 1`,
+		`e2a_thread_null_messages{age_bucket="other"} 2`,
+		`e2a_thread_invariant_violations{kind="other"} 3`,
+		`e2a_thread_relationship_percent{kind="other"} 50`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing normalized series %q in exposition", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
+func TestPromEmitsThreadIdentitySeries(t *testing.T) {
+	p := NewProm("")
+	p.ThreadResolution("rfc_in_reply_to", 2)
+	p.ThreadHeaderParseFailure("references")
+	p.ThreadResolution("lazy_legacy_anchor", 1)
+	p.SetThreadNullMessages("lt_1h", 3)
+	p.SetThreadInvariantViolations("dangling_parent", 4)
+	p.SetThreadRelationshipPercent("threads_multi_conversation", 25)
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_thread_resolution_total{source="rfc_in_reply_to"} 2`,
+		`e2a_thread_resolution_total{source="lazy_legacy_anchor"} 1`,
+		`e2a_thread_header_parse_failures_total{header="references"} 1`,
+		`e2a_thread_null_messages{age_bucket="lt_1h"} 3`,
+		`e2a_thread_invariant_violations{kind="dangling_parent"} 4`,
+		`e2a_thread_relationship_percent{kind="threads_multi_conversation"} 25`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing thread identity series %q in exposition", want)
 		}
 	}
 	if t.Failed() {
@@ -180,7 +320,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 // can't blow up series count. Past the cap, new route values collapse to
 // "other".
 func TestPromRouteCardinalityCap(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	for i := 0; i < maxRouteSeries+50; i++ {
 		p.HTTPRequest("GET", "/v1/synthetic/"+strings.Repeat("x", 1+i%7)+string(rune('a'+i%26))+itoa(i), "2xx", 0.01)
 	}
@@ -197,7 +337,7 @@ func TestPromRouteCardinalityCap(t *testing.T) {
 // Type-label cardinality cap for legacy outbox metrics: event types are a
 // server-defined catalog, but enforce the same overflow guard.
 func TestPromEventTypeCardinalityCap(t *testing.T) {
-	p := NewProm()
+	p := NewProm("")
 	for i := 0; i < maxTypeSeries+20; i++ {
 		p.OutboxEventsPublished("synthetic.event." + itoa(i))
 	}

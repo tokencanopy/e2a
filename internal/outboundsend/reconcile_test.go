@@ -422,6 +422,51 @@ func TestTerminalReconcileWorker_RecordsTerminalLatencyPerSettledRow(t *testing.
 	}
 }
 
+// The reconciler reads its own gates out of SQL, so the shared anchor helper
+// being correct proves nothing about the sweep path: only a store-backed pass
+// shows that the candidate query actually selects reviewed_at/scheduled_at and
+// that the emit site uses them. A held row stranded by a dead job is exactly
+// the population that burned the error budget on 2026-08-03 — settled minutes
+// after a review that may have taken hours.
+func TestTerminalReconcileWorker_TerminalLatencyExcludesReviewAndScheduleDwell(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	adapter := agent.NewOutboundSendStore(store,
+		webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)), usage.NewNoopUsageTracker())
+
+	f := newTerminalFixture(t, pool, store, adapter)
+	heldID := f.seed(t, "lat-held", "accepted", "discarded", false)
+	scheduledID := f.seed(t, "lat-scheduled", "accepted", "discarded", false)
+	// Both drafted three hours ago and released into the pipeline 30 seconds
+	// before their job died. A discarded row settles at its finalized_at, so
+	// pinning each gate off that column makes the gate-anchored latency exactly
+	// ~30s — where the created_at anchor would record hours.
+	for _, tc := range []struct{ id, column string }{
+		{heldID, "reviewed_at"},
+		{scheduledID, "scheduled_at"},
+	} {
+		gate := `(SELECT r.finalized_at - interval '30 seconds' FROM river_job r WHERE r.id = m.send_job_id)`
+		if _, err := f.pool.Exec(context.Background(),
+			`UPDATE messages m SET created_at = now() - interval '3 hours', `+tc.column+` = `+gate+` WHERE m.id=$1`, tc.id); err != nil {
+			t.Fatalf("gate %s on %s: %v", tc.column, tc.id, err)
+		}
+	}
+
+	rec := &recordingMetrics{}
+	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter).WithMetrics(rec)
+	if err := worker.Work(context.Background(), &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(rec.terminals) != 2 || len(rec.latencies) != 2 {
+		t.Fatalf("terminals=%v latencies=%v, want one of each per settled row", rec.terminals, rec.latencies)
+	}
+	for _, got := range rec.latencies {
+		if got < 25 || got > 35 {
+			t.Errorf("reconciled terminal latency = %.0fs, want ~30s (settle − the gate); the sweep must anchor at reviewed_at/scheduled_at, not created_at", got)
+		}
+	}
+}
+
 func TestTerminalReconcileWorker_ReconcilesOnlyTerminalJobs(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)

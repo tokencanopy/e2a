@@ -74,6 +74,16 @@ func TestClaimSendAttempt_AlreadySentReplaysCachedResult(t *testing.T) {
 	if err := store.MarkSendSucceeded(context.Background(), msg.ID, want); err != nil {
 		t.Fatalf("MarkSendSucceeded: %v", err)
 	}
+	var messageKeyIsNull bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT rfc_message_id_key IS NULL FROM messages WHERE id=$1`,
+		msg.ID,
+	).Scan(&messageKeyIsNull); err != nil {
+		t.Fatalf("read message RFC key: %v", err)
+	}
+	if !messageKeyIsNull {
+		t.Fatal("send-attempt state alone populated messages.rfc_message_id_key")
+	}
 
 	second, err := store.ClaimSendAttempt(context.Background(), msg.ID)
 	if err != nil {
@@ -127,11 +137,11 @@ func TestClaimSendAttempt_ConcurrentOnlyOneAcquires(t *testing.T) {
 
 	const N = 20
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		acquired  int
-		inflight  int
-		otherCnt  int
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		acquired int
+		inflight int
+		otherCnt int
 	)
 	wg.Add(N)
 	for i := 0; i < N; i++ {

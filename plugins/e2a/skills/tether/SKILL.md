@@ -114,8 +114,9 @@ or put the agent key + inbox in `~/.e2a-tether.env` and leave the CLI config alo
 > `pending_review` means the message was held for approval; a terminal `failed`
 > means the server persisted a delivery failure. `tether.sh` detects both on
 > every send: an affected intro makes `start` **refuse to arm**, and an affected
-> `update`/`ask` exits non-zero (**2** = held, **5** = terminal failure) so the
-> session never mistakes either for a delivered message. A terminal failure is
+> `update`/`ask` exits non-zero — held is **2** for `update`, **4** for `ask`;
+> terminal failure is **5** for both — so the session never mistakes either for
+> a delivered message. A terminal failure is
 > **not** retryable — the server already recorded an outcome for that message
 > id, so re-sending risks a duplicate. Inspect it with `e2a messages get <id>`.
 
@@ -242,10 +243,11 @@ Write for that medium, not for a CLI.
   you heard them.
 - **Keep it in one thread — always `update`, never a fresh send.** `tether.sh`
   threads by *replying* (In-Reply-To/References + a stable subject), which is what
-  Gmail/Outlook actually stitch on. e2a threads on `conversation_id`, but Gmail
-  ignores that — so a fresh send in the same e2a conversation still lands as a
-  *second* thread in the user's inbox (the split Gmail showed). While tethered,
-  send every update through `"$T" update` (it replies into the thread); do **not**
+  Gmail/Outlook actually stitch on. e2a's `conversation_id` is application
+  correlation, and Gmail ignores it—so a fresh send with the same value still
+  lands as a *second* thread in the user's inbox (the split Gmail showed).
+  While tethered, send every update through `"$T" update` (it replies into the
+  thread); do **not**
   reach for the e2a MCP `send_message` or start a new subject to reach the user
   mid-session. One session = one thread = one subject.
 
@@ -285,9 +287,10 @@ below) — keep that coarse (e.g. 30m).
 
 ## Multiple sessions
 
-Each `start` opens a **dedicated email thread** (fresh conversation id, its own
-subject; replies anchor by In-Reply-To), and local state is **keyed per repo**
-(git toplevel), so tethered sessions in different repos coexist without
+Each `start` opens a **dedicated email thread** (fresh send, fresh application
+conversation ID, its own subject; replies anchor by In-Reply-To), and local
+state is **keyed per repo** (git toplevel), so tethered sessions in different
+repos coexist without
 touching each other's thread, watermark, or ask-lock. Within one repo,
 `start` **refuses to arm over a live session** instead of silently hijacking
 its thread. To run a second session in the *same* repo, start it with

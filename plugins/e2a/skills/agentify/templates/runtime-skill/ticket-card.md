@@ -30,14 +30,14 @@ append-only `events` array; use `add-event` to extend it.
 
 ## Schema (v1)
 
-```json
+```jsonc
 {
   "schema": 1,
   "ticket": 123,                 // the issue number == the ticket id (github store)
   "kind": "bug",                 // bug | feature | other
   "status": "triaged",           // see state-machine.md
   "marker": "acme-feedback",     // == config.marker; redundant for robust extraction
-  "comms_ref": "conv_abc123",    // e2a conversation id of the FILER thread; ID ONLY, never the address (PII boundary)
+  "comms_ref": "conv_abc123",    // FILER app conversation ID only; never an address
   "duplicate_of": null,          // issue number of the canonical ticket, or null
   "fix_gate": {
     "mode": "hitl",              // mirrors config at triage time
@@ -46,7 +46,7 @@ append-only `events` array; use `add-event` to extend it.
   },
   "approval": {
     "status": "needed",          // none | needed | pending | approved | declined
-    "conversation_id": null,     // e2a conv of the APPROVER thread (set by comms when it sends)
+    "conversation_id": null,     // APPROVER app conversation ID; set on first send
     "decided_by": null,          // approver address, on a verified decision
     "reason": null               // approver's note on decline
   },
@@ -75,7 +75,8 @@ append-only `events` array; use `add-event` to extend it.
 
 ## Idempotency / claim discipline (intake)
 
-Each filer thread maps to at most one ticket via its `conversation_id`. The
+Each filer application conversation maps to at most one ticket via its
+`conversation_id`. The
 crash-safe dedup key is the **bot-authored issue-body footer**
 `<!-- {marker} comms:<conversation_id> -->`, written ATOMICALLY with the
 issue body — so it exists even if the run dies before the ticket-card is

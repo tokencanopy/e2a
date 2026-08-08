@@ -9,6 +9,7 @@ import {
   listAgents,
   listAgentMessages,
   listPendingMessages,
+  findPendingMessage,
   getInboxUnread,
   getMessageDetailWire,
   getReviewDetailWire,
@@ -16,6 +17,8 @@ import {
   projectMessageDetail,
   projectPending,
   UNREAD_BADGE_CAP,
+  getWebhook,
+  listWebhookDeliveries,
   type MessageViewWire,
 } from "./api";
 
@@ -80,6 +83,34 @@ describe("listAgents", () => {
 });
 
 describe("message projection (v1 contract)", () => {
+  it("preserves the optional beta thread_id on message summaries", async () => {
+    mockFetch.mockImplementation((url: string) =>
+      url.includes("/messages")
+        ? okJson({
+            items: [
+              {
+                id: "m_threaded",
+                thread_id: "thread_A",
+                direction: "inbound",
+                header_from: "sender@x.com",
+                envelope_from: null,
+                verified_domain: "x.com",
+                to: ["agent@y.com"],
+                delivered_to: "agent@y.com",
+                subject: "Threaded",
+                created_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          })
+        : notFound(),
+    );
+
+    const res = await listAgentMessages("agent@y.com");
+
+    expect(res.items[0].thread_id).toBe("thread_A");
+  });
+
   it("maps v1 review_status/delivery_status onto the app fields", async () => {
     mockFetch.mockImplementation((url: string) =>
       url.includes("/messages")
@@ -186,6 +217,33 @@ describe("message projection (v1 contract)", () => {
     const urls = mockFetch.mock.calls.map((c) => c[0] as string);
     expect(urls).toEqual(["/v1/reviews"]);
   });
+
+  it("follows review cursors until it finds a deep-linked hold", async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === "/v1/reviews?limit=100") {
+        return okJson({
+          items: [{ id: "newer", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "newer", review_status: "pending_review", created_at: "2026-01-02T00:00:00Z" }],
+          next_cursor: "page-2",
+        });
+      }
+      if (url === "/v1/reviews?limit=100&cursor=page-2") {
+        return okJson({
+          items: [{ id: "target", agent_email: "a@x.com", direction: "outbound", header_from: "a@x.com", envelope_from: null, verified_domain: null, to: ["b@y.com"], subject: "target hold", review_status: "pending_review", created_at: "2026-01-01T00:00:00Z" }],
+          next_cursor: null,
+        });
+      }
+      return notFound();
+    });
+
+    await expect(findPendingMessage("target")).resolves.toMatchObject({
+      id: "target",
+      subject: "target hold",
+    });
+    expect(mockFetch.mock.calls.map((c) => c[0])).toEqual([
+      "/v1/reviews?limit=100",
+      "/v1/reviews?limit=100&cursor=page-2",
+    ]);
+  });
 });
 
 // Every per-message SWR entry holds ONE shape — the raw MessageViewWire —
@@ -193,8 +251,8 @@ describe("message projection (v1 contract)", () => {
 // endpoints under one shared cache key (see lib/swrKeys.ts). That
 // invariant only holds if (a) both fetchers return the wire unprojected
 // and (b) the projectors stay pure functions applied at the point of use.
-// The tests below pin both halves; the cross-surface render tests in
-// inboxes/(view)/messages/view/page.test.tsx pin the consequence.
+// The tests below pin both halves; PendingRow and ThreadBubble render tests
+// pin the cross-surface consequence.
 
 // A MessageView as the REVIEW read returns it (GET /v1/reviews/{id}) —
 // the superset: it alone carries hold_reason + protection.
@@ -227,6 +285,7 @@ const REVIEW_WIRE: MessageViewWire = {
 // (GET /v1/agents/{address}/messages/{id}) for an inbound row.
 const INBOUND_WIRE: MessageViewWire = {
   id: "msg_in",
+  thread_id: "thread_in",
   direction: "inbound",
   header_from: "james@x.com",
   envelope_from: "bounce@x.com",
@@ -285,10 +344,11 @@ describe("message-detail projectors (shared-cache invariant)", () => {
     expect(d.header_from).toBe("james@x.com");
     expect(d.envelope_from).toBe("bounce@x.com");
     expect(d.parsed?.text).toBe("plain body");
+    expect(d.thread_id).toBe("thread_in");
   });
 
   it("projectInbound defaults absent list/scalar fields instead of leaking undefined", () => {
-    // The focus page and ThreadBubble index into these without guards
+    // PendingRow and ThreadBubble index into these without guards
     // (cc.join, attachments.map) — undefined here is
     // a crash there.
     const d = projectInbound({
@@ -315,7 +375,7 @@ describe("message-detail projectors (shared-cache invariant)", () => {
     const out = projectMessageDetail("support@acme.dev", REVIEW_WIRE, "inbound");
     expect(out.direction).toBe("outbound");
     // Outbound rows read the draft body; the discriminated union is what
-    // lets the focus page narrow safely.
+    // lets each consuming surface narrow safely.
     expect(out.direction === "outbound" && out.data.body_text).toBe(
       "Hello, your refund is on the way.",
     );
@@ -419,5 +479,73 @@ describe("getInboxUnread (Inboxes list badge probe)", () => {
       url.includes("/messages") ? okJson({ items: [], next_cursor: null }) : notFound(),
     );
     expect(await getInboxUnread("billing@acme.dev")).toEqual({ count: 0, more: false });
+  });
+});
+
+describe("getWebhook", () => {
+  it("fetches one webhook by id, percent-encoding the id", async () => {
+    mockFetch.mockImplementation(() =>
+      okJson({ id: "wh_1", url: "https://x.test/h", enabled: true, created_at: "2026-07-01T00:00:00Z" }),
+    );
+    const wh = await getWebhook("wh_1");
+    expect(mockFetch.mock.calls[0][0]).toBe("/v1/webhooks/wh_1");
+    expect(wh.id).toBe("wh_1");
+  });
+
+  // The detail page routes on a query param the user can edit, so a bad or
+  // deleted id must surface as a 404 the page can render cleanly rather than
+  // an unhandled throw.
+  it("throws ApiError with status 404 for an unknown id", async () => {
+    mockFetch.mockImplementation(() => notFound());
+    await expect(getWebhook("wh_missing")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("listWebhookDeliveries", () => {
+  it("requests the delivery log for the webhook with no filter by default", async () => {
+    mockFetch.mockImplementation(() => okJson({ items: [], next_cursor: null }));
+    await listWebhookDeliveries("wh_1");
+    expect(mockFetch.mock.calls[0][0]).toBe("/v1/webhooks/wh_1/deliveries");
+  });
+
+  it("forwards the status filter and cursor", async () => {
+    mockFetch.mockImplementation(() => okJson({ items: [], next_cursor: null }));
+    await listWebhookDeliveries("wh_1", { status: "failed", cursor: "abc", pageSize: 25 });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("status=failed");
+    expect(url).toContain("cursor=abc");
+    expect(url).toContain("limit=25");
+  });
+
+  it("normalizes a missing items array and next_cursor to empty values", async () => {
+    mockFetch.mockImplementation(() => okJson({}));
+    expect(await listWebhookDeliveries("wh_1")).toEqual({ items: [], next_cursor: null });
+  });
+
+  it("passes delivery rows through without dropping open-set fields", async () => {
+    mockFetch.mockImplementation(() =>
+      okJson({
+        items: [
+          {
+            id: "whd_1",
+            type: "some.future.event",
+            status: "scheduled",
+            attempts: 2,
+            next_retry_at: "2026-07-27T12:30:00Z",
+            created_at: "2026-07-27T12:00:00Z",
+            last_status_code: 503,
+            last_error: "upstream unavailable",
+          },
+        ],
+        next_cursor: "next",
+      }),
+    );
+    const page = await listWebhookDeliveries("wh_1");
+    expect(page.next_cursor).toBe("next");
+    expect(page.items[0]).toMatchObject({
+      type: "some.future.event",
+      status: "scheduled",
+      last_status_code: 503,
+    });
   });
 });

@@ -262,6 +262,7 @@ describe("listen notification handling", () => {
     const full = {
       id: "msg_123",
       headerFrom: "alice@example.com",
+      threadId: "thr_0123456789abcdef0123456789abcdef",
       delivered_to: "bot@agents.e2a.dev",
       subject: "Hello",
       rawMessage: "U3ViamVjdDogSGVsbG8NCg0KSGkgdGhlcmUh",
@@ -281,6 +282,7 @@ describe("listen notification handling", () => {
     // The same canonical SDK model shape `messages get --json` emits.
     expect(mockStdout).toHaveBeenCalledWith(`${JSON.stringify(withWireFrom(full))}\n`);
     expect(mockStdout).toHaveBeenCalledWith(expect.stringContaining("headerFrom"));
+    expect(mockStdout).toHaveBeenCalledWith(expect.stringContaining('"threadId":"thr_0123456789abcdef0123456789abcdef"'));
   });
 
   it("forwards wire-stable JSON to a generic webhook", async () => {

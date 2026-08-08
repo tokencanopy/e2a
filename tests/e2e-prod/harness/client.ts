@@ -1,5 +1,6 @@
 import { loadEnv, type ProdEnv } from "./env.ts";
 import { recordRequest } from "./coverage.ts";
+import { recordResponse } from "./responses.ts";
 import { recordTarget } from "./target.ts";
 
 export interface RawResponse<T = unknown> {
@@ -93,6 +94,10 @@ export class ApiClient {
         parsed = null;
       }
     }
+    // Record the full response as a sample for response_schema_gate.py — ALL
+    // statuses, unlike recordRequest above (see harness/responses.ts for why
+    // the two channels deliberately differ).
+    recordResponse(method, url.pathname, res.status, parsed, raw, res.headers.get("content-type") ?? "");
     const out: RawResponse<T> = {
       status: res.status,
       ok: res.ok,

@@ -1,5 +1,9 @@
 components:
   headers:
+    ETag:
+      description: "Opaque STRONG entity-tag validator for the returned representation, currently a quoted 32-hex-character token (e.g. \"9f86d081884c7d65…\"). Treat it as opaque: never parse, derive, or construct one. Store the received value and replay it VERBATIM in a later If-Match to make a write conditional. Any accepted write moves the validator, so a stale value cannot match and the conditional write is rejected with 412 precondition_failed."
+      schema:
+        type: string
     RateLimitLimit:
       description: Request quota for the current limiter window.
       schema:
@@ -12,6 +16,11 @@ components:
       description: Seconds until the current limiter window resets.
       schema:
         type: integer
+    ResourceLocation:
+      description: "Canonical path-relative URL of the affected resource. Path segments are percent-encoded PER SEGMENT, which legally leaves the sub-delimiters @ + & = : $ unescaped — /v1/contacts/a.partner@fund.vc is an expected value, and so is the fully-escaped /v1/contacts/a.partner%40fund.vc. Neither form is promised, so never string-compare this header against a URL built locally: percent-decode the final path segment to recover the canonical resource key, then compare that."
+      schema:
+        format: uri-reference
+        type: string
     RetryAfter:
       description: Positive integer seconds to wait before retrying a transient 429 or 503 response.
       schema:
@@ -347,6 +356,7 @@ components:
             - base64-encoded-content
           type: string
         filename:
+          description: Attachment filename. Maximum 1024 UTF-8 bytes; longer names are rejected as invalid_attachment.
           examples:
             - report.pdf
           type: string
@@ -426,6 +436,271 @@ components:
         - dkim
         - dmarc
       type: object
+    ContactDueContact:
+      additionalProperties: true
+      properties:
+        address:
+          description: The contact's canonical address — identical to the payload's top-level address.
+          type: string
+        display_name:
+          description: The contact's display name; empty string when unset.
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: The contact's caller-owned metadata, verbatim and uninterpreted. An empty object when the contact carries none.
+          type: object
+      required:
+        - address
+        - display_name
+        - metadata
+      type: object
+      x-stability-level: beta
+    ContactDueData:
+      additionalProperties: true
+      properties:
+        address:
+          description: The contact's canonical address — who the agent owes an action to.
+          type: string
+        agent_email:
+          description: The agent that owns this outreach — its id and address (an agent's id IS its email).
+          type: string
+        contact:
+          $ref: "#/components/schemas/ContactDueContact"
+          description: The contact's identity, inlined so an agent-scoped consumer needs no account-wide contact read.
+        last_conversation_id:
+          description: Conversation id of the most recent exchange with this contact, to continue that thread. Omitted when there is none.
+          type: string
+        last_outbound_at:
+          description: When this agent last sent to the contact. Omitted when it never has.
+          format: date-time
+          type: string
+        next_action_at:
+          description: The schedule instant that came due — the value set on the engagement, not the time the sweep observed it.
+          format: date-time
+          type: string
+        outbound_count:
+          description: How many messages this agent has sent to the contact since the engagement was created. Computed at claim time, not a stored counter.
+          format: int64
+          type: integer
+        replied:
+          description: True when the contact has replied since this agent's first outbound to them.
+          type: boolean
+        stage:
+          description: The caller-owned outreach stage, verbatim. e2a never interprets it; empty when unset.
+          type: string
+      required:
+        - address
+        - agent_email
+        - contact
+        - next_action_at
+        - outbound_count
+        - replied
+        - stage
+      type: object
+      x-stability-level: beta
+    ContactEngagementView:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        agent_email:
+          type: string
+        contact:
+          $ref: "#/components/schemas/EmbeddedContactView"
+        created_at:
+          format: date-time
+          type: string
+        first_outbound_at:
+          description: Server-owned.
+          format: date-time
+          type:
+            - string
+            - "null"
+        inbound_count:
+          description: DMARC-authenticated inbound messages delivered since enrollment. Spoofed, held, blocked, and pre-enrollment messages are excluded. Server-owned.
+          format: int64
+          type: integer
+        last_conversation_id:
+          description: Server-owned.
+          type: string
+        last_inbound_at:
+          description: Server-owned.
+          format: date-time
+          type:
+            - string
+            - "null"
+        last_outbound_at:
+          description: Server-owned. Include it in the due query (last_outbound_before) so a lost client state-write cannot cause a duplicate send.
+          format: date-time
+          type:
+            - string
+            - "null"
+        metadata:
+          additionalProperties: {}
+          description: Caller-owned key/value data scoped to this relationship. Opaque to e2a.
+          type: object
+        next_action_at:
+          description: When the caller wants to act next. e2a does not act on it; it drives the outreach query and the contact.due wake-up.
+          format: date-time
+          type:
+            - string
+            - "null"
+        outbound_count:
+          description: Successfully submitted outbound messages since enrollment. Queue failures and pre-enrollment history are excluded. Server-owned.
+          format: int64
+          type: integer
+        replied:
+          description: Whether this contact has answered since outreach began — computed as last_inbound_at > first_outbound_at, so it means 'replied to us' rather than 'has ever written'. Server-owned.
+          type: boolean
+        stage:
+          description: Caller-defined outreach stage. Opaque to e2a — there is no server-side state machine, and any string is valid.
+          type: string
+        suppressed:
+          description: Whether sends to this address are blocked, by an account-wide or agent-scoped suppression. Server-owned; reflects the same state the send path enforces.
+          type: boolean
+        suppression_reason:
+          description: Free-text detail recorded with the block, when present.
+          type: string
+        suppression_source:
+          description: "Why the block exists, when suppressed. Open set; tolerate unknown values. Known values: unsubscribe, manual, bounce, complaint."
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - agent_email
+        - address
+        - stage
+        - next_action_at
+        - metadata
+        - replied
+        - suppressed
+        - first_outbound_at
+        - last_outbound_at
+        - last_inbound_at
+        - outbound_count
+        - inbound_count
+        - contact
+        - created_at
+        - updated_at
+      type: object
+      x-stability-level: beta
+    ContactImportItemResult:
+      additionalProperties: true
+      properties:
+        address:
+          description: Canonicalized address. Absent when the row could not be parsed.
+          type: string
+        code:
+          description: "Machine-branchable reason, present for skipped and failed rows. Known values: duplicate_in_batch, already_exists, invalid_recipient, invalid_request, contact_limit_reached."
+          type: string
+        enrolled:
+          description: True when this import created the optional per-agent outreach enrolment for this row. False means no agent was requested or the enrolment already existed.
+          type: boolean
+        index:
+          description: Zero-based position of this row in the submitted contacts array.
+          format: int64
+          type: integer
+        message:
+          description: Human-readable explanation for a skipped or failed row.
+          type: string
+        status:
+          description: "Outcome for this row. Known values: created, updated, skipped, failed."
+          type: string
+        suppressed:
+          description: True when this address is on a suppression list. The contact is still recorded — suppression is surfaced here so the import count stays honest rather than silently smaller — but sends to it will be refused.
+          type: boolean
+      required:
+        - index
+        - status
+      type: object
+      x-stability-level: beta
+    ContactImportResult:
+      additionalProperties: true
+      properties:
+        batch_id:
+          description: Identifier for this import. Pass it to DELETE /v1/contacts/imports/{batch_id} to reverse the upload, or as a filter on the contacts list.
+          type: string
+        created:
+          format: int64
+          type: integer
+        failed:
+          format: int64
+          type: integer
+        results:
+          description: One entry per submitted row, in request order.
+          items:
+            $ref: "#/components/schemas/ContactImportItemResult"
+          type: array
+        skipped:
+          format: int64
+          type: integer
+        updated:
+          format: int64
+          type: integer
+      required:
+        - batch_id
+        - created
+        - updated
+        - skipped
+        - failed
+        - results
+      type: object
+      x-stability-level: beta
+    ContactImportRow:
+      additionalProperties: false
+      properties:
+        address:
+          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>"). At most 320 Unicode code points; a longer value fails this row alone with invalid_recipient and does not reject the batch.
+          type: string
+        display_name:
+          description: Optional human-readable name, at most 320 Unicode code points; a longer value fails this row alone with invalid_request and does not reject the batch. Omit it and an existing contact keeps the name it already has — so a narrower re-upload that drops the name column does not erase names. Send an explicit empty string to clear one.
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: "Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. A row that exceeds a bound fails on its own, without affecting the rest of the batch. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
+          type: object
+      required:
+        - address
+      type: object
+      x-stability-level: beta
+    ContactView:
+      additionalProperties: true
+      properties:
+        address:
+          description: "Canonical (normalized) email address. This is the resource key: a display-name form such as \"A. Partner <partner@fund.vc>\" and the bare address resolve to the same contact."
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        display_name:
+          description: Human-readable name. May be empty.
+          type: string
+        import_batch_id:
+          description: The import that created this contact, when source is import. Absent otherwise.
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: Caller-owned key/value data stored on the contact, returned verbatim. e2a never interprets it. An empty object when none is set. Flat objects only; the write-side bounds are published on CreateContactRequest.metadata.
+          type: object
+        source:
+          description: "How this contact first entered the account — provenance, not lifecycle; it never changes after creation. Open set; tolerate unknown values. Known values: import, manual, inbound."
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - address
+        - display_name
+        - metadata
+        - source
+        - created_at
+        - updated_at
+      type: object
+      x-stability-level: beta
     ConversationDetailView:
       additionalProperties: true
       properties:
@@ -601,6 +876,28 @@ components:
         - address
       type: object
       x-stability-level: beta
+    CreateContactRequest:
+      additionalProperties: false
+      properties:
+        address:
+          description: Email address. Accepts a bare address or an RFC 5322 mailbox ("A. Partner <partner@fund.vc>"); it is stored canonicalized. At most 320 Unicode code points.
+          maxLength: 320
+          type: string
+        display_name:
+          description: Optional human-readable name.
+          maxLength: 320
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: "Optional flat key/value data owned by the caller and stored verbatim; e2a never interprets it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
+          type: object
+      required:
+        - address
+      type: object
+      x-stability-level: beta
     CreateTemplateRequest:
       additionalProperties: false
       properties:
@@ -630,7 +927,7 @@ components:
         description:
           type: string
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -648,6 +945,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -657,6 +955,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
@@ -680,7 +979,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -691,6 +990,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
@@ -856,6 +1156,20 @@ components:
         - deleted
         - id
       type: object
+    DeleteContactResult:
+      additionalProperties: true
+      properties:
+        address:
+          description: The canonical address that was removed.
+          type: string
+        deleted:
+          description: Always true; the operation is a no-op-safe confirmation.
+          type: boolean
+      required:
+        - deleted
+        - address
+      type: object
+      x-stability-level: beta
     DeleteDomainResult:
       additionalProperties: true
       properties:
@@ -869,6 +1183,45 @@ components:
         - deleted
         - domain
       type: object
+    DeleteEngagementResult:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        deleted:
+          type: boolean
+      required:
+        - deleted
+        - address
+      type: object
+      x-stability-level: beta
+    DeleteImportBatchResult:
+      additionalProperties: true
+      properties:
+        batch_id:
+          type: string
+        contacts_deleted:
+          description: How many contacts this reversal removed.
+          format: int64
+          type: integer
+        contacts_retained:
+          description: "How many contacts from this batch were deliberately kept: edited since the import, enrolled in outreach that survives, or carrying correspondence history."
+          format: int64
+          type: integer
+        deleted:
+          type: boolean
+        engagements_deleted:
+          description: How many per-agent outreach enrolments created by this import were removed. Enrolments edited or used since the import survive and are not counted here.
+          format: int64
+          type: integer
+      required:
+        - deleted
+        - batch_id
+        - contacts_deleted
+        - contacts_retained
+        - engagements_deleted
+      type: object
+      x-stability-level: beta
     DeleteMessageResult:
       additionalProperties: true
       properties:
@@ -1451,11 +1804,27 @@ components:
         - subject
         - message_type
       type: object
+    EmbeddedContactView:
+      additionalProperties: true
+      properties:
+        address:
+          type: string
+        display_name:
+          type: string
+        metadata:
+          additionalProperties: {}
+          type: object
+      required:
+        - address
+        - display_name
+        - metadata
+      type: object
+      x-stability-level: beta
     ErrorBody:
       additionalProperties: true
       properties:
         code:
-          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, template_not_found, starter_template_not_found, gone, conflict, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
+          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, precondition_failed, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), precondition_failed (412, optimistic-concurrency validator is stale), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), contact_limit_reached, template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
           type: string
           x-e2a-error-contracts:
             address_in_trash:
@@ -1493,6 +1862,16 @@ components:
               retryable: false
               statuses:
                 - 409
+            contact_limit_reached:
+              family: capacity
+              retryable: false
+              statuses:
+                - 400
+            contact_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             domain_has_agents:
               family: state
               retryable: false
@@ -1514,6 +1893,11 @@ components:
               retryable: false
               statuses:
                 - 409
+            engagement_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             error:
               family: server
               retryable: false
@@ -1544,6 +1928,11 @@ components:
               retryable: false
               statuses:
                 - 422
+            import_batch_not_found:
+              family: not_found
+              retryable: false
+              statuses:
+                - 404
             inbound_mx_check_failed:
               family: availability
               retryable: true
@@ -1674,6 +2063,11 @@ components:
               retryable: false
               statuses:
                 - 413
+            precondition_failed:
+              family: state
+              retryable: false
+              statuses:
+                - 412
             rate_limited:
               details_schema: "#/components/schemas/RateLimitedDetails"
               family: capacity
@@ -1795,6 +2189,7 @@ components:
           type: object
           x-e2a-beta-event-data-schemas:
             agent.suppression_added: "#/components/schemas/AgentSuppressionAddedData"
+            contact.due: "#/components/schemas/ContactDueData"
           x-e2a-event-data-schemas:
             domain.sending_failed: "#/components/schemas/DomainSendingFailedData"
             domain.sending_verified: "#/components/schemas/DomainSendingVerifiedData"
@@ -1880,33 +2275,44 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id override. This value is independent of email thread topology; a forward starts a new email thread. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
           maxLength: 1048576
           type: string
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
-          maxLength: 320
+          description: Sets the Reply-To header — where replies to this message are directed. Either a single RFC 5322 address (optionally with a display name, e.g. "Support <support@acme.com>") or an array of up to 5 such addresses to direct replies to several destinations. Each address string is at most 320 characters (display name + address combined), and each address must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
+          oneOf:
+            - maxLength: 320
+              type: string
+            - items:
+                maxLength: 320
+                type: string
+              maxItems: 5
+              type: array
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the forward is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent's own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the forward would otherwise be held for review. Scheduling survives a review hold: if held, send_at is preserved on the pending_review message (surfaced as scheduled_at) and re-armed on approval — submitted at send_at if still future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
           type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
         to:
-          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -1945,6 +2351,35 @@ components:
         - type
         - code
         - summary
+      type: object
+      x-stability-level: beta
+    ImportContactsRequest:
+      additionalProperties: false
+      properties:
+        agent_email:
+          description: Optionally enroll every valid resolved contact with this owned, live agent in the same transaction. Existing engagement state is preserved.
+          maxLength: 320
+          type: string
+        contacts:
+          description: The rows to import. At most 1000 per request; paginate client-side for larger lists.
+          items:
+            $ref: "#/components/schemas/ContactImportRow"
+          maxItems: 1000
+          minItems: 1
+          type: array
+        on_conflict:
+          default: merge
+          description: What to do when the address already exists. merge (default) refreshes display_name and metadata and leaves provenance and any state hanging off the contact untouched — so re-uploading a corrected spreadsheet is safe. skip leaves the existing contact completely alone.
+          enum:
+            - merge
+            - skip
+          type: string
+        stage:
+          description: Initial opaque stage for engagements created by this import. Requires agent_email and never overwrites an existing engagement's stage.
+          maxLength: 128
+          type: string
+      required:
+        - contacts
       type: object
       x-stability-level: beta
     LimitExceededDetails:
@@ -2160,6 +2595,11 @@ components:
         scan_score:
           format: double
           type: number
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           type: string
         size_bytes:
@@ -2354,7 +2794,7 @@ components:
         delivery_detail:
           type: string
         delivery_status:
-          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"
+          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"
           type: string
         direction:
           enum:
@@ -2393,6 +2833,11 @@ components:
         review_status:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Present while a future send_at is set and retained afterwards; omitted for immediate sends and inbound rows. Moving to trash before provider submission prevents submission. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -2402,6 +2847,10 @@ components:
           type: integer
         subject:
           type: string
+        thread_id:
+          description: "Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."
+          type: string
+          x-stability-level: beta
         to:
           items:
             type: string
@@ -2465,7 +2914,7 @@ components:
         delivery_detail:
           type: string
         delivery_status:
-          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. (Legacy 'queued' is superseded by 'accepted'.)"
+          description: "Outbound delivery rollup (worst recipient status by precedence; outbound only). Open set; tolerate unknown values. Known values: accepted, sending, sent, delivered, deferred, bounced, complained, failed. Lifecycle: accepted → sending → sent → delivered | deferred | bounced | complained | failed. While a future scheduled_at is pending, delivery_status remains accepted; scheduled is the SendResultView.status presentation value, not a delivery_status. (Legacy 'queued' is superseded by 'accepted'.)"
           type: string
         direction:
           enum:
@@ -2523,6 +2972,11 @@ components:
         review_status:
           description: "Review-hold lifecycle (outbound only). Open set; tolerate unknown values. Known values: pending_review, sent, review_rejected, review_expired_approved, review_expired_rejected. Note: an APPROVED outbound hold reads as sent here — the message view intentionally collapses the approved outcome into the delivery lifecycle. The distinct review_approved spelling appears only in the approve result (SendResultView.status, for inbound release) and the email.review_approved webhook event, not in this field."
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Future instant a scheduled outbound send was queued to be submitted (outbound only; treat as \"not before\"). Set when the message was created with a future send_at and retained afterwards; omitted for immediate sends. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used at relay accept time (outbound only). Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
@@ -2532,6 +2986,10 @@ components:
           type: integer
         subject:
           type: string
+        thread_id:
+          description: "Beta: server-owned email thread identity. This field may evolve or be removed before it is declared stable. Omitted when no thread has been assigned."
+          type: string
+          x-stability-level: beta
         to:
           items:
             type: string
@@ -2638,6 +3096,38 @@ components:
         - items
         - next_cursor
       type: object
+    PageContactEngagementView:
+      additionalProperties: true
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/ContactEngagementView"
+          type: array
+        next_cursor:
+          type:
+            - string
+            - "null"
+      required:
+        - items
+        - next_cursor
+      type: object
+      x-stability-level: beta
+    PageContactView:
+      additionalProperties: true
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/ContactView"
+          type: array
+        next_cursor:
+          type:
+            - string
+            - "null"
+      required:
+        - items
+        - next_cursor
+      type: object
+      x-stability-level: beta
     PageConversationSummaryView:
       additionalProperties: true
       properties:
@@ -3197,19 +3687,19 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Additional Bcc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Additional Cc recipients. The final message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id override. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id override. This value is independent of email thread topology, which is derived from the referenced message. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
@@ -3218,9 +3708,20 @@ components:
         reply_all:
           type: boolean
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name. At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
-          maxLength: 320
+          description: Sets the Reply-To header — where replies to this message are directed. Either a single RFC 5322 address (optionally with a display name, e.g. "Support <support@acme.com>") or an array of up to 5 such addresses to direct replies to several destinations. Each address string is at most 320 characters (display name + address combined), and each address must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
+          oneOf:
+            - maxLength: 320
+              type: string
+            - items:
+                maxLength: 320
+                type: string
+              maxItems: 5
+              type: array
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the reply is accepted immediately and returns status=scheduled; it is submitted at approximately this time (\"not before\", accurate to the scheduler poll interval). A value at or before now sends immediately. Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent's own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the reply would otherwise be held for review. Scheduling survives a review hold: if held, send_at is preserved on the pending_review message (surfaced as scheduled_at) and re-armed on approval — submitted at send_at if still future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
           type: string
+          x-stability-level: beta
         text:
           maxLength: 1048576
           type: string
@@ -3283,6 +3784,10 @@ components:
           type: string
         review_status:
           description: Hold state of this queue item. Open set; tolerate unknown values. Currently always pending_review (the queue lists held items).
+          type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Present only on an outbound hold that carried a future send_at (#815): the instant the message is queued to be submitted once approved. The schedule survives the hold — approving submits at this instant if it is still in the future, or immediately if it has already passed. Absent on inbound holds and on outbound holds without a schedule."
+          format: date-time
           type: string
         subject:
           type: string
@@ -3361,19 +3866,19 @@ components:
             $ref: "#/components/schemas/Attachment"
           type: array
         bcc:
-          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Bcc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         cc:
-          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Cc recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
           type: array
         conversation_id:
-          description: Caller-assigned conversation (thread) id. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
+          description: Caller-assigned application conversation/grouping id. This value is independent of email thread topology. At most 200 characters — deliberately the same cap as the webhook conversation_ids filter-value limit and the message-list conversation_id filter limit (both 200), so an accepted conversation_id is never too long to filter by. Must not contain CR or LF.
           maxLength: 200
           type: string
         html:
@@ -3381,9 +3886,20 @@ components:
           maxLength: 1048576
           type: string
         reply_to:
-          description: Sets the Reply-To header — where replies to this message are directed. A single RFC 5322 address, optionally with a display name (e.g. "Support <support@acme.com>"). At most 320 characters (display name + address combined). Defaults to the sending agent's own address.
-          maxLength: 320
+          description: Sets the Reply-To header — where replies to this message are directed. Either a single RFC 5322 address (optionally with a display name, e.g. "Support <support@acme.com>") or an array of up to 5 such addresses to direct replies to several destinations. Each address string is at most 320 characters (display name + address combined), and each address must fit SMTP's mailbox octet limits (local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes) — a violation is 400 invalid_request. Defaults to the sending agent's own address.
+          oneOf:
+            - maxLength: 320
+              type: string
+            - items:
+                maxLength: 320
+                type: string
+              maxItems: 5
+              type: array
+        send_at:
+          description: "Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time (RFC 3339 with a UTC offset). When set to a future instant the message is accepted immediately and returns status=scheduled; it is submitted to the provider at approximately this time. Treat it as \"not before\" — accurate to within the scheduler's poll interval (seconds), not exact-to-the-millisecond, and actual delivery can be later under provider retry/outage. A value at or before now sends immediately (identical to omitting it). Must be no more than 90 days ahead (over → 400 invalid_request). A future send_at whose only recipient is the sending agent's own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — this holds even when the message would otherwise be held for review. Scheduling survives a review hold: if the message is held, send_at is preserved on the pending_review message (surfaced there as scheduled_at) and re-armed on approval — the message is then submitted at send_at if that instant is still in the future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
           type: string
+          x-stability-level: beta
         subject:
           description: Literal subject. Required unless a template reference is used (mutually exclusive with template_id/template_alias).
           maxLength: 2000
@@ -3406,7 +3922,7 @@ components:
           maxLength: 1048576
           type: string
         to:
-          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters.
+          description: Primary recipients. The message is limited to 50 recipients across to, cc, and bcc combined. Each recipient string (display name + address combined) is limited to 320 characters. The address itself must also fit SMTP's mailbox octet limits — local part at most 64 octets and the whole addr-spec at most 254 octets, counted in UTF-8 BYTES rather than characters — or the request is rejected with 400 invalid_recipient. A long plus-addressed local part is the usual way to exceed this.
           items:
             maxLength: 320
             type: string
@@ -3434,12 +3950,19 @@ components:
         provider_message_id:
           description: Upstream provider (SES) id. Optional/absent until the message is actually sent — an accepted-but-not-yet-sent message has no provider id.
           type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. The future instant this message is queued to be submitted (approximate — treat as \"not before\"). Set when status=scheduled, and also when status=pending_review if the held draft carried a future send_at — the review hold preserves the schedule, and approval re-arms the send at this instant (if it is still future) or submits immediately (if it has already passed). Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before scheduled_at re-arms it; restoring at or after scheduled_at returns it live with delivery_status=failed and leaves the send canceled."
+          format: date-time
+          type: string
+          x-stability-level: beta
         sent_as:
           description: "From identity used. Open set; tolerate unknown values. Known values: own_address, relay."
           type: string
         status:
-          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. failed = terminal failure. Always branch on this field, not the HTTP status code."
+          description: "Outcome. Open set; tolerate unknown values. Known values: accepted, scheduled, sent, pending_review, review_approved, failed. accepted = durably persisted and queued for immediate submission (async pipeline); the terminal outcome arrives via webhook events (email.sent / email.failed) or GET /v1/messages/{id}. scheduled is beta and may change before it is declared stable. scheduled = durably persisted and queued for future submission at scheduled_at; this is successful acceptance, so do not re-send. failed = terminal failure. Always branch on this field, not the HTTP status code."
           type: string
+          x-experimental-values:
+            - scheduled
       required:
         - status
         - message_id
@@ -3705,6 +4228,7 @@ components:
             - email.flagged
             - email.blocked
             - email.review_requested
+            - contact.due
           type: string
       type: object
     TestWebhookResponse:
@@ -3765,6 +4289,22 @@ components:
           maxLength: 200
           type: string
       type: object
+    UpdateContactRequest:
+      additionalProperties: false
+      properties:
+        display_name:
+          description: Replace the display name. Omit to leave unchanged.
+          maxLength: 320
+          type: string
+        metadata:
+          additionalProperties: {}
+          description: "Replace the metadata object wholesale. Omit to leave unchanged; send an empty object to clear it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
+          type: object
+      type: object
+      x-stability-level: beta
     UpdateMessageRequest:
       additionalProperties: false
       properties:
@@ -3815,7 +4355,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable. All other events are stable."
+          description: "Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable. All other events are stable."
           items:
             enum:
               - email.received
@@ -3833,6 +4373,7 @@ components:
               - email.flagged
               - email.blocked
               - email.review_requested
+              - contact.due
             type: string
           type: array
           x-experimental-values:
@@ -3842,12 +4383,35 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersRequest"
         url:
           description: When present, must be a non-empty webhook delivery URL; omit to leave the URL unchanged.
           type: string
       type: object
+    UpsertEngagementRequest:
+      additionalProperties: false
+      properties:
+        metadata:
+          additionalProperties: {}
+          description: "Replace the relationship metadata wholesale. Omit to leave unchanged; send an empty object to clear it. Bounds, all enforced (400 invalid_request on violation): at most 50 keys; each key at most 128 bytes; each value must be a string, number, boolean, or null — nested objects and arrays are rejected, never flattened; each string value at most 4096 bytes; the whole object at most 16384 bytes once JSON-encoded. The byte-counted limits are UTF-8 octets, so a non-ASCII key or value reaches its limit sooner than its character count suggests."
+          maxProperties: 50
+          propertyNames:
+            maxLength: 128
+          type: object
+        next_action_at:
+          description: Set when to act next (RFC 3339). Omit to leave unchanged; send null to clear the schedule.
+          format: date-time
+          type:
+            - string
+            - "null"
+        stage:
+          description: Set the outreach stage. Omit to leave unchanged.
+          maxLength: 128
+          type: string
+      type: object
+      x-stability-level: beta
     UsageEventEntry:
       additionalProperties: true
       properties:
@@ -4098,7 +4662,7 @@ components:
         enabled:
           type: boolean
         events:
-          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added. Beta: the screening, review-hold, and agent.suppression_added events are unstable — their payload may change before they are declared stable."
+          description: "The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."
           items:
             type: string
           type: array
@@ -4109,6 +4673,7 @@ components:
             - email.review_approved
             - email.review_rejected
             - agent.suppression_added
+            - contact.due
         filters:
           $ref: "#/components/schemas/WebhookFiltersView"
         id:
@@ -4149,7 +4714,7 @@ openapi: 3.1.0
 paths:
   /v1/account:
     delete:
-      description: Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+      description: Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
       operationId: deleteAccount
       parameters:
         - description: Must be the literal DELETE — this action is irreversible.
@@ -4172,12 +4737,21 @@ paths:
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
         default:
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Error
+          description: Error — the standard envelope; branch on error.code.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -4751,9 +5325,270 @@ paths:
       summary: Update an agent
       tags:
         - agents
+  /v1/agents/{email}/contacts:
+    get:
+      description: "Lists the contacts this agent is working, with the reply and delivery facts e2a derives from real message activity. Combine replied=false, next_action_before and last_outbound_before to get everyone due for a follow-up in one request. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: listEngagements
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - description: Only engagements at this exact stage.
+          explode: false
+          in: query
+          name: stage
+          schema:
+            description: Only engagements at this exact stage.
+            type: string
+        - description: Filter on whether the contact has answered since outreach began. Omit for both.
+          explode: false
+          in: query
+          name: replied
+          schema:
+            description: Filter on whether the contact has answered since outreach began. Omit for both.
+            enum:
+              - "true"
+              - "false"
+            type: string
+        - description: Filter on whether sends are blocked. Omit for both.
+          explode: false
+          in: query
+          name: suppressed
+          schema:
+            description: Filter on whether sends are blocked. Omit for both.
+            enum:
+              - "true"
+              - "false"
+            type: string
+        - description: Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+          explode: false
+          in: query
+          name: next_action_before
+          schema:
+            description: Only engagements whose next_action_at has passed this instant (RFC 3339). Pass the current time to get everyone due.
+            format: date-time
+            type: string
+        - description: "Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client's own state write was lost — without it, a failed write can cause a duplicate send."
+          explode: false
+          in: query
+          name: last_outbound_before
+          schema:
+            description: "Only engagements not contacted since this instant (RFC 3339). Include it alongside next_action_before: last_outbound_at is server-maintained, so it excludes anyone just contacted even if the client's own state write was lost — without it, a failed write can cause a duplicate send."
+            format: date-time
+            type: string
+        - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+            type: string
+        - description: Maximum number of items to return (1-100).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            description: Maximum number of items to return (1-100).
+            format: int64
+            maximum: 100
+            minimum: 1
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageContactEngagementView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: List an agent's outreach (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/agents/{email}/contacts/{address}:
+    delete:
+      description: "Removes this agent's outreach state for a contact. Requires ?confirm=DELETE. The contact itself survives (identity is account-level and other agents may still be working them) and suppressions are untouched — un-enrolling is not consent and never restores sendability. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: deleteEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteEngagementResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Un-enrol a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    get:
+      description: "Fetches this agent's relationship with one contact. Returns an ETag for use with If-Match on a subsequent update. Agent-scoped credentials may read their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: getEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              $ref: "#/components/headers/ETag"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get one outreach record (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    put:
+      description: "Enrols a contact in this agent's outreach, or updates the agent-owned fields of an existing enrolment. Omitted fields are left unchanged, so advancing the stage after a send does not disturb the schedule. Creates the contact if it does not exist. Pass If-Match from a prior read to prevent a stale automation loop from overwriting newer state; a conditional request never creates. Derived fields are server-owned and rejected. Returns 201 on first enrolment and 200 on a subsequent update. Agent-scoped credentials may write their own agent. Beta: the outreach surface may change before it is declared stable."
+      operationId: upsertEngagement
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+          in: header
+          name: If-Match
+          schema:
+            description: Optional ETag from a prior read. When present the engagement must already exist and still match at the instant of the write, or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation, so it still refuses to enrol a missing one. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertEngagementRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Location:
+              $ref: "#/components/headers/ResourceLocation"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactEngagementView"
+          description: Created — the contact was newly enrolled in this agent's outreach.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Location:
+              $ref: "#/components/headers/ResourceLocation"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error — the standard envelope; branch on error.code.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Enrol or update outreach state (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
   /v1/agents/{email}/conversations:
     get:
-      description: List an agent's conversation threads (derived from messages.conversation_id).
+      description: List an agent's application conversation groups (derived from messages.conversation_id). Conversation IDs are independent of email thread topology.
       operationId: listConversations
       parameters:
         - in: path
@@ -4829,7 +5664,7 @@ paths:
         - conversations
   /v1/agents/{email}/conversations/{id}:
     get:
-      description: Fetch a single conversation thread with its participants, labels, and member messages.
+      description: Fetch a single application conversation group with its participants, labels, and member messages. Conversation IDs are independent of email thread topology.
       operationId: getConversation
       parameters:
         - in: path
@@ -5030,7 +5865,7 @@ paths:
       tags:
         - messages
     post:
-      description: "Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. 202 + pending_review when the agent has HITL enabled. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
+      description: "Beta: scheduled sending may change before it is declared stable. Send a new email from the agent named in the path (a new thread). The sender is the path agent — `reply`/`forward` are their own sub-resources. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Honors Idempotency-Key. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large. Two capacity limits apply and are permanently distinct — branch on the HTTP status: 402 limit_exceeded is a QUOTA (monthly-message / storage stock-or-flow cap; a retry will not clear it — surface an upgrade path), 429 rate_limited is a throughput/request-RATE cap (transient; back off Retry-After seconds and retry)."
       operationId: sendMessage
       parameters:
         - in: path
@@ -5044,12 +5879,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued message until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -5072,7 +5907,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5081,7 +5916,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5148,7 +5983,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}:
     delete:
-      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held).
+      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
       operationId: deleteMessage
       parameters:
         - description: The agent's full email address.
@@ -5365,7 +6200,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}/forward:
     post:
-      description: "Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. 202 when held for HITL. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Forward a message (inbound or outbound) to new recipients; the original is quoted and its attachments are carried over by default. Any attachments[] you supply are added on top of the originals. A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Forwarding a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — a forward requires the source message to have actually been sent; retry once it is sent, or use wait=sent on the original send. Attachment limits apply to the combined set (carried-over originals + supplied): at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: forwardMessage
       parameters:
         - in: path
@@ -5384,12 +6219,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued forward until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -5412,7 +6247,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5421,7 +6256,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5546,7 +6381,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/messages/{id}/reply:
     post:
-      description: "Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). 202 when held for HITL. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
+      description: "Beta: scheduled sending may change before it is declared stable. Reply to a message (inbound or outbound); recipients and threading are derived from the original. Replying to a message the agent received targets its sender; replying to a message the agent sent continues the thread to its original recipients (`reply_all` also re-includes the original Cc). A future send_at returns 202 + status=scheduled; an HITL hold returns 202 + status=pending_review. Both are successful durable acceptance and must not be re-sent. Replying to a message this agent sent that has not been submitted to the provider yet returns 409 message_not_yet_delivered — it has no Message-ID to thread onto; retry once it is sent, or use wait=sent on the original send. Attachment limits: at most 10 attachments, each ≤ 10 MiB decoded, ≤ 25 MiB decoded combined (over-count → 400 invalid_request; over-size → 413 payload_too_large). Composed-message ceiling: 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes; exceeding it returns 413 payload_too_large."
       operationId: replyToMessage
       parameters:
         - in: path
@@ -5565,12 +6400,12 @@ paths:
           schema:
             description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first request's response instead of re-executing it. If the response is lost after durable acceptance, retry with the same key and byte-identical body to recover the original 202 and message ID; retrying without a key can enqueue a duplicate. Completed keys are remembered for at least 24 hours (the published minimum dedup window). Within the window: same key + different body → 422 idempotency_key_reuse (do not retry as-is); same key while the first request is still executing → 409 idempotency_in_flight (wait, then retry unchanged). Dedup is best-effort under idempotency-store degradation before atomic acceptance; accepted keyed sends commit their message, River job, and replay response together."
             type: string
-        - description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+        - description: "Optional bounded wait. wait=sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
           explode: false
           in: query
           name: wait
           schema:
-            description: "Optional bounded wait. wait=sent holds the request until the asynchronously delivered message reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. Default: no wait. Always branch on body.status, not the HTTP code."
+            description: "Optional bounded wait. wait=sent holds an immediately queued reply until it reaches a terminal-or-held state or at most 20 seconds elapse (currently ~15s), then returns the observed state; on timeout returns status=accepted. A future send_at returns status=scheduled immediately and does not wait for the scheduled time. Default: no wait. Always branch on body.status, not the HTTP code."
             type: string
       requestBody:
         content:
@@ -5593,7 +6428,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SendResultView"
-          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for async submission; terminal outcome via GET/webhook events) or status=pending_review (held for human approval)."
+          description: "Accepted — durably accepted but not yet delivered: status=accepted (queued for immediate async submission; terminal outcome via GET/webhook events), status=scheduled (queued for future submission at scheduled_at), or status=pending_review (held for human approval). All three are successful durable acceptance; do not re-send based on these statuses."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5602,7 +6437,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments), too_many_recipients, invalid_recipient, invalid_attachment (undecodable base64).
+          description: Bad Request — request-shape/validation failure. error.code includes invalid_request (e.g. more than 10 attachments, send_at more than 90 days ahead, a reply_to whose address exceeds SMTP's mailbox octet limits, or a future send_at whose only recipient is the sending agent's own address when the message is not held for review because direct loopback is immediate), too_many_recipients, invalid_recipient (an unparseable recipient, or one whose address exceeds SMTP's mailbox octet limits — local part at most 64 octets, whole addr-spec at most 254 octets, counted in UTF-8 bytes), invalid_attachment (undecodable base64, an over-long filename, or a CR/LF in an attachment filename or content_type).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -5669,7 +6504,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}/restore:
     post:
-      description: Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. Returns the restored message. 409 not_in_trash when the message is not in the trash.
+      description: Bring a trashed (soft-deleted) message back to the inbox. Restored message data is retained indefinitely unless it is deleted again. For a scheduled outbound message, restoring before scheduled_at re-arms submission; restoring at or after scheduled_at returns the message live with delivery_status=failed and leaves submission canceled. Returns the restored message. 409 not_in_trash when the message is not in the trash.
       operationId: restoreMessage
       parameters:
         - description: The agent's full email address.
@@ -5791,7 +6626,7 @@ paths:
       x-stability-level: beta
   /v1/agents/{email}/restore:
     post:
-      description: Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+      description: Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
       operationId: restoreAgent
       parameters:
         - description: The agent's full email address, e.g. support@acme.com.
@@ -6033,6 +6868,351 @@ paths:
       summary: Send a test email to the agent's own address
       tags:
         - agents
+  /v1/contacts:
+    get:
+      description: "Lists the people this account corresponds with, newest first. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: listContacts
+      parameters:
+        - description: "Filter by provenance. Known values: import, manual, inbound."
+          explode: false
+          in: query
+          name: source
+          schema:
+            description: "Filter by provenance. Known values: import, manual, inbound."
+            type: string
+        - description: Filter to the contacts created by one import.
+          explode: false
+          in: query
+          name: import_batch_id
+          schema:
+            description: Filter to the contacts created by one import.
+            type: string
+        - description: Only contacts created strictly after this instant (RFC 3339).
+          explode: false
+          in: query
+          name: created_after
+          schema:
+            description: Only contacts created strictly after this instant (RFC 3339).
+            format: date-time
+            type: string
+        - description: Only contacts created strictly before this instant (RFC 3339).
+          explode: false
+          in: query
+          name: created_before
+          schema:
+            description: Only contacts created strictly before this instant (RFC 3339).
+            format: date-time
+            type: string
+        - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+            type: string
+        - description: Maximum number of items to return (1-100).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            description: Maximum number of items to return (1-100).
+            format: int64
+            maximum: 100
+            minimum: 1
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageContactView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: List contacts (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    post:
+      description: "Creates one contact. The address is canonicalized before storage, so a display-name form and the bare address are the same contact — a second create returns 409. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: createContact
+      parameters:
+        - description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response instead of creating a second contact. Within the dedup window: same key + different body → 422 idempotency_key_reuse; same key while the first request is still executing → 409 idempotency_in_flight."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContactRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: Created
+          headers:
+            Location:
+              $ref: "#/components/headers/ResourceLocation"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Create a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/import:
+    post:
+      description: "Creates or updates up to 1000 contacts in one request and returns a per-row outcome, so one malformed row never rejects the rest of the upload. That isolation covers everything about a row's CONTENT — an unparseable or over-long address, an over-long display_name, metadata outside the per-contact bounds — each of which fails only its own row (status failed, with code invalid_recipient or invalid_request) while the rest of the batch imports. Request-level problems still reject the whole request: malformed JSON, an unknown field, a missing address key, a NUL (U+0000) character or invalid UTF-8 byte sequence anywhere in the body, more than 1000 rows, a body over 20 MiB, or a bad agent_email/stage. Import is inert: it records identity and sends nothing. Addresses already on a suppression list are still imported but flagged, so the reported count matches what was submitted. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      operationId: importContacts
+      parameters:
+        - description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Optional idempotency key for safe retries (unique per logical request). A retry with the same key and byte-identical body replays the first response — including the original batch_id and per-row results — instead of importing the rows a second time. Strongly recommended: an import that times out after the rows landed is otherwise indistinguishable from one that failed."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportContactsRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactImportResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Import contacts in bulk (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/imports/{batch_id}:
+    delete:
+      description: "Reverses the durable import batch. Requires ?confirm=DELETE. It removes only what is verifiably untouched: contacts the batch created that have not been edited, enrolled in surviving outreach, or corresponded with since, and per-agent enrolments the batch created that carry no later edit, message, or recorded activity. Pre-existing outreach and suppressions are never affected, and a contact with any surviving engagement is always retained. The response reports each category; contacts_deleted + contacts_retained accounts for every batch-created contact that still exists. Account-scoped credentials only. Beta: the contact import surface may change before it is declared stable."
+      operationId: deleteImportBatch
+      parameters:
+        - in: path
+          name: batch_id
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteImportBatchResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Reverse a contact import (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+  /v1/contacts/{address}:
+    delete:
+      description: "Removes a contact. Requires ?confirm=DELETE. Suppressions are NOT affected — consent outlives the contact record, so deleting a contact never makes a previously-blocked address sendable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: deleteContact
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Must be the literal DELETE — this action is irreversible.
+          explode: false
+          in: query
+          name: confirm
+          required: true
+          schema:
+            description: Must be the literal DELETE — this action is irreversible.
+            enum:
+              - DELETE
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteContactResult"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Delete a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    get:
+      description: "Fetches one contact by address. Returns an ETag for use with If-Match on a subsequent update. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: getContact
+      parameters:
+        - description: The contact's email address, URL-encoded.
+          in: path
+          name: address
+          required: true
+          schema:
+            description: The contact's email address, URL-encoded.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: OK
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              $ref: "#/components/headers/ETag"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Get a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
+    patch:
+      description: "Partially updates a contact. Omitted fields are left unchanged. Address and provenance are immutable. Account-scoped credentials only. Beta: the contacts surface may change before it is declared stable."
+      operationId: updateContact
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema:
+            type: string
+        - description: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+          in: header
+          name: If-Match
+          schema:
+            description: Optional ETag from a prior read. When present it must still match at the instant of the write or the update is rejected with 412. Send the ETag exactly as returned; a W/-prefixed weak form of the same validator is also accepted, because a transforming CDN may weaken it in transit. * matches any existing representation. Sending the header with an empty value is a 400 invalid_request, not an unconditional write — omit the header entirely to write unconditionally.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContactRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactView"
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: Update a contact (beta)
+      tags:
+        - contacts
+      x-stability-level: beta
   /v1/domains:
     get:
       description: List the domains owned by the authenticated account, newest first, with cursor pagination.
@@ -7392,6 +8572,8 @@ servers:
 x-e2a-standalone-schema-refs:
   AgentSuppressionAddedData:
     $ref: "#/components/schemas/AgentSuppressionAddedData"
+  ContactDueData:
+    $ref: "#/components/schemas/ContactDueData"
   DomainSendingFailedData:
     $ref: "#/components/schemas/DomainSendingFailedData"
   DomainSendingVerifiedData:

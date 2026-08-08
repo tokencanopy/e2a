@@ -1,5 +1,82 @@
 # Changelog
 
+## 2.3.0
+
+Additive only — no flag, output-field, or exit-code meaning changes to any
+command that shipped in 2.2.0.
+
+**Changed:** `--reply-to <email>` on `e2a send` and `e2a reply` is now
+repeatable (max 5 addresses), so a caller can direct replies to several
+destinations (e.g. a shared triage inbox and an individual owner). A single
+`--reply-to` still sends the byte-identical scalar wire form as before;
+several become an address list, matching the server's widened `reply_to`
+field.
+
+## 2.2.0
+
+Additive only — no flag, output-field, or exit-code meaning changes to any
+command that shipped in 2.1.0. The new contacts and scheduled-sending
+surfaces are **beta** and may change before they are declared stable. The
+complete GA-vs-beta stability matrix for the whole `/v1` surface is
+documented in
+[docs/api.md → Stability: GA and beta surface](../docs/api.md#stability-ga-and-beta-surface).
+
+**Added:** `e2a contacts` (beta) — manage account-level contact identity and
+per-agent outreach state, with suppression visibility. Subcommands:
+`list | get | create | update | delete` for contacts (account scope;
+`--source`, `--import-batch`, `--created-after`/`--created-before` filters on
+`list`; `--idempotency-key` on `create`; `--if-match <etag>` on `update` to
+reject a stale edit), `import` (reads an RFC 4180 CSV; `--email-column`,
+`--name-column`, `--on-conflict merge|skip`, `--dry-run` to preview without
+writing, `--agent`/`--stage` to enroll rows in an agent's outreach in the same
+transaction, `--idempotency-key` to safely replay a timed-out upload; up to
+1,000 rows per request with per-row outcomes), `imports delete
+<import-batch-id>` (reverses one import batch — the server removes only
+verifiably untouched rows the batch created and reports what it kept), and
+`outreach list | get | set | delete` for per-agent outreach state
+(`--stage`, `--replied`, `--suppressed`, `--next-action-before`,
+`--last-outbound-before` filters on `outreach list`; `--if-match` on
+`outreach set`; also usable with an agent-scoped credential for its bound
+inbox). `contacts delete` removes the account contact and its per-agent
+outreach rows; suppression and consent records survive.
+
+**Added:** `--send-at <rfc3339>` (beta) on `e2a send` and `e2a reply` —
+scheduled sending. Requires an explicit UTC offset and can be at most 90 days
+ahead. A future schedule exits `0` with `status=scheduled`: the message is
+durably queued for future submission, so do not retry. `scheduled_at` in
+`--json` output is the future submission time — a "not before" bound, not an
+exact fire time. Direct self-send cannot be scheduled (permanent request
+error) unless a review hold takes precedence — held sends drop the schedule
+and send on approval. Trashing the message before provider submission starts
+cancels the send; restoring it before the send time re-arms it, restoring at
+or after that time restores the message but leaves the send canceled.
+
+**Added:** on servers that expose it, SDK-shaped JSON from `messages
+list`/`messages get`/`listen` may include the optional beta `threadId` — a
+server-owned, read-only, mailbox-local email-thread identity. Human-readable
+output formats are unchanged, and there is no `threadId` request flag,
+filter, or thread endpoint. `--conversation-id` remains caller-owned
+application correlation.
+
+**Added:** `e2a suppressions` — inspect and manage recipient block lists.
+Account-wide suppressions are GA; agent-scoped suppression management (the
+`--agent` form of `list`/`remove`, and all of `add`) is beta and may change
+before it is declared stable. Subcommands: `list` (without `--agent`, the
+account-wide list — auto-populated by hard bounces and complaints and
+enforced for every inbox at send time, where a listed recipient fails with
+`recipient_suppressed`; with `--agent <email>`, that one inbox's
+unsubscribe/manual blocks; `--limit <n>` bounds the listing, 1–10000,
+default 100; output is TSV of address, source, reason, and created-at, or
+NDJSON with `--json`), `add <address> --agent <email>` (`--agent` is
+required — manual blocks are per-agent; there is no account-level create,
+account entries only ever come from bounces/complaints; `--reason <text>`
+attaches an optional note), and `remove <address>` (un-suppresses
+account-wide without `--agent`, removes only that agent's block with it; the
+CLI supplies the API's `?confirm=DELETE` guard). All subcommands require an
+account-scoped credential — an agent-scoped credential cannot manage even
+its own inbox's blocks. Un-suppress account-wide only for addresses known to
+be deliverable: removing a genuine bouncer hurts sender reputation.
+
 ## 2.1.0
 
 Additive only — no flag, output-field, or exit-code meaning changes to any
@@ -40,9 +117,26 @@ configuration failure. `0`/`1`/`4` keep their existing meanings for healthy,
 transient-connectivity, and authentication outcomes. Every network operation
 is bounded by a 5-second timeout.
 
+**Added:** `e2a contacts` — manage account-level contact identity and
+per-agent outreach state, with suppression visibility (`list`/`get`/
+`create`/`update`/`delete`/`import`/`imports delete`, plus `outreach
+list`/`get`/`set`/`delete`). Contact identity operations require account
+scope; `outreach` also supports an agent-scoped credential for its bound
+inbox. `create`/`import` accept `--idempotency-key`; `update`/`outreach set`
+accept `--if-match <etag>` to reject a stale edit.
+
+**Added:** `--send-at` on `send`/`reply` — schedule a future send (RFC 3339
+with an explicit UTC offset, at most 90 days ahead). Beta and may change
+before it is declared stable. A future schedule exits `0` with
+`status=scheduled` and is durably queued, so do not retry.
+
+**Added:** beta `threadId` on message list/get/listen JSON — a server-owned,
+read-only mailbox-local identity, distinct from the caller-owned
+`conversation_id` filter. Human-readable formats are unchanged.
+
 ## 2.0.0
 
-Current release. A major bump: the published 1.6.0 and this tree had diverged
+A major bump: the published 1.6.0 and this tree had diverged
 under one version number, and the intervening work removes login flags, renames
 output fields, and changes exit codes — every script driving the CLI should be
 re-read against the breaking notes below before upgrading.

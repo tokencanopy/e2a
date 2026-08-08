@@ -40,6 +40,21 @@ function formatQueuedAgo(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+// A held outbound draft can carry a future send_at (#815): the schedule survives
+// the hold, so the reviewer sees when it will send once approved. Renders the
+// local date-time; if the instant has already passed, approval sends immediately.
+function formatScheduledFor(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  if (at.getTime() <= Date.now()) return "Sends on approval";
+  return `Sends ${at.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
+}
+
 function initialsFor(email: string): string {
   const local = email.split("@")[0] || email;
   return (
@@ -91,7 +106,7 @@ export function PendingRow({
   const isInbound = summary.direction === "inbound";
 
   // Lazy: only fetch the body/recipients once the row is open. Caches the
-  // RAW wire under the shared per-message key — the focus page reads the
+  // RAW wire under the shared per-message key — inbox thread bubbles read the
   // same entry, so both must agree on the shape (see lib/swrKeys.ts) —
   // and projects below. Uses the review endpoint, the only one that
   // carries `hold_reason`/`protection`.
@@ -130,7 +145,7 @@ export function PendingRow({
 
   // Seed the editor from the loaded draft. This is an EFFECT, not SWR's
   // onSuccess, because onSuccess does not fire when the value is served from
-  // cache — and this row shares its per-message entry with the focus page, so
+  // cache — and this row shares its per-message entry with inbox threads, so
   // a warm entry is the common case. Seeding only on a real fetch left the
   // fields empty, and diffApproveEdits then read "" as a deliberate edit and
   // sent it: approving blanked the subject, body and recipients.
@@ -280,6 +295,9 @@ export function PendingRow({
         <Chip tone="warn">
           <Dot tone="warn" /> Pending
         </Chip>
+        {summary.scheduled_at && formatScheduledFor(summary.scheduled_at) && (
+          <Chip tone="info">{formatScheduledFor(summary.scheduled_at)}</Chip>
+        )}
         <span
           className="font-mono text-[11px] shrink-0"
           style={{ color: "var(--fg-subtle)" }}
