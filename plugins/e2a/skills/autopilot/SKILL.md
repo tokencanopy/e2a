@@ -95,9 +95,9 @@ The supervisor owns the agent-scoped e2a key. A task runtime never receives an
 e2a key, MCP credential, forward token, or arbitrary mailbox access. Each job gets
 a new local socket and capability exposing only:
 
-- `get_current_message`
-- `get_current_thread`
-- `submit_reply`
+- `current-message` (read)
+- `current-thread` (read)
+- `reply` (submit)
 - `escalate`
 - `complete`
 
