@@ -3245,7 +3245,7 @@ components:
             - number
             - "null"
         delivered_rate:
-          description: "delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure."
+          description: delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.
           format: double
           type:
             - number
@@ -3307,7 +3307,7 @@ components:
           format: int64
           type: integer
         loopback:
-          description: "Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out."
+          description: "Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. Counts mail that REACHED local submission — a self-send stopped earlier by review has no loopback observation and is not counted here. They remain in accepted and submitted, which count what was asked for and what went out."
           format: int64
           type: integer
         received:

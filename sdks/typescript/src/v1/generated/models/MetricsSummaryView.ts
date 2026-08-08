@@ -54,7 +54,7 @@ export class MetricsSummaryView {
     */
     'dmarcPass': number;
     /**
-    * Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. They remain in accepted and submitted, which count what was asked for and what went out.
+    * Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. Counts mail that REACHED local submission — a self-send stopped earlier by review has no loopback observation and is not counted here. They remain in accepted and submitted, which count what was asked for and what went out.
     */
     'loopback': number;
     /**

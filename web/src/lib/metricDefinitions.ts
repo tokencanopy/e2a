@@ -13,7 +13,7 @@
 export const METRIC_HELP = {
   // ── Rates ──────────────────────────────────────────────
   deliveredRate:
-    "Of everything your agents asked to send OUTWARD, the share a recipient server accepted. Mail stopped by your own review or suppression list still counts against it — this is the honest 'did my mail arrive' number. Agent-to-agent mail is excluded entirely: it never reaches a recipient server, so it can neither succeed nor fail on this measure.",
+    "Of everything your agents asked to send OUTWARD, the share a recipient server accepted. Mail stopped by your own review or suppression list still counts against it — this is the honest 'did my mail arrive' number. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped before it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.",
   bounceRate:
     "Bounced mail as a share of what was actually submitted to a provider — not of everything accepted, and not counting agent-to-agent mail. That denominator is deliberate: it matches the basis mailbox providers use for the thresholds that can put a sending account under review.",
   complaintRate:
@@ -38,7 +38,7 @@ export const METRIC_HELP = {
     "Messages that reached a terminal failure at submission: a provider rejection, exhausted local retries, or a policy cancellation. These have three different owners — expand the reason-code detail to tell them apart.",
 
   loopback:
-    "Messages delivered agent-to-agent without ever leaving this deployment. They are excluded from every rate above: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it.",
+    "Messages delivered agent-to-agent without ever leaving this deployment. They are excluded from every rate above: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. This counts mail that reached local delivery — a self-send stopped earlier by review is not counted here.",
 
   // ── Inbound ────────────────────────────────────────────
   received:

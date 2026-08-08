@@ -34,6 +34,16 @@ type AccountMetrics struct {
 	// AgentsTruncated reports that the account owns more agents with traffic
 	// than Agents contains. Totals remain accurate; only the breakdown is cut.
 	AgentsTruncated bool
+
+	// Days is the optional per-day breakdown, oldest first. Empty when the
+	// caller did not ask for it.
+	//
+	// It is produced inside the SAME transaction as Totals, not by a separate
+	// read. The API promises that bucket counters sum to the window totals, and
+	// two independent reads cannot honour that: a write landing between them
+	// makes the chart contradict the tiles it sits under, which is precisely
+	// the failure a documented sum-to-totals contract must not have.
+	Days []DayBucket
 }
 
 // CountByReasonCodeForAccount aggregates persisted lifecycle observations
@@ -47,7 +57,7 @@ type AccountMetrics struct {
 //
 // When groupByAgent is set, the busiest MaxMetricsAgents agents also come back
 // individually. Totals are computed independently of that cap.
-func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, start, end time.Time, groupByAgent bool) (AccountMetrics, error) {
+func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, start, end time.Time, groupByAgent, bucketByDay bool) (AccountMetrics, error) {
 	var metrics AccountMetrics
 	if userID == "" {
 		return metrics, fmt.Errorf("message lifecycle account metrics: user id required")
@@ -70,6 +80,15 @@ func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, 
 		return metrics, err
 	}
 	metrics.Totals = totals
+
+	if bucketByDay {
+		days, err := accountDaysTx(ctx, tx, userID, start, end)
+		if err != nil {
+			return metrics, err
+		}
+		metrics.Days = days
+	}
+
 	if !groupByAgent {
 		return metrics, nil
 	}
@@ -260,26 +279,19 @@ type DayBucket struct {
 	Counts []ReasonCodeCount
 }
 
-// CountByDayForAccount returns per-day reason-code tallies for one account,
-// on the same cohort-window contract as CountByReasonCodeForAccount: a
-// message lands in the bucket of its own creation day, in UTC.
+// accountDaysTx returns per-day reason-code tallies for one account, on the
+// same cohort-window contract as its caller: a message lands in the bucket of
+// its own creation day, in UTC.
+//
+// It takes the caller's transaction rather than the pool so the buckets and
+// the window totals are read from one snapshot — see AccountMetrics.Days.
 //
 // UTC rather than a caller timezone is deliberate. A bucket boundary that
 // moves with the reader would make two people comparing the same chart see
 // different daily numbers, and the endpoint has no timezone input to make
 // that choice explicit.
-func (s *Store) CountByDayForAccount(ctx context.Context, userID string, start, end time.Time) ([]DayBucket, error) {
-	if userID == "" {
-		return nil, fmt.Errorf("message lifecycle daily metrics: user id required")
-	}
-	if !end.After(start) {
-		return nil, fmt.Errorf("message lifecycle daily metrics: end must be after start")
-	}
-	if end.Sub(start) > MaxMetricsWindow {
-		return nil, fmt.Errorf("message lifecycle daily metrics: window exceeds %s", MaxMetricsWindow)
-	}
-
-	rows, err := s.pool.Query(ctx, `
+func accountDaysTx(ctx context.Context, tx pgx.Tx, userID string, start, end time.Time) ([]DayBucket, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT date_trunc('day', m.created_at AT TIME ZONE 'UTC') AS day,
 		       t.reason_code, t.stage, t.outcome, t.retryable,
 		       count(*)::bigint,

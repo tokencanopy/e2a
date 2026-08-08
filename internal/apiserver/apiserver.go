@@ -117,7 +117,6 @@ func BuildDeps(p Params) httpapi.Deps {
 	var listMessageLifecycle httpapi.MessageLifecycleLister
 	var countAgentMetrics httpapi.AgentMetricsCounter
 	var countAccountMetrics httpapi.AccountMetricsCounter
-	var countAccountDaily httpapi.AccountDailyCounter
 	var countWebhookDeliveries httpapi.WebhookDeliveryCounter
 	if p.Pool != nil {
 		countWebhookDeliveries = webhook.NewSubscriberStore(p.Pool).CountDeliveriesForAccount
@@ -125,7 +124,6 @@ func BuildDeps(p Params) httpapi.Deps {
 		listMessageLifecycle = lifecycleStore.ListForMessage
 		countAgentMetrics = lifecycleStore.CountByReasonCode
 		countAccountMetrics = lifecycleStore.CountByReasonCodeForAccount
-		countAccountDaily = lifecycleStore.CountByDayForAccount
 	}
 	deps := httpapi.Deps{
 		Authenticator:          p.API.AuthenticateUser,
@@ -142,7 +140,6 @@ func BuildDeps(p Params) httpapi.Deps {
 		CountAgentMetrics:      countAgentMetrics,
 		CountAccountMetrics:    countAccountMetrics,
 		CountWebhookDeliveries: countWebhookDeliveries,
-		CountAccountDaily:      countAccountDaily,
 		ModifyMessageLabels:    p.Store.ModifyMessageLabels,
 
 		ListConversations: p.Store.ListConversationsByAgent,

@@ -14,11 +14,7 @@ const accountMetricsBetaDoc = "Beta: account metrics may change before it is dec
 
 // AccountMetricsCounter aggregates persisted lifecycle observations across an
 // account. Mirrors messagelifecycle.Store.CountByReasonCodeForAccount.
-type AccountMetricsCounter func(ctx context.Context, userID string, start, end time.Time, groupByAgent bool) (messagelifecycle.AccountMetrics, error)
-
-// AccountDailyCounter returns per-day lifecycle tallies for an account.
-// Mirrors messagelifecycle.Store.CountByDayForAccount.
-type AccountDailyCounter func(ctx context.Context, userID string, start, end time.Time) ([]messagelifecycle.DayBucket, error)
+type AccountMetricsCounter func(ctx context.Context, userID string, start, end time.Time, groupByAgent, bucketByDay bool) (messagelifecycle.AccountMetrics, error)
 
 // MetricsBucketView is one day's slice of the window.
 type MetricsBucketView struct {
@@ -162,7 +158,7 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 			"window must not exceed 92 days; request a narrower range")
 	}
 
-	metrics, err := s.deps.CountAccountMetrics(ctx, user.ID, start.UTC(), end.UTC(), in.GroupBy == "agent")
+	metrics, err := s.deps.CountAccountMetrics(ctx, user.ID, start.UTC(), end.UTC(), in.GroupBy == "agent", in.Bucket == "day")
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate account metrics")
 	}
@@ -178,17 +174,12 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		}
 	}
 
-	buckets := []MetricsBucketView{}
-	if in.Bucket == "day" && s.deps.CountAccountDaily != nil {
-		days, err := s.deps.CountAccountDaily(ctx, user.ID, start.UTC(), end.UTC())
-		if err != nil {
-			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate daily metrics")
-		}
-		buckets = make([]MetricsBucketView, 0, len(days))
-		for _, day := range days {
-			_, daySummary, dayRates := deriveMetrics(messagelifecycle.AgentMetrics{Counts: day.Counts})
-			buckets = append(buckets, MetricsBucketView{Day: day.Day, Summary: daySummary, Rates: dayRates})
-		}
+	// Buckets arrive with the totals from one snapshot, so the documented
+	// "buckets sum to the window totals" contract holds under concurrent writes.
+	buckets := make([]MetricsBucketView, 0, len(metrics.Days))
+	for _, day := range metrics.Days {
+		_, daySummary, dayRates := deriveMetrics(messagelifecycle.AgentMetrics{Counts: day.Counts})
+		buckets = append(buckets, MetricsBucketView{Day: day.Day, Summary: daySummary, Rates: dayRates})
 	}
 
 	counters, summary, rates := deriveMetrics(metrics.Totals)

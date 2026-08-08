@@ -25,9 +25,17 @@ func newAccountMetricsServer(t *testing.T, metrics messagelifecycle.AccountMetri
 			}
 			return &identity.User{ID: "u_1", Email: "owner@example.com"}, nil
 		},
-		CountAccountMetrics: func(_ context.Context, userID string, start, end time.Time, groupByAgent bool) (messagelifecycle.AccountMetrics, error) {
-			calls = append(calls, userID+"|"+start.Format(time.RFC3339)+"|"+end.Format(time.RFC3339)+"|group="+boolText(groupByAgent))
-			return metrics, nil
+		CountAccountMetrics: func(_ context.Context, userID string, start, end time.Time, groupByAgent, bucketByDay bool) (messagelifecycle.AccountMetrics, error) {
+			calls = append(calls, userID+"|"+start.Format(time.RFC3339)+"|"+end.Format(time.RFC3339)+
+				"|group="+boolText(groupByAgent)+"|bucket="+boolText(bucketByDay))
+			out := metrics
+			if !bucketByDay {
+				out.Days = nil
+			}
+			if !groupByAgent {
+				out.Agents = nil
+			}
+			return out, nil
 		},
 	}
 	for _, fn := range mutate {
@@ -140,7 +148,7 @@ func TestAccountMetricsGroupByAgentReturnsPerAgentSlices(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %#v", status, body)
 	}
-	if len(*calls) != 1 || !strings.HasSuffix((*calls)[0], "group=true") {
+	if len(*calls) != 1 || !strings.Contains((*calls)[0], "group=true") {
 		t.Errorf("store call = %v, want group=true", *calls)
 	}
 	agents, ok := body["agents"].([]any)
@@ -229,14 +237,6 @@ func TestAccountMetricsReportsNotImplementedWithoutStore(t *testing.T) {
 	}
 }
 
-func withDailyBuckets(days []messagelifecycle.DayBucket) func(*Deps) {
-	return func(d *Deps) {
-		d.CountAccountDaily = func(context.Context, string, time.Time, time.Time) ([]messagelifecycle.DayBucket, error) {
-			return days, nil
-		}
-	}
-}
-
 // TestAccountMetricsBucketsOnlyWhenAsked: the daily read is a second query, so
 // it must not run for callers that only want totals.
 func TestAccountMetricsBucketsOnlyWhenAsked(t *testing.T) {
@@ -249,13 +249,21 @@ func TestAccountMetricsBucketsOnlyWhenAsked(t *testing.T) {
 		},
 	}}
 
-	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{}, withDailyBuckets(buckets))
+	srv, calls := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{Days: buckets})
 	_, plain := accountMetricsGET(t, srv, "")
+	// The store is told whether buckets are wanted, so it can produce them in
+	// the SAME transaction as the totals rather than in a second read.
+	if !strings.Contains((*calls)[0], "bucket=false") {
+		t.Errorf("store call = %v, want bucket=false", *calls)
+	}
 	if got, ok := plain["buckets"].([]any); !ok || len(got) != 0 {
 		t.Errorf("buckets = %#v, want empty without bucket=day", plain["buckets"])
 	}
 
 	_, bucketed := accountMetricsGET(t, srv, "?bucket=day")
+	if !strings.Contains((*calls)[1], "bucket=true") {
+		t.Errorf("store call = %v, want bucket=true", *calls)
+	}
 	rows, ok := bucketed["buckets"].([]any)
 	if !ok || len(rows) != 1 {
 		t.Fatalf("buckets = %#v, want 1 row", bucketed["buckets"])
@@ -276,8 +284,9 @@ func TestAccountMetricsBucketsOnlyWhenAsked(t *testing.T) {
 // A quiet day is present with null rates, never a fabricated 0%.
 func TestAccountMetricsQuietBucketHasNullRates(t *testing.T) {
 	day := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
-	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{},
-		withDailyBuckets([]messagelifecycle.DayBucket{{Day: day}}))
+	srv, _ := newAccountMetricsServer(t, messagelifecycle.AccountMetrics{
+		Days: []messagelifecycle.DayBucket{{Day: day}},
+	})
 
 	_, body := accountMetricsGET(t, srv, "?bucket=day")
 	first := body["buckets"].([]any)[0].(map[string]any)
