@@ -46,7 +46,6 @@ function makeDomain(overrides: Partial<DomainInfo> = {}): DomainInfo {
 
 function makeAgent(overrides: Partial<DashboardAgent> = {}): DashboardAgent {
   return {
-    id: "ag_123",
     domain: "mail.example.com",
     email: "support@mail.example.com",
     name: "support",
