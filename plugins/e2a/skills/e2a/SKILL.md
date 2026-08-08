@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
-version: 25
+version: 26
 ---
 
 # Using e2a
 
-<!-- version: 25 -->
+<!-- version: 26 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 
@@ -180,8 +180,10 @@ on send, reply, or forward to defer submission. Know these edges:
 - **`wait=sent` does not wait until the future time.** A future `send_at`
   returns `status: scheduled` immediately; the bounded wait applies only to
   immediate sends.
-- Scheduling does not survive a review hold: a held message drops `send_at`
-  and sends on approval.
+- Scheduling survives a review hold: a held outbound message preserves
+  `send_at` (surfaced as `scheduled_at`) and re-arms on approval, sending at
+  the scheduled time if it is still in the future or immediately if it has
+  already passed.
 - To cancel, delete (trash) the message before submission starts. Restoring
   it before `scheduled_at` re-arms the send; restoring at or after
   `scheduled_at` restores the message but leaves the send canceled.
