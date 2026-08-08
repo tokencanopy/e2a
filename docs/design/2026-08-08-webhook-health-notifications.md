@@ -221,6 +221,25 @@ longer being delivered, and the re-enable path — now a dashboard link rather t
 command, because Part 3 makes that real. The warning variant is the same skeleton with
 "we will disable this if it keeps failing" instead.
 
+**What the disable email must NOT claim.** The tempting line is "your events are safe, just
+replay them once you're fixed." That is only true up to the disable moment, and the
+distinction matters enough to state precisely:
+
+`webhook_events` rows survive 30 days and `POST /v1/events/{id}/redeliver` can replay them,
+but replay is gated on `matched_webhook_ids` — a column **stored at fan-out time**
+(`internal/agent/replay_api.go:27`). Fan-out matches only *enabled* subscribers, so an
+event published after the disable never records this webhook, and replay refuses it with
+`409 webhook was not among the originally-matched subscribers`. Bulk replay yields zero
+deliveries for it.
+
+So auto-disable is recoverable **backwards** and lossy **forwards**. The honest wording is:
+delivery stopped at T; events queued before T can be replayed; events after T were never
+queued for this endpoint. This is also why the *warning* email is the one that actually
+protects data — by the time the disable email sends, the forward loss has already started.
+
+Note also that replay is API-only (no dashboard, no CLI) and one event per call, so the
+recovery it offers is real but hands-on.
+
 ### Part 3 — dashboard enable/disable
 
 Server-side: nothing. `PATCH /v1/webhooks/{id}` with `{"enabled": bool}` already exists
@@ -441,10 +460,16 @@ inbound and the staging MX round trip works.
   long a delivery may sit `pending`. If the answer is "no one disables an endpoint for a
   whole day", 6–8 is defensible and tightens SC3.
 - **Q3. The 128 stranded deliveries on the live account.** Shipping the cap terminates them
-  as `failed` on first wake after deploy, which is honest but final — those are real inbound
-  emails the customer never received. The alternative is contacting them first so they can
-  fix the endpoint and re-enable to drain the queue. **This is a product call, not a
-  technical one**, and it should be made before this deploys.
+  as `failed` on first wake after deploy, which is honest but final. Sharper than it first
+  looks: because replay is gated on `matched_webhook_ids` (see Part 2), events published
+  *after* the disable are not replayable to this endpoint at all — so those 128 rows, plus
+  the 50 already terminally failed, are the **last recoverable events that account has**.
+  Terminating them without contacting the customer first forecloses their only path back.
+  **This is a product call, not a technical one**, and it should be made before this deploys.
+- **Q7 (follow-up, separate issue). Should fan-out record would-have-matched-but-disabled
+  subscribers in `matched_webhook_ids`?** It would make auto-disable a genuinely recoverable
+  pause instead of a forward-lossy one, turning the 30-day retention into a real safety net.
+  Out of scope here, but it is the change that would most reduce the cost of the breaker.
 - **Q4. Should the warning email also fire for a manually-disabled webhook accumulating
   failures?** Currently no — the warn predicate requires `enabled`. Arguably a user who
   disabled an endpoint does not want mail about it. Assumed yes-skip; flagging in case.
