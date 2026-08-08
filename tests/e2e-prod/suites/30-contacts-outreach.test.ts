@@ -156,10 +156,28 @@ interface CreateWebhookResponse {
   signing_secret: string;
 }
 
-// ETags on this surface are strong validators: a quoted 32-hex digest
-// (internal/httpapi/contacts.go contactETag / engagements.go engagementETag —
-// sha256 truncated to 16 bytes, hex-encoded, quoted).
-const ETAG_RE = /^"[0-9a-f]{32}"$/;
+// ETags on this surface are strong validators at the ORIGIN: a quoted 32-hex
+// digest (internal/httpapi/contacts.go contactETag / engagements.go
+// engagementETag — sha256 truncated to 16 bytes, hex-encoded, quoted).
+//
+// The W/ prefix is accepted here because a client can legitimately receive the
+// weak form in production. api.e2a.dev sits behind a Cloudflare proxy that
+// transforms responses (brotli), and Cloudflare downgrades a strong ETag to a
+// weak one whenever it transforms; "Respect Strong ETags" is Enterprise-only
+// and e2a.dev is on the Free plan. The server tolerates the prefix on If-Match
+// for exactly this reason — see the load-bearing comment on etagMatches in
+// internal/httpapi/contacts.go, which also notes that the staging host is
+// DNS-only (unproxied) and therefore structurally cannot observe this. This
+// prod suite is the only place it is visible, and asserting the strong form
+// here made these tests fail against a correctly-behaving production.
+const ETAG_RE = /^(?:W\/)?"[0-9a-f]{32}"$/;
+
+// The underlying validator, with any edge-applied weakness stripped. Compare
+// THIS across writes rather than the raw header: whether a given response
+// arrives weakened depends on whether the edge chose to transform it, so two
+// raw headers can differ by prefix alone while representing the same version.
+const etagCore = (v: string | undefined): string | undefined =>
+  v === undefined ? undefined : v.replace(/^W\//, "");
 
 // ---------------------------------------------------------------------------
 // Local resource tracking. The shared harness cleanup only knows agents and
@@ -250,7 +268,7 @@ test("getContact/updateContact: ETag + If-Match optimistic concurrency (200 → 
   assert.equal(upd.body?.display_name, "Renamed Contact", "the conditional write applied");
   const etag2 = upd.headers.etag;
   assert.ok(etag2 && ETAG_RE.test(etag2), `PATCH returns a fresh ETag, got ${JSON.stringify(etag2)}`);
-  assert.notEqual(etag2, etag, "an accepted write moves the validator");
+  assert.notEqual(etagCore(etag2), etagCore(etag), "an accepted write moves the validator");
 
   // The same (now stale) validator must NOT silently overwrite.
   const stale = await client.patch<ErrorEnvelope>(`/v1/contacts/${encodeURIComponent(address)}`, {
@@ -418,7 +436,14 @@ test("engagements: enrol (201+ETag) → If-Match update (200) → filters → pe
   });
   assert.equal(upd.status, 200, `If-Match upsert expected 200, got ${upd.status}: ${upd.raw.slice(0, 200)}`);
   assert.equal(upd.body?.stage, "nurture", "the conditional update applied");
-  assert.ok(upd.headers.etag && ETAG_RE.test(upd.headers.etag) && upd.headers.etag !== etag, "the update moves the ETag");
+  // Split deliberately: as one compound assertion, a malformed-ETag failure
+  // reported itself as "the update moves the ETag", which points a reader at
+  // a concurrency bug that isn't there. Each clause now fails in its own words.
+  assert.ok(
+    upd.headers.etag && ETAG_RE.test(upd.headers.etag),
+    `the update returns a well-formed ETag, got ${JSON.stringify(upd.headers.etag)}`,
+  );
+  assert.notEqual(etagCore(upd.headers.etag), etagCore(etag), "the update moves the ETag");
   // An omitted field is left unchanged. Compare parsed instants, not strings:
   // the server may normalize RFC 3339 precision differently from toISOString.
   assert.ok(
