@@ -24,7 +24,7 @@ export type TrendPoint = {
 const W = 720;
 const RATE_H = 132;
 const VOL_H = 46;
-const PAD = { left: 34, right: 8, top: 10, bottom: 18 };
+const PAD = { left: 34, right: 8, top: 10, bottom: 6 };
 
 function fmtDay(iso: string): string {
   const d = new Date(iso);
