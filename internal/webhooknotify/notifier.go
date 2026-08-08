@@ -53,10 +53,14 @@ type relay interface {
 type Notifier struct {
 	store NotifierStore
 	relay relay
+	// dkim, when non-nil, signs each email for the From-header domain
+	// before it reaches the relay (see WithDKIM).
+	dkim outbound.DKIMKeyLookup
 	// fromAddress is the resolved sender address (config value, or the
 	// notifyLocalPart fallback on fromDomain).
 	fromAddress string
-	// fromDomain is the domain part of fromAddress (Message-ID generation).
+	// fromDomain is the domain part of fromAddress (Message-ID generation
+	// and DKIM signing domain).
 	fromDomain string
 	publicURL  string
 }
@@ -86,6 +90,23 @@ func New(store NotifierStore, r relay, fromDomain, fromAddress, publicURL string
 
 // FromAddress exposes the resolved sender address (tests + startup log).
 func (n *Notifier) FromAddress() string { return n.fromAddress }
+
+// WithDKIM wires per-domain DKIM signing. The SMTP relay itself never
+// DKIM-signs, and an upstream provider only signs identities IT manages —
+// a custom notifications.from_address domain whose DKIM is published as a
+// raw-key TXT record (BYODKIM, e2a holds the private key) is signed here
+// or not at all. Without this leg the notification would ride on SPF
+// alignment alone, and any SPF-breaking forward would land it in spam —
+// the worst failure mode for the one email telling a customer their
+// integration is broken.
+//
+// nil-safe and fail-open via outbound.SignWithDKIM: no lookup, no stored
+// key for the From domain, or a signing failure all send unsigned (the
+// zero-config self-host path keeps working).
+func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
+	n.dkim = lookup
+	return n
+}
 
 // Deliver composes and sends one health email, classifying the result for
 // the NotifyWorker. Implements Deliverer.
@@ -180,6 +201,13 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) 
 	msgIDHeader := fmt.Sprintf("<webhook-health-%s-%s-%d@%s>", kind, wh.ID, episode.Unix(), n.fromDomain)
 	if !strings.ContainsAny(msgIDHeader, "\r\n") {
 		message = append([]byte("Message-ID: "+msgIDHeader+"\r\n"), message...)
+	}
+
+	// DKIM-sign for the From-header domain AFTER the Message-ID prepend, so
+	// the signature covers the final header set. Fail-open: no key (the
+	// self-host default) sends unsigned, exactly as before.
+	if signed, ok := outbound.SignWithDKIM(n.dkim, message, n.fromDomain); ok {
+		message = signed
 	}
 
 	if _, err := n.relay.SendOnce(n.fromAddress, []string{owner.Email}, message); err != nil {

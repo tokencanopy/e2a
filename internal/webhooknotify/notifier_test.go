@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
@@ -174,6 +175,69 @@ func TestNotifier_TransientStoreErrorIsRetryable(t *testing.T) {
 	}
 	if out.Permanent || out.Outage {
 		t.Errorf("a stats read blip must stay transient, got %+v", out)
+	}
+}
+
+// fakeDKIM is a DKIMKeyLookup test double.
+type fakeDKIM struct {
+	get func(ctx context.Context, domain string) (string, []byte, error)
+}
+
+func (f *fakeDKIM) GetDKIMKeyInternal(ctx context.Context, domain string) (string, []byte, error) {
+	return f.get(ctx, domain)
+}
+
+// The relay (SES SMTP) never DKIM-signs on e2a's behalf for a custom
+// notifications.from_address domain (BYODKIM: e2a holds the private key),
+// so the notifier must sign in-process when a key exists for the From
+// domain — otherwise the one email telling a customer their integration
+// broke would carry no DKIM leg and die in spam on any SPF-breaking
+// forward.
+func TestNotifier_SignsWithDKIMWhenKeyExists(t *testing.T) {
+	keypair, err := dkim.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := &fakeDKIM{get: func(_ context.Context, domain string) (string, []byte, error) {
+		if domain != "corp.example" {
+			t.Fatalf("DKIM lookup domain = %q, want the From-header domain corp.example", domain)
+		}
+		return keypair.Selector, keypair.PrivateKeyDER, nil
+	}}
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "support@corp.example", "").WithDKIM(lookup)
+
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+		t.Fatalf("Deliver: %v", out.Err)
+	}
+	msg := string(relay.message)
+	if !strings.Contains(msg, "DKIM-Signature:") {
+		t.Fatalf("no DKIM-Signature header on the composed message:\n%s", msg[:min(len(msg), 400)])
+	}
+	if !strings.Contains(msg, "d=corp.example") {
+		t.Errorf("DKIM-Signature must be for the From-header domain (d=corp.example)")
+	}
+}
+
+// The self-host path: no key for the domain → send unsigned, never fail.
+func TestNotifier_SendsUnsignedWhenNoDKIMKey(t *testing.T) {
+	lookup := &fakeDKIM{get: func(_ context.Context, _ string) (string, []byte, error) {
+		return "", nil, nil // no key stored
+	}}
+	relay := &captureRelay{}
+	n := New(okStore(), relay, "send.example.com", "", "").WithDKIM(lookup)
+
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+		t.Fatalf("Deliver must succeed unsigned: %v", out.Err)
+	}
+	if strings.Contains(string(relay.message), "DKIM-Signature:") {
+		t.Errorf("unexpected DKIM-Signature without a stored key")
+	}
+	// And with no lookup wired at all (zero-config self-host).
+	relay2 := &captureRelay{}
+	n2 := New(okStore(), relay2, "send.example.com", "", "")
+	if out := n2.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+		t.Fatalf("Deliver must succeed without a DKIM lookup: %v", out.Err)
 	}
 }
 

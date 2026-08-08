@@ -124,7 +124,10 @@ notifications:
   # a fixed no-reply local part on outbound_smtp.from_domain, so
   # self-hosted deployments need no configuration here. Set a replyable
   # support address you own (your upstream must be authorized to send as
-  # it) if you want customers to be able to reply.
+  # it) if you want customers to be able to reply. If e2a holds a DKIM
+  # key for the address's domain (a domain registered with this server),
+  # each notification is DKIM-signed in-process for that domain; with no
+  # stored key it is sent unsigned.
   # from_address: "support@your-company.example"
 
 # Outbound delivery is always asynchronous and at-least-once. The send API

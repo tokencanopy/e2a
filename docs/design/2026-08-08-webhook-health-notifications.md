@@ -526,3 +526,15 @@ decisions, so the doc describes what actually shipped:
 - **The Part 4 SES checkpoint** (runtime credentials permitted to send as
   the configured From) is an ops-side pre-deploy verification; it cannot be
   checked from this repo.
+- **DKIM (design correction).** Part 4's "mirror hitlnotify" hid a gap:
+  `SMTPRelay.SendOnce` performs no DKIM signing (that lives in
+  `outbound.Sender`), and an upstream like SES only signs identities IT
+  manages — a BYODKIM custom `notifications.from_address` domain would
+  have gone out with no DKIM leg at all, leaving the alert riding SPF
+  alignment alone (spam on any SPF-breaking forward). The notifier now
+  signs in-process for the From-header domain via the extracted
+  `outbound.SignWithDKIM` (the same lookup + `internal/dkim` signing the
+  Sender uses — one copy of the logic, no new crypto), applied after the
+  Message-ID prepend so the signature covers the final header set.
+  Fail-open: no stored key (the zero-config self-host path) sends
+  unsigned, exactly as before.

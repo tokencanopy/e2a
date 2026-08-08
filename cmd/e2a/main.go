@@ -615,8 +615,13 @@ func main() {
 	// a replyable support address), else the fixed no-reply local part on the
 	// relay from_domain — configuration, never a constant, because a hardcoded
 	// operator address would break every self-host (they don't own it).
+	// The notifier DKIM-signs in-process for the From-header domain (same
+	// store-backed key lookup the outbound Sender uses): the relay never
+	// signs, and an upstream like SES only signs identities it manages, so
+	// a BYODKIM custom from-address domain is signed here or not at all.
+	// Fail-open — no stored key (self-host default) sends unsigned.
 	if webhookNotifyJobs != nil {
-		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.HTTP.PublicURL)
+		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.HTTP.PublicURL).WithDKIM(store)
 		webhookNotifyJobs.SetDeliverer(whNotifier)
 		log.Printf("[webhook-notify] enabled (from=%s)", whNotifier.FromAddress())
 	} else {
