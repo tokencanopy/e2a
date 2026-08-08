@@ -353,3 +353,15 @@ describe("webhook delivery panel", () => {
     expect(screen.getByText(/Delivery history is kept 30 days/)).toBeInTheDocument();
   });
 });
+
+// The API, CLI, and MCP tools all announce beta; the dashboard must too, or a
+// reader has no signal these definitions can still change under them.
+it("marks the page as beta", async () => {
+  respond(body());
+  renderPage();
+  await screen.findByText("97.8%");
+  expect(screen.getByText("Beta")).toBeInTheDocument();
+  expect(
+    screen.getByText(/definitions may change while this is in beta/),
+  ).toBeInTheDocument();
+});

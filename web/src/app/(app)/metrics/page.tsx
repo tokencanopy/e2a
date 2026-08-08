@@ -13,6 +13,7 @@ import { useMemo, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { PageShell } from "../../components/loft/PageShell";
+import { Chip } from "../../components/loft/Chip";
 import { InfoTip } from "../../components/loft/InfoTip";
 import { metricsKey } from "../../../lib/swrKeys";
 import { METRIC_HELP } from "../../../lib/metricDefinitions";
@@ -204,8 +205,12 @@ export default function MetricsPage() {
 
   return (
     <PageShell
-      title="Metrics"
-      subtitle="Delivery health across every inbox on this account."
+      title={
+        <span className="inline-flex items-center gap-2.5">
+          Metrics <Chip tone="warn">Beta</Chip>
+        </span>
+      }
+      subtitle="Delivery health across every inbox on this account. Counters and their definitions may change while this is in beta."
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {RANGES.map((r) => (
