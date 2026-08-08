@@ -484,3 +484,45 @@ inbound and the staging MX round trip works.
   exists ("e2a Support") if brand alignment turns out to matter more than company
   consolidation. Purely a positioning call; the design works either way since the address
   is configuration.
+
+## Implementation notes (2026-08-08, as built)
+
+The implementation follows this design; the deviations and resolved
+decisions, so the doc describes what actually shipped:
+
+- **Pass ordering.** The sweep runs the DISABLE pass first, then the warn
+  pass — the ordering the edge-case table's own rationale describes ("its
+  `enabled` predicate excludes rows the disable pass just turned off"),
+  though its first clause said the reverse. With disable-first, a burst
+  crossing both thresholds in one sweep enqueues only the disable email;
+  worker guard 3 remains the backstop for warn jobs already enqueued in an
+  earlier sweep. Pinned by
+  `TestAutoDisableWorker_BurstCrossingBothThresholdsSendsOnlyDisable`.
+- **Guard 4's mechanism.** "A delivery has since succeeded" is detected via
+  the dedupe column itself: a successful delivery clears `warn_notified_at`
+  (same tx as the `last_delivered_at` bump), so the worker drops any
+  warning job whose webhook shows `warn_notified_at IS NULL`.
+- **Q5 resolved: yes** — re-enable clears `auto_disable_reason` alongside
+  `auto_disabled_at`, so a healthy webhook never shows a stale cause. The
+  API field is `auto_disabled_reason` (additive, optional, open set); the
+  column is `auto_disable_reason`.
+- **Constants** are named and marked tunable, values still as proposed
+  (unfrozen): `identity.WarnThreshold`/`identity.WarnWindow` (5 / 24h) and
+  `webhookdelivery.MaxDisabledSnoozes` (24).
+- **Sender address.** New config `notifications.from_address`
+  (`E2A_NOTIFICATIONS_FROM_ADDRESS`, validated as a bare address); unset
+  falls back to `webhooks-noreply@<outbound_smtp.from_domain>`. `Reply-To`
+  is set explicitly to the resolved address. The notifier is gated on
+  `outbound_smtp.from_domain` alone — without `http.public_url` the emails
+  still send, with generic dashboard copy instead of a link.
+- **Message-ID** is deterministic per EPISODE (webhook id + the warn stamp
+  / disable timestamp), not per webhook as in hitlnotify — a webhook can
+  legitimately warn again after recovering, and a webhook-keyed id would
+  make Message-ID-deduping recipients swallow the second episode's email.
+- **Snooze cap failure handling.** If the terminal write at the cap fails,
+  the worker returns the error (River retries) instead of completing the
+  job over an ambiguous row. The terminal transition emits a new
+  `webhook_disabled` outcome on `e2a_webhook_delivery_terminal_total`.
+- **The Part 4 SES checkpoint** (runtime credentials permitted to send as
+  the configured From) is an ops-side pre-deploy verification; it cannot be
+  checked from this repo.
