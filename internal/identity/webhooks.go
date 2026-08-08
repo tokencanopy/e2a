@@ -59,8 +59,21 @@ type Webhook struct {
 	SigningSecretPrevExpiresAt *time.Time     `json:"-"`
 	Enabled                    bool           `json:"enabled"`
 	AutoDisabledAt             *time.Time     `json:"auto_disabled_at,omitempty"`
-	CreatedAt                  time.Time      `json:"created_at"`
-	LastDeliveredAt            *time.Time     `json:"last_delivered_at,omitempty"`
+	// AutoDisableReason is the short, customer-facing failure reason (e.g.
+	// "HTTP 404") captured from the most recent terminal delivery error when
+	// the auto-disable sweep tripped this webhook. Sourced from
+	// webhook_subscriber_deliveries.last_error, which the delivery worker
+	// restricts to sanitized customer-facing strings — never internal
+	// hosts, IPs, or DB identifiers. Empty when never auto-disabled;
+	// cleared on re-enable alongside AutoDisabledAt.
+	AutoDisableReason string `json:"auto_disabled_reason,omitempty"`
+	// WarnNotifiedAt is the early-warning dedupe marker: stamped by the
+	// warn sweep in the same transaction as the notification enqueue,
+	// cleared by a successful delivery so a recovered webhook re-arms.
+	// Internal bookkeeping — not exposed on the API view.
+	WarnNotifiedAt  *time.Time `json:"-"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastDeliveredAt *time.Time `json:"last_delivered_at,omitempty"`
 }
 
 // Sentinel errors so API handlers can map error → HTTP status with
@@ -192,7 +205,8 @@ func (s *Store) CreateWebhookIdem(ctx context.Context, userID, url, description 
 const webhookColumns = `id, user_id, url, description, events, filters,
 	        signing_secret, COALESCE(signing_secret_prev, ''),
 	        signing_secret_prev_expires_at,
-	        enabled, auto_disabled_at, created_at, last_delivered_at`
+	        enabled, auto_disabled_at, COALESCE(auto_disable_reason, ''),
+	        warn_notified_at, created_at, last_delivered_at`
 
 // scanWebhook materializes one webhookColumns row. ErrNoRows is left for the
 // caller to translate, since "no row" means not-found on a read and
@@ -204,7 +218,8 @@ func scanWebhook(row pgx.Row) (*Webhook, error) {
 		&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
 		&w.SigningSecret, &w.SigningSecretPrev,
 		&w.SigningSecretPrevExpiresAt,
-		&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
+		&w.Enabled, &w.AutoDisabledAt, &w.AutoDisableReason,
+		&w.WarnNotifiedAt, &w.CreatedAt, &w.LastDeliveredAt,
 	); err != nil {
 		return nil, err
 	}
@@ -263,10 +278,7 @@ func (s *Store) GetWebhookByIDInternal(ctx context.Context, webhookID string) (*
 // (afterCreatedAt, afterID) key from the previous page's last row (zero
 // afterCreatedAt = first page).
 func (s *Store) ListWebhooksByUser(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterID string) ([]Webhook, error) {
-	q := `SELECT id, user_id, url, description, events, filters,
-	        signing_secret, COALESCE(signing_secret_prev, ''),
-	        signing_secret_prev_expires_at,
-	        enabled, auto_disabled_at, created_at, last_delivered_at
+	q := `SELECT ` + webhookColumns + `
 	 FROM webhooks WHERE user_id = $1`
 	args := []interface{}{userID}
 	if !afterCreatedAt.IsZero() {
@@ -287,20 +299,11 @@ func (s *Store) ListWebhooksByUser(ctx context.Context, userID string, limit int
 
 	var out []Webhook
 	for rows.Next() {
-		var w Webhook
-		var filtersJSON []byte
-		if err := rows.Scan(
-			&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
-			&w.SigningSecret, &w.SigningSecretPrev,
-			&w.SigningSecretPrevExpiresAt,
-			&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
-		); err != nil {
+		w, err := scanWebhook(rows)
+		if err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(filtersJSON, &w.Filters); err != nil {
-			return nil, fmt.Errorf("unmarshal filters: %w", err)
-		}
-		out = append(out, w)
+		out = append(out, *w)
 	}
 	return out, rows.Err()
 }
@@ -316,10 +319,7 @@ func (s *Store) ListWebhooksByUser(ctx context.Context, userID string, limit int
 // of enabled webhooks).
 func (s *Store) ListEnabledWebhooksForRouting(ctx context.Context, userID, eventType string) ([]Webhook, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, user_id, url, description, events, filters,
-		        signing_secret, COALESCE(signing_secret_prev, ''),
-		        signing_secret_prev_expires_at,
-		        enabled, auto_disabled_at, created_at, last_delivered_at
+		`SELECT `+webhookColumns+`
 		 FROM webhooks
 		 WHERE user_id = $1 AND enabled = true AND $2 = ANY(events)`,
 		userID, eventType,
@@ -331,20 +331,11 @@ func (s *Store) ListEnabledWebhooksForRouting(ctx context.Context, userID, event
 
 	var out []Webhook
 	for rows.Next() {
-		var w Webhook
-		var filtersJSON []byte
-		if err := rows.Scan(
-			&w.ID, &w.UserID, &w.URL, &w.Description, &w.Events, &filtersJSON,
-			&w.SigningSecret, &w.SigningSecretPrev,
-			&w.SigningSecretPrevExpiresAt,
-			&w.Enabled, &w.AutoDisabledAt, &w.CreatedAt, &w.LastDeliveredAt,
-		); err != nil {
+		w, err := scanWebhook(rows)
+		if err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(filtersJSON, &w.Filters); err != nil {
-			return nil, fmt.Errorf("unmarshal filters: %w", err)
-		}
-		out = append(out, w)
+		out = append(out, *w)
 	}
 	return out, rows.Err()
 }
@@ -468,10 +459,12 @@ func (s *Store) UpdateWebhook(ctx context.Context, webhookID, userID string, u W
 	if u.Enabled != nil {
 		add("enabled", *u.Enabled)
 		// Re-enabling clears auto_disabled_at so a subsequent fail
-		// burst can re-trip it cleanly.
+		// burst can re-trip it cleanly — and the captured reason with
+		// it, so a healthy webhook never shows a stale cause.
 		if *u.Enabled {
 			args = append(args, nil)
 			sets = append(sets, fmt.Sprintf("auto_disabled_at = $%d", len(args)))
+			sets = append(sets, "auto_disable_reason = NULL")
 		}
 	}
 
@@ -544,22 +537,60 @@ const (
 	AutoDisableWindow    = 72 * time.Hour
 )
 
+// WarnThreshold / WarnWindow gate the early-warning notification: in the
+// last WarnWindow, at least WarnThreshold delivery rows recorded a failed
+// attempt (attempts >= 1 AND a non-empty last_error) and zero rows reached
+// 'delivered'. Keying on ATTEMPT-level failures rather than terminal
+// 'failed' rows is the point — a delivery only terminalizes after the
+// 29h21m retry envelope, so a terminal-keyed warning could never beat the
+// breaker meaningfully (docs/design/2026-08-08-webhook-health-notifications.md).
+//
+// TUNABLE: 5 / 24h are the design's proposed values, not yet frozen —
+// low enough to fire within one sweep of a real hard-failure burst, high
+// enough that a single transient blip mails nobody.
+const (
+	WarnThreshold = 5
+	WarnWindow    = 24 * time.Hour
+)
+
+// WebhookNotifyTx enqueues one webhook health-notification job inside the
+// sweep's transaction, so the state transition and its notification commit
+// atomically (a row cannot be disabled/warn-stamped without its job, and
+// cannot be returned twice). nil = no notification pipeline configured;
+// the sweep then runs its state transition alone.
+type WebhookNotifyTx func(ctx context.Context, tx pgx.Tx, webhookID string) error
+
 // AutoDisableFailingWebhooks scans for webhooks whose recent delivery
 // history exceeds the failure threshold and flips them to
-// enabled=false with auto_disabled_at = now(). Returns the count of
-// webhooks newly disabled. Designed to be called periodically (e.g.
-// every 5 minutes) from a janitor goroutine.
+// enabled=false with auto_disabled_at = now(), capturing the most recent
+// terminal delivery error as the customer-facing auto_disable_reason.
+// Returns the count of webhooks newly disabled. Designed to be called
+// periodically (every 5 minutes) from the maintenance sweep.
 //
 // "Consecutive failed events" is interpreted as: in the last
 // AutoDisableWindow, at least AutoDisableThreshold rows in
 // webhook_subscriber_deliveries reached status='failed' AND zero
 // rows reached status='delivered'. The zero-delivered guard prevents
 // a noisy webhook that's still mostly working from being disabled.
-func (s *Store) AutoDisableFailingWebhooks(ctx context.Context) (int, error) {
-	rows, err := s.pool.Query(ctx,
+//
+// The AND enabled = true predicate makes the transition observable
+// exactly once: a webhook can only be RETURNING'd on the flip, never on
+// a later pass — that plus the same-tx enqueue is what guarantees
+// exactly one disable notification per transition (SC2 in the design).
+func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyTx) (int, error) {
+	return s.sweepWebhooksTx(ctx, notifyTx, "auto-disable",
 		`UPDATE webhooks
 		 SET enabled = false,
-		     auto_disabled_at = now()
+		     auto_disabled_at = now(),
+		     auto_disable_reason = (
+		         SELECT d.last_error
+		         FROM webhook_subscriber_deliveries d
+		         WHERE d.webhook_id = webhooks.id
+		           AND d.status = 'failed'
+		           AND d.last_error IS NOT NULL AND d.last_error <> ''
+		         ORDER BY d.last_attempt_at DESC NULLS LAST
+		         LIMIT 1
+		     )
 		 WHERE id IN (
 		     SELECT webhook_id
 		     FROM webhook_subscriber_deliveries
@@ -572,19 +603,83 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context) (int, error) {
 		 RETURNING id`,
 		AutoDisableThreshold, AutoDisableWindow,
 	)
+}
+
+// WarnFailingWebhooks is the early-warning pass of the same sweep: it
+// stamps warn_notified_at (the dedupe marker) and enqueues one warning
+// notification for every ENABLED webhook whose recent deliveries are
+// failing at the attempt level — within seconds of an endpoint breaking,
+// long before any delivery exhausts the retry envelope and the breaker
+// can see it. warn_notified_at IS NULL is both the dedupe and the
+// trigger, so the same exactly-once argument as the disable pass applies.
+// A successful delivery clears the marker (webhook.SubscriberStore.
+// MarkDeliveredIfPending), re-arming the warning for a later episode.
+//
+// Run AFTER the disable pass in a sweep: the enabled = true predicate
+// then excludes rows that same sweep just disabled, so a burst that
+// crosses both thresholds at once produces only the disable email.
+func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyTx) (int, error) {
+	return s.sweepWebhooksTx(ctx, notifyTx, "warn",
+		`UPDATE webhooks
+		 SET warn_notified_at = now()
+		 WHERE id IN (
+		     SELECT webhook_id
+		     FROM webhook_subscriber_deliveries
+		     WHERE created_at > now() - $2::interval
+		     GROUP BY webhook_id
+		     HAVING COUNT(*) FILTER (WHERE attempts >= 1 AND last_error IS NOT NULL AND last_error <> '') >= $1
+		        AND COUNT(*) FILTER (WHERE status = 'delivered') = 0
+		 )
+		 AND enabled = true
+		 AND warn_notified_at IS NULL
+		 RETURNING id`,
+		WarnThreshold, WarnWindow,
+	)
+}
+
+// sweepWebhooksTx runs one maintenance-pass UPDATE … RETURNING id inside a
+// transaction and invokes notifyTx once per returned id in that same
+// transaction. Any enqueue error aborts the whole pass — the state
+// transition must never commit without its notification job (the next
+// sweep retries the transition from scratch). Ids are drained before the
+// enqueues run because pgx forbids issuing statements on a tx while a
+// result set is open.
+func (s *Store) sweepWebhooksTx(ctx context.Context, notifyTx WebhookNotifyTx, pass, query string, args ...interface{}) (int, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("auto-disable scan: %w", err)
+		return 0, fmt.Errorf("%s sweep: begin: %w", pass, err)
 	}
-	defer rows.Close()
-	count := 0
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("%s sweep: %w", pass, err)
+	}
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return count, err
+			rows.Close()
+			return 0, fmt.Errorf("%s sweep: scan: %w", pass, err)
 		}
-		count++
+		ids = append(ids, id)
 	}
-	return count, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("%s sweep: %w", pass, err)
+	}
+
+	if notifyTx != nil {
+		for _, id := range ids {
+			if err := notifyTx(ctx, tx, id); err != nil {
+				return 0, fmt.Errorf("%s sweep: enqueue notify for %s: %w", pass, id, err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("%s sweep: commit: %w", pass, err)
+	}
+	return len(ids), nil
 }
 
 // ClearExpiredPrevSecrets nulls signing_secret_prev /

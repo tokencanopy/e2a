@@ -34,7 +34,7 @@ func TestAutoDisableFailingWebhooks_TripsAfterThresholdFailures(t *testing.T) {
 		}
 	}
 
-	n, err := store.AutoDisableFailingWebhooks(ctx)
+	n, err := store.AutoDisableFailingWebhooks(ctx, nil)
 	if err != nil {
 		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestAutoDisableFailingWebhooks_SpareWebhooksWithDeliveries(t *testing.T) {
 		t.Fatalf("seed delivered row: %v", err)
 	}
 
-	n, err := store.AutoDisableFailingWebhooks(ctx)
+	n, err := store.AutoDisableFailingWebhooks(ctx, nil)
 	if err != nil {
 		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
 	}

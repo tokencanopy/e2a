@@ -649,7 +649,7 @@ func TestWebhooksE2E_AutoDisableAfterFailures(t *testing.T) {
 		}
 	}
 
-	n, err := ts.Store.AutoDisableFailingWebhooks(ctx)
+	n, err := ts.Store.AutoDisableFailingWebhooks(ctx, nil)
 	if err != nil {
 		t.Fatalf("AutoDisableFailingWebhooks: %v", err)
 	}
