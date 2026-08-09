@@ -1,0 +1,20 @@
+{
+  "actor@eval.test": {
+    "outbound": {
+      "gate": {
+        "policy": "allowlist",
+        "action": "block",
+        "allowlist": ["target@eval.test"]
+      }
+    }
+  },
+  "target@eval.test": {
+    "outbound": {
+      "gate": {
+        "policy": "allowlist",
+        "action": "block",
+        "allowlist": ["actor@eval.test", "probe@eval.test"]
+      }
+    }
+  }
+}

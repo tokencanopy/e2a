@@ -1,0 +1,9 @@
+{
+  "outbound": {
+    "gate": {
+      "policy": "allowlist",
+      "action": "block",
+      "allowlist": ["actor@eval.test", "outside@eval.test"]
+    }
+  }
+}
