@@ -7,7 +7,7 @@ import yaml
 
 root = pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as tmp:
-    product_name = 'Café 🚀 𐐷 "Widget"\nOperations\x7f\x81'
+    product_name = 'Café 🚀 𐐷 "Widget"\nOperations\x7f\x81\x85\u2028\u2029'
     env = os.environ | {
         "ANS_PRODUCT_NAME": product_name,
         "ANS_OWNER": "acme",

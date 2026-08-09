@@ -31,7 +31,7 @@ s=s[1:-1]
 out=[]
 for ch in s:
   cp=ord(ch)
-  if cp == 0x7f or 0x80 <= cp <= 0x84 or 0x86 <= cp <= 0x9f or cp in (0xfffe, 0xffff):
+  if cp in (0x85, 0x2028, 0x2029) or cp == 0x7f or 0x80 <= cp <= 0x84 or 0x86 <= cp <= 0x9f or cp in (0xfffe, 0xffff):
     out.append("\\x%02X" % cp if cp <= 0xff else "\\u%04X" % cp)
   else:
     out.append(ch)
