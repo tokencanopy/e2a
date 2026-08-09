@@ -1,0 +1,3 @@
+id: escaped
+send: { subject: Synthetic, text: Synthetic }
+expect: { action: { kind: none, count: 0 } }

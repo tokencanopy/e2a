@@ -1,23 +1,16 @@
 version: 1
-name: __SUITE_NAME__
-
+name: fictional-support-smoke
 target:
-  email: ${__TARGET_ENV__}
-
+  email: ${E2A_EVAL_TARGET}
 actor:
-  email: ${__ACTOR_ENV__}
-
+  email: ${E2A_EVAL_ACTOR}
 transport:
   adapter: e2a
-  api_key: ${__API_KEY_ENV__}
+  api_key: ${E2A_EVAL_API_KEY}
   base_url: https://api.e2a.dev
-  allowed_envelope_recipients:
-    - "${__TARGET_ENV__}"
-    - "${__ACTOR_ENV__}"
-
+  allowed_envelope_recipients: ["${E2A_EVAL_TARGET}", "${E2A_EVAL_ACTOR}"]
 defaults:
   timeout: 60s
-
 cases:
   - cases/happy-path.yaml
   - cases/missing-information.yaml

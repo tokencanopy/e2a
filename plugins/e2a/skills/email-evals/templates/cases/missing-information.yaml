@@ -14,13 +14,13 @@ expect:
       exactly: []
   recipients:
     to:
-      exactly: [${__ACTOR_ENV__}]
+      exactly: ["${__ACTOR_ENV__}"]
     cc:
       exactly: []
     bcc:
       exactly: []
     envelope:
-      exactly: [${__ACTOR_ENV__}]
+      exactly: ["${__ACTOR_ENV__}"]
   thread:
     in_reply_to: original
     references: contains_original

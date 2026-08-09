@@ -1,26 +1,20 @@
 id: happy-path
-
 send:
   subject: Question about fictional order ord_example_123
-  text: Can fictional order ord_example_123 be refunded?
-
+  text: Can it be refunded?
 expect:
   action:
     kind: reply
     count: 1
   sender:
-    exactly: ${__TARGET_ENV__}
+    exactly: ${E2A_EVAL_TARGET}
     reply_to:
       exactly: []
   recipients:
-    to:
-      exactly: ["${__ACTOR_ENV__}"]
-    cc:
-      exactly: []
-    bcc:
-      exactly: []
-    envelope:
-      exactly: ["${__ACTOR_ENV__}"]
+    to: { exactly: ["${E2A_EVAL_ACTOR}"] }
+    cc: { exactly: [] }
+    bcc: { exactly: [] }
+    envelope: { exactly: ["${E2A_EVAL_ACTOR}"] }
   thread:
     in_reply_to: original
     references: contains_original
@@ -28,10 +22,8 @@ expect:
   subject:
     policy: preserve
   body:
-    required_facts:
-      - Refunds are available within 30 days
-    forbidden_patterns:
-      - "sk-[A-Za-z0-9]+"
+    required_facts: [Refunds are available within 30 days]
+    forbidden_patterns: ["sk-[A-Za-z0-9]+"]
   attachments:
     exactly: []
   timing:

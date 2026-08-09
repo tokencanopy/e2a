@@ -1,0 +1,12 @@
+version: 1
+version: 1
+name: synthetic
+target:
+  email: ${E2A_EVAL_TARGET}
+actor:
+  email: ${E2A_EVAL_ACTOR}
+transport:
+  adapter: e2a
+  api_key: ${E2A_EVAL_API_KEY}
+  allowed_envelope_recipients: ["${E2A_EVAL_TARGET}", "${E2A_EVAL_ACTOR}"]
+cases: []
