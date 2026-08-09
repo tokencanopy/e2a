@@ -52,3 +52,11 @@ test("e2a-integrate is language-aware and security-complete", async () => {
   assert.match(source, /synthetic/i);
   assert.match(source, /live smoke test.*separate/is);
 });
+
+test("e2a-integrate preserves SDK runtime and failure semantics", async () => {
+  const source = await read("plugins/e2a/skills/e2a-integrate/references/sdk-recipes.md");
+  assert.match(source, /E2AClient.*synchronous.*AsyncE2AClient.*asynchronous/is);
+  assert.match(source, /timeoutMs.*timeout_ms/is);
+  assert.match(source, /E2AError.*code.*retryable/is);
+  assert.match(source, /separate.*accepted.*held.*delivery/is);
+});
