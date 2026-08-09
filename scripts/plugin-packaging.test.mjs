@@ -68,6 +68,14 @@ test("Labs tracks the core plugin without requiring release tags", async () => {
   assert.deepEqual(labs.dependencies, ["e2a"]);
 });
 
+test("CI exercises the Tether runtime self-test", async () => {
+  const workflow = await readFile(".github/workflows/test.yml", "utf8");
+  assert.match(
+    workflow,
+    /bash plugins\/e2a-labs\/skills\/tether\/tether\.sh _selftest/,
+  );
+});
+
 test("migration guidance refreshes core and keeps the Cursor boundary conservative", async () => {
   const coreReadme = await readFile("plugins/e2a/README.md", "utf8");
   const labsReadme = await readFile("plugins/e2a-labs/README.md", "utf8");
