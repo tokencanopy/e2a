@@ -1,10 +1,11 @@
 {
   "capabilities": ["message_action", "visible_recipients", "blind_recipients", "envelope_recipients"],
   "target": { "email": "target@eval.test" },
-  "stimulus": { "participants": ["actor@eval.test"] },
+  "stimulus": {},
   "candidates": [{
     "ref": "evt_synthetic_forward",
     "eventType": "email.sent",
+    "direction": "outbound",
     "messageType": "forward",
     "from": "target@eval.test",
     "sentAs": "target@eval.test",

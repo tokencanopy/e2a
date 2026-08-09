@@ -2,15 +2,10 @@ import { NormalizationError, normalizeMailbox } from "./normalize.mjs";
 
 const ATTEMPT_EVENTS = new Set(["email.sent", "email.failed", "email.blocked", "email.review_requested"]);
 const RECIPIENT_FIELDS = ["to", "cc", "bcc"];
-const MESSAGE_TYPES = new Map([
-  ["send", "new_message"],
-  ["reply", "reply"],
-  ["forward", "forward"],
-]);
+const MESSAGE_TYPES = new Map([["send", "new_message"], ["reply", "reply"], ["forward", "forward"]]);
 
 function serializable(value) {
-  if (value === undefined) return null;
-  return JSON.parse(JSON.stringify(value));
+  return value === undefined ? null : JSON.parse(JSON.stringify(value));
 }
 
 function result(id, status, code, expected, actual, candidates = []) {
@@ -20,7 +15,7 @@ function result(id, status, code, expected, actual, candidates = []) {
     code,
     expected: serializable(expected),
     actual: serializable(actual),
-    evidenceRefs: [...new Set(candidates.map((candidate) => candidate?.ref).filter((ref) => typeof ref === "string"))].sort(),
+    evidenceRefs: [...new Set(candidates.map((candidate) => candidate?.ref).filter((ref) => typeof ref === "string" && ref.length > 0))].sort(),
   };
 }
 
@@ -62,26 +57,56 @@ function sameSet(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function attemptCandidate(candidate) {
-  if (!candidate || typeof candidate !== "object" || !ATTEMPT_EVENTS.has(candidate.eventType)) return false;
-  return candidate.eventType !== "email.review_requested" || (candidate.direction !== "inbound" && candidate.outbound !== false);
+function hasVerifiedOutboundProvenance(candidate) {
+  return candidate.direction === "outbound" || candidate.provenance === "target_outbound";
 }
 
-function orderedCandidates(evidence) {
-  const candidates = Array.isArray(evidence?.candidates) ? evidence.candidates : [];
+function canonical(value) {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function ordered(candidates) {
   return candidates
-    .filter(attemptCandidate)
     .map((candidate, index) => ({ candidate, index }))
     .sort((left, right) => {
       const leftTime = typeof left.candidate.observedAt === "string" ? left.candidate.observedAt : "";
       const rightTime = typeof right.candidate.observedAt === "string" ? right.candidate.observedAt : "";
-      const byTime = leftTime.localeCompare(rightTime);
-      if (byTime !== 0) return byTime;
-      const leftRef = typeof left.candidate.ref === "string" ? left.candidate.ref : "";
-      const rightRef = typeof right.candidate.ref === "string" ? right.candidate.ref : "";
-      return leftRef.localeCompare(rightRef) || left.index - right.index;
+      return leftTime.localeCompare(rightTime)
+        || String(left.candidate.ref ?? "").localeCompare(String(right.candidate.ref ?? ""))
+        || left.index - right.index;
     })
     .map(({ candidate }) => candidate);
+}
+
+function observations(evidence) {
+  const outbound = [];
+  const unverified = [];
+  for (const candidate of Array.isArray(evidence?.candidates) ? evidence.candidates : []) {
+    if (!candidate || typeof candidate !== "object" || !ATTEMPT_EVENTS.has(candidate.eventType)) continue;
+    if (hasVerifiedOutboundProvenance(candidate)) outbound.push(candidate);
+    else unverified.push(candidate);
+  }
+  const byRef = new Map();
+  const attempts = [];
+  const conflicts = [];
+  for (const candidate of ordered(outbound)) {
+    if (typeof candidate.ref !== "string" || candidate.ref.length === 0) {
+      attempts.push(candidate); // Ref-less observations remain distinct attempts.
+      continue;
+    }
+    const prior = byRef.get(candidate.ref);
+    if (!prior) {
+      byRef.set(candidate.ref, candidate);
+      attempts.push(candidate);
+    } else if (canonical(prior) !== canonical(candidate)) {
+      conflicts.push(candidate.ref);
+    }
+  }
+  return { attempts: ordered(attempts), unverified: ordered(unverified), conflicts: [...new Set(conflicts)].sort() };
 }
 
 function expectedAddresses(specification) {
@@ -93,15 +118,16 @@ function recipientAddresses(candidate) {
 }
 
 function participantSet(evidence) {
-  const participants = evidence?.stimulus?.participants;
-  return addressSet(Array.isArray(participants) ? participants : []);
+  if (!Array.isArray(evidence?.stimulus?.participants)) return { available: false, addresses: [] };
+  return { available: true, addresses: addressSet(evidence.stimulus.participants) };
 }
 
 function actionKind(candidate, participants) {
   const kind = MESSAGE_TYPES.get(candidate.messageType);
   if (kind !== "reply") return kind ?? null;
+  if (!participants.available) return "reply";
   const recipients = new Set(recipientAddresses(candidate));
-  return participants.length > 1 && participants.every((participant) => recipients.has(participant)) ? "reply_all" : "reply";
+  return participants.addresses.every((participant) => recipients.has(participant)) ? "reply_all" : "reply";
 }
 
 function fieldPlacement(expectation, candidate) {
@@ -139,26 +165,65 @@ function recipientAssertion(field, expected, candidate, movements) {
   return { status: "pass", code: "matched", actual: detail };
 }
 
+function envelopeAssertion(expected, candidate) {
+  const assertion = recipientAssertion("envelopeRecipients", expected, { envelopeRecipients: candidate.envelopeRecipients }, []);
+  if (assertion.code === "recipient_set_mismatch" && assertion.actual.missing?.length === 0 && assertion.actual.unexpected?.length > 0) {
+    return { ...assertion, code: "unexpected_recipient" };
+  }
+  return assertion;
+}
+
 function targetAddress(evidence) {
   return mailbox(evidence?.target?.email) ?? mailbox(evidence?.targetEmail) ?? mailbox(evidence?.target);
 }
 
-/**
- * Grade normalized outbound evidence without mutating it. Every returned value is a
- * plain JSON value so it can be written directly to replay artifacts.
- */
+function diagnostic(candidate, actual) {
+  return { ref: typeof candidate.ref === "string" && candidate.ref.length > 0 ? candidate.ref : null, actual };
+}
+
+function aggregate(id, expected, attempts, evaluate) {
+  const byRef = attempts.map((candidate) => diagnostic(candidate, evaluate(candidate)));
+  const failed = byRef.find((entry) => entry.actual.status === "error" || entry.actual.status === "fail");
+  const status = failed?.actual.status ?? "pass";
+  return result(id, status, failed?.actual.code ?? "matched", expected, { byRef }, attempts);
+}
+
+function blockedAssertions(expectation, evidence, attempts, code, actual) {
+  const results = [];
+  for (const id of ["action.kind", "action.count", "action.no_duplicates"]) {
+    results.push(result(id, "error", code, expectation.action ?? { kind: "none", count: 0 }, actual, attempts));
+  }
+  if (expectation.sender?.exactly !== undefined) results.push(result("sender.from", "error", code, expectation.sender.exactly, actual, attempts));
+  if (expectation.sender?.sentAs !== undefined) results.push(result("sender.sent_as", "error", code, expectation.sender.sentAs, actual, attempts));
+  if (expectation.sender?.replyTo !== undefined) results.push(result("sender.reply_to", "error", code, expectedAddresses(expectation.sender.replyTo), actual, attempts));
+  if (expectation.sender?.displayName !== undefined) results.push(result("sender.display_name", "error", code, expectation.sender.displayName, actual, attempts));
+  if (expectation.recipients) {
+    for (const field of ["to", "cc", "bcc", "envelope"]) {
+      if (expectation.recipients[field] !== undefined) results.push(result(`recipients.${field}`, "error", code, expectedAddresses(expectation.recipients[field]), actual, attempts));
+    }
+    results.push(result("recipients.cross_field", "error", code, "same recipient fields", actual, attempts));
+    results.push(result("recipients.no_target_self", "error", code, targetAddress(evidence), actual, attempts));
+  }
+  return results;
+}
+
+/** Grade normalized outbound evidence without mutating it. */
 export function gradeCore(expectation = {}, evidence = {}) {
-  const attempts = orderedCandidates(evidence);
-  const candidate = attempts[0] ?? {};
+  const { attempts, unverified, conflicts } = observations(evidence);
+  if (conflicts.length > 0) return blockedAssertions(expectation, evidence, attempts, "conflicting_evidence_ref", { refs: conflicts });
+  if (unverified.length > 0) return blockedAssertions(expectation, evidence, attempts, "missing_outbound_provenance", { count: attempts.length, refs: unverified.map((candidate) => candidate.ref ?? null) });
+
   const results = [];
   const expectedAction = expectation.action ?? { kind: "none", count: 0 };
   const expectedCount = Number.isSafeInteger(expectedAction.count) && expectedAction.count >= 0 ? expectedAction.count : 0;
   const participants = participantSet(evidence);
-  const actualKinds = attempts.map((entry) => actionKind(entry, participants));
-
+  const actualKinds = attempts.map((candidate) => actionKind(candidate, participants));
   let kindStatus = "pass";
   let kindCode = "matched";
-  if (expectedAction.kind === "reply_all" && attempts.some((entry) => entry.messageType === "reply") && actualKinds.includes("reply")) {
+  if (expectedAction.kind === "reply_all" && !participants.available) {
+    kindStatus = "error";
+    kindCode = "missing_reply_all_participant_evidence";
+  } else if (expectedAction.kind === "reply_all" && actualKinds.includes("reply")) {
     kindStatus = "fail";
     kindCode = "reply_all_participants_missing";
   } else if (expectedAction.kind !== "none" && (actualKinds.length === 0 || actualKinds.some((kind) => kind !== expectedAction.kind))) {
@@ -169,82 +234,49 @@ export function gradeCore(expectation = {}, evidence = {}) {
     kindCode = "unexpected_outbound_attempt";
   }
   results.push(result("action.kind", kindStatus, kindCode, expectedAction.kind, actualKinds, attempts));
-
   const countMatches = attempts.length === expectedCount;
-  results.push(result(
-    "action.count",
-    countMatches ? "pass" : "fail",
-    countMatches ? "matched" : expectedCount === 0 && attempts.length > 0 ? "unexpected_outbound_attempt" : "action_count_mismatch",
-    expectedCount,
-    attempts.length,
-    attempts,
-  ));
+  results.push(result("action.count", countMatches ? "pass" : "fail", countMatches ? "matched" : expectedCount === 0 && attempts.length > 0 ? "unexpected_outbound_attempt" : "action_count_mismatch", expectedCount, attempts.length, attempts));
   const duplicate = expectedCount > 0 && attempts.length > expectedCount;
   results.push(result("action.no_duplicates", duplicate ? "fail" : "pass", duplicate ? "duplicate_outbound_attempt" : "matched", expectedCount, attempts.length, attempts));
 
-  if (expectation.sender?.exactly !== undefined) {
-    const expected = mailbox(expectation.sender.exactly);
-    const actual = mailbox(candidate.from);
-    results.push(result("sender.from", expected === actual ? "pass" : "fail", expected === actual ? "matched" : "sender_mismatch", expected, actual, attempts));
-  }
-  if (expectation.sender?.sentAs !== undefined) {
-    const expected = mailbox(expectation.sender.sentAs);
-    const actual = mailbox(candidate.sentAs);
-    results.push(result("sender.sent_as", expected === actual ? "pass" : "fail", expected === actual ? "matched" : "sent_as_mismatch", expected, actual, attempts));
-  }
-  if (expectation.sender?.replyTo !== undefined) {
-    const expected = expectedAddresses(expectation.sender.replyTo);
-    const actual = addressSet(candidate.replyTo ?? []);
-    results.push(result("sender.reply_to", sameSet(expected, actual) ? "pass" : "fail", sameSet(expected, actual) ? "matched" : "reply_to_mismatch", expected, actual, attempts));
-  }
-  if (expectation.sender?.displayName !== undefined) {
-    const actual = mailboxWithDisplayName(candidate.from)?.displayName ?? null;
-    const expected = expectation.sender.displayName;
-    results.push(result("sender.display_name", expected === actual ? "pass" : "fail", expected === actual ? "matched" : "display_name_mismatch", expected, actual, attempts));
-  }
+  if (expectation.sender?.exactly !== undefined) results.push(aggregate("sender.from", mailbox(expectation.sender.exactly), attempts, (candidate) => {
+    const actual = mailbox(candidate.from); return { status: actual === mailbox(expectation.sender.exactly) ? "pass" : "fail", code: actual === mailbox(expectation.sender.exactly) ? "matched" : "sender_mismatch", actual };
+  }));
+  if (expectation.sender?.sentAs !== undefined) results.push(aggregate("sender.sent_as", mailbox(expectation.sender.sentAs), attempts, (candidate) => {
+    const actual = mailbox(candidate.sentAs); return { status: actual === mailbox(expectation.sender.sentAs) ? "pass" : "fail", code: actual === mailbox(expectation.sender.sentAs) ? "matched" : "sent_as_mismatch", actual };
+  }));
+  if (expectation.sender?.replyTo !== undefined) results.push(aggregate("sender.reply_to", expectedAddresses(expectation.sender.replyTo), attempts, (candidate) => {
+    const actual = addressSet(candidate.replyTo ?? []); return { status: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "pass" : "fail", code: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "matched" : "reply_to_mismatch", actual };
+  }));
+  if (expectation.sender?.displayName !== undefined) results.push(aggregate("sender.display_name", expectation.sender.displayName, attempts, (candidate) => {
+    const actual = mailboxWithDisplayName(candidate.from)?.displayName ?? null; return { status: actual === expectation.sender.displayName ? "pass" : "fail", code: actual === expectation.sender.displayName ? "matched" : "display_name_mismatch", actual };
+  }));
 
   if (expectation.recipients) {
-    const movements = fieldPlacement(expectation, candidate);
     for (const field of RECIPIENT_FIELDS) {
       if (expectation.recipients[field] === undefined) continue;
       if (field === "bcc" && !evidence.capabilities?.includes("blind_recipients")) {
         results.push(result("recipients.bcc", "error", "missing_blind_recipient_evidence", expectedAddresses(expectation.recipients.bcc), null, attempts));
-        continue;
+      } else {
+        results.push(aggregate(`recipients.${field}`, expectedAddresses(expectation.recipients[field]), attempts, (candidate) => recipientAssertion(field, expectation.recipients[field], candidate, fieldPlacement(expectation, candidate))));
       }
-      const assertion = recipientAssertion(field, expectation.recipients[field], candidate, movements);
-      results.push(result(`recipients.${field}`, assertion.status, assertion.code, expectedAddresses(expectation.recipients[field]), assertion.actual, attempts));
     }
     if (expectation.recipients.envelope !== undefined) {
       if (!evidence.capabilities?.includes("envelope_recipients")) {
         results.push(result("recipients.envelope", "error", "missing_envelope_recipient_evidence", expectedAddresses(expectation.recipients.envelope), null, attempts));
       } else {
-        const observed = addressList(candidate.envelopeRecipients);
-        const expected = expectedAddresses(expectation.recipients.envelope);
-        const actual = [...new Set(observed.addresses)].sort();
-        const missing = expected.filter((address) => !actual.includes(address));
-        const unexpected = actual.filter((address) => !expected.includes(address));
-        const code = observed.invalid.length > 0 || (missing.length > 0 && unexpected.length > 0) ? "recipient_set_mismatch"
-          : missing.length > 0 ? "missing_recipient"
-            : unexpected.length > 0 ? "unexpected_recipient" : "matched";
-        const original = Array.isArray(candidate.envelopeRecipients) ? [...candidate.envelopeRecipients] : [];
-        results.push(result("recipients.envelope", code === "matched" ? "pass" : "fail", code, expected, { original, addresses: actual, invalid: observed.invalid, missing, unexpected }, attempts));
+        results.push(aggregate("recipients.envelope", expectedAddresses(expectation.recipients.envelope), attempts, (candidate) => envelopeAssertion(expectation.recipients.envelope, candidate)));
       }
     }
-    results.push(result("recipients.cross_field", movements.length === 0 ? "pass" : "fail", movements.length === 0 ? "matched" : "recipient_cross_field", "same recipient fields", movements, attempts));
-
+    results.push(aggregate("recipients.cross_field", "same recipient fields", attempts, (candidate) => {
+      const actual = fieldPlacement(expectation, candidate); return { status: actual.length === 0 ? "pass" : "fail", code: actual.length === 0 ? "matched" : "recipient_cross_field", actual };
+    }));
     const target = targetAddress(evidence);
-    const selfRecipients = target === null ? [] : [...new Set([
-      ...recipientAddresses(candidate),
-      ...addressList(candidate.envelopeRecipients).addresses,
-    ].filter((address) => address === target))].sort();
-    results.push(result(
-      "recipients.no_target_self",
-      target === null ? "error" : selfRecipients.length === 0 ? "pass" : "fail",
-      target === null ? "missing_target_identity_evidence" : selfRecipients.length === 0 ? "matched" : "target_self_recipient",
-      target,
-      selfRecipients,
-      attempts,
-    ));
+    results.push(aggregate("recipients.no_target_self", target, attempts, (candidate) => {
+      if (target === null) return { status: "error", code: "missing_target_identity_evidence", actual: [] };
+      const recipients = [...new Set([...recipientAddresses(candidate), ...addressList(candidate.envelopeRecipients).addresses].filter((address) => address === target))].sort();
+      return { status: recipients.length === 0 ? "pass" : "fail", code: recipients.length === 0 ? "matched" : "target_self_recipient", actual: { recipients } };
+    }));
   }
   return results;
 }
