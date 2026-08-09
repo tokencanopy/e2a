@@ -116,6 +116,37 @@ test("preflight accepts the exact containment sets and returns an alias-only pla
   assert.deepEqual(client.calls.map(([method]) => method), ["get", "get", "getProtection", "getProtection", "get"]);
 });
 
+test("capability facade shared methods cannot be mutated across adapter instances", async () => {
+  const first = adapter(fakeClient());
+  const prototype = Object.getPrototypeOf(first.capabilities);
+  const expected = [
+    "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
+    "thread_headers", "raw_mime", "attachment_hashes", "delivery_lifecycle",
+  ];
+
+  assert.ok(Object.isFrozen(prototype));
+  assert.ok(Object.isFrozen(first.capabilities.constructor));
+  assert.throws(() => { prototype.toJSON = () => ["mutated"]; }, TypeError);
+  assert.throws(() => { delete prototype.toJSON; }, TypeError);
+  assert.throws(() => Object.defineProperty(prototype, "toJSON", { value: () => ["mutated"] }), TypeError);
+  assert.throws(() => { prototype.has = () => false; }, TypeError);
+  assert.throws(() => { delete prototype.has; }, TypeError);
+  assert.throws(() => Object.defineProperty(prototype, "has", { value: () => false }), TypeError);
+  assert.throws(() => { prototype[Symbol.iterator] = function* () { yield "mutated"; }; }, TypeError);
+  assert.throws(() => { delete prototype[Symbol.iterator]; }, TypeError);
+  assert.throws(() => Object.defineProperty(prototype, Symbol.iterator, { value: function* () { yield "mutated"; } }), TypeError);
+
+  assert.deepEqual([...first.capabilities], expected);
+  assert.deepEqual(JSON.parse(JSON.stringify(first.capabilities)), expected);
+  const result = await first.preflight(resolvedSuite());
+  assert.deepEqual([...result.capabilities], expected);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.capabilities)), expected);
+
+  const future = adapter(fakeClient());
+  assert.deepEqual([...future.capabilities], expected);
+  assert.equal(future.capabilities.has("blind_recipients"), true);
+});
+
 test("preflight strips credential-bearing URL components only from the serializable plan", async () => {
   const configuredEndpoint = "https://e2a-user:e2a-password@api.example.test/evals/v1?token=query-token#fragment-token";
   const result = await createE2AAdapter({

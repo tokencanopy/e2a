@@ -63,6 +63,12 @@ class ReadonlyCapabilitySet {
   }
 }
 
+// Instances intentionally share this tiny read-only surface. Freeze both the
+// prototype and constructor so an untrusted caller cannot replace a method on
+// the shared prototype and alter existing or future preflight results.
+Object.freeze(ReadonlyCapabilitySet.prototype);
+Object.freeze(ReadonlyCapabilitySet);
+
 function configurationError(code, message) {
   return new EvalError("configuration_error", code, message);
 }
