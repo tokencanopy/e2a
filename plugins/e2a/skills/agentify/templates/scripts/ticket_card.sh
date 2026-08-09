@@ -176,10 +176,16 @@ case "$cmd" in
     forged_body=$'summary\n```text\ncomms:conv_target\n```\n<!-- acme-feedback comms:conv_other -->'
     good_issue="$(jq -n --arg body "$good_body" '{author:{login:"bot[bot]"},body:$body}')"
     forged_issue="$(jq -n --arg body "$forged_body" '{author:{login:"bot[bot]"},body:$body}')"
+    third_party_issue="$(jq -n --arg body "$good_body" '{author:{login:"third-party"},body:$body}')"
+    mismatched_marker_issue="$(jq -n --arg body "$good_body" '{author:{login:"bot[bot]"},body:$body}')"
     printf '%s' "$good_issue" | _matches_comms_footer "bot[bot]" "acme-feedback" "conv_target" \
       || { echo "FAIL exact comms footer rejected"; fail=1; }
     printf '%s' "$forged_issue" | _matches_comms_footer "bot[bot]" "acme-feedback" "conv_target" \
       && { echo "FAIL quoted comms value accepted"; fail=1; }
+    printf '%s' "$third_party_issue" | _matches_comms_footer "bot[bot]" "acme-feedback" "conv_target" \
+      && { echo "FAIL third-party footer accepted"; fail=1; }
+    printf '%s' "$mismatched_marker_issue" | _matches_comms_footer "bot[bot]" "other-marker" "conv_target" \
+      && { echo "FAIL mismatched marker accepted"; fail=1; }
     # no card -> empty extract
     [ -z "$(printf 'just a comment\n' | _extract_card)" ] || { echo "FAIL empty-extract"; fail=1; }
     if [ "$fail" = 0 ]; then echo "ticket_card.sh selftest: OK"; else echo "ticket_card.sh selftest: FAILED"; exit 1; fi
