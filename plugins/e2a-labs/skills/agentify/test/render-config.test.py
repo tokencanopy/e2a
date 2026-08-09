@@ -32,3 +32,18 @@ with tempfile.TemporaryDirectory() as tmp:
         env=bad,
     )
     assert rejected.returncode == 2
+
+    for required in (
+        "ANS_PRODUCT_NAME",
+        "ANS_SUPPORT_ADDRESS",
+        "ANS_APPROVER_ADDRESS",
+        "ANS_VERIFY_SETUP_SCRIPT",
+    ):
+        missing = subprocess.run(
+            ["bash", str(root / "agentify-render.sh"), "--to", tmp, "--force"],
+            env=env | {required: ""},
+            capture_output=True,
+            text=True,
+        )
+        assert missing.returncode == 2, required
+        assert f"{required} is required" in missing.stderr
