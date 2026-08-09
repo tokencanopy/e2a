@@ -37,3 +37,18 @@ test("e2a-setup bootstraps MCP, inboxes, and optional custom domains", async () 
   );
   assert.equal(setupMirror, setupGuide);
 });
+
+test("e2a-integrate is language-aware and security-complete", async () => {
+  const source = await read("plugins/e2a/skills/e2a-integrate/SKILL.md");
+  assert.match(source, /^name: e2a-integrate$/m);
+  assert.match(source, /outbound.*webhook.*polling/is);
+  assert.match(source, /TypeScript.*Python.*official.*SDK/is);
+  assert.match(source, /REST.*OpenAPI/is);
+  assert.match(source, /never invent.*SDK/i);
+  assert.match(source, /application-owned.*boundary/i);
+  assert.match(source, /server-only.*credential/i);
+  assert.match(source, /signature verification.*before/i);
+  assert.match(source, /idempotent/i);
+  assert.match(source, /synthetic/i);
+  assert.match(source, /live smoke test.*separate/is);
+});
