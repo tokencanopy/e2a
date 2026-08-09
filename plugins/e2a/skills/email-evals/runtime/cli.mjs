@@ -1,4 +1,5 @@
 import path from "node:path";
+import { lstat, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { loadSuite } from "./lib/contract.mjs";
 import { createE2AAdapter } from "./lib/e2a-adapter.mjs";
@@ -140,10 +141,50 @@ function exitForSummary(summary) {
   return 4;
 }
 
-function reportPath(summary) {
-  const runId = typeof summary?.runId === "string" && /^run_\d{8}T\d{6}_[a-f0-9]{8}$/.test(summary.runId)
-    ? summary.runId : null;
-  return runId ? `${runId}/report.md` : null;
+const RUN_ID = /^run_\d{8}T\d{6}_[a-f0-9]{8}$/;
+
+function unsafeReport() {
+  throw new Error("unsafe report artifact");
+}
+
+async function regularDirectory(directory) {
+  const state = await lstat(directory);
+  if (state.isSymbolicLink() || !state.isDirectory()) unsafeReport();
+  return realpath(directory);
+}
+
+async function regularFile(file) {
+  const state = await lstat(file);
+  if (state.isSymbolicLink() || !state.isFile()) unsafeReport();
+  return realpath(file);
+}
+
+export async function validateReportArtifact({ command, summary, outputRoot, runDirectory }) {
+  const runId = typeof summary?.runId === "string" && RUN_ID.test(summary.runId) ? summary.runId : null;
+  const files = summary?.files;
+  const descriptor = files && typeof files === "object" && Object.getPrototypeOf(files) === Object.prototype
+    ? Object.getOwnPropertyDescriptor(files, "report") : null;
+  if (!runId || !descriptor || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "string") unsafeReport();
+
+  let requestedRun;
+  let canonicalRoot;
+  if (command === "run") {
+    const requestedRoot = path.resolve(outputRoot);
+    canonicalRoot = await regularDirectory(requestedRoot);
+    requestedRun = path.join(requestedRoot, runId);
+  } else if (command === "regrade") {
+    requestedRun = path.resolve(runDirectory);
+  } else {
+    unsafeReport();
+  }
+  const requestedReport = path.join(requestedRun, "report.md");
+  if (path.resolve(descriptor.value) !== requestedReport) unsafeReport();
+  const canonicalRun = await regularDirectory(requestedRun);
+  if (path.basename(canonicalRun) !== runId) unsafeReport();
+  if (canonicalRoot && path.dirname(canonicalRun) !== canonicalRoot) unsafeReport();
+  const expected = path.join(canonicalRun, "report.md");
+  if ((await regularFile(requestedReport)) !== expected) unsafeReport();
+  return `${runId}/report.md`;
 }
 
 function writeResult({ command, json, value, report, stdout }) {
@@ -182,6 +223,7 @@ export async function main(argv, dependencies = {}) {
     createAdapter: createE2AAdapter,
     runSuite,
     regradeRun,
+    validateReport: validateReportArtifact,
     ...dependencies,
   };
   let parsed;
@@ -199,9 +241,11 @@ export async function main(argv, dependencies = {}) {
     const suiteFile = path.resolve(deps.cwd, parsed.suite);
     const suite = await deps.loadSuite(suiteFile, { environment: deps.environment });
     if (parsed.command === "regrade") {
-      const result = await deps.regradeRun({ suite, runDirectory: path.resolve(deps.cwd, parsed.run) });
+      const runDirectory = path.resolve(deps.cwd, parsed.run);
+      const result = await deps.regradeRun({ suite, runDirectory });
+      const report = await deps.validateReport({ command: parsed.command, summary: result, runDirectory });
       const output = { summary: safeSummary(result) };
-      writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result), stdout: deps.stdout });
+      writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
       return exitForSummary(result);
     }
 
@@ -216,13 +260,15 @@ export async function main(argv, dependencies = {}) {
     // runSuite still owns its preflight boundary, so give it this exact cached
     // result rather than repeating the adapter/network operation.
     const { preflight } = await preflightSuite(suite, adapter);
+    const outputRoot = path.resolve(deps.cwd, parsed.output ?? "results");
     const result = await deps.runSuite({
       suite,
       adapter: cachePreflight(adapter, preflight),
-      outputRoot: path.resolve(deps.cwd, parsed.output ?? "results"),
+      outputRoot,
     });
+    const report = await deps.validateReport({ command: parsed.command, summary: result, outputRoot });
     const output = { summary: safeSummary(result) };
-    writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result), stdout: deps.stdout });
+    writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
     return exitForSummary(result);
   } catch (error) {
     return diagnostic(error, deps.stderr);

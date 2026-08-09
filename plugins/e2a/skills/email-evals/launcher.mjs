@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 import { CliUsageError, parseRuntimeArguments, usage } from "./runtime/lib/cli-arguments.mjs";
 
 const launcherDirectory = path.dirname(fileURLToPath(import.meta.url));
+const RUNTIME_STDERR_LIMIT = 8192;
+const SAFE_RUNTIME_DIAGNOSTICS = new Map([
+  ["email-evals: assertion_failure\n", 1],
+  ["email-evals: configuration_error\n", 2],
+  ["email-evals: capability_error\n", 2],
+  ["email-evals: transport_error\n", 3],
+  ["email-evals: target_timeout\n", 3],
+  ["email-evals: grader_error\n", 4],
+  ["email-evals: unexpected runner failure\n", 4],
+]);
 
 function unavailable(stderr) {
   stderr.write("email-evals: runtime unavailable\n");
@@ -18,6 +28,43 @@ function runNode(args, options) {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve(code ?? (signal ? 4 : 4)));
   });
+}
+
+function runRuntimeNode(args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { ...options, stdio: ["inherit", "inherit", "pipe"] });
+    const chunks = [];
+    let size = 0;
+    let truncated = false;
+    child.stderr.on("data", (chunk) => {
+      if (size >= RUNTIME_STDERR_LIMIT) {
+        truncated = true;
+        return;
+      }
+      const remaining = RUNTIME_STDERR_LIMIT - size;
+      const retained = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      chunks.push(retained);
+      size += retained.length;
+      if (chunk.length > remaining) truncated = true;
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve({
+      code: code ?? (signal ? 4 : 4),
+      stderr: Buffer.concat(chunks).toString("utf8"),
+      truncated,
+    }));
+  });
+}
+
+function safeRuntimeExit(result, stderr) {
+  const expectedCode = !result.truncated ? SAFE_RUNTIME_DIAGNOSTICS.get(result.stderr) : undefined;
+  if (expectedCode !== undefined && result.code === expectedCode) {
+    stderr.write(result.stderr);
+    return result.code;
+  }
+  if (!result.truncated && result.stderr === "" && result.code === 0) return 0;
+  stderr.write("email-evals: runtime failure\n");
+  return 4;
 }
 
 async function regularNoLink(file) {
@@ -74,11 +121,11 @@ async function launchRuntime(argv, parsed, dependencies) {
     await dependencies.beforeExec?.();
     const immediatelyBeforeExec = await regularNoLink(resolvedCli);
     if (!sameIdentity(beforeOpen, immediatelyBeforeExec) || await realpath(resolvedCli) !== resolvedCli) throw new Error("cli changed before execution");
-    return await dependencies.spawnNode([resolvedCli, ...argv], {
+    const result = await dependencies.spawnRuntime([resolvedCli, ...argv], {
       cwd: dependencies.cwd,
       env: dependencies.environment,
-      stdio: "inherit",
     });
+    return safeRuntimeExit(result, dependencies.stderr);
   } catch {
     return unavailable(dependencies.stderr);
   } finally {
@@ -93,6 +140,7 @@ export async function main(argv, supplied = {}) {
     stdout: process.stdout,
     stderr: process.stderr,
     spawnNode: runNode,
+    spawnRuntime: runRuntimeNode,
     ...supplied,
   };
   if (argv[0] === "scaffold" || argv[0] === "setup") return launchLocal(argv[0], argv.slice(1), dependencies);

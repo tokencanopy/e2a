@@ -92,3 +92,26 @@ test("launcher rejects suite/runtime/CLI symlinks and detects a post-check runti
   }), 2);
   await assert.rejects(readFile(fixture.marker, "utf8"), { code: "ENOENT" });
 });
+
+test("launcher contains runtime stderr while preserving its fixed diagnostic protocol", async () => {
+  const fixture = await runtimeFixture();
+  const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
+  const cli = path.join(fixture.runtime, "cli.mjs");
+
+  await writeFile(cli, 'throw new Error("e2a_acct_synthetic /private/tmp/secret-suite.yaml");\n');
+  const importFailure = await shell("bash", [launcher, "validate", "--suite", fixture.suite]);
+  assert.equal(importFailure.code, 4);
+  assert.equal(importFailure.stderr, "email-evals: runtime failure\n");
+  assert.doesNotMatch(importFailure.stderr, /e2a_acct_|\/private\/tmp/);
+
+  await writeFile(cli, 'process.stderr.write("email-evals: transport_error\\n"); process.exitCode = 3;\n');
+  const knownDiagnostic = await shell("bash", [launcher, "validate", "--suite", fixture.suite]);
+  assert.equal(knownDiagnostic.code, 3);
+  assert.equal(knownDiagnostic.stderr, "email-evals: transport_error\n");
+
+  await writeFile(cli, 'process.stderr.write("e2a_acct_synthetic".repeat(1024 * 1024)); process.exitCode = 4;\n');
+  const oversized = await shell("bash", [launcher, "validate", "--suite", fixture.suite]);
+  assert.equal(oversized.code, 4);
+  assert.equal(oversized.stderr, "email-evals: runtime failure\n");
+  assert.doesNotMatch(oversized.stderr, /e2a_acct_/);
+});

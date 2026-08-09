@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { EvalError } from "../lib/errors.mjs";
-import { main } from "../cli.mjs";
+import { main, validateReportArtifact } from "../cli.mjs";
 
 const ACTOR = "actor@eval.test";
 const TARGET = "target@eval.test";
@@ -77,6 +77,9 @@ function harness(overrides = {}) {
         calls.push(`regrade:${runDirectory}`);
         return overrides.regradeSummary ?? summary();
       },
+      // Unit runner results are synthetic; artifact validation has direct
+      // filesystem regressions below.
+      validateReport: async () => "run_20260808T120000_0123abcd/report.md",
       ...overrides.dependencies,
     },
   };
@@ -213,10 +216,42 @@ test("JSON stdout is one object and human output carries a safe report path", as
 
   const pathLeak = summary();
   pathLeak.files.report = `/results/${ACTOR}/e2a_acct_synthetic/report.md`;
-  const redactedPath = harness({ runSummary: pathLeak });
-  assert.equal(await main(["run", "--suite", "suite.yaml"], redactedPath.dependencies), 0);
-  assert.match(stdout(redactedPath), /Report: run_20260808T120000_0123abcd\/report\.md/);
-  assert.doesNotMatch(stdout(redactedPath), /actor@eval\.test|e2a_acct_|\/results\//);
+  const rejectedPath = harness({ runSummary: pathLeak, dependencies: { validateReport: async () => { throw new Error("unsafe path"); } } });
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--json"], rejectedPath.dependencies), 4);
+  assert.equal(stdout(rejectedPath), "");
+  assert.equal(stderr(rejectedPath), "email-evals: unexpected runner failure\n");
+});
+
+test("report artifacts must be regular expected files in their canonical run directory", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-report-"));
+  const runId = "run_20260808T120000_0123abcd";
+  const run = path.join(root, runId);
+  const report = path.join(run, "report.md");
+  await mkdir(run);
+  await writeFile(report, "# Synthetic report\n");
+  const valid = { runId, files: { report } };
+  assert.equal(await validateReportArtifact({ command: "run", summary: valid, outputRoot: root }), `${runId}/report.md`);
+  assert.equal(await validateReportArtifact({ command: "regrade", summary: valid, runDirectory: run }), `${runId}/report.md`);
+
+  for (const altered of [
+    { runId, files: {} },
+    { runId, files: { report: 42 } },
+    { runId, files: { report: path.join(root, "elsewhere", "report.md") } },
+    { runId, files: { report: path.join(run, "..", "report.md") } },
+    { runId: "run_20260808T120000_deadbeef", files: { report } },
+  ]) {
+    await assert.rejects(validateReportArtifact({ command: "run", summary: altered, outputRoot: root }));
+  }
+
+  const linkedRun = path.join(root, "run_20260808T120001_0123abcd");
+  await mkdir(linkedRun);
+  const linkedReport = path.join(linkedRun, "report.md");
+  await symlink(report, linkedReport);
+  await assert.rejects(validateReportArtifact({
+    command: "run",
+    summary: { runId: path.basename(linkedRun), files: { report: linkedReport } },
+    outputRoot: root,
+  }));
 });
 
 test("unexpected errors have stable safe diagnostics", async () => {
