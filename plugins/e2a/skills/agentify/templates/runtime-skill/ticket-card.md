@@ -77,8 +77,9 @@ append-only `events` array; use `add-event` to extend it.
 
 Each filer application conversation maps to at most one ticket via its
 `conversation_id`. The
-crash-safe dedup key is the **bot-authored issue-body footer**
-`<!-- {marker} comms:<conversation_id> -->`, written ATOMICALLY with the
+crash-safe dedup key is the **exact last nonblank, bot-authored issue-body footer**
+`<!-- {marker} comms:<conversation_id> -->`, trusted only when both the
+configured marker and bot author match, and written ATOMICALLY with the
 issue body — so it exists even if the run dies before the ticket-card is
 written. Before creating an issue, run `ticket_card.sh find-by-comms
 <conversation_id>`; if it returns an issue, the email is already triaged (a
