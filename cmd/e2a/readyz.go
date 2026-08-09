@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/migrations"
@@ -38,6 +40,9 @@ const (
 	readinessProbeInterval = 2 * time.Second
 	readinessProbeTimeout  = 5 * time.Second
 	readinessFailureGrace  = 15 * time.Second
+	// poolProbeTimeout bounds the pool-usability check. Short on purpose: it
+	// distinguishes "closed/broken" from "busy" and must never wait on capacity.
+	poolProbeTimeout = 250 * time.Millisecond
 )
 
 type readinessState struct {
@@ -58,6 +63,13 @@ type readinessMonitor struct {
 
 	mu     sync.Mutex // guards lastOK
 	lastOK time.Time
+
+	// The monitor's own connection, deliberately outside the pool — see probe().
+	connMu sync.Mutex
+	conn   *pgx.Conn
+
+	// probeFn overrides the real probe in tests.
+	probeFn func() (string, error)
 
 	state    atomic.Pointer[readinessState]
 	stop     chan struct{}
@@ -94,7 +106,10 @@ func newReadinessMonitorWithConfig(pool *pgxpool.Pool, draining *atomic.Bool, in
 }
 
 func (m *readinessMonitor) Stop() {
-	m.stopOnce.Do(func() { close(m.stop) })
+	m.stopOnce.Do(func() {
+		close(m.stop)
+		m.closeProbeConn()
+	})
 }
 
 // evaluate runs one probe and folds it into the published verdict.
@@ -135,21 +150,89 @@ func (m *readinessMonitor) run() {
 
 // probe returns a not-ready reason and the underlying error, or a nil error
 // when the instance is serviceable.
+//
+// It runs on a connection the monitor owns, NOT one borrowed from the shared
+// pool. Probing through the pool would reintroduce the bug in slower motion:
+// pool.Ping has to acquire a pooled connection, so a saturated pool starves the
+// probe exactly as it starved the old inline check, and a saturation lasting
+// longer than the grace window would still evict the instance. A dedicated
+// connection makes the probe measure what it claims to measure — whether the
+// database is reachable — independently of how busy the pool is.
 func (m *readinessMonitor) probe() (string, error) {
+	if m.probeFn != nil {
+		return m.probeFn()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	defer cancel()
 
-	if err := m.pool.Ping(ctx); err != nil {
-		return "database unreachable", err
+	// The dedicated connection deliberately cannot observe the pool, so check
+	// the pool's own usability separately: an instance whose pool is closed or
+	// broken cannot serve, however reachable the database is. A short deadline
+	// keeps this from becoming the starvation path it replaces — under
+	// saturation the acquire simply times out, and a timeout means BUSY, which
+	// is precisely the condition readiness must tolerate. Any other error means
+	// the pool itself is unusable.
+	acqCtx, acqCancel := context.WithTimeout(ctx, poolProbeTimeout)
+	c, err := m.pool.Acquire(acqCtx)
+	acqCancel()
+	switch {
+	case err == nil:
+		c.Release()
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		// Saturated, not broken. Keep going.
+	default:
+		return "connection pool unavailable", err
 	}
-	applied, err := latestMigrationApplied(ctx, m.pool, m.latest)
+
+	conn, err := m.probeConn(ctx)
 	if err != nil {
 		return "database unreachable", err
+	}
+	if err := conn.Ping(ctx); err != nil {
+		// A connection the server has since closed looks identical to an
+		// unreachable database on first use. Drop it so the next tick redials
+		// rather than reporting a stale socket as an outage forever.
+		m.closeProbeConn()
+		return "database unreachable", err
+	}
+	applied, err := latestMigrationApplied(ctx, conn, m.latest)
+	if err != nil {
+		m.closeProbeConn()
+		// The database answered the ping, so this is a failing query rather
+		// than an unreachable server — do not mislabel it in the readiness
+		// reason or the operator chases the wrong thing.
+		return "migration check failed", err
 	}
 	if !applied {
 		return "migrations not applied", errNotApplied
 	}
 	return "", nil
+}
+
+// probeConn lazily dials (and memoizes) the monitor's own connection, built
+// from the pool's connection config so it targets the same database with the
+// same credentials.
+func (m *readinessMonitor) probeConn(ctx context.Context) (*pgx.Conn, error) {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if m.conn != nil && !m.conn.IsClosed() {
+		return m.conn, nil
+	}
+	conn, err := pgx.ConnectConfig(ctx, m.pool.Config().ConnConfig)
+	if err != nil {
+		return nil, err
+	}
+	m.conn = conn
+	return conn, nil
+}
+
+func (m *readinessMonitor) closeProbeConn() {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if m.conn != nil {
+		_ = m.conn.Close(context.Background())
+		m.conn = nil
+	}
 }
 
 var errNotApplied = fmt.Errorf("latest migration not applied")
@@ -194,7 +277,13 @@ func writeNotReady(w http.ResponseWriter, reason string) {
 // latestMigrationApplied reports whether the given migration filename is
 // recorded in schema_migrations. An empty filename (no embedded migrations)
 // trivially counts as applied.
-func latestMigrationApplied(ctx context.Context, pool *pgxpool.Pool, latest string) (bool, error) {
+// querier is satisfied by both *pgxpool.Pool and *pgx.Conn, so the migration
+// check can run on the monitor's dedicated connection.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func latestMigrationApplied(ctx context.Context, pool querier, latest string) (bool, error) {
 	if latest == "" {
 		return true, nil
 	}

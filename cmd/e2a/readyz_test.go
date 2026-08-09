@@ -115,14 +115,9 @@ func TestReadyzHandler_Draining(t *testing.T) {
 // Previously /readyz called pool.Ping inline, so pool exhaustion timed out the
 // check and reported "database unreachable". HAProxy marked the only backend
 // DOWN and answered every request — including ones that never touch the DB —
-// with its own 503. Here a monitor that has been healthy keeps reporting ready
-// while probes fail inside the grace window.
+// with its own 503.
 func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
-	healthy := migratedTestDB(t)
-
-	// Start healthy so lastOK is set, then swap in a dead pool to simulate the
-	// probe failing without the database having actually gone away.
-	m := newReadinessMonitorWithConfig(healthy, nil, time.Hour, time.Hour, 2*time.Second)
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, time.Hour, 2*time.Second)
 	defer m.Stop()
 
 	rec := httptest.NewRecorder()
@@ -131,13 +126,8 @@ func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
 		t.Fatalf("precondition: status = %d, want 200", rec.Code)
 	}
 
-	dead, err := pgxpool.New(context.Background(), testutil.TestDBURL())
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	dead.Close()
-	m.pool = dead
-	m.evaluate() // probe fails, but we are well inside the grace window
+	m.probeFn = func() (string, error) { return "database unreachable", errNotApplied }
+	m.evaluate() // fails, but we are well inside the grace window
 
 	rec = httptest.NewRecorder()
 	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -150,16 +140,10 @@ func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
 // A failure that outlives the grace window must still flip readiness — the
 // tolerance above must not become "never report a dead database".
 func TestReadinessFlipsAfterGraceExpires(t *testing.T) {
-	healthy := migratedTestDB(t)
-	m := newReadinessMonitorWithConfig(healthy, nil, time.Hour, 0, 2*time.Second)
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, 0, 2*time.Second)
 	defer m.Stop()
 
-	dead, err := pgxpool.New(context.Background(), testutil.TestDBURL())
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	dead.Close()
-	m.pool = dead
+	m.probeFn = func() (string, error) { return "database unreachable", errNotApplied }
 	time.Sleep(2 * time.Millisecond) // ensure now-lastOK exceeds the zero grace
 	m.evaluate()
 
@@ -167,6 +151,46 @@ func TestReadinessFlipsAfterGraceExpires(t *testing.T) {
 	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 once the grace window has expired", rec.Code)
+	}
+}
+
+// The probe must not borrow from the pool. Probing through pool.Ping would
+// reintroduce the original bug in slower motion: a saturated pool starves the
+// probe just as it starved the inline check, so a saturation outlasting the
+// grace window would evict the instance anyway. Here every pooled connection is
+// held open and the probe must still succeed.
+func TestReadinessProbeSurvivesPoolExhaustion(t *testing.T) {
+	pool := migratedTestDB(t)
+	m := newReadinessMonitorWithConfig(pool, nil, time.Hour, 0, 3*time.Second)
+	defer m.Stop()
+
+	ctx := context.Background()
+	held := make([]*pgxpool.Conn, 0, pool.Config().MaxConns)
+	for i := int32(0); i < pool.Config().MaxConns; i++ {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			c.Release()
+		}
+	}()
+	if pool.Stat().AcquiredConns() != pool.Config().MaxConns {
+		t.Fatalf("precondition: pool not exhausted (%d/%d acquired)",
+			pool.Stat().AcquiredConns(), pool.Config().MaxConns)
+	}
+
+	// grace is 0, so any probe failure flips readiness immediately.
+	m.evaluate()
+
+	rec := httptest.NewRecorder()
+	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: an exhausted pool made the probe report the database unreachable; body=%s",
+			rec.Code, rec.Body.String())
 	}
 }
 
