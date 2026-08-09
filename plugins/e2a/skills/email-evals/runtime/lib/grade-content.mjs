@@ -78,7 +78,18 @@ function expectedAttachments(value) {
   if (!Array.isArray(value)) return null;
   return value.map((entry) => {
     if (typeof entry === "string") return entry.length > 0 ? { filename: entry } : null;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).length === 0) return null;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.getPrototypeOf(entry) !== Object.prototype) return null;
+    const keys = Object.keys(entry);
+    if (keys.length === 0) return null;
+    const allowed = new Set(["filename", "contentType", "disposition", "sizeBytes", "sha256"]);
+    if (keys.some((key) => !allowed.has(key))) return null;
+    for (const key of keys) {
+      const field = entry[key];
+      if (field === undefined) return null;
+      if (key === "sizeBytes") {
+        if (!Number.isSafeInteger(field) || field < 0) return null;
+      } else if (typeof field !== "string" || field.length === 0) return null;
+    }
     return entry;
   });
 }
@@ -104,18 +115,24 @@ function attachmentMatch(expected, actual) {
 
 function timestamp(value) {
   if (typeof value !== "string") return { error: "missing_timing_evidence" };
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z|[+-]\d{2}:\d{2})$/);
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/);
   if (!match) return { error: "invalid_timestamp" };
-  const [year, month, day, hour, minute, second, millisecond = "0", zone] = match.slice(1);
+  const [year, month, day, hour, minute, second, fraction = "", zone] = match.slice(1);
+  // RFC3339 permits arbitrary fractional precision. Arithmetic is millisecond
+  // based, so deliberately truncate (never round) beyond three digits.
+  const millisecond = fraction.slice(0, 3).padEnd(3, "0");
   const values = [year, month, day, hour, minute, second, millisecond].map(Number);
   if (values.some((entry) => !Number.isSafeInteger(entry))) return { error: "invalid_timestamp" };
   const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber, millisecondNumber] = values;
-  if (monthNumber < 1 || monthNumber > 12 || dayNumber < 1 || hourNumber > 23 || minuteNumber > 59 || secondNumber > 59 || millisecondNumber > 999) return { error: "invalid_timestamp" };
+  if (monthNumber < 1 || monthNumber > 12 || dayNumber < 1 || hourNumber > 23 || minuteNumber > 59 || secondNumber > 60 || millisecondNumber > 999) return { error: "invalid_timestamp" };
   const local = new Date(0);
   local.setUTCFullYear(yearNumber, monthNumber - 1, dayNumber);
-  local.setUTCHours(hourNumber, minuteNumber, secondNumber, millisecondNumber);
+  // Date normalizes :60, so validate the civil date at :59 then add one
+  // second to represent a legal RFC3339 leap second deterministically.
+  const civilSecond = secondNumber === 60 ? 59 : secondNumber;
+  local.setUTCHours(hourNumber, minuteNumber, civilSecond, millisecondNumber);
   if (local.getUTCFullYear() !== yearNumber || local.getUTCMonth() !== monthNumber - 1 || local.getUTCDate() !== dayNumber
-    || local.getUTCHours() !== hourNumber || local.getUTCMinutes() !== minuteNumber || local.getUTCSeconds() !== secondNumber
+    || local.getUTCHours() !== hourNumber || local.getUTCMinutes() !== minuteNumber || local.getUTCSeconds() !== civilSecond
     || local.getUTCMilliseconds() !== millisecondNumber) return { error: "invalid_timestamp" };
   let offsetMinutes = 0;
   if (zone !== "Z") {
@@ -125,7 +142,7 @@ function timestamp(value) {
     if (offsetHour > 23 || offsetMinute > 59) return { error: "invalid_timestamp" };
     offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
   }
-  const milliseconds = local.getTime() - offsetMinutes * 60_000;
+  const milliseconds = local.getTime() + (secondNumber === 60 ? 1_000 : 0) - offsetMinutes * 60_000;
   return Number.isSafeInteger(milliseconds) && Number.isFinite(milliseconds) ? { milliseconds } : { error: "invalid_timestamp" };
 }
 
@@ -139,9 +156,28 @@ function receiptState(evidence, candidates) {
     return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [] };
   }
   if (timestamp(receipt.observedAt).error) return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [receipt.ref] };
-  const candidateIds = candidates.map((candidate) => candidate.messageId).filter((value) => typeof value === "string" && value.length > 0);
-  if (candidateIds.length === 0 || !candidateIds.includes(receipt.messageId)) {
+  const matching = [];
+  const seenRefs = new Map();
+  for (const candidate of candidates) {
+    if (candidate.messageId !== receipt.messageId) continue;
+    const ref = typeof candidate.ref === "string" && candidate.ref.length > 0 ? candidate.ref : null;
+    if (ref === null) {
+      matching.push(candidate);
+      continue;
+    }
+    const previous = seenRefs.get(ref);
+    if (previous === undefined) {
+      seenRefs.set(ref, candidate);
+      matching.push(candidate);
+    } else if (canonical(previous) !== canonical(candidate)) {
+      matching.push(candidate);
+    }
+  }
+  if (matching.length === 0) {
     return { status: "fail", code: "unexpected_actor_receipt", actual: { messageId: receipt.messageId }, refs: [receipt.ref] };
+  }
+  if (matching.length !== 1) {
+    return { status: "fail", code: "ambiguous_actor_receipt", actual: { messageId: receipt.messageId, refs: references(matching) }, refs: [receipt.ref] };
   }
   return { status: "valid", present: true, actual: { messageId: receipt.messageId }, refs: [receipt.ref] };
 }

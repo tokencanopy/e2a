@@ -115,6 +115,16 @@ test("content grading checks ordered attachment metadata and explicit capabiliti
   assertResult(malformedExpectation, "attachments.exactly", "error", "invalid_attachment_expectation");
 });
 
+test("direct attachment expectations require defined supported metadata fields", () => {
+  const attachment = { filename: "refund-policy.txt", contentType: "text/plain", disposition: "attachment", sizeBytes: 18, sha256: "d2b3ec0450082cc4693ad0a0c490c6c8581a03ed1c2552e9d5c4a09611a72300" };
+  const good = gradeContent(expectation({ attachments: { exactly: [{ filename: "refund-policy.txt" }] } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, attachments: [attachment] } })] }));
+  assertResult(good, "attachments.exactly", "pass");
+  for (const spec of [{ bogus: "value" }, { filename: undefined }, { sizeBytes: -1 }, { sizeBytes: "18" }, {}]) {
+    const result = gradeContent(expectation({ attachments: { exactly: [spec] } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, attachments: [attachment] } })] }));
+    assertResult(result, "attachments.exactly", "error", "invalid_attachment_expectation");
+  }
+});
+
 test("literal Unicode facts and missing MIME fields stay deterministic", () => {
   const unicode = gradeContent(expectation({ body: { requiredFacts: ["返金は30日以内です"], plainText: "required", maxSize: 4 } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, text: "返金は30日以内です", sizeBytes: 5 } })] }));
   assertResult(unicode, "body.required_facts", "pass");
@@ -142,6 +152,16 @@ test("timing accepts only calendar-valid timezone-qualified instants", () => {
   }
 });
 
+test("timing truncates RFC3339 fractions to milliseconds and accepts leap seconds", () => {
+  const timing = { timing: { replyWithinMs: 123 } };
+  assertResult(gradeContent(expectation(timing), evidence({ candidates: [candidate({ observedAt: "2026-08-08T12:00:00.1Z" })] })), "timing.reply_within", "pass");
+  assertResult(gradeContent(expectation(timing), evidence({ candidates: [candidate({ observedAt: "2026-08-08T12:00:00.1234Z" })] })), "timing.reply_within", "pass");
+  assertResult(gradeContent(expectation({ timing: { replyWithinMs: 60_000 } }), evidence({ stimulus: { ...evidence().stimulus, receivedAt: "2016-12-31T23:59:00Z" }, candidates: [candidate({ observedAt: "2016-12-31T23:59:60Z" })] })), "timing.reply_within", "pass");
+  for (const observedAt of ["2026-08-08T12:00:61Z", "2026-02-29T00:00:00.1+01:00"]) {
+    assertResult(gradeContent(expectation(), evidence({ candidates: [candidate({ observedAt })] })), "timing.reply_within", "error", "invalid_timestamp");
+  }
+});
+
 test("lifecycle requires per-candidate submission and a complete matching actor receipt", () => {
   const globalFallback = gradeContent(expectation(), evidence({ lifecycle: { submission: "sent" }, candidates: [candidate(), candidate({ ref: "evt_synthetic_missing_lifecycle", messageId: "msg_synthetic_missing_lifecycle", lifecycle: undefined })] }));
   assertResult(globalFallback, "lifecycle.submission", "error", "missing_lifecycle_evidence");
@@ -154,6 +174,14 @@ test("lifecycle requires per-candidate submission and a complete matching actor 
   assertResult(wrongReceipt, "lifecycle.actor_received", "fail", "unexpected_actor_receipt");
   const unexpectedReceipt = gradeContent(expectation({ lifecycle: { submission: "sent", actorReceived: false } }), evidence());
   assertResult(unexpectedReceipt, "lifecycle.actor_received", "fail", "unexpected_actor_receipt");
+});
+
+test("actor receipts require one distinct correlated candidate after stable replay deduplication", () => {
+  const replay = candidate();
+  const deduped = gradeContent(expectation(), evidence({ candidates: [replay, { ...replay }] }));
+  assertResult(deduped, "lifecycle.actor_received", "pass");
+  const ambiguous = gradeContent(expectation(), evidence({ candidates: [candidate(), candidate({ ref: "evt_synthetic_same_message", messageId: "msg_synthetic_reply" })] }));
+  assertResult(ambiguous, "lifecycle.actor_received", "fail", "ambiguous_actor_receipt");
 });
 
 test("plain-text forbidden requires normalized evidence but accepts explicit null", () => {
