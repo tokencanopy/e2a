@@ -1,4 +1,4 @@
--- 095_batches.sql
+-- 099_batches.sql
 --
 -- Storage for the batch-send feature — the primitive that lets one API call
 -- fan out N independent messages, each with its own message_id/state/retry

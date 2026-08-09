@@ -75,7 +75,7 @@ type BatchStatusRollup struct {
 // for one message. Mirrors CreateOutboundMessageTx's positional args as a
 // struct so a batch of N doesn't need a 14-arg loop body. When BatchID is
 // non-empty the resulting messages row is linked back to that batch header
-// via the FK added in migration 095. See docs/design/batch-send.md §9
+// via the FK added in migration 099. See docs/design/batch-send.md §9
 // (accept-tx step 10.b).
 type OutboundMessageInput struct {
 	AgentID           string
@@ -163,7 +163,7 @@ func (s *Store) GetBatch(ctx context.Context, batchID string) (*Batch, error) {
 // BatchStatusRollupByID computes the delivery-status histogram over the
 // batch's child messages rows in one grouped query. Not cached — batch
 // observation is a rare, poll-after-send operation and at ≤100 rows per
-// batch the query is cheap (the partial index in migration 095 makes the
+// batch the query is cheap (the partial index in migration 099 makes the
 // WHERE batch_id = $1 scan a bounded lookup). See docs/design/batch-send.md
 // §7.1.
 //

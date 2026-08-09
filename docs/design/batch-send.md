@@ -191,7 +191,7 @@ CREATE INDEX batches_user_created_at_idx  ON batches (user_id,  created_at DESC)
 CREATE INDEX batches_agent_created_at_idx ON batches (agent_id, created_at DESC);
 ```
 
-**Type corrections from the initial draft.** The initial draft referenced `accounts(account_id)` and `agents(agent_id)` with `UUID` FKs. Neither exists in this codebase — the actual ownership chain is `users.id` (TEXT, `usr_...`) → `agent_identities.id` (TEXT, `agt_...`); there is no `accounts` table (the word appears only in the /v1 `AccountView` API resource, which is a projection over users + limits + usage). The schema above uses the real column shapes and reference targets; migration `095_batches.sql` embeds this SQL.
+**Type corrections from the initial draft.** The initial draft referenced `accounts(account_id)` and `agents(agent_id)` with `UUID` FKs. Neither exists in this codebase — the actual ownership chain is `users.id` (TEXT, `usr_...`) → `agent_identities.id` (TEXT, `agt_...`); there is no `accounts` table (the word appears only in the /v1 `AccountView` API resource, which is a projection over users + limits + usage). The schema above uses the real column shapes and reference targets; migration `099_batches.sql` embeds this SQL.
 
 Rationale for storing `suppressed_json` on the batch row (not per-message): a suppressed item produces NO `messages` row, so there is no other durable place to record the drop. The batch row is the only place that remembers "item i was in your request but we skipped it because address X hit the suppression list."
 
