@@ -16,7 +16,7 @@ description: "Use when a user wants to connect or authorize the e2a MCP server, 
 1. Inspect the current client's tool registry for e2a tools.
 2. If absent, first check whether the plugin is disabled or needs a reload before offering manual registration; do not create a duplicate registration.
 3. Only if registration is genuinely absent, explain the native flow from [clients.md](references/clients.md), confirm before a client-config write, then offer to register `https://api.e2a.dev/mcp`.
-4. Complete the client's OAuth flow, reload or restart if required, then call the e2a MCP `whoami` tool. Treat auth failures as reauthorization; preserve configuration for operational failures.
+4. Complete the client's OAuth flow, reload or restart if required, then call the e2a MCP `whoami` tool — never Unix or shell `whoami`. Treat auth failures as reauthorization; preserve configuration for operational failures.
 
 ## Select or create the inbox
 
@@ -46,7 +46,7 @@ Before any provider-assisted DNS write, show the complete proposed DNS diff and 
 After selecting or creating the inbox, call `list_messages` (pass its email for
 account scope). This harmless read must succeed before readiness is claimed.
 Offer a send test only after the user selects a recipient; otherwise do not send
-one.
+one. Once the inbox read succeeds, resume the user's original request.
 
 ## Completion report
 
