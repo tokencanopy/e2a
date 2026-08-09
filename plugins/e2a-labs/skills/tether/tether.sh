@@ -438,6 +438,13 @@ except Exception:print("")')"
     badrem="$(TETHER_STATE="$badf" t_remaining_seconds)"
     ck "malformed stored expiry is expired" "$badrem" "-1"
     rm -f "$badf"
+    legacyf=/tmp/tether-selftest-legacy-expiry.json
+    printf '{"expires_at":"2999-08-08T18:00:00"}' > "$legacyf"
+    legacyrem="$(TETHER_STATE="$legacyf" t_remaining_seconds)"
+    ck "legacy naive stored expiry remains active" "$([ "$legacyrem" -gt 0 ] && echo yes)" "yes"
+    legacyexp="$(TETHER_STATE="$legacyf" t_state_get expires_at)"
+    ck "legacy naive stored expiry is normalized" "$([ "${legacyexp%Z}" != "$legacyexp" ] && echo yes)" "yes"
+    rm -f "$legacyf" "${legacyf}.lock"
     corruptf=/tmp/tether-selftest-corrupt-state.json
     printf '{not-json' > "$corruptf"
     corruptrem="$(TETHER_STATE="$corruptf" t_remaining_seconds)"
