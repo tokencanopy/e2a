@@ -311,14 +311,20 @@ except Exception:
 
 # t_remaining_seconds → seconds until expires_at; huge sentinel if no expiry
 t_remaining_seconds() {
-  local exp; exp="$(t_state_get expires_at)"
-  [ -n "$exp" ] || { echo 2147483647; return; }
-  python3 -c 'import sys,datetime
+  local f; f="$(t_state_path)"
+  [ -f "$f" ] || { echo 2147483647; return; }
+  python3 -c 'import sys,datetime,json
 try:
-  t=datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))
+  state=json.load(open(sys.argv[1]))
+  if not isinstance(state,dict): raise ValueError("state must be an object")
+  if "expires_at" not in state or state["expires_at"] == "":
+    print(2147483647); raise SystemExit
+  exp=state["expires_at"]
+  if not isinstance(exp,str): raise ValueError("expires_at must be a string")
+  t=datetime.datetime.fromisoformat(exp.replace("Z","+00:00"))
   if t.tzinfo is None or t.utcoffset() is None: raise ValueError("timezone required")
   print(int((t-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
-except Exception:print(-1)' "$exp"
+except Exception:print(-1)' "$f"
 }
 
 # --- e2a API (via the CLI) -----------------------------------------------------

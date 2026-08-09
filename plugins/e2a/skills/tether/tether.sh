@@ -438,6 +438,11 @@ except Exception:print("")')"
     badrem="$(TETHER_STATE="$badf" t_remaining_seconds)"
     ck "malformed stored expiry is expired" "$badrem" "-1"
     rm -f "$badf"
+    corruptf=/tmp/tether-selftest-corrupt-state.json
+    printf '{not-json' > "$corruptf"
+    corruptrem="$(TETHER_STATE="$corruptf" t_remaining_seconds)"
+    ck "corrupt stored state is expired" "$corruptrem" "-1"
+    rm -f "$corruptf"
 
     echo "# placeholder creds are treated as MISSING:"
     ph="$(env E2A_API_KEY='e2a_agt_...' E2A_AGENT_EMAIL='tether@you.example' \
