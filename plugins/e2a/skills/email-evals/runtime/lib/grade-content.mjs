@@ -1,4 +1,11 @@
 const STATUS_WEIGHT = Object.freeze({ pass: 0, fail: 1, error: 2 });
+// Positive UTC leap-second insertion instants through IERS Bulletin C 72
+// (2026-07-06). Update this table when a later Bulletin C announces one.
+const LEAP_SECOND_UTC_INSTANTS = new Set([
+  "1972-07-01", "1973-01-01", "1974-01-01", "1975-01-01", "1976-01-01", "1977-01-01", "1978-01-01", "1979-01-01", "1980-01-01",
+  "1981-07-01", "1982-07-01", "1983-07-01", "1985-07-01", "1988-01-01", "1990-01-01", "1991-01-01", "1992-07-01", "1993-07-01",
+  "1994-07-01", "1996-01-01", "1997-07-01", "1999-01-01", "2006-01-01", "2009-01-01", "2012-07-01", "2015-07-01", "2017-01-01",
+].map((date) => Date.parse(`${date}T00:00:00.000Z`)));
 
 function serializable(value) {
   return value === undefined ? null : JSON.parse(JSON.stringify(value));
@@ -10,6 +17,26 @@ function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
+}
+
+function isJsonSafePlainData(value, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+  if (Array.isArray(value)) {
+    if (Object.getOwnPropertySymbols(value).length > 0 || Object.keys(value).some((key) => !/^(?:0|[1-9]\d*)$/.test(key))) return false;
+    ancestors.add(value);
+    const valid = Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index) && isJsonSafePlainData(value[index], ancestors)).every(Boolean);
+    ancestors.delete(value);
+    return valid;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length > 0) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => !descriptor.enumerable || !Object.hasOwn(descriptor, "value"))) return false;
+  ancestors.add(value);
+  const valid = Object.values(descriptors).every((descriptor) => isJsonSafePlainData(descriptor.value, ancestors));
+  ancestors.delete(value);
+  return valid;
 }
 
 function references(candidates, extra = []) {
@@ -143,7 +170,9 @@ function timestamp(value) {
     offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
   }
   const milliseconds = local.getTime() + (secondNumber === 60 ? 1_000 : 0) - offsetMinutes * 60_000;
-  return Number.isSafeInteger(milliseconds) && Number.isFinite(milliseconds) ? { milliseconds } : { error: "invalid_timestamp" };
+  if (!Number.isSafeInteger(milliseconds) || !Number.isFinite(milliseconds)) return { error: "invalid_timestamp" };
+  if (secondNumber === 60 && !LEAP_SECOND_UTC_INSTANTS.has(milliseconds - millisecondNumber)) return { error: "invalid_timestamp" };
+  return { milliseconds };
 }
 
 function receiptState(evidence, candidates) {
@@ -156,6 +185,10 @@ function receiptState(evidence, candidates) {
     return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [] };
   }
   if (timestamp(receipt.observedAt).error) return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [receipt.ref] };
+  const malformed = candidates.filter((candidate) => !isJsonSafePlainData(candidate));
+  if (malformed.length > 0) {
+    return { status: "error", code: "malformed_candidate_evidence", actual: { refs: references(malformed) }, refs: [receipt.ref] };
+  }
   const matching = [];
   const seenRefs = new Map();
   for (const candidate of candidates) {

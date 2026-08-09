@@ -162,6 +162,17 @@ test("timing truncates RFC3339 fractions to milliseconds and accepts leap second
   }
 });
 
+test("leap seconds must resolve to a published UTC insertion instant", () => {
+  const timing = expectation({ timing: { replyWithinMs: 60_000 } });
+  const base = { stimulus: { ...evidence().stimulus, receivedAt: "2016-12-31T23:59:00Z" } };
+  for (const observedAt of ["2016-12-31T23:59:60Z", "2017-01-01T00:59:60+01:00", "2016-12-31T18:59:60-05:00"]) {
+    assertResult(gradeContent(timing, evidence({ ...base, candidates: [candidate({ observedAt })] })), "timing.reply_within", "pass");
+  }
+  for (const observedAt of ["2016-12-31T12:00:60Z", "2015-12-31T23:59:60Z", "2016-12-31T23:59:60+01:00"]) {
+    assertResult(gradeContent(timing, evidence({ ...base, candidates: [candidate({ observedAt })] })), "timing.reply_within", "error", "invalid_timestamp");
+  }
+});
+
 test("lifecycle requires per-candidate submission and a complete matching actor receipt", () => {
   const globalFallback = gradeContent(expectation(), evidence({ lifecycle: { submission: "sent" }, candidates: [candidate(), candidate({ ref: "evt_synthetic_missing_lifecycle", messageId: "msg_synthetic_missing_lifecycle", lifecycle: undefined })] }));
   assertResult(globalFallback, "lifecycle.submission", "error", "missing_lifecycle_evidence");
@@ -182,6 +193,17 @@ test("actor receipts require one distinct correlated candidate after stable repl
   assertResult(deduped, "lifecycle.actor_received", "pass");
   const ambiguous = gradeContent(expectation(), evidence({ candidates: [candidate(), candidate({ ref: "evt_synthetic_same_message", messageId: "msg_synthetic_reply" })] }));
   assertResult(ambiguous, "lifecycle.actor_received", "fail", "ambiguous_actor_receipt");
+});
+
+test("actor receipt replay deduplication rejects non-JSON-safe candidate evidence", () => {
+  const first = candidate({ diagnostic: NaN });
+  const second = candidate({ diagnostic: null });
+  const nan = gradeContent(expectation(), evidence({ candidates: [first, second] }));
+  assertResult(nan, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  const infinity = gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: Infinity }), candidate({ diagnostic: Infinity })] }));
+  assertResult(infinity, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  const replay = candidate({ diagnostic: { stable: true } });
+  assertResult(gradeContent(expectation(), evidence({ candidates: [replay, structuredClone(replay)] })), "lifecycle.actor_received", "pass");
 });
 
 test("plain-text forbidden requires normalized evidence but accepts explicit null", () => {
