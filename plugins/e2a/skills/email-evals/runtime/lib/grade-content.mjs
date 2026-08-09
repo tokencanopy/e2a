@@ -1,4 +1,14 @@
 const STATUS_WEIGHT = Object.freeze({ pass: 0, fail: 1, error: 2 });
+// Eval evidence is normally fewer than ten levels deep, contains a handful of
+// candidates/attachments, and stays well below one thousand scalar fields.
+// These deliberately generous limits bound work before grading untrusted
+// evidence while leaving substantial room for local diagnostic metadata.
+const EVIDENCE_SNAPSHOT_LIMITS = Object.freeze({
+  maxDepth: 64,
+  maxNodes: 8_192,
+  maxObjectKeys: 256,
+  maxArrayLength: 1_024,
+});
 // Positive UTC leap-second insertion instants through IERS Bulletin C 72
 // (2026-07-06). Update this table when a later Bulletin C announces one.
 const LEAP_SECOND_UTC_INSTANTS = new Set([
@@ -19,24 +29,111 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
-function isJsonSafePlainData(value, ancestors = new Set()) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object" || ancestors.has(value)) return false;
-  if (Array.isArray(value)) {
-    if (Object.getOwnPropertySymbols(value).length > 0 || Object.keys(value).some((key) => !/^(?:0|[1-9]\d*)$/.test(key))) return false;
-    ancestors.add(value);
-    const valid = Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index) && isJsonSafePlainData(value[index], ancestors)).every(Boolean);
-    ancestors.delete(value);
-    return valid;
+function snapshotJsonSafePlainData(value) {
+  let root;
+  let nodeCount = 0;
+  let currentRootKey = null;
+  const active = new Set();
+  const stack = [{ kind: "visit", source: value, parent: null, key: null, depth: 0, rootKey: null }];
+
+  const assign = (parent, key, snapshot) => {
+    if (parent === null) {
+      root = snapshot;
+      return;
+    }
+    Object.defineProperty(parent, key, {
+      value: snapshot,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  const invalid = (reason) => ({ ok: false, reason, rootKey: currentRootKey });
+
+  try {
+    while (stack.length > 0) {
+      const frame = stack.pop();
+      currentRootKey = frame.rootKey;
+      if (frame.kind === "exit") {
+        active.delete(frame.source);
+        continue;
+      }
+
+      nodeCount += 1;
+      if (nodeCount > EVIDENCE_SNAPSHOT_LIMITS.maxNodes) return invalid("node_limit");
+      if (frame.depth > EVIDENCE_SNAPSHOT_LIMITS.maxDepth) return invalid("depth_limit");
+
+      const type = typeof frame.source;
+      if (frame.source === null || type === "string" || type === "boolean") {
+        assign(frame.parent, frame.key, frame.source);
+        continue;
+      }
+      if (type === "number") {
+        if (!Number.isFinite(frame.source)) return invalid("non_finite_number");
+        assign(frame.parent, frame.key, frame.source);
+        continue;
+      }
+      if (type !== "object") return invalid("unsupported_value");
+      if (active.has(frame.source)) return invalid("cycle");
+
+      let target;
+      let children;
+      if (Array.isArray(frame.source)) {
+        const lengthDescriptor = Object.getOwnPropertyDescriptor(frame.source, "length");
+        if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, "value")
+          || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) return invalid("invalid_array_length");
+        const length = lengthDescriptor.value;
+        // Check length before enumerating keys or allocating the snapshot, so
+        // sparse hostile arrays cannot force work proportional to their length.
+        if (length > EVIDENCE_SNAPSHOT_LIMITS.maxArrayLength) return invalid("array_length_limit");
+        if (Object.getOwnPropertySymbols(frame.source).length > 0) return invalid("symbol_key");
+        const names = Object.getOwnPropertyNames(frame.source);
+        if (names.length !== length + 1) return invalid("sparse_or_extended_array");
+        target = new Array(length);
+        children = [];
+        for (let index = 0; index < length; index += 1) {
+          const key = String(index);
+          const descriptor = Object.getOwnPropertyDescriptor(frame.source, key);
+          if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return invalid("invalid_array_element");
+          children.push([key, descriptor.value]);
+        }
+      } else {
+        if (Object.getPrototypeOf(frame.source) !== Object.prototype) return invalid("non_plain_object");
+        if (Object.getOwnPropertySymbols(frame.source).length > 0) return invalid("symbol_key");
+        const names = Object.getOwnPropertyNames(frame.source);
+        if (names.length > EVIDENCE_SNAPSHOT_LIMITS.maxObjectKeys) return invalid("object_key_limit");
+        target = {};
+        children = [];
+        for (const key of names) {
+          const descriptor = Object.getOwnPropertyDescriptor(frame.source, key);
+          if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+            currentRootKey = frame.depth === 0 ? key : frame.rootKey;
+            return invalid("accessor_or_hidden_property");
+          }
+          children.push([key, descriptor.value]);
+        }
+      }
+
+      assign(frame.parent, frame.key, target);
+      active.add(frame.source);
+      stack.push({ kind: "exit", source: frame.source, rootKey: frame.rootKey });
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const [key, child] = children[index];
+        stack.push({
+          kind: "visit",
+          source: child,
+          parent: target,
+          key,
+          depth: frame.depth + 1,
+          rootKey: frame.depth === 0 ? key : frame.rootKey,
+        });
+      }
+    }
+  } catch {
+    return invalid("descriptor_failure");
   }
-  if (Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length > 0) return false;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(descriptors).some((descriptor) => !descriptor.enumerable || !Object.hasOwn(descriptor, "value"))) return false;
-  ancestors.add(value);
-  const valid = Object.values(descriptors).every((descriptor) => isJsonSafePlainData(descriptor.value, ancestors));
-  ancestors.delete(value);
-  return valid;
+  return { ok: true, value: root };
 }
 
 function references(candidates, extra = []) {
@@ -185,10 +282,6 @@ function receiptState(evidence, candidates) {
     return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [] };
   }
   if (timestamp(receipt.observedAt).error) return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [receipt.ref] };
-  const malformed = candidates.filter((candidate) => !isJsonSafePlainData(candidate));
-  if (malformed.length > 0) {
-    return { status: "error", code: "malformed_candidate_evidence", actual: { refs: references(malformed) }, refs: [receipt.ref] };
-  }
   const matching = [];
   const seenRefs = new Map();
   for (const candidate of candidates) {
@@ -217,6 +310,12 @@ function receiptState(evidence, candidates) {
 
 /** Grade normalized MIME/content evidence without retaining raw MIME. */
 export function gradeContent(expectation = {}, evidence = {}) {
+  const snapshot = snapshotJsonSafePlainData(evidence);
+  if (!snapshot.ok) {
+    const code = snapshot.rootKey === "actorReceipt" ? "invalid_actor_receipt_evidence" : "malformed_candidate_evidence";
+    return [result("lifecycle.actor_received", "error", code, expectation?.lifecycle?.actorReceived ?? null, null)];
+  }
+  evidence = snapshot.value;
   const candidates = candidatesOf(evidence);
   if (candidates.length === 0) return [];
   const results = [];

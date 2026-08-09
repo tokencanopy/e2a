@@ -109,7 +109,9 @@ test("content grading checks ordered attachment metadata and explicit capabiliti
   assertResult(results, "attachments.exactly", "pass");
   const reversed = gradeContent(expectation({ attachments: { exactly: [attachment, second] } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, attachments: [second, attachment] } })] }));
   assertResult(reversed, "attachments.exactly", "fail", "attachment_set_mismatch");
-  const missingCapability = gradeContent(expectation(), evidence({ capabilities: ["thread_headers", "raw_mime"], candidates: [candidate({ mime: { ...candidate().mime, attachments: undefined } })] }));
+  const mimeWithoutAttachments = { ...candidate().mime };
+  delete mimeWithoutAttachments.attachments;
+  const missingCapability = gradeContent(expectation(), evidence({ capabilities: ["thread_headers", "raw_mime"], candidates: [candidate({ mime: mimeWithoutAttachments })] }));
   assertResult(missingCapability, "attachments.exactly", "error", "missing_attachment_hash_evidence");
   const malformedExpectation = gradeContent(expectation({ attachments: { exactly: [{}] } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, attachments: [attachment] } })] }));
   assertResult(malformedExpectation, "attachments.exactly", "error", "invalid_attachment_expectation");
@@ -174,7 +176,9 @@ test("leap seconds must resolve to a published UTC insertion instant", () => {
 });
 
 test("lifecycle requires per-candidate submission and a complete matching actor receipt", () => {
-  const globalFallback = gradeContent(expectation(), evidence({ lifecycle: { submission: "sent" }, candidates: [candidate(), candidate({ ref: "evt_synthetic_missing_lifecycle", messageId: "msg_synthetic_missing_lifecycle", lifecycle: undefined })] }));
+  const missingLifecycle = candidate({ ref: "evt_synthetic_missing_lifecycle", messageId: "msg_synthetic_missing_lifecycle" });
+  delete missingLifecycle.lifecycle;
+  const globalFallback = gradeContent(expectation(), evidence({ lifecycle: { submission: "sent" }, candidates: [candidate(), missingLifecycle] }));
   assertResult(globalFallback, "lifecycle.submission", "error", "missing_lifecycle_evidence");
   assert.equal(globalFallback.find((entry) => entry.id === "lifecycle.submission").actual.byRef.length, 2);
   const malformedLifecycle = gradeContent(expectation(), evidence({ candidates: [candidate({ lifecycle: { submission: 9 } })] }));
@@ -204,6 +208,133 @@ test("actor receipt replay deduplication rejects non-JSON-safe candidate evidenc
   assertResult(infinity, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
   const replay = candidate({ diagnostic: { stable: true } });
   assertResult(gradeContent(expectation(), evidence({ candidates: [replay, structuredClone(replay)] })), "lifecycle.actor_received", "pass");
+});
+
+test("candidate accessors are rejected without execution", () => {
+  let getterCalls = 0;
+  const accessorCandidate = candidate();
+  Object.defineProperty(accessorCandidate, "ref", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error("candidate ref getter must not execute");
+    },
+  });
+
+  let results;
+  assert.doesNotThrow(() => {
+    results = gradeContent(expectation(), evidence({ candidates: [accessorCandidate] }));
+  });
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  assert.equal(getterCalls, 0);
+});
+
+test("actor receipt accessors are rejected without execution", () => {
+  for (const field of ["ref", "observedAt"]) {
+    let getterCalls = 0;
+    const actorReceipt = {
+      ref: "evt_synthetic_actor_receipt",
+      messageId: "msg_synthetic_reply",
+      observedAt: "2026-08-08T12:00:05.000Z",
+    };
+    Object.defineProperty(actorReceipt, field, {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error(`actor receipt ${field} getter must not execute`);
+      },
+    });
+
+    let results;
+    assert.doesNotThrow(() => {
+      results = gradeContent(expectation(), evidence({ actorReceipt }));
+    });
+    assertResult(results, "lifecycle.actor_received", "error", "invalid_actor_receipt_evidence");
+    assert.equal(getterCalls, 0, field);
+  }
+});
+
+test("top-level evidence accessors are classified without execution", () => {
+  for (const [field, code] of [["candidates", "malformed_candidate_evidence"], ["actorReceipt", "invalid_actor_receipt_evidence"]]) {
+    let getterCalls = 0;
+    const accessorEvidence = evidence();
+    Object.defineProperty(accessorEvidence, field, {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error(`top-level ${field} getter must not execute`);
+      },
+    });
+
+    const results = gradeContent(expectation(), accessorEvidence);
+    assertResult(results, "lifecycle.actor_received", "error", code);
+    assert.equal(getterCalls, 0, field);
+  }
+});
+
+test("candidate evidence traversal is bounded and iterative", () => {
+  let diagnostic = { leaf: true };
+  for (let depth = 0; depth < 15_000; depth += 1) diagnostic = { next: diagnostic };
+
+  let results;
+  assert.doesNotThrow(() => {
+    results = gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic })] }));
+  });
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+});
+
+test("oversized dense and sparse candidate arrays are rejected before traversal", () => {
+  const dense = Array.from({ length: 1_025 }, (_, index) => index);
+  assertResult(
+    gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: dense })] })),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_candidate_evidence",
+  );
+
+  let getterCalls = 0;
+  const sparse = new Array(1_025);
+  Object.defineProperty(sparse, "0", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error("oversized sparse array must not be traversed");
+    },
+  });
+  let results;
+  assert.doesNotThrow(() => {
+    results = gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: sparse })] }));
+  });
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  assert.equal(getterCalls, 0);
+});
+
+test("candidate object-key and total-node limits return stable malformed evidence", () => {
+  const tooManyKeys = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`key${index}`, index]));
+  assertResult(
+    gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: tooManyKeys })] })),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_candidate_evidence",
+  );
+
+  const tooManyNodes = Array.from({ length: 9 }, () => Array.from({ length: 1_024 }, () => null));
+  assertResult(
+    gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: tooManyNodes })] })),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_candidate_evidence",
+  );
+});
+
+test("cyclic candidate evidence returns a stable malformed result", () => {
+  const diagnostic = {};
+  diagnostic.self = diagnostic;
+  let results;
+  assert.doesNotThrow(() => {
+    results = gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic })] }));
+  });
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
 });
 
 test("plain-text forbidden requires normalized evidence but accepts explicit null", () => {
