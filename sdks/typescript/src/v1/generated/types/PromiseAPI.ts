@@ -4,9 +4,12 @@ import { PromiseMiddleware, Middleware, PromiseMiddlewareWrapper } from '../midd
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -71,6 +74,7 @@ import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
+import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
 import { ImportContactsRequest } from '../models/ImportContactsRequest.js';
 import { LimitExceededDetails } from '../models/LimitExceededDetails.js';
@@ -84,6 +88,9 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsCounterView } from '../models/MetricsCounterView.js';
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -162,8 +169,10 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
+import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 import { ObservableAccountApi } from './ObservableAPI.js';
 
@@ -310,6 +319,32 @@ export class PromiseAccountApi {
     public getAccount(_options?: PromiseConfigurationOptions): Promise<AccountView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.getAccount(observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<HttpInfo<AccountMetricsView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAccountMetricsWithHttpInfo(start, end, groupBy, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<AccountMetricsView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAccountMetrics(start, end, groupBy, observableOptions);
         return result.toPromise();
     }
 
@@ -1354,6 +1389,32 @@ export class PromiseMessagesApi {
     }
 
     /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetricsWithHttpInfo(email: string, start?: Date, end?: Date, _options?: PromiseConfigurationOptions): Promise<HttpInfo<AgentMetricsView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAgentMetricsWithHttpInfo(email, start, end, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetrics(email: string, start?: Date, end?: Date, _options?: PromiseConfigurationOptions): Promise<AgentMetricsView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getAgentMetrics(email, start, end, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
      * Returns one attachment\'s metadata plus a short-lived `download_url` (+ `expires_at`) to fetch the bytes out of band — so binary content never streams through an agent\'s context. Pass `?inline=true` to also receive base64 `data` for small attachments (<= 256 KB); larger inline requests are rejected with 413 attachment_too_large. `index` is the 0-based attachment index from the message\'s `attachments[]`.
      * Get an attachment (metadata + short-lived download URL)
      * @param email
@@ -1472,10 +1533,11 @@ export class PromiseMessagesApi {
      * @param [cursor]
      * @param [limit]
      * @param [deleted] List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
+     * @param [filter] Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      */
-    public listMessagesWithHttpInfo(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageMessageSummaryView>> {
+    public listMessagesWithHttpInfo(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageMessageSummaryView>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.listMessagesWithHttpInfo(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, observableOptions);
+        const result = this.api.listMessagesWithHttpInfo(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, filter, observableOptions);
         return result.toPromise();
     }
 
@@ -1496,10 +1558,11 @@ export class PromiseMessagesApi {
      * @param [cursor]
      * @param [limit]
      * @param [deleted] List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
+     * @param [filter] Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      */
-    public listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, _options?: PromiseConfigurationOptions): Promise<PageMessageSummaryView> {
+    public listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: PromiseConfigurationOptions): Promise<PageMessageSummaryView> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.listMessages(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, observableOptions);
+        const result = this.api.listMessages(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, filter, observableOptions);
         return result.toPromise();
     }
 
