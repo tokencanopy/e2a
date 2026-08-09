@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,10 +35,84 @@ test("loadSuite resolves complete scalar references and canonicalizes the closed
 test("digest uses the unresolved alias-safe contract, not an API-key value", async () => {
   const first = await loadSuite(fixture("contracts/valid/suite.yaml"), { environment: validEnvironment });
   const second = await loadSuite(fixture("contracts/valid/suite.yaml"), {
-    environment: { ...validEnvironment, E2A_EVAL_API_KEY: "e2a_acct_rotated_synthetic" },
+    environment: { ...validEnvironment, E2A_EVAL_API_KEY: "synthetic-key-rotated" },
   });
   assert.equal(first.digest, second.digest);
-  assert.doesNotMatch(JSON.stringify(first).replace(first.transport.apiKey, "[key]"), /e2a_acct_rotated_synthetic/);
+  assert.doesNotMatch(JSON.stringify(first).replace(first.transport.apiKey, "[key]"), /synthetic-key-rotated/);
+});
+
+async function writeMinimalSuite(root, { name = "synthetic", caseSource, recipients = "[\"${E2A_EVAL_TARGET}\", \"${E2A_EVAL_ACTOR}\"]" } = {}) {
+  await writeFile(path.join(root, "suite.yaml"), [
+    "version: 1", `name: ${name}`, "target:", "  email: ${E2A_EVAL_TARGET}", "actor:", "  email: ${E2A_EVAL_ACTOR}",
+    "transport:", "  adapter: e2a", "  api_key: ${E2A_EVAL_API_KEY}", `  allowed_envelope_recipients: ${recipients}`,
+    "cases: [case.yaml]", "",
+  ].join("\n"));
+  await writeFile(path.join(root, "case.yaml"), caseSource ?? [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:", "  action: { kind: none, count: 0 }", "",
+  ].join("\n"));
+}
+
+test("complete references resolve in IDs, enums, policies, and nested attachments", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-env-"));
+  await writeMinimalSuite(root, { name: "${E2A_SUITE_NAME}", caseSource: [
+    "id: ${E2A_CASE_ID}", "send:", "  subject: Synthetic", "  text: Synthetic", "expect:", "  action:", "    kind: ${E2A_ACTION}", "    count: 0",
+    "  subject:", "    policy: ${E2A_POLICY}", "  attachments:", "    exactly:", "      - filename: ${E2A_FILENAME}", "        content_type: ${E2A_CONTENT_TYPE}", "        disposition: ${E2A_DISPOSITION}", "        sha256: ${E2A_HASH}", "",
+  ].join("\n") });
+  const suite = await loadSuite(path.join(root, "suite.yaml"), { environment: {
+    ...validEnvironment, E2A_SUITE_NAME: "synthetic", E2A_CASE_ID: "synthetic-case", E2A_ACTION: "none", E2A_POLICY: "preserve",
+    E2A_FILENAME: "synthetic.txt", E2A_CONTENT_TYPE: "text/plain", E2A_DISPOSITION: "attachment", E2A_HASH: "abc",
+  } });
+  assert.equal(suite.cases[0].id, "synthetic-case");
+  assert.equal(suite.cases[0].expect.action.kind, "none");
+  assert.equal(suite.cases[0].expect.attachments.exactly[0].filename, "synthetic.txt");
+});
+
+for (const [field, source] of [
+  ["id", "id: bad-${E2A_CASE_ID}"],
+  ["enum", "expect:\n  action:\n    kind: reply-${E2A_ACTION}\n    count: 1"],
+  ["policy", "expect:\n  action:\n    kind: none\n    count: 0\n  subject:\n    policy: preserve-${E2A_POLICY}"],
+  ["attachment", "expect:\n  action:\n    kind: none\n    count: 0\n  attachments:\n    exactly:\n      - filename: bad-${E2A_FILENAME}"],
+]) {
+  test(`partial references fail in nested ${field} scalars`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "email-evals-partial-"));
+    const caseSource = field === "id"
+      ? `${source}\nsend: { subject: Synthetic, text: Synthetic }\nexpect: { action: { kind: none, count: 0 } }\n`
+      : `id: synthetic-case\nsend: { subject: Synthetic, text: Synthetic }\n${source}\n`;
+    await writeMinimalSuite(root, { caseSource });
+    await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.code === "partial_environment_reference");
+  });
+}
+
+test("digest aliases literal display-name mailboxes and canonicalizes reordered recipient sets", async () => {
+  const firstRoot = await mkdtemp(path.join(tmpdir(), "email-evals-digest-"));
+  const secondRoot = await mkdtemp(path.join(tmpdir(), "email-evals-digest-"));
+  const caseSource = "id: synthetic-case\nsend: { subject: Synthetic, text: Synthetic }\nexpect: { action: { kind: none, count: 0 } }\n";
+  await writeMinimalSuite(firstRoot, { recipients: "[\"Actor <ACTOR@EVAL.TEST>\", \"Target <TARGET@EVAL.TEST>\"]", caseSource });
+  await writeMinimalSuite(secondRoot, { recipients: "[\"Target <target@eval.test>\", \"Actor <actor@eval.test>\"]", caseSource });
+  const first = await loadSuite(path.join(firstRoot, "suite.yaml"), { environment: validEnvironment });
+  const second = await loadSuite(path.join(secondRoot, "suite.yaml"), { environment: validEnvironment });
+  assert.equal(first.digest, second.digest);
+});
+
+test("alias expansion and deterministic file swaps are stable configuration errors", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-io-"));
+  await writeMinimalSuite(root);
+  await writeFile(path.join(root, "suite.yaml"), `version: 1\nname: &value synthetic\ntarget: { email: *value }\n${"cases: [*value, *value, *value, *value, *value, *value, *value, *value, *value, *value]\n".repeat(20)}`);
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), /Suite YAML is invalid/);
+
+  await writeMinimalSuite(root);
+  await writeFile(path.join(root, "suite-replacement.yaml"), await readFile(path.join(root, "suite.yaml"), "utf8"));
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), {
+    environment: validEnvironment,
+    beforeRead: async ({ label }) => { if (label === "suite") await rename(path.join(root, "suite-replacement.yaml"), path.join(root, "suite.yaml")); },
+  }), (error) => error.errorClass === "configuration_error" && error.code === "file_changed_during_load");
+
+  await writeMinimalSuite(root);
+  await writeFile(path.join(root, "replacement.yaml"), await readFile(path.join(root, "case.yaml"), "utf8"));
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), {
+    environment: validEnvironment,
+    beforeRead: async ({ label }) => { if (label === "case") await rename(path.join(root, "replacement.yaml"), path.join(root, "case.yaml")); },
+  }), (error) => error.errorClass === "configuration_error" && error.code === "file_changed_during_load");
 });
 
 for (const [name, code] of [

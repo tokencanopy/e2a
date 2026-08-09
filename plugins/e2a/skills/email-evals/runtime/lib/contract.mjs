@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
 import { EvalError } from "./errors.mjs";
@@ -100,7 +100,14 @@ function resolveString(value, environment, pointer) {
 function normalizeScalarMailbox(value, environment, pointer) {
   const resolved = resolveEnvironment(value, environment, pointer);
   try {
-    return { ...resolved, mailbox: normalizeMailbox(resolved.value) };
+    const mailbox = normalizeMailbox(resolved.value);
+    return {
+      ...resolved,
+      mailbox,
+      canonical: environmentReference.test(resolved.source)
+        ? resolved.source
+        : { address: mailbox.address, displayName: mailbox.displayName ?? null },
+    };
   } catch (error) {
     if (error instanceof NormalizationError) throw configurationError(error.code, "Invalid mailbox", pointer);
     throw error;
@@ -112,7 +119,8 @@ function normalizeMailboxSet(value, environment, pointer) {
   const resolved = raw.map((entry, index) => normalizeScalarMailbox(entry, environment, `${pointer}/${index}`));
   try {
     const addresses = normalizeAddressSet(resolved.map((entry) => entry.value));
-    return { source: resolved.map((entry) => entry.source), addresses };
+    const ordered = [...resolved].sort((left, right) => left.mailbox.address.localeCompare(right.mailbox.address));
+    return { source: ordered.map((entry) => entry.canonical), addresses };
   } catch (error) {
     if (error instanceof NormalizationError) throw configurationError(error.code, "Invalid recipient set", pointer);
     throw error;
@@ -141,9 +149,10 @@ function normalizeRegexes(value, environment, pointer) {
   });
 }
 
-function validateEnum(value, allowed, code, pointer) {
-  if (!allowed.has(value)) throw configurationError(code, "Invalid configuration value", pointer);
-  return value;
+function resolveEnum(value, environment, allowed, code, pointer) {
+  const resolved = resolveString(value, environment, pointer);
+  if (!allowed.has(resolved.value)) throw configurationError(code, "Invalid configuration value", pointer);
+  return resolved;
 }
 
 function normalizeRecipientSet(value, environment, pointer) {
@@ -153,8 +162,8 @@ function normalizeRecipientSet(value, environment, pointer) {
 
 function normalizeCase(rawCase, environment, casePath) {
   const item = allowedObject(rawCase, caseKeys, "", ["id", "send", "expect"]);
-  const id = asString(item.id, "/id");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) throw configurationError("invalid_case_id", "Invalid case identifier", "/id");
+  const id = resolveString(item.id, environment, "/id");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id.value)) throw configurationError("invalid_case_id", "Invalid case identifier", "/id");
   const sendRaw = allowedObject(item.send, sendKeys, "/send", ["subject", "text"]);
   const send = {
     subject: resolveString(sendRaw.subject, environment, "/send/subject"),
@@ -163,15 +172,16 @@ function normalizeCase(rawCase, environment, casePath) {
   const expectRaw = allowedObject(item.expect, expectKeys, "/expect", ["action"]);
   const actionRaw = allowedObject(expectRaw.action, actionKeys, "/expect/action", ["kind", "count"]);
   const action = {
-    kind: validateEnum(asString(actionRaw.kind, "/expect/action/kind"), actionKinds, "invalid_action_kind", "/expect/action/kind"),
+    kind: resolveEnum(actionRaw.kind, environment, actionKinds, "invalid_action_kind", "/expect/action/kind"),
     count: asNonnegativeInteger(actionRaw.count, "/expect/action/count"),
   };
-  if ((action.kind === "none") !== (action.count === 0)) {
+  if ((action.kind.value === "none") !== (action.count === 0)) {
     throw configurationError("invalid_action_count", "Action kind and count are inconsistent", "/expect/action");
   }
 
-  const expectation = { action };
-  const canonical = { id, send: { subject: send.subject.source, text: send.text.source }, expect: { action } };
+  const normalizedAction = { kind: action.kind.value, count: action.count };
+  const expectation = { action: normalizedAction };
+  const canonical = { id: id.source, send: { subject: send.subject.source, text: send.text.source }, expect: { action: { kind: action.kind.source, count: action.count } } };
   const sourceRecipients = [];
 
   if (expectRaw.sender !== undefined) {
@@ -181,13 +191,13 @@ function normalizeCase(rawCase, environment, casePath) {
     if (senderRaw.exactly !== undefined) {
       const normalized = normalizeScalarMailbox(senderRaw.exactly, environment, "/expect/sender/exactly");
       sender.exactly = normalized.mailbox.address;
-      senderCanonical.exactly = normalized.source;
+      senderCanonical.exactly = normalized.canonical;
       sourceRecipients.push(normalized.mailbox.address);
     }
     if (senderRaw.sent_as !== undefined) {
       const normalized = normalizeScalarMailbox(senderRaw.sent_as, environment, "/expect/sender/sent_as");
       sender.sentAs = normalized.mailbox.address;
-      senderCanonical.sentAs = normalized.source;
+      senderCanonical.sentAs = normalized.canonical;
       sourceRecipients.push(normalized.mailbox.address);
     }
     if (senderRaw.display_name !== undefined) {
@@ -219,18 +229,23 @@ function normalizeCase(rawCase, environment, casePath) {
     expectation.recipients = recipients;
     canonical.expect.recipients = recipientsCanonical;
   }
-  if (action.count > 0 && !expectation.recipients?.envelope) {
+  if (normalizedAction.count > 0 && !expectation.recipients?.envelope) {
     throw configurationError("missing_envelope_allowlist", "Outbound cases require an exact envelope expectation", "/expect/recipients/envelope");
   }
 
   if (expectRaw.thread !== undefined) {
     const threadRaw = allowedObject(expectRaw.thread, threadKeys, "/expect/thread");
     const thread = {};
+    const threadCanonical = {};
     for (const [rawKey, normalizedKey, allowed] of [["in_reply_to", "inReplyTo", new Set(["original"])], ["references", "references", new Set(["contains_original"])], ["conversation", "conversation", new Set(["same"])]]) {
-      if (threadRaw[rawKey] !== undefined) thread[normalizedKey] = validateEnum(asString(threadRaw[rawKey], `/expect/thread/${rawKey}`), allowed, "invalid_thread_expectation", `/expect/thread/${rawKey}`);
+      if (threadRaw[rawKey] !== undefined) {
+        const resolved = resolveEnum(threadRaw[rawKey], environment, allowed, "invalid_thread_expectation", `/expect/thread/${rawKey}`);
+        thread[normalizedKey] = resolved.value;
+        threadCanonical[normalizedKey] = resolved.source;
+      }
     }
     expectation.thread = thread;
-    canonical.expect.thread = { ...thread };
+    canonical.expect.thread = threadCanonical;
   }
 
   if (expectRaw.subject !== undefined) {
@@ -246,8 +261,9 @@ function normalizeCase(rawCase, environment, casePath) {
       }
     }
     if (subjectRaw.policy !== undefined) {
-      subject.policy = validateEnum(asString(subjectRaw.policy, "/expect/subject/policy"), subjectPolicies, "invalid_subject_policy", "/expect/subject/policy");
-      subjectCanonical.policy = subject.policy;
+      const resolved = resolveEnum(subjectRaw.policy, environment, subjectPolicies, "invalid_subject_policy", "/expect/subject/policy");
+      subject.policy = resolved.value;
+      subjectCanonical.policy = resolved.source;
     }
     for (const key of ["required_fragments", "forbidden_fragments"]) {
       if (subjectRaw[key] !== undefined) {
@@ -278,13 +294,15 @@ function normalizeCase(rawCase, environment, casePath) {
       bodyCanonical.forbiddenPatterns = values.map(({ source }) => source);
     }
     if (bodyRaw.plain_text !== undefined) {
-      body.plainText = validateEnum(asString(bodyRaw.plain_text, "/expect/body/plain_text"), plainTextPolicies, "invalid_plain_text_policy", "/expect/body/plain_text");
-      bodyCanonical.plainText = body.plainText;
+      const resolved = resolveEnum(bodyRaw.plain_text, environment, plainTextPolicies, "invalid_plain_text_policy", "/expect/body/plain_text");
+      body.plainText = resolved.value;
+      bodyCanonical.plainText = resolved.source;
     }
     if (bodyRaw.html !== undefined) {
       const htmlRaw = allowedObject(bodyRaw.html, htmlKeys, "/expect/body/html", ["policy"]);
-      body.html = { policy: validateEnum(asString(htmlRaw.policy, "/expect/body/html/policy"), htmlPolicies, "invalid_html_policy", "/expect/body/html/policy") };
-      bodyCanonical.html = { ...body.html };
+      const resolved = resolveEnum(htmlRaw.policy, environment, htmlPolicies, "invalid_html_policy", "/expect/body/html/policy");
+      body.html = { policy: resolved.value };
+      bodyCanonical.html = { policy: resolved.source };
     }
     if (bodyRaw.max_size !== undefined) {
       body.maxSize = asNonnegativeInteger(bodyRaw.max_size, "/expect/body/max_size");
@@ -296,18 +314,34 @@ function normalizeCase(rawCase, environment, casePath) {
 
   if (expectRaw.attachments !== undefined) {
     const attachmentsRaw = allowedObject(expectRaw.attachments, attachmentsKeys, "/expect/attachments", ["exactly"]);
-    const attachments = asArray(attachmentsRaw.exactly, "/expect/attachments/exactly").map((attachment, index) => {
-      if (typeof attachment === "string") return attachment;
+    const attachments = [];
+    const attachmentsCanonical = [];
+    for (const [index, attachment] of asArray(attachmentsRaw.exactly, "/expect/attachments/exactly").entries()) {
+      if (typeof attachment === "string") {
+        const resolved = resolveString(attachment, environment, `/expect/attachments/exactly/${index}`);
+        attachments.push(resolved.value);
+        attachmentsCanonical.push(resolved.source);
+        continue;
+      }
       const object = allowedObject(attachment, attachmentKeys, `/expect/attachments/exactly/${index}`);
       const normalized = {};
+      const normalizedCanonical = {};
       for (const [rawKey, normalizedKey] of [["filename", "filename"], ["content_type", "contentType"], ["disposition", "disposition"], ["sha256", "sha256"]]) {
-        if (object[rawKey] !== undefined) normalized[normalizedKey] = asString(object[rawKey], `/expect/attachments/exactly/${index}/${rawKey}`);
+        if (object[rawKey] !== undefined) {
+          const resolved = resolveString(object[rawKey], environment, `/expect/attachments/exactly/${index}/${rawKey}`);
+          normalized[normalizedKey] = resolved.value;
+          normalizedCanonical[normalizedKey] = resolved.source;
+        }
       }
-      if (object.size_bytes !== undefined) normalized.sizeBytes = asNonnegativeInteger(object.size_bytes, `/expect/attachments/exactly/${index}/size_bytes`);
-      return normalized;
-    });
+      if (object.size_bytes !== undefined) {
+        normalized.sizeBytes = asNonnegativeInteger(object.size_bytes, `/expect/attachments/exactly/${index}/size_bytes`);
+        normalizedCanonical.sizeBytes = normalized.sizeBytes;
+      }
+      attachments.push(normalized);
+      attachmentsCanonical.push(normalizedCanonical);
+    }
     expectation.attachments = { exactly: attachments };
-    canonical.expect.attachments = { exactly: attachments };
+    canonical.expect.attachments = { exactly: attachmentsCanonical };
   }
 
   if (expectRaw.timing !== undefined) {
@@ -319,13 +353,18 @@ function normalizeCase(rawCase, environment, casePath) {
   if (expectRaw.lifecycle !== undefined) {
     const lifecycleRaw = allowedObject(expectRaw.lifecycle, lifecycleKeys, "/expect/lifecycle");
     const lifecycle = {};
-    if (lifecycleRaw.submission !== undefined) lifecycle.submission = validateEnum(asString(lifecycleRaw.submission, "/expect/lifecycle/submission"), submissionStates, "invalid_submission_state", "/expect/lifecycle/submission");
+    const lifecycleCanonical = {};
+    if (lifecycleRaw.submission !== undefined) {
+      const resolved = resolveEnum(lifecycleRaw.submission, environment, submissionStates, "invalid_submission_state", "/expect/lifecycle/submission");
+      lifecycle.submission = resolved.value;
+      lifecycleCanonical.submission = resolved.source;
+    }
     if (lifecycleRaw.actor_received !== undefined) lifecycle.actorReceived = asBoolean(lifecycleRaw.actor_received, "/expect/lifecycle/actor_received");
     expectation.lifecycle = lifecycle;
-    canonical.expect.lifecycle = { ...lifecycle };
+    canonical.expect.lifecycle = lifecycleCanonical;
   }
 
-  return { value: { id, send: { subject: send.subject.value, text: send.text.value }, expect: expectation, caseFile: casePath }, canonical, sourceRecipients };
+  return { value: { id: id.value, send: { subject: send.subject.value, text: send.text.value }, expect: expectation, caseFile: casePath }, canonical, sourceRecipients };
 }
 
 function contained(root, candidate) {
@@ -333,19 +372,38 @@ function contained(root, candidate) {
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 }
 
-async function readYaml(file, label) {
-  let source;
+// The optional hooks are internal test seams: callers never receive file handles.
+async function readYaml(file, label, { root, pointer, openFile = open, beforeRead } = {}) {
+  let handle;
   try {
-    source = await readFile(file, "utf8");
-  } catch {
-    throw configurationError("case_file_unreadable", `Unable to read ${label} YAML`);
+    handle = await openFile(file, "r");
+    const handleStat = await handle.stat();
+    const resolved = await realpath(file);
+    if (root && !contained(root, resolved)) throw configurationError("path_outside_suite", "Case path is outside the suite root", pointer);
+    await beforeRead?.({ file, label, resolved });
+    const pathStat = await stat(resolved);
+    if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
+      throw configurationError("file_changed_during_load", "Configuration file changed while loading", pointer);
+    }
+    const source = await handle.readFile({ encoding: "utf8" });
+    let document;
+    try {
+      document = parseDocument(source, { prettyErrors: true, strict: true, uniqueKeys: true, version: "1.2" });
+      if (document.errors.length) {
+        const duplicate = document.errors.some((error) => /unique|duplicate/i.test(error.message));
+        throw configurationError(duplicate ? "duplicate_key" : "invalid_yaml", "Suite YAML is invalid");
+      }
+      return { value: document.toJS(), resolved };
+    } catch (error) {
+      if (error instanceof EvalError) throw error;
+      throw configurationError("invalid_yaml", "Suite YAML is invalid", pointer);
+    }
+  } catch (error) {
+    if (error instanceof EvalError) throw error;
+    throw configurationError(label === "suite" ? "suite_file_unreadable" : "case_file_unreadable", `Unable to read ${label} YAML`, pointer);
+  } finally {
+    await handle?.close();
   }
-  const document = parseDocument(source, { prettyErrors: true, strict: true, uniqueKeys: true, version: "1.2" });
-  if (document.errors.length) {
-    const duplicate = document.errors.some((error) => /unique|duplicate/i.test(error.message));
-    throw configurationError(duplicate ? "duplicate_key" : "invalid_yaml", "Suite YAML is invalid");
-  }
-  return document.toJS();
 }
 
 function stableJson(value) {
@@ -363,19 +421,16 @@ function aliasCanonical(value, aliases) {
   return value;
 }
 
-export async function loadSuite(suiteFile, { environment = process.env } = {}) {
-  let resolvedSuiteFile;
-  try {
-    resolvedSuiteFile = await realpath(path.resolve(suiteFile));
-  } catch {
-    throw configurationError("suite_file_unreadable", "Unable to read suite YAML");
-  }
+export async function loadSuite(suiteFile, { environment = process.env, openFile, beforeRead } = {}) {
+  const requestedSuiteFile = path.resolve(suiteFile);
+  const suiteDocument = await readYaml(requestedSuiteFile, "suite", { openFile, beforeRead });
+  const resolvedSuiteFile = suiteDocument.resolved;
   const suiteRoot = path.dirname(resolvedSuiteFile);
-  const rawSuite = await readYaml(resolvedSuiteFile, "suite");
+  const rawSuite = suiteDocument.value;
   const suite = allowedObject(rawSuite, suiteKeys, "", ["version", "name", "target", "actor", "transport", "cases"]);
   if (suite.version !== 1) throw configurationError("unsupported_version", "Unsupported suite version", "/version");
-  const name = asString(suite.name, "/name");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw configurationError("invalid_suite_name", "Invalid suite name", "/name");
+  const name = resolveString(suite.name, environment, "/name");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name.value)) throw configurationError("invalid_suite_name", "Invalid suite name", "/name");
   const targetRaw = allowedObject(suite.target, identityKeys, "/target", ["email"]);
   const actorRaw = allowedObject(suite.actor, identityKeys, "/actor", ["email"]);
   const target = normalizeScalarMailbox(targetRaw.email, environment, "/target/email");
@@ -383,7 +438,8 @@ export async function loadSuite(suiteFile, { environment = process.env } = {}) {
   if (target.mailbox.address === actor.mailbox.address) throw configurationError("same_actor_target", "Actor and target must differ", "/actor/email");
 
   const transportRaw = allowedObject(suite.transport, transportKeys, "/transport", ["adapter", "api_key", "allowed_envelope_recipients"]);
-  if (transportRaw.adapter !== "e2a") throw configurationError("invalid_adapter", "Unsupported transport adapter", "/transport/adapter");
+  const adapter = resolveString(transportRaw.adapter, environment, "/transport/adapter");
+  if (adapter.value !== "e2a") throw configurationError("invalid_adapter", "Unsupported transport adapter", "/transport/adapter");
   const apiKey = resolveEnvironment(transportRaw.api_key, environment, "/transport/api_key");
   if (!environmentReference.test(apiKey.source)) throw configurationError("api_key_environment_required", "API key must be an environment reference", "/transport/api_key");
   const baseUrl = transportRaw.base_url === undefined ? { source: "https://api.e2a.dev", value: "https://api.e2a.dev" } : resolveString(transportRaw.base_url, environment, "/transport/base_url");
@@ -411,27 +467,26 @@ export async function loadSuite(suiteFile, { environment = process.env } = {}) {
     if (reference.includes("${")) throw configurationError("partial_environment_reference", "Case paths cannot contain environment interpolation", `/cases/${index}`);
     const candidate = path.resolve(suiteRoot, reference);
     if (!contained(suiteRoot, candidate)) throw configurationError("path_outside_suite", "Case path is outside the suite root", `/cases/${index}`);
-    let caseFile;
-    try { caseFile = await realpath(candidate); } catch { throw configurationError("case_file_unreadable", "Unable to read case YAML", `/cases/${index}`); }
-    if (!contained(suiteRoot, caseFile)) throw configurationError("path_outside_suite", "Case path is outside the suite root", `/cases/${index}`);
-    const normalized = normalizeCase(await readYaml(caseFile, "case"), environment, caseFile);
+    const caseDocument = await readYaml(candidate, "case", { root: suiteRoot, pointer: `/cases/${index}`, openFile, beforeRead });
+    const caseFile = caseDocument.resolved;
+    const normalized = normalizeCase(caseDocument.value, environment, caseFile);
     if (caseIds.has(normalized.value.id)) throw configurationError("duplicate_case_id", "Duplicate case identifier", `/cases/${index}`);
     caseIds.add(normalized.value.id);
     for (const recipient of normalized.sourceRecipients) {
       if (!allowedSet.has(recipient)) throw configurationError("recipient_outside_allowlist", "Case recipient is outside the transport allowlist", `/cases/${index}`);
     }
     cases.push(normalized.value);
-    canonicalCases.push({ file: path.relative(suiteRoot, caseFile), ...normalized.canonical });
+    canonicalCases.push({ file: path.relative(suiteRoot, caseFile).split(path.sep).join("/"), ...normalized.canonical });
   }
 
   const aliases = new Map([[actor.mailbox.address, "actor"], [target.mailbox.address, "target"]]);
   allowedRecipients.addresses.filter((address) => !aliases.has(address)).forEach((address, index) => aliases.set(address, `probe:${index + 1}`));
   const canonical = aliasCanonical({
     version: 1,
-    name,
-    target: { email: target.source },
-    actor: { email: actor.source },
-    transport: { adapter: "e2a", baseUrl: baseUrl.source, allowedEnvelopeRecipients: allowedRecipients.source },
+    name: name.source,
+    target: { email: target.canonical },
+    actor: { email: actor.canonical },
+    transport: { adapter: adapter.source, baseUrl: baseUrl.source, allowedEnvelopeRecipients: allowedRecipients.source },
     defaults: { timeout: timeout.source, settle: settle.source, pollInterval: pollInterval.source },
     cases: canonicalCases,
   }, aliases);
@@ -439,7 +494,7 @@ export async function loadSuite(suiteFile, { environment = process.env } = {}) {
 
   return {
     version: 1,
-    name,
+    name: name.value,
     suiteFile: resolvedSuiteFile,
     suiteRoot,
     digest,
