@@ -7,8 +7,9 @@ import yaml
 
 root = pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as tmp:
+    product_name = 'Café 🚀 𐐷 "Widget"\nOperations\x7f\x81'
     env = os.environ | {
-        "ANS_PRODUCT_NAME": 'Acme "Widget"\nOperations',
+        "ANS_PRODUCT_NAME": product_name,
         "ANS_OWNER": "acme",
         "ANS_REPO": "widget",
         "ANS_MARKER": "acme-feedback",
@@ -21,7 +22,7 @@ with tempfile.TemporaryDirectory() as tmp:
     }
     subprocess.run(["bash", str(root / "agentify-render.sh"), "--to", tmp], env=env, check=True)
     config = yaml.safe_load(pathlib.Path(tmp, "autonomous-repo.config.yml").read_text())
-    assert config["product_name"] == 'Acme "Widget"\nOperations'
+    assert config["product_name"] == product_name
     assert config["verify_setup_script"] == r"scripts\verify.sh"
     assert config["repo"] == "acme/widget"
 
