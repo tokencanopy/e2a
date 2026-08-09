@@ -24,6 +24,7 @@ const ERROR_CODE_ORIGINS = {
     ...Object.fromEntries(ADAPTER_TRANSPORT_CODES.map((code) => [code, ["adapter"]])),
     adapter_failed: ["adapter_boundary"],
     artifact_limit_exceeded: ["runner"],
+    cases_artifact_limit: ["runner"],
     invalid_clock_after_send: ["runner"],
     invalid_evidence: ["runner", "grader"],
   },

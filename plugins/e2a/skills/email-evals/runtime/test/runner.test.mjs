@@ -211,8 +211,12 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.equal(thrown.cases[0].primaryError.code, "grader_threw");
   assert.equal(thrown.cases[0].primaryError.origin, "grader");
   assert.ok(thrown.cases[0].evidence);
+  assert.deepEqual(thrown.cases[0].assertions, []);
   const regraded = await regradeRun({ suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]), runDirectory: path.dirname(thrown.files.cases) });
-  assert.notEqual(regraded.status, "incomplete");
+  assert.equal(regraded.status, thrown.status);
+  assert.deepEqual(regraded.cases[0].evidence, thrown.cases[0].evidence);
+  assert.deepEqual(regraded.cases[0].assertions, []);
+  assert.deepEqual(regraded.cases[0].primaryError, thrown.cases[0].primaryError);
 });
 
 test("adapter transport error registry covers every literal adapter code and baseline overflow regrades", async () => {
@@ -236,6 +240,8 @@ test("adapter transport error registry covers every literal adapter code and bas
     outputRoot: await root(), runId: RUN_ID,
   });
   assert.equal(original.cases[0].primaryError.code, "baseline_limit_exceeded");
+  assert.equal(original.cases[0].evidence, null);
+  assert.deepEqual(original.cases[0].assertions, []);
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) });
   assert.equal(regraded.cases[0].primaryError.code, "baseline_limit_exceeded");
   assert.equal(regraded.status, original.status);
@@ -247,6 +253,8 @@ test("adapter transport error registry covers every literal adapter code and bas
   });
   assert.equal(boundary.cases[0].primaryError.code, "adapter_failed");
   assert.equal(boundary.cases[0].primaryError.origin, "adapter_boundary");
+  assert.equal(boundary.cases[0].evidence, null);
+  assert.deepEqual(boundary.cases[0].assertions, []);
   const boundaryRegrade = await regradeRun({ suite: one, runDirectory: path.dirname(boundary.files.cases) });
   assert.equal(boundaryRegrade.cases[0].primaryError.code, "adapter_failed");
 });
@@ -268,6 +276,16 @@ test("missing required evidence is capability_error in both run and regrade", as
   assert.ok(summary.cases[0].assertions.some((assertion) => assertion.status === "error"));
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.cases[0].primaryError.class, "capability_error");
+
+  const forged = (await readFile(summary.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  forged[0].primaryError = {
+    class: "transport_error", code: "invalid_evidence", origin: "grader", message: "Synthetic",
+  };
+  await writeFile(summary.files.cases, `${forged.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
 });
 
 test("a no-action case still requires a versioned evidence envelope", async () => {
@@ -634,6 +652,14 @@ test("nonthrowing malformed observations are transport errors while thrown grade
     assert.equal(summary.cases[0].status, "error");
     assert.equal(summary.cases[0].primaryError.class, "transport_error");
     assert.equal(summary.cases[0].primaryError.code, "invalid_evidence");
+    const forged = (await readFile(summary.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+    const assertionError = forged[0].assertions.find((assertion) => assertion.status === "error");
+    assertionError.code = "missing_synthetic_evidence";
+    await writeFile(summary.files.cases, `${forged.map(JSON.stringify).join("\n")}\n`);
+    await assert.rejects(
+      regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+      (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    );
   }
 });
 
@@ -716,6 +742,42 @@ test("regrade rejects untrusted CaseRecords before copying any stored fields", a
       record.evidence = null;
       record.assertions = [];
       record.primaryError = { class: "transport_error", code: "poll_failed", origin: "adapter", message: "Synthetic\nforged" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "transport_error", code: "poll_failed", origin: "adapter", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "transport_error", code: "adapter_failed", origin: "adapter_boundary", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "transport_error", code: "invalid_evidence", origin: "runner", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "transport_error", code: "invalid_clock_after_send", origin: "runner", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "target_timeout", code: "no_terminal_response", origin: "runner", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "grader_error", code: "grader_threw", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "capability_error", code: "required_evidence_unavailable", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "transport_error", code: "invalid_evidence", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "fail";
+      record.primaryError = { class: "assertion_failure", code: "assertions_failed", origin: "grader", message: "Synthetic" };
     },
   ];
   for (const mutate of mutations) {
@@ -801,12 +863,44 @@ test("cumulative cases artifact bounds stop later sends and remain regradable", 
     return captured;
   });
   const original = await runSuite({ suite: largeSuite, adapter: fake, outputRoot: await root(), runId: RUN_ID });
-  assert.ok((await stat(original.files.cases)).size <= 16 * 1024 * 1024);
-  assert.ok(fake.calls.execute.length < cases.length);
+  assert.ok((await stat(original.files.cases)).size <= 16_777_216);
+  assert.equal(fake.calls.execute.some((call) => call.id === "large-17"), false);
+  assert.equal(fake.calls.execute.some((call) => call.id === "large-18"), false);
   assert.notEqual(original.status, "pass");
+  assert.equal(original.complete, true);
+  assert.deepEqual(original.cases.map((record) => record.id), cases.map((entry) => entry.id));
+  const bounded = original.cases.filter((record) => record.primaryError?.code === "cases_artifact_limit");
+  assert.ok(bounded.length >= 2);
+  for (const record of bounded) {
+    assert.deepEqual(Object.keys(record).sort(), [
+      "assertions", "evidence", "id", "primaryError", "secondaryErrors", "status", "suite", "versions",
+    ]);
+    assert.equal(record.status, "error");
+    assert.equal(record.evidence, null);
+    assert.deepEqual(record.assertions, []);
+    assert.deepEqual(record.suite, { version: largeSuite.version, digest: largeSuite.digest });
+    assert.deepEqual(record.versions, { evidence: 1 });
+    assert.equal(record.primaryError.origin, "runner");
+  }
   const regraded = await regradeRun({ suite: largeSuite, runDirectory: path.dirname(original.files.cases) });
   assert.equal(regraded.status, original.status);
   assert.equal(regraded.counts.total, cases.length);
+  assert.equal(regraded.complete, true);
+  assert.deepEqual(regraded.cases, original.cases);
+
+  const forged = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  const firstCompact = forged.findIndex((record) => record.primaryError?.code === "cases_artifact_limit");
+  assert.ok(firstCompact > 0);
+  const priorId = forged[firstCompact - 1].id;
+  const compactId = forged[firstCompact].id;
+  const prior = forged[firstCompact - 1];
+  forged[firstCompact - 1] = { ...forged[firstCompact], id: priorId };
+  forged[firstCompact] = { ...prior, id: compactId };
+  await writeFile(original.files.cases, `${forged.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: largeSuite, runDirectory: path.dirname(original.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
 });
 
 test("a report-only finalize failure durably marks both returned and on-disk summary failed", async () => {

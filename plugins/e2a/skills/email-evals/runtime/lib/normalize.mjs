@@ -2,12 +2,73 @@ import { addressParser } from "postal-mime";
 
 const MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
 const durationPattern = /^(0|[1-9][0-9]*)(ms|s|m|h)$/;
-// Scan maximal non-delimited tokens, then let the canonical parser decide
-// whether a token containing @ is a mailbox. Tokenizing first keeps this
-// linear for large strings without an @; an unanchored `left+@right+` pattern
-// retries the growing left side at every offset. Maximal capture also prevents
-// replacing a known address only as a prefix of a different accepted address.
-const mailboxTextTokenPattern = /[^\s<>(){},;:"']+/gu;
+// RFC address-list syntax separators cannot occur in an unquoted addr-spec.
+// Apostrophes, braces, plus, hyphen, and the rest of RFC atext deliberately
+// are not separators. Scanning maximal spans once prevents both quadratic
+// regex retry behavior and prefix replacement inside a longer mailbox.
+const MAILBOX_TEXT_BOUNDARIES = new Set(["<", ">", ",", ";", ":"]);
+
+function mailboxTextBoundary(character, state) {
+  if (state.quoted || state.commentDepth > 0 || state.domainLiteral) return false;
+  if (character === ")") return true;
+  return MAILBOX_TEXT_BOUNDARIES.has(character) || /\s/u.test(character)
+    || character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f;
+}
+
+function scanMailboxText(value, visit) {
+  let cursor = 0;
+  while (cursor < value.length) {
+    const boundaryState = { quoted: false, commentDepth: 0, domainLiteral: false };
+    if (mailboxTextBoundary(value[cursor], boundaryState)) {
+      visit({ boundary: value[cursor] });
+      cursor += 1;
+      continue;
+    }
+    const start = cursor;
+    const state = { quoted: false, commentDepth: 0, domainLiteral: false, escaped: false };
+    let containsAt = false;
+    while (cursor < value.length && !mailboxTextBoundary(value[cursor], state)) {
+      const character = value[cursor];
+      if (character === "@") containsAt = true;
+      if (state.escaped) {
+        state.escaped = false;
+      } else if (character === "\\" && (state.quoted || state.commentDepth > 0 || state.domainLiteral)) {
+        state.escaped = true;
+      } else if (state.commentDepth > 0) {
+        if (character === "(") state.commentDepth += 1;
+        if (character === ")") state.commentDepth -= 1;
+      } else if (state.quoted) {
+        if (character === "\"") state.quoted = false;
+      } else if (state.domainLiteral) {
+        if (character === "]") state.domainLiteral = false;
+      } else if (character === "(") {
+        state.commentDepth = 1;
+      } else if (character === "\"") {
+        state.quoted = true;
+      } else if (character === "[") {
+        state.domainLiteral = true;
+      }
+      cursor += 1;
+    }
+    const candidate = value.slice(start, cursor);
+    if (!containsAt) {
+      visit({ candidate, mailbox: null, unsafe: false });
+      continue;
+    }
+    try {
+      visit({ candidate, mailbox: normalizeMailbox(candidate), unsafe: false });
+    } catch (error) {
+      if (error instanceof NormalizationError) {
+        // An invalid maximal span may contain multiple adjacent valid
+        // mailboxes. Fail closed rather than leak either half while trying to
+        // guess a split that could corrupt a longer valid addr-spec.
+        visit({ candidate, mailbox: null, unsafe: true });
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 export class NormalizationError extends Error {
   constructor(code, message = "Invalid normalized value") {
@@ -41,25 +102,32 @@ export function normalizeMailbox(value) {
 /** Replace parser-valid mailbox tokens in free text without matching address prefixes. */
 export function replaceMailboxText(value, replacer) {
   if (typeof value !== "string" || typeof replacer !== "function") return value;
-  mailboxTextTokenPattern.lastIndex = 0;
-  return value.replace(mailboxTextTokenPattern, (candidate) => {
-    if (!candidate.includes("@")) return candidate;
-    try {
-      return replacer(normalizeMailbox(candidate), candidate);
-    } catch (error) {
-      if (error instanceof NormalizationError) return candidate;
-      throw error;
-    }
+  const chunks = [];
+  scanMailboxText(value, ({ boundary, candidate, mailbox, unsafe }) => {
+    if (boundary !== undefined) chunks.push(boundary);
+    else if (unsafe) chunks.push("[REDACTED:address]");
+    else if (mailbox) chunks.push(replacer(mailbox, candidate));
+    else chunks.push(candidate);
   });
+  return chunks.join("");
 }
 
 export function mailboxAddressesInText(value) {
   const addresses = [];
-  replaceMailboxText(value, (mailbox, candidate) => {
-    addresses.push(mailbox.address);
-    return candidate;
+  if (typeof value !== "string") return addresses;
+  scanMailboxText(value, ({ mailbox }) => {
+    if (mailbox) addresses.push(mailbox.address);
   });
   return addresses;
+}
+
+export function containsMailboxText(value) {
+  if (typeof value !== "string") return false;
+  let found = false;
+  scanMailboxText(value, ({ mailbox, unsafe }) => {
+    if (mailbox || unsafe) found = true;
+  });
+  return found;
 }
 
 export function normalizeAddressSet(values) {

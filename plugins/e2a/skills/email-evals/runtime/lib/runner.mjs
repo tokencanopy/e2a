@@ -12,7 +12,7 @@ import {
 } from "./errors.mjs";
 import { gradeContent } from "./grade-content.mjs";
 import { gradeCore } from "./grade-core.mjs";
-import { mailboxAddressesInText, NormalizationError, normalizeMailbox } from "./normalize.mjs";
+import { containsMailboxText, NormalizationError, normalizeMailbox } from "./normalize.mjs";
 import {
   aliasCaseRecord,
   artifactCaseId,
@@ -35,6 +35,7 @@ const SEMANTIC_ENV_VALUES = Object.freeze([
 ]);
 const MAX_EVIDENCE_STRING = 1_048_576;
 const MAX_PROJECTED_EVIDENCE_BYTES = 1024 * 1024;
+const ARTIFACT_LIMIT_MESSAGE = "Evaluation artifact reached its cumulative size limit";
 const DANGEROUS_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const SECONDARY_STAGES = new Set(["reporting", "on_case", "cleanup"]);
 const SECONDARY_CODES = new Set([
@@ -545,24 +546,23 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
   };
 }
 
-function artifactLimitRawRecord({ suite, testCase, now, fallback }) {
-  const at = laterInstant(now, fallback).value;
+function artifactLimitRecord(suite, testCase) {
   return {
-    id: testCase.id,
+    id: artifactCaseId(suite, testCase.id),
     status: "error",
-    startedAt: at.iso,
-    completedAt: at.iso,
-    durations: { executionMs: 0, gradingMs: 0, totalMs: 0 },
     versions: { evidence: EVIDENCE_VERSION },
     suite: { version: suite.version, digest: suite.digest },
-    expectation: testCase.expect,
     evidence: null,
     assertions: [],
     primaryError: primaryEvalError(
-      "transport_error", "artifact_limit_exceeded", "Evaluation artifact reached its cumulative size limit", "runner",
+      "transport_error", "cases_artifact_limit", ARTIFACT_LIMIT_MESSAGE, "runner",
     ),
     secondaryErrors: [],
   };
+}
+
+function caseLineBytes(record) {
+  return Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
 }
 
 /** Execute one preflight and then each case in strict source order. */
@@ -584,6 +584,19 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
     throw new EvalError("capability_error", "missing_capability", "Evaluation adapter cannot prove every requested assertion", { capabilities: missing });
   }
 
+  const artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase));
+  const artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
+  const artifactLimitSuffixBytes = new Array(artifactLimitRecords.length + 1).fill(0);
+  for (let index = artifactLimitRecords.length - 1; index >= 0; index -= 1) {
+    if (artifactLimitLineBytes[index] > CASES_ARTIFACT_LIMITS.lineBytes) {
+      throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case identifiers cannot fit bounded artifact records");
+    }
+    artifactLimitSuffixBytes[index] = artifactLimitLineBytes[index] + artifactLimitSuffixBytes[index + 1];
+  }
+  if (artifactLimitSuffixBytes[0] > CASES_ARTIFACT_LIMITS.totalBytes) {
+    throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case set cannot fit bounded artifact records");
+  }
+
   // Artifact creation happens after the complete read-only preflight and
   // before the first send. A collision or unsafe path can therefore never
   // leave an unreported mail send behind.
@@ -595,18 +608,34 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
   let reportingMs = 0;
   let durableReportingFailed = false;
   let artifactLimitReached = false;
+  let casesBytes = 0;
+  let projectedNormalLineBytes = null;
 
   try {
     // Deliberately plain and sequential. V0 correlation and rate behavior rely
     // on there never being more than one active case.
-    for (const testCase of suite.cases) {
-      let raw = artifactLimitReached
-        ? artifactLimitRawRecord({ suite, testCase, now, fallback: runStart })
-        : await executeOne({ suite, adapter, testCase, runId: resolvedRunId, runStartedAt: runStart.iso, now });
-      executionMs += raw.durations.executionMs;
-      gradingMs += raw.durations.gradingMs;
-      let record = aliasCaseRecord(raw, suite);
-      if (Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8") > CASES_ARTIFACT_LIMITS.lineBytes) {
+    for (let caseIndex = 0; caseIndex < suite.cases.length; caseIndex += 1) {
+      const testCase = suite.cases[caseIndex];
+      // The exact compact suffix is always reserved before another side effect.
+      // Once a previous normal line gives us a deterministic projection, stop
+      // sending before that projection would consume the suffix reservation.
+      if (!artifactLimitReached && projectedNormalLineBytes !== null
+        && casesBytes + projectedNormalLineBytes + artifactLimitSuffixBytes[caseIndex + 1] > CASES_ARTIFACT_LIMITS.totalBytes) {
+        artifactLimitReached = true;
+      }
+
+      let raw = null;
+      let record;
+      if (artifactLimitReached) {
+        record = artifactLimitRecords[caseIndex];
+        raw = record;
+      } else {
+        raw = await executeOne({ suite, adapter, testCase, runId: resolvedRunId, runStartedAt: runStart.iso, now });
+        executionMs += raw.durations.executionMs;
+        gradingMs += raw.durations.gradingMs;
+        record = aliasCaseRecord(raw, suite);
+      }
+      if (caseLineBytes(record) > CASES_ARTIFACT_LIMITS.lineBytes) {
         record = aliasCaseRecord({
           ...raw,
           status: "error",
@@ -614,6 +643,23 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
           assertions: [],
           primaryError: primaryEvalError("transport_error", "invalid_evidence", "Evaluation evidence exceeded the artifact size limit", "runner"),
         }, suite);
+      }
+
+      let recordBytes = caseLineBytes(record);
+      if (!artifactLimitReached && recordBytes > CASES_ARTIFACT_LIMITS.lineBytes) {
+        artifactLimitReached = true;
+        record = artifactLimitRecords[caseIndex];
+        raw = record;
+        recordBytes = artifactLimitLineBytes[caseIndex];
+      }
+      if (!artifactLimitReached
+        && casesBytes + recordBytes + artifactLimitSuffixBytes[caseIndex + 1] > CASES_ARTIFACT_LIMITS.totalBytes) {
+        artifactLimitReached = true;
+        record = artifactLimitRecords[caseIndex];
+        raw = record;
+        recordBytes = artifactLimitLineBytes[caseIndex];
+      } else if (!artifactLimitReached) {
+        projectedNormalLineBytes = Math.max(projectedNormalLineBytes ?? 0, recordBytes);
       }
 
       cases.push(record);
@@ -641,8 +687,9 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
         if (!caseLineDurable && error?.code === "cases_artifact_limit" && !artifactLimitReached) {
           cases.pop();
           artifactLimitReached = true;
-          raw = artifactLimitRawRecord({ suite, testCase, now, fallback: runStart });
-          record = aliasCaseRecord(raw, suite);
+          raw = artifactLimitRecords[caseIndex];
+          record = raw;
+          recordBytes = artifactLimitLineBytes[caseIndex];
           cases.push(record);
           try {
             const provisional = summaryDocument({
@@ -675,6 +722,7 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
           durableReportingFailed = true;
         }
       }
+      if (caseLineDurable) casesBytes += recordBytes;
       reportingMs += elapsed(appendStart.milliseconds, laterInstant(now, appendStart).value.milliseconds);
 
       // Hooks observe only the immutable, already-aliased record and run only
@@ -805,7 +853,7 @@ function exactCaseObject(value, allowed) {
 function safeStoredString(value, { nullable = false } = {}) {
   if (nullable && value === null) return null;
   if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidCaseArtifact();
-  if (mailboxAddressesInText(value).length > 0) invalidCaseArtifact();
+  if (containsMailboxText(value)) invalidCaseArtifact();
   if (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(value)) invalidCaseArtifact();
   return value;
 }
@@ -829,7 +877,7 @@ function storedArtifactContainsSecret(value, suite) {
   const visit = (entry) => {
     if (unsafe) return;
     if (typeof entry === "string") {
-      unsafe = mailboxAddressesInText(entry).length > 0
+      unsafe = containsMailboxText(entry)
         || /\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(entry)
         || secrets.some((secret) => entry.includes(secret));
       return;
@@ -938,8 +986,37 @@ function canonicalObservedAliases(value) {
   return visit(value);
 }
 
+function validateStoredArtifactLimitRecord(record, suite) {
+  const source = exactCaseObject(record, new Set([
+    "id", "status", "versions", "suite", "evidence", "assertions", "primaryError", "secondaryErrors",
+  ]));
+  const versions = exactCaseObject(source.versions, new Set(["evidence"]));
+  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest"]));
+  const primaryError = projectStoredError(source.primaryError);
+  if (source.status !== "error" || versions.evidence !== EVIDENCE_VERSION
+    || suiteRef.version !== suite.version || suiteRef.digest !== suite.digest
+    || source.evidence !== null || !Array.isArray(source.assertions) || source.assertions.length !== 0
+    || !Array.isArray(source.secondaryErrors) || source.secondaryErrors.length !== 0
+    || primaryError.class !== "transport_error" || primaryError.code !== "cases_artifact_limit"
+    || primaryError.origin !== "runner") invalidCaseArtifact();
+  return {
+    id: safeStoredControlFreeString(source.id),
+    status: "error",
+    versions: { evidence: EVIDENCE_VERSION },
+    suite: { version: suite.version, digest: suite.digest },
+    evidence: null,
+    assertions: [],
+    primaryError: { ...primaryError, message: ARTIFACT_LIMIT_MESSAGE },
+    secondaryErrors: [],
+  };
+}
+
 function validateStoredRecord(record, suite, testCase) {
   if (storedArtifactContainsSecret(record, suite)) invalidCaseArtifact();
+  if (record?.primaryError?.class === "transport_error"
+    && record?.primaryError?.code === "cases_artifact_limit") {
+    return validateStoredArtifactLimitRecord(record, suite);
+  }
   const source = exactCaseObject(record, new Set([
     "id", "status", "startedAt", "completedAt", "durations", "versions", "suite", "expectation", "evidence",
     "assertions", "primaryError", "secondaryErrors",
@@ -960,28 +1037,40 @@ function validateStoredRecord(record, suite, testCase) {
   const assertions = source.assertions.map(projectStoredAssertion);
   const primaryError = projectStoredError(source.primaryError);
   const secondaryErrors = source.secondaryErrors.map((entry) => projectStoredError(entry, { secondary: true }));
-  const hasAssertionError = assertions.some((assertion) => assertion.status === "error");
-  const hasAssertionFailure = assertions.some((assertion) => assertion.status === "fail");
+  const allAssertionsPass = assertions.length > 0 && assertions.every((assertion) => assertion.status === "pass");
   if (evidence === null && assertions.length > 0) invalidCaseArtifact();
-  if (source.status === "pass" && (evidence === null || assertions.length === 0
-    || primaryError !== null || assertions.some((entry) => entry.status !== "pass"))) invalidCaseArtifact();
-  if (source.status === "fail" && (evidence === null || primaryError?.class !== "assertion_failure"
-    || primaryError.code !== "assertions_failed" || !hasAssertionFailure || hasAssertionError)) invalidCaseArtifact();
-  if (source.status === "error") {
-    if (!primaryError || primaryError.class === "assertion_failure") invalidCaseArtifact();
-    if (hasAssertionError && (evidence === null || !["capability_error", "transport_error"].includes(primaryError.class))) invalidCaseArtifact();
+  if (primaryError === null) {
+    if (source.status !== "pass" || evidence === null || !allAssertionsPass) invalidCaseArtifact();
+  } else if (primaryError.origin === "adapter" || primaryError.origin === "adapter_boundary") {
+    if (source.status !== "error" || evidence !== null || assertions.length !== 0
+      || primaryError.class !== "transport_error") invalidCaseArtifact();
+  } else if (primaryError.origin === "runner") {
+    if (source.status !== "error" || assertions.length !== 0) invalidCaseArtifact();
+    if (primaryError.class === "target_timeout") {
+      if (evidence === null || evidence.candidates.length !== 0) invalidCaseArtifact();
+    } else if (primaryError.class === "transport_error" && primaryError.code === "invalid_clock_after_send") {
+      if (evidence === null) invalidCaseArtifact();
+    } else if (primaryError.class === "transport_error" && ["invalid_evidence", "artifact_limit_exceeded"].includes(primaryError.code)) {
+      if (evidence !== null) invalidCaseArtifact();
+    } else {
+      invalidCaseArtifact();
+    }
+  } else if (primaryError.origin === "grader") {
+    if (evidence === null) invalidCaseArtifact();
+    if (primaryError.class === "grader_error") {
+      if (source.status !== "error" || assertions.length !== 0) invalidCaseArtifact();
+    } else {
+      const classified = classifyAssertions(assertions);
+      if (classified.status !== source.status || classified.error?.class !== primaryError.class
+        || classified.error?.code !== primaryError.code || classified.error?.origin !== primaryError.origin) invalidCaseArtifact();
+    }
+  } else {
+    invalidCaseArtifact();
   }
   const allowedClasses = new Set(Object.keys(EVAL_ERROR_CODE_REGISTRY).filter((entry) => entry !== "configuration_error"));
   if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
   if (primaryError && (!isStableEvalErrorCode(primaryError.class, primaryError.code)
     || !isStableEvalErrorOrigin(primaryError.class, primaryError.code, primaryError.origin))) invalidCaseArtifact();
-  if (primaryError?.class === "assertion_failure" && primaryError.origin !== "grader") invalidCaseArtifact();
-  if (primaryError?.class === "capability_error" && (primaryError.origin !== "grader" || evidence === null || !hasAssertionError)) invalidCaseArtifact();
-  if (primaryError?.class === "grader_error" && (primaryError.origin !== "grader" || evidence === null)) invalidCaseArtifact();
-  if (primaryError?.class === "target_timeout" && (primaryError.origin !== "runner" || evidence === null
-    || evidence.candidates.length !== 0 || assertions.length !== 0)) invalidCaseArtifact();
-  if (primaryError?.class === "transport_error" && primaryError.origin === "grader"
-    && (evidence === null || !hasAssertionError)) invalidCaseArtifact();
   for (const secondary of secondaryErrors) {
     if (!SECONDARY_STAGES.has(secondary.stage) || !SECONDARY_CODES.has(secondary.code)) invalidCaseArtifact();
     if (secondary.class && !new Set([...allowedClasses, "configuration_error"]).has(secondary.class)) invalidCaseArtifact();
@@ -1111,10 +1200,18 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     throw new EvalError("configuration_error", "case_set_mismatch", "Stored run cases do not exactly match the resolved suite");
   }
   const validatedRecords = stored.records.map((record, index) => validateStoredRecord(record, suite, suite.cases[index]));
+  let artifactLimitSuffix = false;
+  for (const record of validatedRecords) {
+    const compact = record.primaryError?.code === "cases_artifact_limit";
+    if (artifactLimitSuffix && !compact) invalidCaseArtifact();
+    if (compact) artifactLimitSuffix = true;
+  }
 
   const cases = validatedRecords.map((storedRecord) => {
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
-      || ["transport_error", "target_timeout"].includes(storedRecord.primaryError?.class)) return storedRecord;
+      || storedRecord.primaryError?.class === "target_timeout"
+      || storedRecord.primaryError?.class === "grader_error"
+      || (storedRecord.primaryError?.class === "transport_error" && storedRecord.primaryError.origin !== "grader")) return storedRecord;
     const expectation = restoreAliasValue(storedRecord.expectation);
     const evidence = restoreAliasValue(storedRecord.evidence);
     let assertions = [];

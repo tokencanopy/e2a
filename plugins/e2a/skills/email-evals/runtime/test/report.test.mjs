@@ -6,6 +6,7 @@ import test from "node:test";
 import { loadSuite } from "../lib/contract.mjs";
 import {
   aliasCaseRecord,
+  CASES_ARTIFACT_LIMITS,
   createArtifactWriter,
   renderMarkdown,
   validateRunId,
@@ -50,6 +51,24 @@ test("artifact writer creates a private run and refuses collisions without overw
   const before = await readFile(first.files.cases, "utf8");
   await assert.rejects(createArtifactWriter({ outputRoot, runId: RUN_ID }), /already exists/i);
   assert.equal(await readFile(first.files.cases, "utf8"), before);
+});
+
+test("artifact writer accepts the exact cumulative byte limit and rejects the next line", async () => {
+  const writer = await createArtifactWriter({ outputRoot: await root(), runId: RUN_ID });
+  const lineCount = CASES_ARTIFACT_LIMITS.totalBytes / CASES_ARTIFACT_LIMITS.lineBytes;
+  for (let index = 0; index < lineCount; index += 1) {
+    const record = { id: `exact-${index}`, padding: "" };
+    const emptyBytes = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
+    record.padding = "X".repeat(CASES_ARTIFACT_LIMITS.lineBytes - emptyBytes);
+    assert.equal(Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8"), CASES_ARTIFACT_LIMITS.lineBytes);
+    await writer.appendCase(record, { status: "incomplete", cases: [] });
+  }
+  assert.equal((await stat(writer.files.cases)).size, 16_777_216);
+  await assert.rejects(
+    writer.appendCase({ id: "overflow" }, { status: "incomplete", cases: [] }),
+    (error) => error.code === "cases_artifact_limit" && error.lineDurable === false,
+  );
+  await writer.close();
 });
 
 test("artifact writer refuses symlink roots and cannot clobber a summary symlink", async () => {
@@ -149,6 +168,46 @@ test("mailbox scanning follows parser semantics without rewriting address prefix
   assert.match(record.evidence.candidates[0].from.address, /^observed:\d+$/);
   assert.equal(record.evidence.candidates[0].from.displayName, "Short");
   assert.doesNotMatch(record.primaryError.message, /[\r\n]/);
+});
+
+test("mailbox scanning aliases complete RFC atext spans including apostrophes", () => {
+  const configured = suite();
+  configured.actor.email = "o'reilly@b";
+  configured.transport.allowedEnvelopeRecipients = [
+    configured.target.email, configured.actor.email, "alpha@eval.test", "zeta@eval.test",
+  ];
+  const atext = "a!#$%&'*+-/=?^_`{|}~@b";
+  const text = `Known o'reilly@b; plus plus+tag@x-b; atext ${atext}; comments a(comment)@example.com and a@(comment)example.com; parenthesized (inside@b); Unicode ü@b; display Élodie <display@x-b>; distinct xo'reilly@b; adjacent left@b/right@c`;
+  const malformed = ["\"unterminated@example.com", "prefix(unclosed@example.com", "[unclosed@example.com"];
+  const record = aliasCaseRecord({
+    id: "atext-mailboxes",
+    status: "error",
+    expectation: { body: { requiredFacts: [text, ...malformed] } },
+    evidence: { version: 1, capabilities: [], candidates: [{ mime: { text } }] },
+    assertions: [],
+    primaryError: {
+      class: "transport_error", code: "poll_failed", origin: "adapter", message: text,
+    },
+    secondaryErrors: [],
+  }, configured);
+
+  const artifact = JSON.stringify(record);
+  for (const mailbox of [
+    "o'reilly@b", "plus+tag@x-b", atext, "a(comment)@example.com", "a@(comment)example.com",
+    "inside@b", "unterminated@example.com", "unclosed@example.com", "ü@b", "display@x-b",
+    "xo'reilly@b", "left@b", "right@c",
+  ]) {
+    assert.doesNotMatch(artifact, new RegExp(mailbox.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(record.expectation.body.requiredFacts[0], /Known actor/);
+  assert.doesNotMatch(record.expectation.body.requiredFacts[0], /xactor/);
+  assert.match(record.expectation.body.requiredFacts[0], /Élodie <observed:\d+>/);
+  assert.match(record.expectation.body.requiredFacts[0], /comments observed:\d+ and observed:\d+/);
+  assert.match(record.expectation.body.requiredFacts[0], /adjacent \[REDACTED:address\]/);
+  assert.ok(record.expectation.body.requiredFacts.slice(1).every(
+    (value) => value === "[REDACTED:address]" || /^observed:\d+$/.test(value),
+  ));
+  assert.equal(record.evidence.candidates[0].mime.text, record.expectation.body.requiredFacts[0]);
 });
 
 test("forbidden diagnostic matches and secrets in errors are redacted without RegExp state leaks", () => {
