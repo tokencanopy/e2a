@@ -12,6 +12,23 @@ const manifestFiles = [
   ".claude-plugin/marketplace.json",
   ".cursor-plugin/marketplace.json",
 ];
+const authoringPromptLabels = [
+  "use case",
+  "existing target runtime",
+  "dedicated actor environment name",
+  "dedicated target environment name",
+  "expected action",
+  "exact allowed recipients",
+  "sender",
+  "Reply-To",
+  "thread",
+  "subject",
+  "required facts",
+  "forbidden patterns",
+  "attachments",
+  "timeout",
+  "lifecycle",
+];
 
 async function emailEvalFiles(directory = templateDirectory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -28,17 +45,38 @@ function assertBefore(source, earlier, later) {
   assert.ok(source.indexOf(earlier) < source.indexOf(later), `${earlier} must precede ${later}`);
 }
 
+function parseAuthoringPrompts(source) {
+  const section = source.match(
+    /<!-- email-evals:authoring-prompts:start -->\n([\s\S]*?)\n<!-- email-evals:authoring-prompts:end -->/,
+  );
+  assert.ok(section, "missing marked authoring-prompt section");
+  return section[1].trim().split("\n").map((line) => {
+    const item = line.match(/^(\d+)\. \*\*([^*]+)\*\* — (.+)$/);
+    assert.ok(item, `invalid authoring prompt item: ${line}`);
+    return { number: Number(item[1]), label: item[2], prompt: item[3] };
+  });
+}
+
 test("email-evals skill preserves the safe authoring and run sequence", async () => {
   const source = await readFile(skillFile, "utf8");
 
   assert.match(source, /^---\nname: email-evals\ndescription: .+\n---/m);
   assert.match(source, /Ask one logical question at a time/i);
   assert.match(source, /do not dump a questionnaire/i);
-  for (const field of [
-    "use case", "target runtime", "actor", "target", "expected action", "allowed recipients",
-    "sender", "Reply-To", "thread", "subject", "required facts", "forbidden patterns",
-    "attachments", "timeout", "lifecycle",
-  ]) assert.match(source, new RegExp(field, "i"));
+  assert.match(source, /Ask exactly one prompt, wait for the answer, then advance/i);
+  assert.match(source, /only when an earlier answer proves.*irrelevant/i);
+  const prompts = parseAuthoringPrompts(source);
+  assert.equal(prompts.length, authoringPromptLabels.length);
+  assert.deepEqual(prompts.map(({ label }) => label), authoringPromptLabels);
+  for (const [index, { number, label, prompt }] of prompts.entries()) {
+    assert.equal(number, index + 1);
+    assert.match(prompt, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+    assert.doesNotMatch(`${label} ${prompt}`, /\band\b|\//i, `${label} must not bundle fields`);
+    assert.equal([...prompt.matchAll(/\?/g)].length, 1, `${label} must be one question`);
+    for (const otherLabel of authoringPromptLabels.filter((value) => value !== label)) {
+      assert.doesNotMatch(prompt, new RegExp(otherLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+    }
+  }
 
   assert.match(source, /refuse.*(?:customer|production-derived).*?(?:message|identifier|domain|fixture)/is);
   assert.match(source, /synthetic replacement/i);

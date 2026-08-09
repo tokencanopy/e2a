@@ -7,16 +7,27 @@ description: Author and safely run deterministic email-agent evaluation suites w
 
 ## Gather the suite one answer at a time
 
-Ask one logical question at a time; do not dump a questionnaire. Ask, in order:
+Ask one logical question at a time; do not dump a questionnaire. Ask exactly one prompt, wait for the answer, then advance. Conditionally omit a later prompt only when an earlier answer proves its field irrelevant; never bundle prompts.
 
-1. Ask for the use case.
-2. Ask whether the target runtime already exists and is running. This skill does not build or start the target agent runtime.
-3. Ask for the dedicated actor and target environment-variable names.
-4. Ask for the expected action and exact allowed recipients.
-5. Ask for the sender and Reply-To expectations.
-6. Ask for the thread and subject expectations.
-7. Ask for required facts and forbidden patterns.
-8. Ask for attachments, timeout, and lifecycle expectations.
+<!-- email-evals:authoring-prompts:start -->
+1. **use case** — Ask: “What is the synthetic use case?”
+2. **existing target runtime** — Ask: “Does the existing target runtime already run?”
+3. **dedicated actor environment name** — Ask: “What is the dedicated actor environment name?”
+4. **dedicated target environment name** — Ask: “What is the dedicated target environment name?”
+5. **expected action** — Ask: “What is the expected action?”
+6. **exact allowed recipients** — Ask: “Which exact allowed recipients are required?”
+7. **sender** — Ask: “What is the sender?”
+8. **Reply-To** — Ask: “What is the Reply-To expectation?”
+9. **thread** — Ask: “What is the thread expectation?”
+10. **subject** — Ask: “What is the subject expectation?”
+11. **required facts** — Ask: “What required facts apply?”
+12. **forbidden patterns** — Ask: “What forbidden patterns apply?”
+13. **attachments** — Ask: “What attachments are expected?”
+14. **timeout** — Ask: “What timeout applies?”
+15. **lifecycle** — Ask: “What lifecycle outcome is required?”
+<!-- email-evals:authoring-prompts:end -->
+
+This skill does not build or start the target agent runtime.
 
 Refuse real customer messages, identifiers, customer domains, or production-derived fixtures. Immediately propose a synthetic replacement, such as a fictional order identifier and a `.test` mailbox. Keep every case and attachment synthetic.
 
