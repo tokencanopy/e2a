@@ -29,6 +29,25 @@ const authoringPromptLabels = [
   "timeout",
   "lifecycle",
 ];
+const authoringPromptsStart = "<!-- email-evals:authoring-prompts:start -->";
+const authoringPromptsEnd = "<!-- email-evals:authoring-prompts:end -->";
+const authoringPromptTokens = [
+  ["use case"],
+  ["target runtime"],
+  ["actor environment"],
+  ["target environment"],
+  ["action"],
+  ["recipient"],
+  ["sender"],
+  ["Reply-To"],
+  ["thread"],
+  ["subject"],
+  ["fact"],
+  ["pattern"],
+  ["attachment"],
+  ["timeout"],
+  ["lifecycle"],
+];
 
 async function emailEvalFiles(directory = templateDirectory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -45,17 +64,68 @@ function assertBefore(source, earlier, later) {
   assert.ok(source.indexOf(earlier) < source.indexOf(later), `${earlier} must precede ${later}`);
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function authoringPromptItem(source) {
+  return /^\s*(?:\d+\.|[-*])\s+(?:\*\*[^*\n]+\*\*\s+—\s+)?(?:Ask:\s*)?.*\?/m.test(source);
+}
+
+/** Parse and validate the sole canonical authoring prompt block without I/O. */
 function parseAuthoringPrompts(source) {
-  const section = source.match(
-    /<!-- email-evals:authoring-prompts:start -->\n([\s\S]*?)\n<!-- email-evals:authoring-prompts:end -->/,
-  );
-  assert.ok(section, "missing marked authoring-prompt section");
-  return section[1].trim().split("\n").map((line) => {
+  const startCount = source.split(authoringPromptsStart).length - 1;
+  const endCount = source.split(authoringPromptsEnd).length - 1;
+  assert.equal(startCount, 1, "authoring prompts require exactly one marked block start");
+  assert.equal(endCount, 1, "authoring prompts require exactly one marked block end");
+
+  const start = source.indexOf(authoringPromptsStart);
+  const end = source.indexOf(authoringPromptsEnd);
+  assert.ok(start < end, "authoring prompt markers must be in order");
+  const outside = `${source.slice(0, start)}${source.slice(end + authoringPromptsEnd.length)}`;
+  assert.equal(authoringPromptItem(outside), false, "authoring question item exists outside canonical block");
+
+  const section = source.slice(start + authoringPromptsStart.length, end).trim();
+  const prompts = section.split("\n").map((line) => {
     const item = line.match(/^(\d+)\. \*\*([^*]+)\*\* — (.+)$/);
     assert.ok(item, `invalid authoring prompt item: ${line}`);
     return { number: Number(item[1]), label: item[2], prompt: item[3] };
   });
+  assert.equal(prompts.length, authoringPromptLabels.length);
+  assert.deepEqual(prompts.map(({ label }) => label), authoringPromptLabels);
+  for (const [index, { number, label, prompt }] of prompts.entries()) {
+    assert.equal(number, index + 1);
+    assert.match(prompt, new RegExp(escapeRegExp(label), "i"));
+    assert.doesNotMatch(prompt, /\*\*/, `${label} must contain one label`);
+    assert.equal([...prompt.matchAll(/\?/g)].length, 1, `${label} must be one question`);
+    for (const token of authoringPromptTokens.flatMap((tokens, tokenIndex) => tokenIndex === index ? [] : tokens)) {
+      assert.doesNotMatch(prompt, new RegExp(`\\b${escapeRegExp(token)}\\b`, "i"), `${label} mentions ${token}`);
+    }
+  }
+  return prompts;
 }
+
+test("authoring prompt contract rejects noncanonical blocks and bundled mutations", async () => {
+  const source = await readFile(skillFile, "utf8");
+  const senderPrompt = "1. **sender** — Ask: “What is the sender?”";
+  const mutations = [
+    ["duplicate marker pair", `${source}\n${authoringPromptsStart}\n${authoringPromptsEnd}`],
+    ["second bundled marked block", `${source}\n${authoringPromptsStart}\n${senderPrompt}\n${authoringPromptsEnd}`],
+    ["question before canonical block", source.replace(authoringPromptsStart, `${senderPrompt}\n${authoringPromptsStart}`)],
+    ["question after canonical block", source.replace(authoringPromptsEnd, `${authoringPromptsEnd}\n${senderPrompt}`)],
+    ["duplicate label", source.replace("2. **existing target runtime**", "2. **use case**")],
+    ["reordered label", source.replace(
+      "1. **use case** — Ask: “What is the synthetic use case?”\n2. **existing target runtime** — Ask: “Does the existing target runtime already run?”",
+      "1. **existing target runtime** — Ask: “Does the existing target runtime already run?”\n2. **use case** — Ask: “What is the synthetic use case?”",
+    )],
+    ["missing label", source.replace("15. **lifecycle** — Ask: “What lifecycle outcome is required?”\n", "")],
+    ["prompt mentions another field", source.replace("What is the synthetic use case?", "What use case should the sender handle?")],
+  ];
+
+  for (const [name, mutated] of mutations) {
+    assert.throws(() => parseAuthoringPrompts(mutated), undefined, name);
+  }
+});
 
 test("email-evals skill preserves the safe authoring and run sequence", async () => {
   const source = await readFile(skillFile, "utf8");
@@ -63,20 +133,11 @@ test("email-evals skill preserves the safe authoring and run sequence", async ()
   assert.match(source, /^---\nname: email-evals\ndescription: .+\n---/m);
   assert.match(source, /Ask one logical question at a time/i);
   assert.match(source, /do not dump a questionnaire/i);
-  assert.match(source, /Ask exactly one prompt, wait for the answer, then advance/i);
+  assert.match(source, /(?:one prompt|one logical question)[^.]*wait[^.]*answer[^.]*advance/i);
   assert.match(source, /only when an earlier answer proves.*irrelevant/i);
   const prompts = parseAuthoringPrompts(source);
   assert.equal(prompts.length, authoringPromptLabels.length);
   assert.deepEqual(prompts.map(({ label }) => label), authoringPromptLabels);
-  for (const [index, { number, label, prompt }] of prompts.entries()) {
-    assert.equal(number, index + 1);
-    assert.match(prompt, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
-    assert.doesNotMatch(`${label} ${prompt}`, /\band\b|\//i, `${label} must not bundle fields`);
-    assert.equal([...prompt.matchAll(/\?/g)].length, 1, `${label} must be one question`);
-    for (const otherLabel of authoringPromptLabels.filter((value) => value !== label)) {
-      assert.doesNotMatch(prompt, new RegExp(otherLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
-    }
-  }
 
   assert.match(source, /refuse.*(?:customer|production-derived).*?(?:message|identifier|domain|fixture)/is);
   assert.match(source, /synthetic replacement/i);
