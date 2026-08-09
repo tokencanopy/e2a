@@ -93,10 +93,7 @@ case "$cmd" in
     if [ -n "$untilarg" ]; then
       # Validate like --for: an unparseable expiry reads as the no-expiry
       # sentinel downstream, silently turning the asked-for window UNBOUNDED.
-      expires="$(python3 -c 'import sys,datetime
-try:
-  datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")); print(sys.argv[1])
-except Exception: print("INVALID")' "$untilarg")"
+      expires="$(t_parse_until "$untilarg")"
       [ "$expires" = "INVALID" ] && { echo "tether: can't parse --until '$untilarg' — use RFC3339, e.g. 2026-07-02T18:00:00Z"; exit 2; }
     elif [ -n "$forarg" ]; then
       expires="$(t_duration_to_expiry "$forarg")"
@@ -433,6 +430,14 @@ except Exception:print("")')"
     ck "'' → until-stop"  "$(t_duration_to_expiry '')"     ""
     ck "1h30m → INVALID"  "$(t_duration_to_expiry '1h30m')" "INVALID"
     ck "'90 min'→INVALID" "$(t_duration_to_expiry '90 min')" "INVALID"
+    ck "naive --until rejected" "$(t_parse_until '2026-08-08T18:00:00')" "INVALID"
+    ck "Z --until normalized" "$(t_parse_until '2026-08-08T18:00:00Z')" "2026-08-08T18:00:00Z"
+    ck "offset --until normalized" "$(t_parse_until '2026-08-08T11:00:00-07:00')" "2026-08-08T18:00:00Z"
+    badf=/tmp/tether-selftest-bad-expiry.json
+    printf '{"expires_at":"not-a-date"}' > "$badf"
+    badrem="$(TETHER_STATE="$badf" t_remaining_seconds)"
+    ck "malformed stored expiry is expired" "$badrem" "-1"
+    rm -f "$badf"
 
     echo "# placeholder creds are treated as MISSING:"
     ph="$(env E2A_API_KEY='e2a_agt_...' E2A_AGENT_EMAIL='tether@you.example' \
