@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { E2AClient } from "@e2a/sdk/v1";
 import { EvalError } from "./errors.mjs";
+import { parseMimeEvidence } from "./mime.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox } from "./normalize.mjs";
 
 const CAPABILITIES = Object.freeze([
@@ -71,6 +72,10 @@ Object.freeze(ReadonlyCapabilitySet);
 
 function configurationError(code, message) {
   return new EvalError("configuration_error", code, message);
+}
+
+function transportError(code, message) {
+  return new EvalError("transport_error", code, message);
 }
 
 function stableJson(value) {
@@ -227,16 +232,476 @@ function makePlan({ baseUrl, aliases, allowedAliases, cases }) {
   };
 }
 
+const OBSERVATION_LIMIT = 100;
+const OUTBOUND_TERMINAL_EVENTS = new Set([
+  "email.sent",
+  "email.failed",
+  "email.blocked",
+  "email.review_requested",
+]);
+
+function instant(value, code = "invalid_timestamp") {
+  const milliseconds = value instanceof Date ? value.getTime()
+    : typeof value === "number" ? value
+      : typeof value === "string" ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(milliseconds)) throw transportError(code, "Evaluation observation contained an invalid timestamp");
+  return { milliseconds, iso: new Date(milliseconds).toISOString() };
+}
+
+function clockInstant(now) {
+  try {
+    return instant(now(), "invalid_clock");
+  } catch (error) {
+    if (error instanceof EvalError) throw error;
+    throw transportError("invalid_clock", "Evaluation clock returned an invalid instant");
+  }
+}
+
+function strings(value, { optional = false } = {}) {
+  if (value === undefined && optional) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw transportError("malformed_event", "Evaluation event recipient evidence is malformed");
+  }
+  return [...value];
+}
+
+function dataOf(event) {
+  if (!event?.data || typeof event.data !== "object" || Array.isArray(event.data)) {
+    throw transportError("malformed_event", "Evaluation event payload is malformed");
+  }
+  return event.data;
+}
+
+function eventInstant(event) {
+  return instant(event?.createdAt, "malformed_event");
+}
+
+function eventIdentity(event) {
+  if (typeof event?.id !== "string" || event.id.length === 0 || typeof event?.type !== "string") {
+    throw transportError("malformed_event", "Evaluation event envelope is malformed");
+  }
+  return event.id;
+}
+
+function sameCanonical(left, right) {
+  const canonicalEvent = (event) => ({
+    id: event.id,
+    type: event.type,
+    schemaVersion: event.schemaVersion,
+    status: event.status,
+    createdAt: eventInstant(event).iso,
+    agentEmail: event.agentEmail,
+    conversationId: event.conversationId,
+    messageId: event.messageId,
+    data: event.data,
+  });
+  return stableJson(canonicalEvent(left)) === stableJson(canonicalEvent(right));
+}
+
+function uniqueEvents(events) {
+  const byRef = new Map();
+  for (const event of events) {
+    const ref = eventIdentity(event);
+    const prior = byRef.get(ref);
+    if (prior && !sameCanonical(prior, event)) {
+      throw transportError("conflicting_event_ref", "Evaluation event reference carried conflicting evidence");
+    }
+    if (!prior) byRef.set(ref, event);
+  }
+  return [...byRef.values()].sort((left, right) => eventInstant(left).iso.localeCompare(eventInstant(right).iso)
+    || left.id.localeCompare(right.id));
+}
+
+async function boundedItems(source, code) {
+  let resolved;
+  try {
+    resolved = await source;
+  } catch (error) {
+    throw error;
+  }
+  let items;
+  if (Array.isArray(resolved)) {
+    items = resolved.slice(0, OBSERVATION_LIMIT + 1);
+  } else if (resolved && typeof resolved.toArray === "function") {
+    items = await resolved.toArray({ limit: OBSERVATION_LIMIT + 1 });
+  } else if (resolved && typeof resolved[Symbol.asyncIterator] === "function") {
+    items = [];
+    for await (const item of resolved) {
+      items.push(item);
+      if (items.length > OBSERVATION_LIMIT) break;
+    }
+  } else {
+    throw transportError("malformed_page", "Evaluation list response is not iterable");
+  }
+  if (!Array.isArray(items)) throw transportError("malformed_page", "Evaluation list response is malformed");
+  if (items.length > OBSERVATION_LIMIT) throw transportError(code, "Evaluation observation exceeded its bounded result limit");
+  return items;
+}
+
+function messageIdOf(data) {
+  return typeof data.message_id === "string" && data.message_id.length > 0 ? data.message_id : null;
+}
+
+function conversationIdOf(event, data, message) {
+  for (const value of [data.conversation_id, event?.conversationId, message?.conversationId]) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+function normalizedAgent(value) {
+  if (typeof value !== "string") return null;
+  try {
+    return normalizeMailbox(value).address;
+  } catch {
+    return null;
+  }
+}
+
+function eventIsFor(event, expectedAgent, direction) {
+  const data = dataOf(event);
+  const envelopeAgent = event.agentEmail === undefined ? null : normalizedAgent(event.agentEmail);
+  const payloadAgent = normalizedAgent(data.agent_email);
+  return payloadAgent === expectedAgent
+    && (envelopeAgent === null || envelopeAgent === expectedAgent)
+    && data.direction === direction;
+}
+
+function stableEnvelopeRecipients(to, cc, bcc) {
+  const seen = new Set();
+  const result = [];
+  for (const value of [...to, ...cc, ...bcc]) {
+    let key = value;
+    try { key = normalizeMailbox(value).address; } catch { /* preserve malformed evidence for fail-closed grading */ }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function safeTransition(transition) {
+  if (!transition || typeof transition !== "object" || Array.isArray(transition)) {
+    throw transportError("malformed_lifecycle", "Evaluation lifecycle evidence is malformed");
+  }
+  const occurredAt = instant(transition.occurredAt, "malformed_lifecycle").iso;
+  return {
+    id: typeof transition.id === "string" ? transition.id : null,
+    messageId: typeof transition.messageId === "string" ? transition.messageId : null,
+    direction: typeof transition.direction === "string" ? transition.direction : null,
+    stage: typeof transition.stage === "string" ? transition.stage : null,
+    outcome: typeof transition.outcome === "string" ? transition.outcome : null,
+    reasonCode: typeof transition.reasonCode === "string" ? transition.reasonCode : null,
+    retryable: transition.retryable === true,
+    reconstructed: transition.reconstructed === true,
+    recipient: typeof transition.recipient === "string" ? transition.recipient : null,
+    occurredAt,
+  };
+}
+
+function submissionFor(eventType) {
+  switch (eventType) {
+    case "email.sent": return "sent";
+    case "email.failed": return "failed";
+    case "email.blocked": return "blocked";
+    case "email.review_requested": return "pending_review";
+    default: return null;
+  }
+}
+
+async function readLifecycle(sdk, target, messageId) {
+  const page = await sdk.messages.getLifecycle(target, messageId, { limit: OBSERVATION_LIMIT });
+  if (!page || !Array.isArray(page.items)) throw transportError("malformed_lifecycle", "Evaluation lifecycle response is malformed");
+  if (page.items.length > OBSERVATION_LIMIT || page.nextCursor) {
+    throw transportError("observation_limit_exceeded", "Evaluation lifecycle exceeded its bounded result limit");
+  }
+  return page.items.map(safeTransition);
+}
+
+function validateMessage(message, messageId, direction) {
+  if (!message || typeof message !== "object" || message.id !== messageId || message.direction !== direction) {
+    throw transportError("message_identity_mismatch", "Evaluation message did not match its durable event reference");
+  }
+  return message;
+}
+
+async function mimeFromMessage(message, { required }) {
+  if (typeof message.rawMessage !== "string") {
+    if (required) throw transportError("raw_mime_unavailable", "Evaluation message raw MIME is unavailable");
+    return null;
+  }
+  try {
+    return await parseMimeEvidence(message.rawMessage);
+  } catch {
+    throw transportError("mime_observation_failed", "Evaluation message MIME could not be normalized");
+  }
+}
+
+async function normalizeStimulus(sdk, event, actor, target) {
+  const data = dataOf(event);
+  if (event.type !== "email.received" || !eventIsFor(event, target, "inbound") || normalizedAgent(data.header_from) !== actor) {
+    throw transportError("stimulus_identity_mismatch", "Target stimulus identity could not be verified");
+  }
+  const messageId = messageIdOf(data);
+  if (!messageId) throw transportError("malformed_event", "Target stimulus event omitted its message reference");
+  const message = validateMessage(await sdk.messages.get(target, messageId), messageId, "inbound");
+  const mime = await mimeFromMessage(message, { required: true });
+  const to = strings(data.to);
+  const cc = strings(data.cc, { optional: true });
+  const participants = stableEnvelopeRecipients([data.header_from], to, cc).filter((address) => address !== target);
+  const receivedAt = instant(data.received_at ?? message.createdAt ?? event.createdAt, "malformed_event").iso;
+  const normalized = {
+    ref: event.id,
+    messageId,
+    conversationId: conversationIdOf(event, data, message),
+    rfcMessageId: mime.messageId,
+    subject: typeof data.subject === "string" ? data.subject : message.subject,
+    receivedAt,
+  };
+  // Task 4's reply-all classifier needs a participant set only when reply and
+  // reply-all are observably distinct. With just the actor and target, a reply
+  // and reply-all have identical recipients; publishing [actor] would
+  // incorrectly classify every ordinary one-to-one reply as reply-all.
+  if (participants.length > 1) normalized.participants = participants;
+  return normalized;
+}
+
+function stimulusEvents(events, actor, target, subject, lowerBound, upperBound) {
+  return uniqueEvents(events).filter((event) => {
+    if (event.type !== "email.received") return false;
+    const observed = eventInstant(event).milliseconds;
+    if (observed < lowerBound || observed > upperBound) return false;
+    const data = dataOf(event);
+    return eventIsFor(event, target, "inbound")
+      && normalizedAgent(data.header_from) === actor
+      && data.subject === subject;
+  });
+}
+
+function subjectMatches(subject, expectation, stimulusSubject) {
+  if (typeof subject !== "string") return false;
+  const specification = expectation ?? {};
+  if (typeof specification.exact === "string" && subject !== specification.exact) return false;
+  if (typeof specification.regex === "string") {
+    try { if (!new RegExp(specification.regex).test(subject)) return false; } catch { return false; }
+  }
+  if (Array.isArray(specification.requiredFragments) && specification.requiredFragments.some((fragment) => !subject.includes(fragment))) return false;
+  if (Array.isArray(specification.forbiddenFragments) && specification.forbiddenFragments.some((fragment) => subject.includes(fragment))) return false;
+  if (specification.policy === "preserve") {
+    const stripped = subject.replace(/^(?:Re:[ \t]*)+/i, "");
+    if (stripped !== stimulusSubject) return false;
+  }
+  if (specification.policy === "forward") {
+    const match = subject.match(/^(?:Fwd|Fw):[ \t]*/i);
+    if (!match || subject.slice(match[0].length) !== stimulusSubject) return false;
+  }
+  const hasConstraint = Object.keys(specification).length > 0;
+  return hasConstraint || subject === stimulusSubject;
+}
+
+function eventCandidateMetadata(event, target, lowerBound, upperBound) {
+  if (!OUTBOUND_TERMINAL_EVENTS.has(event.type)) return null;
+  const observed = eventInstant(event).milliseconds;
+  if (observed < lowerBound || observed > upperBound) return null;
+  const data = dataOf(event);
+  if (!eventIsFor(event, target, "outbound")) return null;
+  const messageId = messageIdOf(data);
+  if (!messageId) throw transportError("malformed_event", "Outbound evaluation event omitted its message reference");
+  return {
+    event,
+    data,
+    messageId,
+    conversationId: conversationIdOf(event, data),
+    subject: data.subject,
+  };
+}
+
+async function normalizeCandidate(sdk, target, metadata) {
+  const { event, data, messageId } = metadata;
+  const to = strings(data.to);
+  const cc = strings(data.cc, { optional: true });
+  const bcc = strings(data.bcc, { optional: true });
+  let message = null;
+  let mime = null;
+  let transitions = [];
+  if (!(event.type === "email.blocked" && typeof event.messageId !== "string")) {
+    message = validateMessage(await sdk.messages.get(target, messageId), messageId, "outbound");
+    mime = await mimeFromMessage(message, { required: event.type !== "email.review_requested" });
+    transitions = await readLifecycle(sdk, target, messageId);
+  }
+  const observedAt = eventInstant(event).iso;
+  return {
+    ref: event.id,
+    eventType: event.type,
+    direction: "outbound",
+    provenance: "target_outbound",
+    messageType: typeof data.message_type === "string" ? data.message_type : null,
+    from: typeof data.from === "string" ? data.from : message?.headerFrom ?? data.agent_email,
+    sentAs: data.agent_email,
+    replyTo: mime?.replyTo ?? (Array.isArray(message?.replyTo) ? [...message.replyTo] : []),
+    to,
+    cc,
+    bcc,
+    envelopeRecipients: stableEnvelopeRecipients(to, cc, bcc),
+    conversationId: conversationIdOf(event, data, message),
+    messageId,
+    observedAt,
+    sentAt: observedAt,
+    mime,
+    lifecycle: { submission: submissionFor(event.type), transitions },
+  };
+}
+
+function relatedByMime(candidate, stimulus) {
+  if (!candidate.mime || typeof stimulus.rfcMessageId !== "string") return false;
+  return candidate.mime.inReplyTo === stimulus.rfcMessageId
+    || candidate.mime.references?.includes(stimulus.rfcMessageId);
+}
+
+async function correlatedCandidates(sdk, events, resolvedCase, stimulus, target, lowerBound, upperBound) {
+  const metadata = uniqueEvents(events).map((event) => eventCandidateMetadata(event, target, lowerBound, upperBound)).filter(Boolean);
+  const exact = stimulus.conversationId
+    ? metadata.filter((entry) => entry.conversationId === stimulus.conversationId)
+    : [];
+  if (exact.length > 0) return Promise.all(exact.map((entry) => normalizeCandidate(sdk, target, entry)));
+
+  if (resolvedCase.expect.action.kind === "new_message") {
+    const plausible = metadata.filter((entry) => normalizedAgent(entry.data.from ?? entry.data.agent_email) === target
+      && subjectMatches(entry.subject, resolvedCase.expect.subject, stimulus.subject));
+    if (plausible.length > 1) throw transportError("ambiguous_correlation", "Multiple outbound messages matched the evaluation case");
+    return plausible.length === 1 ? [await normalizeCandidate(sdk, target, plausible[0])] : [];
+  }
+
+  const normalized = [];
+  for (const entry of metadata) {
+    const candidate = await normalizeCandidate(sdk, target, entry);
+    if (relatedByMime(candidate, stimulus)) normalized.push(candidate);
+  }
+  return normalized;
+}
+
+async function normalizeReceiptMessage(sdk, actor, messageId) {
+  const message = validateMessage(await sdk.messages.get(actor, messageId), messageId, "inbound");
+  return { message, mime: await mimeFromMessage(message, { required: true }) };
+}
+
+function candidateForMime(candidates, mime) {
+  return candidates.find((candidate) => candidate.mime?.messageId && candidate.mime.messageId === mime.messageId) ?? null;
+}
+
+async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candidates, actor, target, lowerBound, upperBound) {
+  const receipts = [];
+  const candidateSubjects = new Set(candidates.map((candidate) => candidate.mime?.subject).filter((subject) => typeof subject === "string"));
+  for (const event of uniqueEvents(actorEvents)) {
+    if (event.type !== "email.received") continue;
+    const observed = eventInstant(event).milliseconds;
+    if (observed < lowerBound || observed > upperBound) continue;
+    const data = dataOf(event);
+    if (!eventIsFor(event, actor, "inbound") || normalizedAgent(data.header_from) !== target) continue;
+    if (candidateSubjects.size > 0 && !candidateSubjects.has(data.subject)) continue;
+    const receivedMessageId = messageIdOf(data);
+    if (!receivedMessageId) throw transportError("malformed_event", "Actor receipt event omitted its message reference");
+    const { mime } = await normalizeReceiptMessage(sdk, actor, receivedMessageId);
+    const candidate = candidateForMime(candidates, mime);
+    if (candidate) receipts.push({
+      ref: event.id,
+      messageId: candidate.messageId,
+      receiptMessageId: receivedMessageId,
+      observedAt: instant(data.received_at ?? event.createdAt, "malformed_event").iso,
+    });
+  }
+  if (receipts.length > 1) throw transportError("ambiguous_correlation", "Multiple actor receipts matched the evaluation case");
+  if (receipts.length === 1) return receipts[0];
+
+  for (const summary of actorMessages) {
+    if (!summary || typeof summary.id !== "string" || baseline.has(summary.id)) continue;
+    if (normalizedAgent(summary.headerFrom) !== target) continue;
+    if (candidateSubjects.size > 0 && !candidateSubjects.has(summary.subject)) continue;
+    const { message, mime } = await normalizeReceiptMessage(sdk, actor, summary.id);
+    if (normalizedAgent(message.headerFrom) !== target) continue;
+    const candidate = candidateForMime(candidates, mime);
+    if (!candidate) continue;
+    receipts.push({
+      ref: `message:${summary.id}`,
+      messageId: candidate.messageId,
+      receiptMessageId: summary.id,
+      observedAt: instant(message.createdAt, "malformed_message").iso,
+    });
+  }
+  if (receipts.length > 1) throw transportError("ambiguous_correlation", "Multiple actor receipts matched the evaluation case");
+  return receipts[0] ?? null;
+}
+
+function isConnectionError(error) {
+  return error?.code === "connection_error" && error?.status === 0;
+}
+
+function readBackoff(error, pollIntervalMs, remainingMs) {
+  const hinted = typeof error?.retryAfterSeconds === "number" && Number.isFinite(error.retryAfterSeconds)
+    ? Math.max(0, error.retryAfterSeconds * 1_000) : pollIntervalMs;
+  return Math.min(Math.max(pollIntervalMs, hinted), remainingMs);
+}
+
+function validateExecution(resolvedCase, context) {
+  if (!resolvedCase || typeof resolvedCase.id !== "string" || !resolvedCase.send
+    || typeof resolvedCase.send.subject !== "string" || typeof resolvedCase.send.text !== "string"
+    || !resolvedCase.expect?.action || typeof resolvedCase.expect.action.kind !== "string") {
+    throw configurationError("invalid_case", "Resolved evaluation case is invalid");
+  }
+  for (const [field, minimum] of [["timeoutMs", 1], ["settleMs", 0], ["pollIntervalMs", 1]]) {
+    if (!Number.isSafeInteger(context?.[field]) || context[field] < minimum) {
+      throw configurationError("invalid_execution_context", "Evaluation execution timing is invalid");
+    }
+  }
+  for (const field of ["suiteDigest", "runId", "actor", "target"]) {
+    if (typeof context?.[field] !== "string" || context[field].length === 0) {
+      throw configurationError("invalid_execution_context", "Evaluation execution context is invalid");
+    }
+  }
+}
+
+function evidenceDocument({ capabilities, context, caseStartedAt, sendAcceptedAt, sendResult, stimulus, candidates, actorReceipt, completedAt }) {
+  const refs = {
+    stimulus: { event: stimulus?.ref ?? null, message: stimulus?.messageId ?? null, outboundMessage: sendResult.messageId ?? null },
+    candidates: candidates.map((candidate) => candidate.ref),
+    actorReceipt: actorReceipt?.ref ?? null,
+  };
+  return {
+    version: 1,
+    capabilities: capabilities.toArray(),
+    target: { email: context.target },
+    stimulus: stimulus ? { ...stimulus, outboundMessageId: sendResult.messageId ?? null } : {
+      ref: null, messageId: null, outboundMessageId: sendResult.messageId ?? null,
+      conversationId: null, rfcMessageId: null, subject: null, receivedAt: null,
+    },
+    candidates,
+    actorReceipt,
+    lifecycle: {
+      stimulus: sendResult.status,
+      candidates: candidates.map((candidate) => ({ ref: candidate.ref, ...candidate.lifecycle })),
+      actorReceived: actorReceipt !== null,
+    },
+    timings: {
+      runStartedAt: typeof context.startedAt === "string" ? context.startedAt : null,
+      caseStartedAt,
+      sendAcceptedAt,
+      targetReceivedAt: stimulus?.receivedAt ?? null,
+      firstCandidateAt: candidates[0]?.observedAt ?? null,
+      completedAt,
+      timeoutMs: context.timeoutMs,
+      settleMs: context.settleMs,
+      pollIntervalMs: context.pollIntervalMs,
+    },
+    refs,
+  };
+}
+
 /**
  * Creates the e2a transport adapter. Its first operation is deliberately a
  * read-only containment preflight; no protection mutation or mail send lives
  * on this path.
  */
-export function createE2AAdapter({ apiKey, baseUrl, client, now = () => Date.now(), sleep = () => Promise.resolve() }) {
-  // Keep these seams available for the later polling implementation without
-  // exposing credentials in the serializable adapter result.
-  void now;
-  void sleep;
+export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date(), sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) }) {
   const sdk = client ?? new E2AClient({ apiKey, baseUrl, ...TIMEOUTS });
   const capabilities = new ReadonlyCapabilitySet(CAPABILITIES);
 
@@ -291,6 +756,159 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => Date.now
         protectionDigest,
         plan: makePlan({ baseUrl: safeBaseUrl, aliases, allowedAliases, cases }),
       };
+    },
+    async executeCase(resolvedCase, context) {
+      validateExecution(resolvedCase, context);
+      const actor = normalizeAddress(context.actor);
+      const target = normalizeAddress(context.target);
+      if (actor === target) throw configurationError("same_actor_target", "Actor and target must differ");
+
+      const caseStart = clockInstant(now);
+      const caseStartedAt = caseStart.iso;
+      const deadline = caseStart.milliseconds + context.timeoutMs;
+      const baselineSince = new Date(caseStart.milliseconds - 2 * context.timeoutMs).toISOString();
+      let baselineItems;
+      try {
+        baselineItems = await boundedItems(
+          sdk.messages.list(actor, { direction: "inbound", since: baselineSince, limit: OBSERVATION_LIMIT }),
+          "baseline_limit_exceeded",
+        );
+      } catch (error) {
+        if (error instanceof EvalError) throw error;
+        throw transportError("baseline_read_failed", "Unable to record the bounded actor inbox baseline");
+      }
+      const baseline = new Set();
+      for (const item of baselineItems) {
+        if (!item || typeof item.id !== "string" || item.id.length === 0) {
+          throw transportError("malformed_page", "Actor inbox baseline contained a malformed message reference");
+        }
+        baseline.add(item.id);
+      }
+
+      const stimulusBody = Object.freeze({
+        to: Object.freeze([target]),
+        subject: resolvedCase.send.subject,
+        text: resolvedCase.send.text,
+      });
+      const idempotencyKey = `eev1_${createHash("sha256").update([
+        context.suiteDigest,
+        context.runId,
+        resolvedCase.id,
+        stableJson(stimulusBody),
+      ].join("\n")).digest("hex").slice(0, 48)}`;
+      const sendOptions = Object.freeze({ idempotencyKey, wait: "sent" });
+      let sendResult;
+      try {
+        sendResult = await sdk.messages.send(actor, stimulusBody, sendOptions);
+      } catch (error) {
+        if (!isConnectionError(error)) {
+          throw transportError("stimulus_send_failed", "Evaluation stimulus could not be submitted");
+        }
+        try {
+          // The SDK already exhausted its keyed retries. This is the only
+          // explicit recovery: request the server's idempotent replay with the
+          // exact same frozen body object and key.
+          sendResult = await sdk.messages.send(actor, stimulusBody, sendOptions);
+        } catch {
+          throw transportError("send_acceptance_unknown", "Evaluation stimulus acceptance could not be established safely");
+        }
+      }
+      if (!sendResult || !["accepted", "sent"].includes(sendResult.status)) {
+        throw transportError("stimulus_not_delivered", "Evaluation stimulus did not enter an observable delivery state");
+      }
+      const sendAcceptedAt = clockInstant(now).iso;
+
+      let logicalElapsed = Math.max(0, clockInstant(now).milliseconds - caseStart.milliseconds);
+      let lastEvidence = { stimulus: null, candidates: [], actorReceipt: null };
+      let terminalObservedAt = null;
+      let lastReadFailure = null;
+      let lastSuccessfulReadAt = -1;
+
+      for (;;) {
+        const realElapsed = Math.max(0, clockInstant(now).milliseconds - caseStart.milliseconds);
+        const elapsed = Math.max(logicalElapsed, realElapsed);
+        if (elapsed > context.timeoutMs) logicalElapsed = context.timeoutMs;
+
+        try {
+          const targetEvents = await boundedItems(
+            sdk.events.list({ agentEmail: target, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            "observation_limit_exceeded",
+          );
+          const actorEvents = await boundedItems(
+            sdk.events.list({ agentEmail: actor, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            "observation_limit_exceeded",
+          );
+          const actorMessages = await boundedItems(
+            sdk.messages.list(actor, { direction: "inbound", since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            "observation_limit_exceeded",
+          );
+
+          let stimulus = lastEvidence.stimulus;
+          if (!stimulus) {
+            const matches = stimulusEvents(targetEvents, actor, target, resolvedCase.send.subject, caseStart.milliseconds, deadline);
+            const messageRefs = [...new Set(matches.map((event) => messageIdOf(dataOf(event))))];
+            if (messageRefs.length > 1) throw transportError("ambiguous_correlation", "Multiple target messages matched the evaluation stimulus");
+            if (matches.length > 0) stimulus = await normalizeStimulus(sdk, matches[0], actor, target);
+          }
+
+          let candidates = [];
+          let actorReceipt = null;
+          if (stimulus) {
+            candidates = await correlatedCandidates(sdk, targetEvents, resolvedCase, stimulus, target, caseStart.milliseconds, deadline);
+            candidates.sort((left, right) => left.observedAt.localeCompare(right.observedAt) || left.ref.localeCompare(right.ref));
+            actorReceipt = await findActorReceipt(
+              sdk, actorEvents, actorMessages, baseline, candidates, actor, target, caseStart.milliseconds, deadline,
+            );
+          }
+          lastEvidence = { stimulus, candidates, actorReceipt };
+          lastSuccessfulReadAt = elapsed;
+          lastReadFailure = null;
+          if (resolvedCase.expect.action.kind !== "none" && candidates.length > 0 && terminalObservedAt === null) {
+            terminalObservedAt = elapsed;
+          }
+        } catch (error) {
+          if (error instanceof EvalError && [
+            "observation_limit_exceeded", "ambiguous_correlation", "conflicting_event_ref",
+          ].includes(error.code)) throw error;
+          lastReadFailure = { error, elapsed };
+        }
+
+        const afterReadRealElapsed = Math.max(0, clockInstant(now).milliseconds - caseStart.milliseconds);
+        const afterReadElapsed = Math.max(logicalElapsed, afterReadRealElapsed);
+        const fullTimeout = afterReadElapsed >= context.timeoutMs;
+        const settled = resolvedCase.expect.action.kind !== "none"
+          && terminalObservedAt !== null
+          && afterReadElapsed >= Math.min(context.timeoutMs, terminalObservedAt + context.settleMs);
+        if (fullTimeout || settled) {
+          if (lastReadFailure && lastReadFailure.elapsed >= lastSuccessfulReadAt) {
+            throw transportError("observation_failed", "Evaluation evidence could not be read completely");
+          }
+          const completedAt = clockInstant(now).iso;
+          return evidenceDocument({
+            capabilities,
+            context: { ...context, actor, target },
+            caseStartedAt,
+            sendAcceptedAt,
+            sendResult,
+            ...lastEvidence,
+            completedAt,
+          });
+        }
+
+        const nextBoundary = terminalObservedAt === null || resolvedCase.expect.action.kind === "none"
+          ? context.timeoutMs
+          : Math.min(context.timeoutMs, terminalObservedAt + context.settleMs);
+        const remaining = Math.max(0, nextBoundary - afterReadElapsed);
+        const waitMs = lastReadFailure
+          ? readBackoff(lastReadFailure.error, context.pollIntervalMs, remaining)
+          : Math.min(context.pollIntervalMs, remaining);
+        if (waitMs <= 0) {
+          logicalElapsed = nextBoundary;
+          continue;
+        }
+        await sleep(waitMs);
+        logicalElapsed = Math.min(context.timeoutMs, afterReadElapsed + waitMs);
+      }
     },
   });
 }

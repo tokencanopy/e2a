@@ -1,0 +1,46 @@
+[
+  {
+    "id": "evt_synthetic_target_received_blocked_case",
+    "type": "email.received",
+    "schemaVersion": "1",
+    "status": "processed",
+    "createdAt": "2026-08-08T12:00:01.000Z",
+    "agentEmail": "target@eval.test",
+    "conversationId": "conv_synthetic",
+    "messageId": "msg_synthetic_target_in",
+    "data": {
+      "message_id": "msg_synthetic_target_in",
+      "agent_email": "target@eval.test",
+      "direction": "inbound",
+      "conversation_id": "conv_synthetic",
+      "header_from": "actor@eval.test",
+      "envelope_from": "actor@eval.test",
+      "to": ["target@eval.test"],
+      "cc": [],
+      "reply_to": [],
+      "delivered_to": "target@eval.test",
+      "subject": "Question about fictional order ord_example_123",
+      "received_at": "2026-08-08T12:00:01.000Z"
+    }
+  },
+  {
+    "id": "evt_synthetic_target_blocked",
+    "type": "email.blocked",
+    "schemaVersion": "1",
+    "status": "processed",
+    "createdAt": "2026-08-08T12:00:04.000Z",
+    "agentEmail": "target@eval.test",
+    "conversationId": "conv_synthetic",
+    "data": {
+      "message_id": "msgblk_synthetic",
+      "agent_email": "target@eval.test",
+      "direction": "outbound",
+      "to": ["outside@eval.test"],
+      "cc": [],
+      "bcc": ["hidden@eval.test"],
+      "subject": "Re: Question about fictional order ord_example_123",
+      "reason": "recipient gate blocked the synthetic attempt",
+      "reason_source": "recipient_gate"
+    }
+  }
+]
