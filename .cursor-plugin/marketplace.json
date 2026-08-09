@@ -5,8 +5,8 @@
     "url": "https://e2a.dev"
   },
   "metadata": {
-    "description": "e2a — authenticated email gateway for AI agents (MCP server + operate-well skill).",
-    "version": "0.6.0"
+    "description": "e2a — authenticated email gateway for AI agents (MCP configuration and canonical docs).",
+    "version": "0.7.0"
   },
   "plugins": [
     {

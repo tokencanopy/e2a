@@ -22,3 +22,39 @@ test("only core registers the e2a MCP server", async () => {
     assert.equal(labs.mcpServers, undefined);
   }
 });
+
+test("marketplaces expose the supported plugin set and release versions", async () => {
+  const claudeMarket = JSON.parse(await readFile(".claude-plugin/marketplace.json", "utf8"));
+  const codexMarket = JSON.parse(await readFile(".agents/plugins/marketplace.json", "utf8"));
+  const cursorMarket = JSON.parse(await readFile(".cursor-plugin/marketplace.json", "utf8"));
+
+  assert.deepEqual(claudeMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
+  assert.deepEqual(codexMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
+  assert.deepEqual(cursorMarket.plugins.map((plugin) => plugin.name), ["e2a"]);
+  assert.equal(claudeMarket.metadata.version, "0.7.0");
+  assert.equal(cursorMarket.metadata.version, "0.7.0");
+
+  for (const client of [".claude-plugin", ".codex-plugin", ".cursor-plugin"]) {
+    const core = JSON.parse(await readFile(`plugins/e2a/${client}/plugin.json`, "utf8"));
+    assert.equal(core.version, "0.7.0");
+  }
+  for (const client of [".claude-plugin", ".codex-plugin"]) {
+    const labs = JSON.parse(await readFile(`plugins/e2a-labs/${client}/plugin.json`, "utf8"));
+    assert.equal(labs.version, "0.1.0");
+  }
+});
+
+test("client manifests retain only their supported visual fields", async () => {
+  const claude = JSON.parse(await readFile("plugins/e2a/.claude-plugin/plugin.json", "utf8"));
+  const codex = JSON.parse(await readFile("plugins/e2a/.codex-plugin/plugin.json", "utf8"));
+  const cursor = JSON.parse(await readFile("plugins/e2a/.cursor-plugin/plugin.json", "utf8"));
+
+  assert.equal(claude.icon, undefined);
+  assert.equal(codex.interface.composerIcon, "./assets/icon.svg");
+  assert.equal(cursor.logo, "assets/icon.svg");
+});
+
+test("Labs pins its Claude dependency to the compatible core release", async () => {
+  const labs = JSON.parse(await readFile("plugins/e2a-labs/.claude-plugin/plugin.json", "utf8"));
+  assert.deepEqual(labs.dependencies, [{ name: "e2a", version: "^0.7.0" }]);
+});
