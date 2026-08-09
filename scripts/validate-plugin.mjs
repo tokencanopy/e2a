@@ -10,6 +10,7 @@
 //      metadata agrees with the independently versioned core plugin.
 //   4. Every skill directory in every plugin has valid SKILL.md frontmatter.
 //   5. Core alone owns the e2a MCP configuration; Labs cannot register one.
+//   6. Numeric MCP-tool claims match the canonical tool-name catalog.
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -57,6 +58,25 @@ function clientManifestPath(plugin, client) {
   return join(plugin.dir, client, "plugin.json");
 }
 
+function validateMcpToolClaims(file, value, expectedCount) {
+  if (Array.isArray(value)) {
+    for (const item of value) validateMcpToolClaims(file, item, expectedCount);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "description" && typeof item === "string") {
+      for (const match of item.matchAll(/\b(\d+) MCP tools\b/g)) {
+        const advertised = Number(match[1]);
+        if (advertised !== expectedCount) {
+          fail(`${rel(file)}: description advertises ${advertised} MCP tools; canonical catalog has ${expectedCount}`);
+        }
+      }
+    }
+    validateMcpToolClaims(file, item, expectedCount);
+  }
+}
+
 function validateSkill(plugin, dir) {
   const file = join(plugin.dir, "skills", dir, "SKILL.md");
   if (!existsSync(file)) {
@@ -89,7 +109,7 @@ function validateSkill(plugin, dir) {
   }
 }
 
-function validatePlugin(plugin) {
+function validatePlugin(plugin, mcpToolCount) {
   if (!existsSync(plugin.dir) || !statSync(plugin.dir).isDirectory()) {
     fail(`missing plugin directory: ${rel(plugin.dir)}`);
     return;
@@ -117,6 +137,7 @@ function validatePlugin(plugin) {
 
   for (const { file, manifest } of manifests) {
     if (!manifest) continue;
+    validateMcpToolClaims(file, manifest, mcpToolCount);
     for (const field of ["name", "description", "version"]) {
       if (!manifest[field]) fail(`${rel(file)}: missing required field "${field}"`);
     }
@@ -137,6 +158,21 @@ function validatePlugin(plugin) {
     }
     if (plugin.ownsMcp && manifest.mcpServers !== "./.mcp.json") {
       fail(`${rel(file)}: MCP owner must reference "./.mcp.json"`);
+    }
+  }
+
+  if (plugin.name === "e2a-labs" && claudeManifest) {
+    const dependencies = claudeManifest.dependencies;
+    const dependency = Array.isArray(dependencies) && dependencies.length === 1
+      ? dependencies[0]
+      : null;
+    if (
+      !dependency
+      || dependency.name !== "e2a"
+      || dependency.version !== "^0.7.0"
+      || JSON.stringify(Object.keys(dependency).sort()) !== JSON.stringify(["name", "version"])
+    ) {
+      fail(`${rel(clientManifestPath(plugin, ".claude-plugin"))}: dependencies must be exactly [{"name":"e2a","version":"^0.7.0"}]`);
     }
   }
 
@@ -164,33 +200,61 @@ function validatePlugin(plugin) {
   pluginResults.push({ name: plugin.name, skills: skillDirs.length, version: version ?? "missing" });
 }
 
-for (const plugin of PLUGIN_DEFS) validatePlugin(plugin);
+const mcpToolCatalogFile = join(ROOT, "mcp", "tool-names.v1.json");
+const mcpToolCatalog = readJSON(mcpToolCatalogFile);
+if (!Array.isArray(mcpToolCatalog)) {
+  fail(`${rel(mcpToolCatalogFile)}: canonical MCP tool catalog must be an array`);
+}
+const mcpToolCount = Array.isArray(mcpToolCatalog) ? mcpToolCatalog.length : 0;
 
-// Marketplace manifests expose only core e2a today. Their versions must follow
-// core, never the independently versioned Labs package.
+for (const plugin of PLUGIN_DEFS) validatePlugin(plugin, mcpToolCount);
+
+// Claude and Codex expose both packages; Cursor exposes only core. Marketplace
+// metadata versions follow core, never the independently versioned Labs package.
 const coreVersion = pluginResults.find(({ name }) => name === "e2a")?.version;
 const MARKETPLACE_MANIFESTS = [
-  { file: join(ROOT, ".claude-plugin", "marketplace.json"), versionKey: "metadata.version", versionOptional: true },
-  { file: join(ROOT, ".cursor-plugin", "marketplace.json"), versionKey: "metadata.version" },
-  { file: join(ROOT, ".agents", "plugins", "marketplace.json"), versionKey: null },
+  {
+    file: join(ROOT, ".claude-plugin", "marketplace.json"),
+    pluginNames: ["e2a", "e2a-labs"],
+    versionKey: "metadata.version",
+  },
+  {
+    file: join(ROOT, ".agents", "plugins", "marketplace.json"),
+    pluginNames: ["e2a", "e2a-labs"],
+    versionKey: null,
+  },
+  {
+    file: join(ROOT, ".cursor-plugin", "marketplace.json"),
+    pluginNames: ["e2a"],
+    versionKey: "metadata.version",
+  },
 ];
 
-for (const { file, versionKey, versionOptional } of MARKETPLACE_MANIFESTS) {
+for (const { file, pluginNames, versionKey } of MARKETPLACE_MANIFESTS) {
   if (!existsSync(file)) {
     fail(`missing marketplace manifest: ${rel(file)}`);
     continue;
   }
   const marketplace = readJSON(file);
   if (!marketplace) continue;
+  validateMcpToolClaims(file, marketplace, mcpToolCount);
   if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length === 0) {
     fail(`${rel(file)}: "plugins" must be a non-empty array`);
     continue;
+  }
+  const actualPluginNames = marketplace.plugins.map((entry) => entry.name);
+  if (JSON.stringify(actualPluginNames) !== JSON.stringify(pluginNames)) {
+    fail(`${rel(file)}: plugins must be exactly ${pluginNames.join(", ")}; found ${actualPluginNames.join(", ")}`);
   }
   for (const entry of marketplace.plugins) {
     const source = typeof entry.source === "string" ? entry.source : entry.source?.path;
     if (!source) {
       fail(`${rel(file)}: plugin "${entry.name}" has no source path`);
       continue;
+    }
+    const expectedSource = `./plugins/${entry.name}`;
+    if (source !== expectedSource) {
+      fail(`${rel(file)}: plugin "${entry.name}" source "${source}" must be "${expectedSource}"`);
     }
     const sourcePath = join(ROOT, source.replace(/^\.\//, ""));
     if (!existsSync(sourcePath) || !statSync(sourcePath).isDirectory()) {
@@ -199,7 +263,7 @@ for (const { file, versionKey, versionOptional } of MARKETPLACE_MANIFESTS) {
   }
   if (versionKey) {
     const version = getAt(marketplace, versionKey);
-    if (!(versionOptional && version === undefined) && coreVersion && version !== coreVersion) {
+    if (coreVersion && version !== coreVersion) {
       fail(`${rel(file)}: ${versionKey} "${version}" != core e2a version "${coreVersion}"`);
     }
   }

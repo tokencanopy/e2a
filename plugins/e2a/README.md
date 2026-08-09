@@ -2,9 +2,9 @@
 
 Gives an AI coding agent a real, authenticated email inbox. Installing this
 plugin registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
-Streamable HTTP + OAuth 2.1) and an **operate-well skill** so the agent can send
-and receive email, reply in-thread, manage agents and custom domains, and work
-with attachments.
+Streamable HTTP + OAuth 2.1) and four stable skills for setup, application
+integration, diagnosis, and everyday inbox operation. Installing core supplies
+the MCP connection used by both core and the optional Labs workflows.
 
 After installation, authorize e2a through your client's MCP flow (Claude Code:
 run `/mcp`; Codex CLI: `codex mcp login e2a`) — no API key to paste. For
@@ -48,8 +48,9 @@ Remote servers take `url` only — `type`/`transport` are stdio-only in Cursor.
 On first use Cursor registers itself via OAuth Dynamic Client Registration and
 opens your browser; there is no API key to paste and no `auth` block to fill in.
 
-Cursor gets the MCP server this way rather than the plugin, so it does not pick
-up the skill — the tools work, the operating guidance doesn't come with them.
+Cursor receives the core MCP configuration and canonical setup documentation,
+but its current plugin path does not deliver the core or Labs skills. The MCP
+tools still work; install Labs only in Claude Code or Codex.
 
 This file used to recommend two things that don't work, so they're worth naming
 before someone re-adds them: a bare `/add-plugin e2a` resolves only against
@@ -80,7 +81,11 @@ plugins/e2a/
 │   ├── sdk.md                   # SDK + webhook integration guide
 │   ├── templates.md             # email-template guide
 │   └── llms.txt                 # machine-readable hosted docs index
-├── skills/e2a/SKILL.md          # the "operate-well" skill (surfaces as /e2a)
+├── skills/                      # four stable skills
+│   ├── e2a/SKILL.md             # everyday inbox operation
+│   ├── e2a-setup/SKILL.md       # MCP, OAuth, inbox, and domain readiness
+│   ├── e2a-integrate/SKILL.md   # SDK or REST application integration
+│   └── e2a-doctor/SKILL.md      # evidence-backed diagnosis and repair
 └── clients/                     # manual paste-in configs for non-plugin clients
 ```
 
@@ -94,7 +99,7 @@ The marketplace manifests that expose this plugin live at the repo root:
 
 ## Developing
 
-The skill is authored in `skills/<name>/SKILL.md` with YAML frontmatter:
+Skills are authored in `skills/<name>/SKILL.md` with YAML frontmatter:
 
 ```markdown
 ---
