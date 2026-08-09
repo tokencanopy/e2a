@@ -13,6 +13,8 @@ const description = (source) => {
 
 const e2aOperationDescription = "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior.";
 const diagnosisVocabulary = "diagnos(?:e|es|ed|ing|is|tic(?:s)?)?";
+const isWebhookIntegrationAction = (value) =>
+  /\b(?:integrat(?:e|es|ed|ing)|add(?:s|ed|ing)?|implement(?:s|ed|ing)?)\b(?:\s+(?:an?|the))?\s+webhooks?\b/i.test(value);
 
 test("e2a-setup bootstraps MCP, inboxes, and optional custom domains", async () => {
   const [source, clients, customDomains, setupGuide, setupMirror] = await Promise.all([
@@ -79,7 +81,17 @@ test("stable skill descriptions separate setup, integration, operation, and diag
   assert.doesNotMatch(descriptions["e2a-integrate"], new RegExp(`\\b(?:already-connected|contacts\\/outreach|templates|scheduling mail|${diagnosisVocabulary}|failing|delivery)\\b`, "i"));
 
   assert.match(descriptions["e2a-doctor"], /failing|diagnos|delivery/i);
-  assert.doesNotMatch(descriptions["e2a-doctor"], /\b(?:application|codebase|SDK|webhook integration|OAuth|create an agent inbox|contacts\/outreach|templates|scheduling mail)\b/i);
+  assert.doesNotMatch(descriptions["e2a-doctor"], /\b(?:application|codebase|SDK|OAuth|create an agent inbox|contacts\/outreach|templates|scheduling mail)\b/i);
+  assert.equal(isWebhookIntegrationAction(descriptions["e2a-doctor"]), false,
+    "Doctor can diagnose webhooks but must not claim their integration");
+
+  const webhookIntegration = "Use when integrating a webhook into an application";
+  assert.equal(isWebhookIntegrationAction(webhookIntegration), true,
+    "webhook integration belongs to e2a-integrate, not e2a-doctor");
+  const webhookDiagnosis = "Use when diagnosing webhook integrations that are failing";
+  assert.match(webhookDiagnosis, new RegExp(`\\b(?:${diagnosisVocabulary}|failing)\\b`, "i"));
+  assert.equal(isWebhookIntegrationAction(webhookDiagnosis), false,
+    "webhook diagnosis remains valid Doctor language");
 });
 
 test("e2a-integrate is language-aware and security-complete", async () => {
