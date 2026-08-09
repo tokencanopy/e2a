@@ -32,14 +32,17 @@ function fixtureSuite(overrides = {}) {
 }
 
 function summary(errorClass = null) {
+  const assertionFailure = errorClass === "assertion_failure";
   return {
     runId: "run_20260808T120000_0123abcd",
     status: errorClass ? "fail" : "pass",
     complete: true,
-    counts: errorClass ? { total: 1, passed: 0, failed: 1, errors: 0 } : { total: 1, passed: 1, failed: 0, errors: 0 },
+    counts: errorClass
+      ? { total: 1, passed: 0, failed: assertionFailure ? 1 : 0, errors: assertionFailure ? 0 : 1 }
+      : { total: 1, passed: 1, failed: 0, errors: 0 },
     capabilities: CAPABILITIES,
     suite: { name: "fictional-support-smoke", version: 1, digest: "a".repeat(64) },
-    cases: errorClass ? [{ id: "reply", status: "fail", primaryError: { class: errorClass, code: "assertions_failed" } }] : [],
+    cases: errorClass ? [{ id: "reply", status: assertionFailure ? "fail" : "error", primaryError: { class: errorClass, code: "synthetic" } }] : [],
     files: { report: "/results/run_20260808T120000_0123abcd/report.md" },
   };
 }
@@ -174,6 +177,29 @@ test("run caches its preflight for runSuite and maps result and preflight errors
 
   const configuration = harness({ dependencies: { runSuite: async () => { throw new EvalError("configuration_error", "preflight_failed", "synthetic"); } } });
   assert.equal(await main(["run", "--suite", "suite.yaml"], configuration.dependencies), 2);
+});
+
+test("completed human run and regrade summaries emit their fixed exit diagnostic", async () => {
+  for (const command of ["run", "regrade"]) {
+    for (const [errorClass, exitCode] of [
+      ["assertion_failure", 1],
+      ["configuration_error", 2],
+      ["capability_error", 2],
+      ["transport_error", 3],
+      ["target_timeout", 3],
+      ["grader_error", 4],
+    ]) {
+      const h = harness(command === "run"
+        ? { runSummary: summary(errorClass) }
+        : { regradeSummary: summary(errorClass) });
+      const args = command === "run"
+        ? ["run", "--suite", "suite.yaml"]
+        : ["regrade", "--suite", "suite.yaml", "--run", "run"];
+      assert.equal(await main(args, h.dependencies), exitCode, `${command}:${errorClass}`);
+      assert.match(stdout(h), /^Status: fail; 0\/1 passed\nReport: run_[a-zA-Z0-9_]+\/report\.md\n$/);
+      assert.equal(stderr(h), `email-evals: ${errorClass}\n`, `${command}:${errorClass}`);
+    }
+  }
 });
 
 test("preflight preserves every recognized error class and makes unknown failure unexpected", async () => {

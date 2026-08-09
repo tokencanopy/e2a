@@ -34,13 +34,16 @@ async function runtimeFixture() {
 
 function fakeRuntimeChild() {
   const child = new EventEmitter();
+  const stdout = new EventEmitter();
   const stderr = new EventEmitter();
   let destroyed = 0;
   let unrefed = 0;
   stderr.destroy = () => { destroyed += 1; };
+  stdout.destroy = () => {};
+  child.stdout = stdout;
   child.stderr = stderr;
   child.unref = () => { unrefed += 1; };
-  return { child, stderr, destroyed: () => destroyed, unrefed: () => unrefed };
+  return { child, stdout, stderr, destroyed: () => destroyed, unrefed: () => unrefed };
 }
 
 function manualTimers() {
@@ -52,6 +55,21 @@ function manualTimers() {
       return callback;
     },
     clear: (callback) => timers.delete(callback),
+  };
+}
+
+function completedSummary(errorClass) {
+  const assertion = errorClass === "assertion_failure";
+  return {
+    command: "COMMAND",
+    summary: {
+      runId: "run_20260809T120000_0123abcd",
+      status: "fail",
+      complete: true,
+      counts: { total: 1, passed: 0, failed: assertion ? 1 : 0, errors: assertion ? 0 : 1 },
+      capabilities: [],
+      cases: [{ id: "synthetic-case", status: assertion ? "fail" : "error", errorClass }],
+    },
   };
 }
 
@@ -140,6 +158,86 @@ test("launcher contains runtime stderr while preserving its fixed diagnostic pro
   assert.doesNotMatch(oversized.stderr, /e2a_acct_/);
 });
 
+test("launcher preserves every completed JSON result exit class for run and regrade", async () => {
+  const fixture = await runtimeFixture();
+  const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
+  const cli = path.join(fixture.runtime, "cli.mjs");
+  for (const command of ["run", "regrade"]) {
+    for (const [errorClass, exitCode] of [
+      ["assertion_failure", 1],
+      ["configuration_error", 2],
+      ["capability_error", 2],
+      ["transport_error", 3],
+      ["target_timeout", 3],
+      ["grader_error", 4],
+    ]) {
+      const output = completedSummary(errorClass);
+      output.command = command;
+      await writeFile(cli, `process.stdout.write(${JSON.stringify(`${JSON.stringify(output)}\n`)}); process.exitCode = ${exitCode};\n`);
+      const args = command === "run"
+        ? [command, "--suite", fixture.suite, "--json"]
+        : [command, "--suite", fixture.suite, "--run", path.join(fixture.root, "run"), "--json"];
+      const result = await shell("bash", [launcher, ...args]);
+      assert.equal(result.code, exitCode, `${command}:${errorClass}`);
+      assert.equal(result.stdout, `${JSON.stringify(output)}\n`, `${command}:${errorClass}`);
+      assert.equal(result.stderr, "", `${command}:${errorClass}`);
+    }
+  }
+});
+
+test("launcher preserves bounded human summaries only with their matching fixed diagnostic", async () => {
+  const fixture = await runtimeFixture();
+  const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
+  const cli = path.join(fixture.runtime, "cli.mjs");
+  for (const command of ["run", "regrade"]) {
+    for (const [errorClass, exitCode] of [
+      ["assertion_failure", 1],
+      ["configuration_error", 2],
+      ["capability_error", 2],
+      ["transport_error", 3],
+      ["target_timeout", 3],
+      ["grader_error", 4],
+    ]) {
+      const output = "Status: fail; 0/1 passed\nReport: run_20260809T120000_0123abcd/report.md\n";
+      await writeFile(cli, `process.stdout.write(${JSON.stringify(output)}); process.stderr.write(${JSON.stringify(`email-evals: ${errorClass}\n`)}); process.exitCode = ${exitCode};\n`);
+      const args = command === "run"
+        ? [command, "--suite", fixture.suite]
+        : [command, "--suite", fixture.suite, "--run", path.join(fixture.root, "run")];
+      const result = await shell("bash", [launcher, ...args]);
+      assert.equal(result.code, exitCode, `${command}:${errorClass}`);
+      assert.equal(result.stdout, output, `${command}:${errorClass}`);
+      assert.equal(result.stderr, `email-evals: ${errorClass}\n`, `${command}:${errorClass}`);
+    }
+  }
+
+  await writeFile(cli, 'process.stdout.write("Status: fail; 0/1 passed\\nReport: run_20260809T120000_0123abcd/report.md\\ne2a_acct_synthetic\\n"); process.stderr.write("email-evals: transport_error\\n"); process.exitCode = 3;\n');
+  const forged = await shell("bash", [launcher, "run", "--suite", fixture.suite]);
+  assert.equal(forged.code, 4);
+  assert.equal(forged.stdout, "");
+  assert.equal(forged.stderr, "email-evals: runtime failure\n");
+});
+
+test("launcher rejects forged completed output without forwarding bounded child data", async () => {
+  const fixture = await runtimeFixture();
+  const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
+  const cli = path.join(fixture.runtime, "cli.mjs");
+  const valid = completedSummary("transport_error");
+  valid.command = "run";
+  for (const source of [
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(valid)}\nextra\n`)}); process.exitCode = 3;\n`,
+    `const output = ${JSON.stringify(valid)}; output.summary.cases[0].errorClass = "assertion_failure"; process.stdout.write(JSON.stringify(output) + "\\n"); process.exitCode = 3;\n`,
+    `const output = ${JSON.stringify(valid)}; output.secret = "e2a_acct_synthetic /private/tmp/secret"; process.stdout.write(JSON.stringify(output) + "\\n"); process.exitCode = 3;\n`,
+    `process.stdout.write("x".repeat(17 * 1024 * 1024)); process.exitCode = 3;\n`,
+  ]) {
+    await writeFile(cli, source);
+    const result = await shell("bash", [launcher, "run", "--suite", fixture.suite, "--json"]);
+    assert.equal(result.code, 4);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "email-evals: runtime failure\n");
+    assert.doesNotMatch(result.stdout + result.stderr, /e2a_acct_|\/private\/tmp\/secret/);
+  }
+});
+
 test("runtime launcher waits for stderr finalization and fails closed on event races", async () => {
   const forwarded = fakeRuntimeChild();
   const forwardedTimers = manualTimers();
@@ -151,9 +249,10 @@ test("runtime launcher waits for stderr finalization and fails closed on event r
   });
   forwarded.child.emit("exit", 3, null);
   assert.equal(forwardedTimers.pending().length, 1);
+  forwarded.stdout.emit("close");
   forwarded.stderr.emit("data", Buffer.from("email-evals: transport_error\n"));
   forwarded.stderr.emit("close");
-  assert.deepEqual(await forwardedRun, { code: 3, stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
+  assert.deepEqual(await forwardedRun, { code: 3, stdout: "", stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
   assert.equal(forwardedTimers.pending().length, 0);
 
   const held = fakeRuntimeChild();
@@ -166,24 +265,25 @@ test("runtime launcher waits for stderr finalization and fails closed on event r
   });
   held.child.emit("exit", 3, null);
   heldTimers.pending()[0]();
-  assert.deepEqual(await heldRun, { code: 4, stderr: "", truncated: true, finalized: false });
+  assert.deepEqual(await heldRun, { code: 4, stdout: "", stderr: "", truncated: true, finalized: false });
   assert.equal(held.destroyed(), 1);
   assert.equal(held.unrefed(), 1);
 
   const spawnFailure = fakeRuntimeChild();
   const failedRun = runRuntimeNode([], {}, { spawnChild: () => spawnFailure.child });
   spawnFailure.child.emit("error", new Error("e2a_acct_synthetic /private/tmp/error"));
-  assert.deepEqual(await failedRun, { code: 4, stderr: "", truncated: true, finalized: false });
+  assert.deepEqual(await failedRun, { code: 4, stdout: "", stderr: "", truncated: true, finalized: false });
 
   const signaled = fakeRuntimeChild();
   const signaledRun = runRuntimeNode([], {}, { spawnChild: () => signaled.child });
   signaled.child.emit("exit", null, "SIGTERM");
+  signaled.stdout.emit("end");
   signaled.stderr.emit("data", Buffer.from("email-evals: transport_error\n"));
   signaled.stderr.emit("end");
   const signaledResult = await signaledRun;
   signaled.child.emit("error", new Error("late error"));
   signaled.stderr.emit("close");
-  assert.deepEqual(signaledResult, { code: 4, stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
+  assert.deepEqual(signaledResult, { code: 4, stdout: "", stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
 
   const fixture = await runtimeFixture();
   const launcherFailure = fakeRuntimeChild();

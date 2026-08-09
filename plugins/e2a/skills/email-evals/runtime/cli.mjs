@@ -131,14 +131,23 @@ function safeSummary(summary) {
   };
 }
 
-function exitForSummary(summary) {
-  if (summary?.status === "pass") return 0;
+function failureClassForSummary(summary) {
+  if (summary?.status === "pass") return null;
   const classes = [summary?.primaryError?.class, ...(summary?.cases ?? []).map((record) => record?.primaryError?.class)];
-  if (classes.includes("grader_error")) return 4;
-  if (classes.includes("transport_error") || classes.includes("target_timeout")) return 3;
-  if (classes.includes("configuration_error") || classes.includes("capability_error")) return 2;
-  if (classes.includes("assertion_failure")) return 1;
-  return 4;
+  if (classes.includes("grader_error")) return "grader_error";
+  if (classes.includes("transport_error")) return "transport_error";
+  if (classes.includes("target_timeout")) return "target_timeout";
+  if (classes.includes("configuration_error")) return "configuration_error";
+  if (classes.includes("capability_error")) return "capability_error";
+  if (classes.includes("assertion_failure")) return "assertion_failure";
+  return null;
+}
+
+function exitForSummary(summary, { json, stderr }) {
+  if (summary?.status === "pass") return 0;
+  const errorClass = failureClassForSummary(summary);
+  if (!json && errorClass !== null) stderr.write(`email-evals: ${errorClass}\n`);
+  return errorClass === null ? 4 : ERROR_EXIT_CODES[errorClass];
 }
 
 const RUN_ID = /^run_\d{8}T\d{6}_[a-f0-9]{8}$/;
@@ -244,7 +253,7 @@ export async function main(argv, dependencies = {}) {
       const report = await deps.validateReport({ command: parsed.command, summary: result, runDirectory });
       const output = { summary: safeSummary(result) };
       writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
-      return exitForSummary(result);
+      return exitForSummary(result, { json: parsed.json, stderr: deps.stderr });
     }
 
     const adapter = deps.createAdapter({ apiKey: suite.transport.apiKey, baseUrl: suite.transport.baseUrl });
@@ -267,7 +276,7 @@ export async function main(argv, dependencies = {}) {
     const report = await deps.validateReport({ command: parsed.command, summary: result, outputRoot });
     const output = { summary: safeSummary(result) };
     writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
-    return exitForSummary(result);
+    return exitForSummary(result, { json: parsed.json, stderr: deps.stderr });
   } catch (error) {
     return diagnostic(error, deps.stderr);
   }

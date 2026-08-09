@@ -6,8 +6,18 @@ import { fileURLToPath } from "node:url";
 import { CliUsageError, parseRuntimeArguments, usage } from "./runtime/lib/cli-arguments.mjs";
 
 const launcherDirectory = path.dirname(fileURLToPath(import.meta.url));
+// Match the runtime's maximum retained cases artifact while keeping child output bounded.
+const RUNTIME_STDOUT_LIMIT = 16 * 1024 * 1024;
 const RUNTIME_STDERR_LIMIT = 8192;
 const RUNTIME_STDERR_GRACE_MS = 100;
+const RESULT_CLASSES = new Set([
+  "assertion_failure", "configuration_error", "capability_error",
+  "transport_error", "target_timeout", "grader_error",
+]);
+const RESULT_CAPABILITIES = new Set([
+  "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
+  "thread_headers", "raw_mime", "attachment_hashes", "delivery_lifecycle",
+]);
 const SAFE_RUNTIME_DIAGNOSTICS = new Map([
   ["email-evals: assertion_failure\n", 1],
   ["email-evals: configuration_error\n", 2],
@@ -39,12 +49,11 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     graceMs = RUNTIME_STDERR_GRACE_MS,
   } = dependencies;
   return new Promise((resolve) => {
-    const chunks = [];
-    let size = 0;
+    const stdoutCapture = { chunks: [], size: 0, truncated: false, finalized: false };
+    const stderrCapture = { chunks: [], size: 0, truncated: false, finalized: false };
     let truncated = false;
     let settled = false;
     let exited = false;
-    let finalized = false;
     let exitCode = 4;
     let exitSignal = null;
     let graceTimer = null;
@@ -59,63 +68,75 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     }
 
     function fixedFailure() {
-      finish({ code: 4, stderr: "", truncated: true, finalized: false });
+      finish({ code: 4, stdout: "", stderr: "", truncated: true, finalized: false });
     }
 
     function finishFromExit() {
-      if (!exited || !finalized) return;
+      if (!exited || !stdoutCapture.finalized || !stderrCapture.finalized) return;
       finish({
         code: exitSignal || !Number.isInteger(exitCode) ? 4 : exitCode,
-        stderr: Buffer.concat(chunks).toString("utf8"),
+        stdout: Buffer.concat(stdoutCapture.chunks).toString("utf8"),
+        stderr: Buffer.concat(stderrCapture.chunks).toString("utf8"),
         truncated,
         finalized: true,
       });
     }
 
-    function finalizeStderr() {
-      if (timedOut || finalized || settled) return;
-      finalized = true;
-      finishFromExit();
+    function captureStream(stream, capture, limit) {
+      stream.on("data", (chunk) => {
+        if (settled) return;
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (capture.size >= limit) {
+          capture.truncated = true;
+          truncated = true;
+          return;
+        }
+        const remaining = limit - capture.size;
+        const retained = data.length > remaining ? data.subarray(0, remaining) : data;
+        capture.chunks.push(retained);
+        capture.size += retained.length;
+        if (data.length > remaining) {
+          capture.truncated = true;
+          truncated = true;
+        }
+      });
+      const finalize = () => {
+        if (timedOut || capture.finalized || settled) return;
+        capture.finalized = true;
+        finishFromExit();
+      };
+      stream.once("end", finalize);
+      stream.once("close", finalize);
     }
 
     try {
-      child = spawnChild(process.execPath, args, { ...options, stdio: ["inherit", "inherit", "pipe"] });
+      child = spawnChild(process.execPath, args, { ...options, stdio: ["inherit", "pipe", "pipe"] });
     } catch {
       fixedFailure();
       return;
     }
-    if (!child?.stderr || typeof child.stderr.on !== "function" || typeof child.once !== "function") {
+    if (!child?.stdout || typeof child.stdout.on !== "function"
+      || !child?.stderr || typeof child.stderr.on !== "function" || typeof child.once !== "function") {
       fixedFailure();
       return;
     }
-    child.stderr.on("data", (chunk) => {
-      if (settled) return;
-      if (size >= RUNTIME_STDERR_LIMIT) {
-        truncated = true;
-        return;
-      }
-      const remaining = RUNTIME_STDERR_LIMIT - size;
-      const retained = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-      chunks.push(retained);
-      size += retained.length;
-      if (chunk.length > remaining) truncated = true;
-    });
-    child.stderr.once("end", finalizeStderr);
-    child.stderr.once("close", finalizeStderr);
+    captureStream(child.stdout, stdoutCapture, RUNTIME_STDOUT_LIMIT);
+    captureStream(child.stderr, stderrCapture, RUNTIME_STDERR_LIMIT);
     child.once("error", fixedFailure);
     child.once("exit", (code, signal) => {
       if (settled) return;
       exited = true;
       exitCode = code;
       exitSignal = signal;
-      if (finalized) {
+      if (stdoutCapture.finalized && stderrCapture.finalized) {
         finishFromExit();
         return;
       }
       graceTimer = setTimer(() => {
-        if (finalized || settled) return;
+        if ((stdoutCapture.finalized && stderrCapture.finalized) || settled) return;
         timedOut = true;
         truncated = true;
+        try { child.stdout.destroy?.(); } catch {}
         try { child.stderr.destroy?.(); } catch {}
         try { child.unref?.(); } catch {}
         fixedFailure();
@@ -124,13 +145,106 @@ export function runRuntimeNode(args, options, dependencies = {}) {
   });
 }
 
-function safeRuntimeExit(result, stderr) {
-  const expectedCode = result.finalized === true && !result.truncated ? SAFE_RUNTIME_DIAGNOSTICS.get(result.stderr) : undefined;
-  if (expectedCode !== undefined && result.code === expectedCode) {
+function plainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function exactKeys(value, keys) {
+  if (!plainObject(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function nonnegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function completedJSONExit(stdout, command) {
+  if ((command !== "run" && command !== "regrade") || !stdout.endsWith("\n") || stdout.slice(0, -1).includes("\n")) return null;
+  let output;
+  try {
+    output = JSON.parse(stdout.slice(0, -1));
+  } catch {
+    return null;
+  }
+  if (JSON.stringify(output) + "\n" !== stdout || !exactKeys(output, ["command", "summary"]) || output.command !== command) return null;
+  const summary = output.summary;
+  if (!exactKeys(summary, ["runId", "status", "complete", "counts", "capabilities", "cases"])
+    || !/^run_\d{8}T\d{6}_[a-f0-9]{8}$/.test(summary.runId)
+    || summary.status !== "fail" || summary.complete !== true
+    || !exactKeys(summary.counts, ["total", "passed", "failed", "errors"])
+    || !Object.values(summary.counts).every(nonnegativeInteger)
+    || !Array.isArray(summary.capabilities)
+    || summary.capabilities.some((entry) => !RESULT_CAPABILITIES.has(entry))
+    || new Set(summary.capabilities).size !== summary.capabilities.length
+    || !Array.isArray(summary.cases) || summary.cases.length !== summary.counts.total) return null;
+
+  const observedCounts = { passed: 0, failed: 0, errors: 0 };
+  const classes = [];
+  const caseIds = new Set();
+  for (const result of summary.cases) {
+    const keys = result?.errorClass === undefined ? ["id", "status"] : ["id", "status", "errorClass"];
+    if (!exactKeys(result, keys) || typeof result.id !== "string" || result.id.length < 1 || result.id.length > 128
+      || !/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(result.id)
+      || !["pass", "fail", "error"].includes(result.status)) return null;
+    if (caseIds.has(result.id)) return null;
+    caseIds.add(result.id);
+    if (result.status === "pass") {
+      if (result.errorClass !== undefined) return null;
+      observedCounts.passed++;
+      continue;
+    }
+    if (!RESULT_CLASSES.has(result.errorClass)
+      || (result.errorClass === "assertion_failure") !== (result.status === "fail")) return null;
+    observedCounts[result.status === "fail" ? "failed" : "errors"]++;
+    classes.push(result.errorClass);
+  }
+  if (summary.counts.passed !== observedCounts.passed || summary.counts.failed !== observedCounts.failed
+    || summary.counts.errors !== observedCounts.errors
+    || summary.counts.total !== summary.counts.passed + summary.counts.failed + summary.counts.errors) return null;
+  if (classes.includes("grader_error")) return 4;
+  if (classes.includes("transport_error") || classes.includes("target_timeout")) return 3;
+  if (classes.includes("configuration_error") || classes.includes("capability_error")) return 2;
+  if (classes.includes("assertion_failure")) return 1;
+  return null;
+}
+
+function completedHumanOutput(stdout, command) {
+  if (command !== "run" && command !== "regrade") return false;
+  const match = /^Status: fail; (\d+)\/(\d+) passed\nReport: (run_\d{8}T\d{6}_[a-f0-9]{8})\/report\.md\n$/.exec(stdout);
+  if (!match) return false;
+  const passed = Number(match[1]);
+  const total = Number(match[2]);
+  return Number.isSafeInteger(passed) && Number.isSafeInteger(total) && passed >= 0 && passed <= total;
+}
+
+function safeRuntimeExit(result, parsed, stdout, stderr) {
+  if (result.finalized !== true || result.truncated || typeof result.stdout !== "string" || typeof result.stderr !== "string") {
+    stderr.write("email-evals: runtime failure\n");
+    return 4;
+  }
+  const completedExit = parsed.json ? completedJSONExit(result.stdout, parsed.command) : null;
+  const completedHuman = !parsed.json && completedHumanOutput(result.stdout, parsed.command);
+  const diagnosticExit = SAFE_RUNTIME_DIAGNOSTICS.get(result.stderr);
+  if (result.code === 0 && result.stderr === "") {
+    stdout.write(result.stdout);
+    return 0;
+  }
+  if (result.code === completedExit && (result.stderr === "" || diagnosticExit === completedExit)) {
+    stdout.write(result.stdout);
+    if (result.stderr !== "") stderr.write(result.stderr);
+    return result.code;
+  }
+  if (completedHuman && diagnosticExit !== undefined && result.code === diagnosticExit) {
+    stdout.write(result.stdout);
     stderr.write(result.stderr);
     return result.code;
   }
-  if (result.finalized === true && !result.truncated && result.stderr === "" && result.code === 0) return 0;
+  if (result.stdout === "" && diagnosticExit !== undefined && result.code === diagnosticExit) {
+    stderr.write(result.stderr);
+    return result.code;
+  }
   stderr.write("email-evals: runtime failure\n");
   return 4;
 }
@@ -194,7 +308,7 @@ async function launchRuntime(argv, parsed, dependencies) {
         cwd: dependencies.cwd,
         env: dependencies.environment,
       });
-      return safeRuntimeExit(result, dependencies.stderr);
+      return safeRuntimeExit(result, parsed, dependencies.stdout, dependencies.stderr);
     } catch {
       return runtimeFailure(dependencies.stderr);
     }
