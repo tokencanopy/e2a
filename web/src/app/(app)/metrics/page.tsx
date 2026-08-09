@@ -378,11 +378,11 @@ export default function MetricsPage() {
                   <thead>
                     <tr style={{ color: "var(--fg-muted)" }}>
                       <th className="py-1.5 text-left font-normal">Inbox</th>
-                      <th className="py-1.5 text-right font-normal">Messages</th>
-                      <th className="py-1.5 text-right font-normal">Accepted</th>
-                      <th className="py-1.5 text-right font-normal">Delivered</th>
-                      <th className="py-1.5 text-right font-normal">Rate</th>
-                      <th className="py-1.5 text-right font-normal">Bounced</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Messages</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Accepted</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Delivered</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Rate</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Bounced</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -390,17 +390,17 @@ export default function MetricsPage() {
                       <tr key={a.agent_email} style={{ borderTop: "1px solid var(--border-sub)" }}>
                         <td className="py-1.5">
                           <Link
-                            href={`/inboxes/messages?agent=${encodeURIComponent(a.agent_email)}`}
+                            href={`/inboxes/messages?email=${encodeURIComponent(a.agent_email)}`}
                             style={{ color: "var(--accent)" }}
                           >
                             {a.agent_email}
                           </Link>
                         </td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.messages_in_window)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.summary.accepted)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.summary.delivered)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{pct(a.rates.delivered_rate)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(bounced(a.summary))}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.messages_in_window)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.summary.accepted)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.summary.delivered)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{pct(a.rates.delivered_rate)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(bounced(a.summary))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -582,28 +582,28 @@ function WebhookPanel({ webhooks: w }: { webhooks?: WebhookMetrics }) {
             <thead>
               <tr style={{ color: "var(--fg-muted)" }}>
                 <th className="py-1.5 text-left font-normal">Endpoint</th>
-                <th className="py-1.5 text-right font-normal">
+                <th className="py-1.5 pl-3 text-right font-normal">
                   <span className="inline-flex items-center">
                     Deliveries
                     <InfoTip label="the delivery grain" text={METRIC_HELP.webhookGrain} />
                   </span>
                 </th>
-                <th className="py-1.5 text-right font-normal">Success</th>
-                <th className="py-1.5 text-right font-normal">Last status</th>
-                <th className="py-1.5 text-right font-normal">State</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Success</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Last status</th>
+                <th className="py-1.5 pl-3 text-right font-normal">State</th>
               </tr>
             </thead>
             <tbody>
               {endpoints.map((e) => (
                 <tr key={e.webhook_id} style={{ borderTop: "1px solid var(--border-sub)" }}>
                   <td className="py-1.5">{e.url_host || e.webhook_id}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(e.deliveries)}</td>
-                  <td className="py-1.5 text-right tabular-nums">{pct(e.success_rate)}</td>
-                  <td className="py-1.5 text-right tabular-nums">
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(e.deliveries)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{pct(e.success_rate)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">
                     {e.last_status_code ?? "—"}
                   </td>
                   <td
-                    className="py-1.5 text-right"
+                    className="py-1.5 pl-3 text-right"
                     style={{
                       color: e.auto_disabled_at
                         ? "var(--danger)"
@@ -668,25 +668,25 @@ function ReasonCodeDetail({ counters }: { counters: { reason_code: string; stage
             <thead>
               <tr style={{ color: "var(--fg-muted)" }}>
                 <th className="py-1.5 text-left font-normal">Reason code</th>
-                <th className="py-1.5 text-left font-normal">Stage</th>
-                <th className="py-1.5 text-left font-normal">Outcome</th>
-                <th className="py-1.5 text-right font-normal">
+                <th className="py-1.5 pl-3 text-left font-normal">Stage</th>
+                <th className="py-1.5 pl-3 text-left font-normal">Outcome</th>
+                <th className="py-1.5 pl-3 text-right font-normal">
                   <span className="inline-flex items-center">
                     Observations
                     <InfoTip label="observations" text={METRIC_HELP.observations} />
                   </span>
                 </th>
-                <th className="py-1.5 text-right font-normal">Messages</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Messages</th>
               </tr>
             </thead>
             <tbody>
               {counters.map((c) => (
                 <tr key={c.reason_code} style={{ borderTop: "1px solid var(--border-sub)" }}>
                   <td className="py-1.5 font-mono text-[11px]">{c.reason_code}</td>
-                  <td className="py-1.5">{c.stage}</td>
-                  <td className="py-1.5">{c.outcome}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(c.observations)}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(c.messages)}</td>
+                  <td className="py-1.5 pl-3">{c.stage}</td>
+                  <td className="py-1.5 pl-3">{c.outcome}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(c.observations)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(c.messages)}</td>
                 </tr>
               ))}
             </tbody>
