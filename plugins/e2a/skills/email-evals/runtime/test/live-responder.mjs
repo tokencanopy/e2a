@@ -10,6 +10,8 @@ const SUBJECT = "Question about fictional order ord_example_123";
 const RESPONSE = "Refunds are available within 30 days. This is a synthetic policy answer.";
 const DEADLINE_MS = 20_000;
 const POLL_MS = 1_000;
+const SAFE_STATUS = /^[a-z_]{1,32}$/;
+const SAFE_MESSAGE_ID = /^msg_[a-f0-9]{32}$/;
 
 function requiredEnvironment() {
   const values = Object.fromEntries(REQUIRED_ENVIRONMENT.map((name) => [name, process.env[name]]));
@@ -53,10 +55,10 @@ async function main() {
       { text: RESPONSE },
       { idempotencyKey: `email-eval-reply-${stimulus.id}`, wait: "sent" },
     );
-    if (!result || !["accepted", "sent"].includes(result.status)) {
-      throw new Error("reply did not enter a safe delivery state");
+    if (!result || !SAFE_STATUS.test(result.status) || !SAFE_MESSAGE_ID.test(result.messageId)) {
+      throw new Error("reply returned an unsafe result");
     }
-    process.stdout.write("reply submitted\n");
+    process.stdout.write(`${JSON.stringify({ status: result.status, message_id: result.messageId })}\n`);
     return;
   }
   throw new Error("responder deadline exceeded");

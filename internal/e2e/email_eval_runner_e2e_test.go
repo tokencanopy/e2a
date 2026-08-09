@@ -44,6 +44,7 @@ const (
 	maxSMTPRecipients         = 10
 	smtpReadBufferBytes       = 1024
 	defaultSMTPForwardTimeout = 2 * time.Second
+	maxResponderResultBytes   = 128
 )
 
 var (
@@ -908,6 +909,53 @@ type deterministicResponder struct {
 	once   sync.Once
 }
 
+type responderResult struct {
+	Status    string `json:"status"`
+	MessageID string `json:"message_id"`
+}
+
+func validSyntheticMessageID(value string) bool {
+	if len(value) != len("msg_")+32 || !strings.HasPrefix(value, "msg_") {
+		return false
+	}
+	for _, character := range value[len("msg_"):] {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func safeResponderStatus(value string) bool {
+	if len(value) < 1 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseResponderResult(output string) (responderResult, error) {
+	if len(output) == 0 || len(output) > maxResponderResultBytes || output[len(output)-1] != '\n' {
+		return responderResult{}, errors.New("invalid responder result framing")
+	}
+	var result responderResult
+	if err := json.Unmarshal([]byte(output[:len(output)-1]), &result); err != nil {
+		return responderResult{}, errors.New("invalid responder result JSON")
+	}
+	canonical, err := json.Marshal(result)
+	if err != nil || output != string(canonical)+"\n" {
+		return responderResult{}, errors.New("noncanonical responder result")
+	}
+	if !safeResponderStatus(result.Status) || !validSyntheticMessageID(result.MessageID) {
+		return responderResult{}, errors.New("unsafe responder result fields")
+	}
+	return result, nil
+}
+
 func startDeterministicResponder(t *testing.T, baseURL, apiKey, targetAddress string) *deterministicResponder {
 	t.Helper()
 	node, err := exec.LookPath("node")
@@ -947,18 +995,24 @@ func (r *deterministicResponder) stop() {
 	})
 }
 
-func (r *deterministicResponder) WaitForReply(t *testing.T) {
+func (r *deterministicResponder) WaitForReply(t *testing.T) responderResult {
 	t.Helper()
 	select {
 	case err := <-r.done:
 		r.once.Do(r.cancel)
-		if err != nil || r.stdout.String() != "reply submitted\n" {
+		if err != nil {
 			t.Fatal("deterministic responder did not complete safely")
 		}
+		result, parseErr := parseResponderResult(r.stdout.String())
+		if parseErr != nil {
+			t.Fatal("deterministic responder returned an invalid result")
+		}
+		return result
 	case <-time.After(25 * time.Second):
 		r.stop()
 		t.Fatal("deterministic responder timed out")
 	}
+	return responderResult{}
 }
 
 type evalCLIResult struct {
@@ -1118,13 +1172,259 @@ func authedJSONWithIdempotency(t *testing.T, method, requestURL, apiKey, idempot
 
 type durableEvalState struct {
 	OutboundMessages    int
-	OutboundJobs        int
+	OutboundJobs        outboundJobSnapshot
 	IdempotencyRows     int
 	ReplyMessageID      string
 	ReplySendJobID      int64
 	ReplyIdemStatus     string
 	ReplyResponseStatus int
 	ReplyResponseBody   string
+}
+
+type outboundJobSnapshot struct {
+	Count     int
+	Canonical string
+}
+
+type outboundJobIdentity struct {
+	ID int64 `json:"id"`
+}
+
+func decodeOutboundJobRows(snapshot outboundJobSnapshot) (map[int64]string, error) {
+	var rows []json.RawMessage
+	if err := json.Unmarshal([]byte(snapshot.Canonical), &rows); err != nil || len(rows) != snapshot.Count {
+		return nil, errors.New("invalid outbound job snapshot")
+	}
+	byID := make(map[int64]string, len(rows))
+	for _, row := range rows {
+		var identity outboundJobIdentity
+		if json.Unmarshal(row, &identity) != nil || identity.ID <= 0 {
+			return nil, errors.New("invalid outbound job identity")
+		}
+		if _, exists := byID[identity.ID]; exists {
+			return nil, errors.New("duplicate outbound job identity")
+		}
+		byID[identity.ID] = string(row)
+	}
+	return byID, nil
+}
+
+func readOutboundJobSnapshot(ctx context.Context, pool *pgxpool.Pool) (outboundJobSnapshot, error) {
+	var snapshot outboundJobSnapshot
+	err := pool.QueryRow(ctx,
+		`SELECT count(*),
+		        COALESCE(
+		          jsonb_agg(
+		            jsonb_build_object(
+		              'id', id,
+		              'queue', queue,
+		              'state', state::text,
+		              'args', args,
+		              'attempt', attempt,
+		              'max_attempts', max_attempts
+		            ) ORDER BY id
+		          ),
+		          '[]'::jsonb
+		        )::text
+		   FROM river_job
+		  WHERE kind = 'outbound_send'`).Scan(&snapshot.Count, &snapshot.Canonical)
+	return snapshot, err
+}
+
+func terminalRiverJobState(state string) bool {
+	switch state {
+	case "cancelled", "completed", "discarded":
+		return true
+	default:
+		return false
+	}
+}
+
+func liveOutboundJobs(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM river_job
+		  WHERE kind = 'outbound_send'
+		    AND state::text NOT IN ('cancelled', 'completed', 'discarded')`).Scan(&count)
+	return count, err
+}
+
+func validateInitialResponderRelationship(initial responderResult, durable durableEvalState) error {
+	if initial.Status != "sent" || initial.MessageID != durable.ReplyMessageID {
+		return errors.New("initial responder result diverged from durable reply")
+	}
+	return nil
+}
+
+func validateResponderReplayRelationship(initial responderResult, durable durableEvalState, replay responderResult) error {
+	if err := validateInitialResponderRelationship(initial, durable); err != nil {
+		return err
+	}
+	var cached responderResult
+	if json.Unmarshal([]byte(durable.ReplyResponseBody), &cached) != nil ||
+		durable.ReplyResponseStatus != http.StatusAccepted || cached.Status != "accepted" ||
+		cached.MessageID != durable.ReplyMessageID {
+		return errors.New("durable reply cache is not the accepted outcome")
+	}
+	if replay.Status != "sent" || replay.Status != initial.Status || replay.MessageID != cached.MessageID {
+		return fmt.Errorf("wait=sent replay diverged from the terminal SDK outcome: replay_status=%q initial_status=%q same_message_id=%t",
+			replay.Status, initial.Status, replay.MessageID == cached.MessageID)
+	}
+	return nil
+}
+
+func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	const marker = "msg_fix2_oracle_"
+	baselineSnapshot, err := readOutboundJobSnapshot(ctx, pool)
+	if err != nil {
+		t.Fatal("read baseline outbound job snapshot")
+	}
+	baselineLive, err := liveOutboundJobs(ctx, pool)
+	if err != nil {
+		t.Fatal("read baseline live outbound jobs")
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM river_job WHERE kind = 'outbound_send' AND args->>'message_id' LIKE $1`, marker+"%")
+	})
+	insert := func(suffix, queue, state string) int64 {
+		t.Helper()
+		var id int64
+		err := pool.QueryRow(ctx,
+			`INSERT INTO river_job (args, kind, queue, state, max_attempts, finalized_at)
+			 VALUES (jsonb_build_object('message_id', $1::text), 'outbound_send', $2::text, $3::river_job_state, 3,
+			         CASE WHEN $3::text IN ('cancelled', 'completed', 'discarded') THEN now() END)
+			 RETURNING id`, marker+suffix, queue, state).Scan(&id)
+		if err != nil {
+			t.Fatalf("insert synthetic outbound oracle job: %v", err)
+		}
+		return id
+	}
+	wrongQueueID := insert("wrong_queue", "default", "completed")
+	orphanID := insert("orphan", "outbound", "completed")
+	pendingID := insert("pending", "outbound", "pending")
+
+	snapshot, err := readOutboundJobSnapshot(ctx, pool)
+	if err != nil {
+		t.Fatal("read synthetic outbound job snapshot")
+	}
+	if snapshot.Count != baselineSnapshot.Count+3 {
+		t.Fatalf("outbound job snapshot count = %d, want baseline %d + 3", snapshot.Count, baselineSnapshot.Count)
+	}
+	rowsByID, err := decodeOutboundJobRows(snapshot)
+	if err != nil {
+		t.Fatal("decode synthetic outbound job snapshot")
+	}
+	for _, want := range []struct {
+		id, attempt, maxAttempts int64
+		queue, state, messageID  string
+	}{
+		{id: wrongQueueID, queue: "default", state: "completed", messageID: marker + "wrong_queue", maxAttempts: 3},
+		{id: orphanID, queue: "outbound", state: "completed", messageID: marker + "orphan", maxAttempts: 3},
+		{id: pendingID, queue: "outbound", state: "pending", messageID: marker + "pending", maxAttempts: 3},
+	} {
+		row, exists := rowsByID[want.id]
+		if !exists {
+			t.Fatalf("outbound job snapshot omitted job %d", want.id)
+		}
+		var got struct {
+			Queue       string `json:"queue"`
+			State       string `json:"state"`
+			Attempt     int64  `json:"attempt"`
+			MaxAttempts int64  `json:"max_attempts"`
+			Args        struct {
+				MessageID string `json:"message_id"`
+			} `json:"args"`
+		}
+		if json.Unmarshal([]byte(row), &got) != nil || got.Queue != want.queue || got.State != want.state ||
+			got.Attempt != want.attempt || got.MaxAttempts != want.maxAttempts || got.Args.MessageID != want.messageID {
+			t.Fatalf("outbound job snapshot fields diverged for job %d", want.id)
+		}
+	}
+	live, err := liveOutboundJobs(ctx, pool)
+	if err != nil || live != baselineLive+1 {
+		t.Fatalf("live outbound jobs = %d, %v; want baseline %d + pending job", live, err, baselineLive)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE river_job SET state = 'completed', finalized_at = now() WHERE id = $1`, pendingID); err != nil {
+		t.Fatal("finalize synthetic pending job")
+	}
+	if live, err = liveOutboundJobs(ctx, pool); err != nil || live != baselineLive {
+		t.Fatalf("live outbound jobs after finalize = %d, %v; want baseline %d", live, err, baselineLive)
+	}
+	for _, state := range []string{"cancelled", "completed", "discarded"} {
+		if !terminalRiverJobState(state) {
+			t.Fatalf("terminal River state %q classified live", state)
+		}
+	}
+	for _, state := range []string{"available", "pending", "retryable", "running", "scheduled", "future_state"} {
+		if terminalRiverJobState(state) {
+			t.Fatalf("live or unknown River state %q classified terminal", state)
+		}
+	}
+}
+
+func TestResponderWaitSentReplayRelationship(t *testing.T) {
+	const messageID = "msg_0123456789abcdef0123456789abcdef"
+	initial, err := parseResponderResult(`{"status":"sent","message_id":"` + messageID + `"}` + "\n")
+	if err != nil {
+		t.Fatalf("parse canonical responder result: %v", err)
+	}
+	replay, err := parseResponderResult(`{"status":"sent","message_id":"` + messageID + `"}` + "\n")
+	if err != nil {
+		t.Fatalf("parse canonical replay result: %v", err)
+	}
+	durable := durableEvalState{
+		ReplyMessageID:      messageID,
+		ReplyResponseStatus: http.StatusAccepted,
+		ReplyResponseBody:   `{"status":"accepted","message_id":"` + messageID + `"}`,
+	}
+	if err := validateResponderReplayRelationship(initial, durable, replay); err != nil {
+		t.Fatalf("valid responder replay relationship: %v", err)
+	}
+	for _, testCase := range []struct {
+		name    string
+		initial responderResult
+	}{
+		{name: "initial message id", initial: responderResult{Status: "sent", MessageID: "msg_ffffffffffffffffffffffffffffffff"}},
+		{name: "initial status", initial: responderResult{Status: "accepted", MessageID: messageID}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if validateResponderReplayRelationship(testCase.initial, durable, replay) == nil {
+				t.Fatal("mismatched initial result passed validation")
+			}
+		})
+	}
+	for _, testCase := range []struct {
+		name   string
+		replay responderResult
+	}{
+		{name: "message id", replay: responderResult{Status: "sent", MessageID: "msg_ffffffffffffffffffffffffffffffff"}},
+		{name: "status", replay: responderResult{Status: "accepted", MessageID: messageID}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if validateResponderReplayRelationship(initial, durable, testCase.replay) == nil {
+				t.Fatal("mismatched replay result passed validation")
+			}
+		})
+	}
+}
+
+func TestResponderResultValidationRejectsUnsafeShape(t *testing.T) {
+	const messageID = "msg_0123456789abcdef0123456789abcdef"
+	for _, unsafe := range []string{
+		`{"status":"sent","message_id":"` + messageID + `","extra":true}` + "\n",
+		`{"message_id":"` + messageID + `","status":"sent"}` + "\n",
+		`{"status":"sent","message_id":"msg_bad"}` + "\n",
+		strings.Repeat("x", maxResponderResultBytes+1),
+	} {
+		if _, err := parseResponderResult(unsafe); err == nil {
+			t.Fatal("unsafe responder result passed validation")
+		}
+	}
 }
 
 func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actorID, targetID string) (durableEvalState, error) {
@@ -1134,15 +1434,11 @@ func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actor
 		actorID, targetID).Scan(&state.OutboundMessages); err != nil {
 		return durableEvalState{}, err
 	}
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM river_job AS job
-		   JOIN messages AS message ON message.id = job.args->>'message_id'
-		  WHERE job.kind = 'outbound_send'
-		    AND job.queue = 'outbound'
-		    AND message.agent_id IN ($1, $2)`, actorID, targetID).Scan(&state.OutboundJobs); err != nil {
+	jobs, err := readOutboundJobSnapshot(ctx, pool)
+	if err != nil {
 		return durableEvalState{}, err
 	}
+	state.OutboundJobs = jobs
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM idempotency_keys WHERE user_id = $1`, userID).Scan(&state.IdempotencyRows); err != nil {
 		return durableEvalState{}, err
@@ -1172,19 +1468,6 @@ func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actor
 	return state, nil
 }
 
-func liveEvalOutboundJobs(ctx context.Context, pool *pgxpool.Pool, actorID, targetID string) (int, error) {
-	var count int
-	err := pool.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM river_job AS job
-		   JOIN messages AS message ON message.id = job.args->>'message_id'
-		  WHERE job.kind = 'outbound_send'
-		    AND job.queue = 'outbound'
-		    AND job.state::text IN ('available', 'running', 'retryable', 'scheduled')
-		    AND message.agent_id IN ($1, $2)`, actorID, targetID).Scan(&count)
-	return count, err
-}
-
 func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, targetID string, want durableEvalState) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1198,7 +1481,7 @@ func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, 
 	for {
 		last, lastErr = readDurableEvalState(ctx, pool, userID, actorID, targetID)
 		if lastErr == nil {
-			live, lastErr = liveEvalOutboundJobs(ctx, pool, actorID, targetID)
+			live, lastErr = liveOutboundJobs(ctx, pool)
 		}
 		if lastErr == nil && live == 0 && last == want {
 			consecutive++
@@ -1210,17 +1493,44 @@ func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, 
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("durable eval state did not settle: live_jobs=%d query_error=%v got=%+v want=%+v", live, lastErr, last, want)
+			replyEqual := last.ReplyMessageID == want.ReplyMessageID &&
+				last.ReplySendJobID == want.ReplySendJobID && last.ReplyIdemStatus == want.ReplyIdemStatus &&
+				last.ReplyResponseStatus == want.ReplyResponseStatus && last.ReplyResponseBody == want.ReplyResponseBody
+			t.Fatalf("durable eval state did not settle: live_jobs=%d query_error=%v messages=%d/%d jobs=%d/%d job_snapshot_equal=%t idempotency_rows=%d/%d reply_equal=%t",
+				live, lastErr, last.OutboundMessages, want.OutboundMessages,
+				last.OutboundJobs.Count, want.OutboundJobs.Count, last.OutboundJobs == want.OutboundJobs,
+				last.IdempotencyRows, want.IdempotencyRows, replyEqual)
 		case <-ticker.C:
 		}
 	}
 }
 
-func assertOriginalDurableBaseline(t *testing.T, state durableEvalState) {
+func assertOutboundJobGrowth(t *testing.T, before, after outboundJobSnapshot, growth int) {
 	t.Helper()
-	if state.OutboundMessages != 2 || state.OutboundJobs != 2 {
-		t.Fatalf("initial durable outbound state = %d messages/%d jobs, want 2/2", state.OutboundMessages, state.OutboundJobs)
+	if after.Count != before.Count+growth {
+		t.Fatalf("outbound job snapshot count = %d, want baseline %d + %d", after.Count, before.Count, growth)
 	}
+	beforeByID, err := decodeOutboundJobRows(before)
+	if err != nil {
+		t.Fatal("decode baseline outbound job snapshot")
+	}
+	afterByID, err := decodeOutboundJobRows(after)
+	if err != nil {
+		t.Fatal("outbound job snapshot was not valid JSON")
+	}
+	for id, row := range beforeByID {
+		if afterByID[id] != row {
+			t.Fatalf("baseline outbound job %d changed or disappeared", id)
+		}
+	}
+}
+
+func assertOriginalDurableBaseline(t *testing.T, initialJobs outboundJobSnapshot, state durableEvalState) {
+	t.Helper()
+	if state.OutboundMessages != 2 {
+		t.Fatalf("initial durable outbound messages = %d, want 2", state.OutboundMessages)
+	}
+	assertOutboundJobGrowth(t, initialJobs, state.OutboundJobs, 2)
 	var replay struct {
 		Status    string `json:"status"`
 		MessageID string `json:"message_id"`
@@ -1253,6 +1563,10 @@ func assertUnauthorizedDurableAbsence(t *testing.T, pool *pgxpool.Pool, userID, 
 
 func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	pool := testutil.TestDB(t)
+	initialJobs, err := readOutboundJobSnapshot(context.Background(), pool)
+	if err != nil {
+		t.Fatal("read pre-eval outbound job snapshot")
+	}
 	forwarder := newSMTPForwarder(t)
 	ts := testutil.TestServer(t, pool,
 		testutil.WithOutboundSMTP(forwarder.Host(), forwarder.Port(), "agents.localhost"),
@@ -1266,12 +1580,13 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 
 	var suite string
 	var durableBaseline durableEvalState
+	var initialResponderResult responderResult
 	var actorEgressBaseline, unauthorizedEgressBaseline int
 	t.Run("actor to target reply round trip", func(t *testing.T) {
 		suite = writeEvalSuite(t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress())
 		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
 		result := runEmailEvalCLI(t, suite, apiKey.PlaintextKey)
-		responder.WaitForReply(t)
+		initialResponderResult = responder.WaitForReply(t)
 		if result.ExitCode != 0 {
 			t.Fatalf("email eval failed: %s", result.Stderr)
 		}
@@ -1288,7 +1603,10 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal("read original durable email-eval baseline")
 		}
-		assertOriginalDurableBaseline(t, durableBaseline)
+		assertOriginalDurableBaseline(t, initialJobs, durableBaseline)
+		if err := validateInitialResponderRelationship(initialResponderResult, durableBaseline); err != nil {
+			t.Fatal("initial responder result did not match the durable reply")
+		}
 		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
 		actorEgressBaseline = forwarder.countRecipient(actor.EmailAddress())
 		unauthorizedEgressBaseline = forwarder.countRecipient(evalUnauthorizedAddress)
@@ -1310,7 +1628,10 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 
 	t.Run("stable reply idempotency has no duplicate or unauthorized SMTP egress", func(t *testing.T) {
 		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
-		responder.WaitForReply(t)
+		replayResult := responder.WaitForReply(t)
+		if err := validateResponderReplayRelationship(initialResponderResult, durableBaseline, replayResult); err != nil {
+			t.Fatalf("responder replay did not match the original durable outcome: %v", err)
+		}
 		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
 		if after := forwarder.countRecipient(actor.EmailAddress()); after != actorEgressBaseline {
 			t.Fatalf("idempotent replay changed reply SMTP egress from %d to %d", actorEgressBaseline, after)
