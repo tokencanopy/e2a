@@ -57,6 +57,24 @@ describe("sitemap", () => {
     }
   });
 
+  it("includes the use-case hub and every published use-case page", () => {
+    delete process.env[ENV_KEY];
+    const found = urls();
+    for (const slug of [
+      "support-agent",
+      "ai-receptionist",
+      "scheduling-agent",
+      "ecommerce-agent",
+      "sales-agent",
+      "recruiting-agent",
+      "voice-agent",
+      "procurement-agent",
+    ]) {
+      expect(found).toContain(`http://localhost:3000/use-cases/${slug}`);
+    }
+    expect(found).toContain("http://localhost:3000/use-cases");
+  });
+
   it("emits no duplicate URLs", () => {
     process.env[ENV_KEY] = "/pricing";
     const found = urls();

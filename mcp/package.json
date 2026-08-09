@@ -1,7 +1,7 @@
 {
   "name": "@e2a/mcp-server",
   "version": "0.5.0",
-  "description": "MCP server for e2a — give AI support, receptionist, and scheduling agents a real email inbox",
+  "description": "MCP server for e2a — give any AI agent a real, authenticated email inbox",
   "mcpName": "dev.e2a/mcp-server",
   "type": "module",
   "main": "./dist/bin/http.js",
