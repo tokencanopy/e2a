@@ -476,16 +476,16 @@ except Exception:print("")')"
     ck "different dirs → different state keys" "$([ -n "$k1" ] && [ -n "$k2" ] && [ "$k1" != "$k2" ] && echo distinct)" "distinct"
     armf=/tmp/tether-selftest-armed.json
     printf '{"armed":"1","conversation_id":"tether-old","to":"a@b.c"}' > "$armf"
-    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.localhost' \
       TETHER_STATE="$armf" bash "${here}/tether.sh" start someone@example.com --title selftest 2>&1)"; rc=$?
     ck "start refuses to arm over a live session" "$rc:$(printf '%s' "$out" | grep -c 'already armed')" "1:1"
-    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.localhost' \
       TETHER_STATE=/tmp/tether-selftest-notitle.json bash "${here}/tether.sh" start someone@example.com 2>&1)"; rc=$?
     ck "start without --title is a usage error" "$rc:$(printf '%s' "$out" | grep -c 'title is required')" "2:1"
     rm -f /tmp/tether-selftest-notitle.json
     # A trailing valueless flag must be a loud usage error, not an infinite
     # option-parse loop (bash `shift 2` with $#=1 is a no-op).
-    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.localhost' \
       TETHER_STATE=/tmp/tether-selftest-shift.json bash "${here}/tether.sh" start someone@example.com --title 2>&1)"; rc=$?
     ck "trailing valueless flag → usage error (no hang)" "$rc:$(printf '%s' "$out" | grep -c 'requires a value')" "2:1"
     rm -f /tmp/tether-selftest-shift.json
@@ -496,7 +496,7 @@ except Exception:print("")')"
     sb=/tmp/tether-selftest-home; mkdir -p "$sb/.e2a-tether"
     printf '{"armed":"1","conversation_id":"tether-old","to":"a@b.c"}' > "$sb/.e2a-tether/state.json"
     out="$(env HOME="$sb" E2A_CLI=/bin/false E2A_API_KEY='e2a_agt_selftest123' \
-      E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+      E2A_AGENT_EMAIL='selftest@agents.localhost' \
       bash "${here}/tether.sh" start someone@example.com --title selftest --parallel 2>&1)" || true
     ck "start --parallel self-keys a fresh TETHER_STATE" \
       "$(printf '%s' "$out" | grep -c 'TETHER_STATE=')" "1"
@@ -525,14 +525,14 @@ except Exception:print("")')"
     printf '#!/usr/bin/env bash\necho msg_selftest_terminal\nexit 7\n' > "$stub7"; chmod +x "$stub7"
     armf7=/tmp/tether-selftest-exit7.json
     printf '{"armed":"1","conversation_id":"tether-x","to":"a@b.c","last_message_id":"msg_anchor"}' > "$armf7"
-    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.localhost' \
       E2A_CLI="$stub7" TETHER_STATE="$armf7" bash "${here}/tether.sh" update "terminal failure" 2>&1)"; rc=$?
     ck "update: CLI exit 7 → exit 5, reported NOT delivered" \
       "$rc:$(printf '%s' "$out" | grep -c 'terminal FAILED outcome')" "5:1"
     # And the state pointer must NOT advance onto an undelivered message.
     ck "update: exit 7 leaves last_message_id untouched" \
       "$(TETHER_STATE="$armf7" bash -c '. "'"${here}"'/lib.sh"; t_state_get last_message_id')" "msg_anchor"
-    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.e2a.dev' \
+    out="$(env E2A_API_KEY='e2a_agt_selftest123' E2A_AGENT_EMAIL='selftest@agents.localhost' \
       E2A_CLI="$stub7" TETHER_STATE="$armf7" bash "${here}/tether.sh" ask "will this block?" 2>&1)"; rc=$?
     ck "ask: CLI exit 7 → exit 5, does not wait" \
       "$rc:$(printf '%s' "$out" | grep -c 'not waiting')" "5:1"
