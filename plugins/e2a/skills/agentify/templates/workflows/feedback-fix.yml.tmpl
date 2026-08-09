@@ -87,6 +87,9 @@ jobs:
       # NEVER add a cloud-auth step here — that, not a missing tool rule, is
       # what would grant infra power. The cloud-CLI + merge denials are
       # belt-and-suspenders (the runner holds no cloud/prod credential).
+      # The fix lane intentionally retains arbitrary repository-local Bash for
+      # build/test work, runs without deploy or production credentials, and
+      # ends at a human-reviewed PR.
       - name: Run the fix procedure
         if: steps.gate.outputs.active == 'true'
         id: claude
@@ -105,8 +108,10 @@ jobs:
           claude_args: |
             --model ${{ steps.cfg.outputs.model }}
             --max-turns 120
-            --permission-mode bypassPermissions
-            --allowedTools Bash,Edit,Write,Read,Glob,Grep
+            --strict-mcp-config
+            --permission-mode dontAsk
+            --tools "Bash,Edit,Write,Read,Glob,Grep"
+            --allowedTools Bash Edit Write Read Glob Grep
             --disallowedTools "Bash(gcloud:*)" "Bash(kubectl:*)" "Bash(aws:*)" "Bash(gh secret:*)" "Bash(gh pr merge:*)"
 
       # NON-AGENT STEP: record in_progress + the PR number on the ticket-card

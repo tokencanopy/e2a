@@ -83,6 +83,11 @@ AND (later) a repo-write coding agent.
    thread participant or the approver) is the bounded-blast-radius limit, not
    an arbitrary-egress hole.
 
+   Unattended lanes use `dontAsk`, an explicit built-in `--tools` set, and a
+   strict MCP configuration. Triage and comms auto-approve only named Bash
+   prefixes and e2a tools. The fix lane intentionally retains general repository
+   Bash, but receives no deploy or production credentials and cannot merge its PR.
+
 6. **Per-adopter identity.** Each adopter brings its own GitHub App and its
    own Anthropic + comms credentials. Nothing is shared across installs.
 
