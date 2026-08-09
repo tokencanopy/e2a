@@ -51,9 +51,24 @@ var pollLimitedOps = map[string]bool{
 // A rate limiter sized to allow legitimate bulk cleanup would not have stopped
 // that; a concurrency cap does, while still letting a caller delete as much as
 // they like sequentially.
+// The set is every delete whose cost scales with accumulated data rather than
+// with the request. The rest of the delete surface (deleteMessage, deleteApiKey,
+// deleteContact, deleteTemplate, deleteWebhook, deleteSuppression,
+// deleteAgentSuppression, deleteEngagement) removes a bounded number of rows and
+// is deliberately left uncapped.
 var destructiveOps = map[string]bool{
-	"deleteAgent":  true,
+	// Cascades every message the agent ever received.
+	"deleteAgent": true,
+	// Cascades the agents registered under the domain.
 	"deleteDomain": true,
+	// The largest cascade in the API, and all of it in ONE transaction: it
+	// counts across nine tables (including a join over every message), locks
+	// every agent the account owns with SELECT ... FOR UPDATE, cancels each
+	// linked durable send, then deletes. Strictly worse than deleteAgent.
+	"deleteAccount": true,
+	// Bulk-deletes every contact in the batch in a single statement; the batch
+	// is as large as whatever was imported.
+	"deleteImportBatch": true,
 }
 
 // maxConcurrentDestructive is the per-account in-flight ceiling for

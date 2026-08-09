@@ -79,3 +79,30 @@ func TestAcquireDestructiveIsConcurrencySafe(t *testing.T) {
 		t.Errorf("admitted %d concurrent destructive ops, want exactly %d", admitted, maxConcurrentDestructive)
 	}
 }
+
+// The capped set must cover every delete whose cost scales with accumulated
+// data. deleteAccount is the sharpest case — one transaction that locks every
+// agent the account owns — and was missed on the first pass.
+func TestDestructiveOpsCoversUnboundedCascades(t *testing.T) {
+	for _, op := range []string{
+		"deleteAgent",       // cascades every message
+		"deleteDomain",      // cascades the domain's agents
+		"deleteAccount",     // counts 9 tables, locks all agents, one transaction
+		"deleteImportBatch", // bulk-deletes a whole batch of contacts
+	} {
+		if !destructiveOps[op] {
+			t.Errorf("%s performs an unbounded cascade but is not concurrency-capped", op)
+		}
+	}
+
+	// Bounded single-row deletes stay uncapped: capping them would add 429s to
+	// ordinary CRUD for no availability benefit.
+	for _, op := range []string{
+		"deleteMessage", "deleteApiKey", "deleteContact", "deleteTemplate",
+		"deleteWebhook", "deleteSuppression", "deleteAgentSuppression", "deleteEngagement",
+	} {
+		if destructiveOps[op] {
+			t.Errorf("%s removes a bounded number of rows and should not be capped", op)
+		}
+	}
+}
