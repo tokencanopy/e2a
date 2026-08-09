@@ -396,6 +396,73 @@ test("beta review and block events do not fabricate omitted MIME or recipient ev
   }
 });
 
+test("pending review without event conversation or MIME correlates by its authoritative row conversation", async () => {
+  const events = await fixture("events-success.json");
+  const review = structuredClone(events[1]);
+  review.id = "evt_synthetic_target_review_row_thread";
+  review.type = "email.review_requested";
+  delete review.conversationId;
+  delete review.data.conversation_id;
+  const messages = successfulMessages();
+  delete messages.msg_synthetic_target_out.rawMessage;
+
+  const evidence = await adapter(fakeClient({ events: [events[0], review], messages })).adapter.executeCase(caseSpec(), caseContext());
+  assert.deepEqual(evidence.candidates.map(({ ref }) => ref), ["evt_synthetic_target_review_row_thread"]);
+  assert.equal(evidence.candidates[0].conversationId, "conv_synthetic");
+  assert.equal(evidence.candidates[0].mime, null);
+
+  const noneTime = clock();
+  const noneCase = caseSpec({ expect: { ...caseSpec().expect, action: { kind: "none", count: 0 } } });
+  const noneEvidence = await adapter(fakeClient({ events: [events[0], review], messages }), noneTime).adapter.executeCase(
+    noneCase,
+    caseContext({ timeoutMs: 5_000, settleMs: 100, pollIntervalMs: 500 }),
+  );
+  assert.equal(noneTime.elapsed(), 5_000);
+  assert.equal(noneEvidence.candidates.length, 1);
+  const noneCount = gradeCore(noneCase.expect, noneEvidence).find(({ id }) => id === "action.count");
+  assert.equal(noneCount.status, "fail");
+  assert.equal(noneCount.code, "unexpected_outbound_attempt");
+});
+
+test("authoritative row conversation resolves otherwise ambiguous unthreaded new messages", async () => {
+  const events = await fixture("events-success.json");
+  const candidates = [1, 2].map((index) => {
+    const event = structuredClone(events[1]);
+    event.id = `evt_synthetic_unthreaded_${index}`;
+    event.messageId = `msg_synthetic_unthreaded_${index}`;
+    event.data.message_id = event.messageId;
+    event.data.message_type = "send";
+    event.data.subject = "Synthetic status update";
+    delete event.conversationId;
+    delete event.data.conversation_id;
+    return event;
+  });
+  const messages = successfulMessages();
+  for (const [index, event] of candidates.entries()) {
+    messages[event.messageId] = {
+      ...messages.msg_synthetic_target_out,
+      id: event.messageId,
+      conversationId: index === 0 ? "conv_synthetic" : "conv_unrelated",
+      subject: event.data.subject,
+      rawMessage: rawMessage({
+        messageId: `unthreaded-${index + 1}@agents.localhost`, from: TARGET, to: ACTOR,
+        subject: event.data.subject, text: "Synthetic status update.",
+      }),
+    };
+  }
+  const newMessageCase = caseSpec({
+    expect: { ...caseSpec().expect, action: { kind: "new_message", count: 1 }, subject: { exact: "Synthetic status update" } },
+  });
+  const client = fakeClient({ events: [events[0], ...candidates], messages });
+  const evidence = await adapter(client).adapter.executeCase(newMessageCase, caseContext());
+  assert.deepEqual(evidence.candidates.map(({ ref }) => ref), ["evt_synthetic_unthreaded_1"]);
+  assert.equal(evidence.candidates[0].conversationId, "conv_synthetic");
+  assert.deepEqual(
+    [...new Set(client.calls.gets.filter(({ email }) => email === TARGET).map(({ messageId }) => messageId))].sort(),
+    ["msg_synthetic_target_in", "msg_synthetic_unthreaded_1", "msg_synthetic_unthreaded_2"],
+  );
+});
+
 test("actor receipt falls back to one baseline-absent inbound row", async () => {
   const events = await fixture("events-success.json");
   const withoutActorEvent = events.filter((event) => event.agentEmail !== ACTOR);

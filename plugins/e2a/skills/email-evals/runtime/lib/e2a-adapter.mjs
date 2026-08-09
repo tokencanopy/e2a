@@ -546,21 +546,32 @@ function outboundRecipients(eventType, data) {
   };
 }
 
+function isRowBackedCandidate(metadata) {
+  return !(metadata.event.type === "email.blocked" && typeof metadata.event.messageId !== "string");
+}
+
+async function hydrateCandidateMetadata(sdk, target, metadata) {
+  if (!isRowBackedCandidate(metadata)) return { ...metadata, message: null };
+  const fetchedMessage = await sdk.messages.get(target, metadata.messageId);
+  messageIdOf(metadata.event, metadata.data, fetchedMessage, { required: true });
+  const message = validateMessage(fetchedMessage, metadata.messageId, "outbound");
+  return {
+    ...metadata,
+    message,
+    conversationId: conversationIdOf(metadata.event, metadata.data, message),
+  };
+}
+
 async function normalizeCandidate(sdk, target, metadata) {
-  const { event, data, messageId } = metadata;
+  const { event, data, messageId, message } = metadata;
   const recipients = outboundRecipients(event.type, data);
-  let message = null;
   let mime = null;
   let transitions = [];
-  if (!(event.type === "email.blocked" && typeof event.messageId !== "string")) {
-    const fetchedMessage = await sdk.messages.get(target, messageId);
-    messageIdOf(event, data, fetchedMessage, { required: true });
-    message = validateMessage(fetchedMessage, messageId, "outbound");
+  if (message) {
     mime = await mimeFromMessage(message, { required: event.type !== "email.review_requested" });
     transitions = await readLifecycle(sdk, target, messageId);
   }
   const observedAt = eventInstant(event).iso;
-  const conversationId = conversationIdOf(event, data, message);
   return {
     ref: event.id,
     eventType: event.type,
@@ -571,7 +582,7 @@ async function normalizeCandidate(sdk, target, metadata) {
     sentAs: data.agent_email,
     ...(mime ? { replyTo: mime.replyTo } : {}),
     ...recipients,
-    conversationId,
+    conversationId: metadata.conversationId,
     messageId,
     observedAt,
     sentAt: observedAt,
@@ -588,7 +599,10 @@ function relatedByMime(candidate, stimulus) {
 
 async function correlatedCandidates(sdk, events, resolvedCase, stimulus, target, lowerBound, upperBound) {
   const stimulusLowerBound = Math.max(lowerBound, instant(stimulus.receivedAt, "malformed_event").milliseconds);
-  const metadata = uniqueEvents(events).map((event) => eventCandidateMetadata(event, target, stimulusLowerBound, upperBound)).filter(Boolean);
+  const eventMetadata = uniqueEvents(events)
+    .map((event) => eventCandidateMetadata(event, target, stimulusLowerBound, upperBound))
+    .filter(Boolean);
+  const metadata = await Promise.all(eventMetadata.map((entry) => hydrateCandidateMetadata(sdk, target, entry)));
   const exact = stimulus.conversationId
     ? metadata.filter((entry) => entry.conversationId === stimulus.conversationId)
     : [];
