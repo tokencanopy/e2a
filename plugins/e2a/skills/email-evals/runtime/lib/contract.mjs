@@ -4,6 +4,9 @@ import path from "node:path";
 import { parseDocument } from "yaml";
 import { EvalError } from "./errors.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox, parseDuration } from "./normalize.mjs";
+import { EVAL_IDENTIFIER_LIMITS, isEvalLiteralIdentifier } from "./result-contract.mjs";
+
+export { EVAL_IDENTIFIER_LIMITS } from "./result-contract.mjs";
 
 export const RESOLVED_ENVIRONMENT_VALUES = Symbol.for("e2a.email-evals.resolved-environment-values");
 export const RESOLVED_ENVIRONMENT_SOURCES = Symbol.for("e2a.email-evals.resolved-environment-sources");
@@ -35,9 +38,6 @@ const subjectPolicies = new Set(["preserve", "forward"]);
 const plainTextPolicies = new Set(["required", "forbidden"]);
 const htmlPolicies = new Set(["required", "forbidden", "equivalent_if_present"]);
 const submissionStates = new Set(["sent", "failed", "pending_review", "scheduled"]);
-const evalIdentifierPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-export const EVAL_IDENTIFIER_LIMITS = Object.freeze({ suiteNameBytes: 128, caseIdBytes: 128 });
-
 function configurationError(code, message, pointer) {
   return new EvalError("configuration_error", code, message, pointer ? { path: pointer } : undefined);
 }
@@ -52,7 +52,7 @@ export function assertEvalIdentifierLength(value, kind, pointer) {
 
 export function assertEvalIdentifier(value, kind, pointer) {
   assertEvalIdentifierLength(value, kind, pointer);
-  if (!evalIdentifierPattern.test(value)) {
+  if (!isEvalLiteralIdentifier(value, EVAL_IDENTIFIER_LIMITS[kind])) {
     const suiteName = kind === "suiteNameBytes";
     throw configurationError(
       suiteName ? "invalid_suite_name" : "invalid_case_id",

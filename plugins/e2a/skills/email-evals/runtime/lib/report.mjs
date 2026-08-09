@@ -7,6 +7,7 @@ import path from "node:path";
 import { types as utilTypes } from "node:util";
 import { EvalError } from "./errors.mjs";
 import { RESOLVED_ENVIRONMENT_SOURCES, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
+import { isSafeResultCaseId } from "./result-contract.mjs";
 import {
   mailboxAddressesInText,
   NormalizationError,
@@ -302,7 +303,8 @@ function canonicalCase(suite, caseId) {
 
 export function artifactCaseId(suite, caseId) {
   const environment = environmentValues(suite);
-  return tokenizeResolvedSource(caseId, canonicalCase(suite, caseId)?.id, environment);
+  const result = tokenizeResolvedSource(caseId, canonicalCase(suite, caseId)?.id, environment);
+  return isSafeResultCaseId(result) ? result : "unknown-case";
 }
 
 export function artifactSuiteName(suite) {

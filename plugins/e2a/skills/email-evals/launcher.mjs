@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { CliUsageError, parseRuntimeArguments, usage } from "./runtime/lib/cli-arguments.mjs";
+import { isSafeResultCaseId } from "./runtime/lib/result-contract.mjs";
 
 const launcherDirectory = path.dirname(fileURLToPath(import.meta.url));
 // Match the runtime's maximum retained cases artifact while keeping child output bounded.
@@ -67,8 +68,8 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       resolve(result);
     }
 
-    function fixedFailure() {
-      finish({ code: 4, stdout: "", stderr: "", truncated: true, finalized: false });
+    function fixedFailure(termination = "failure") {
+      finish({ code: 4, stdout: "", stderr: "", truncated: true, finalized: false, termination });
     }
 
     function finishFromExit() {
@@ -79,6 +80,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
         stderr: Buffer.concat(stderrCapture.chunks).toString("utf8"),
         truncated,
         finalized: true,
+        termination: exitSignal ? "signal" : "exit",
       });
     }
 
@@ -107,22 +109,23 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       };
       stream.once("end", finalize);
       stream.once("close", finalize);
+      stream.once("error", () => fixedFailure("stream_error"));
     }
 
     try {
       child = spawnChild(process.execPath, args, { ...options, stdio: ["inherit", "pipe", "pipe"] });
     } catch {
-      fixedFailure();
+      fixedFailure("spawn_error");
       return;
     }
     if (!child?.stdout || typeof child.stdout.on !== "function"
       || !child?.stderr || typeof child.stderr.on !== "function" || typeof child.once !== "function") {
-      fixedFailure();
+      fixedFailure("spawn_error");
       return;
     }
     captureStream(child.stdout, stdoutCapture, RUNTIME_STDOUT_LIMIT);
     captureStream(child.stderr, stderrCapture, RUNTIME_STDERR_LIMIT);
-    child.once("error", fixedFailure);
+    child.once("error", () => fixedFailure("spawn_error"));
     child.once("exit", (code, signal) => {
       if (settled) return;
       exited = true;
@@ -139,7 +142,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
         try { child.stdout.destroy?.(); } catch {}
         try { child.stderr.destroy?.(); } catch {}
         try { child.unref?.(); } catch {}
-        fixedFailure();
+        fixedFailure("timeout");
       }, graceMs);
     });
   });
@@ -185,8 +188,7 @@ function completedJSONExit(stdout, command) {
   const caseIds = new Set();
   for (const result of summary.cases) {
     const keys = result?.errorClass === undefined ? ["id", "status"] : ["id", "status", "errorClass"];
-    if (!exactKeys(result, keys) || typeof result.id !== "string" || result.id.length < 1 || result.id.length > 128
-      || !/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(result.id)
+    if (!exactKeys(result, keys) || !isSafeResultCaseId(result.id)
       || !["pass", "fail", "error"].includes(result.status)) return null;
     if (caseIds.has(result.id)) return null;
     caseIds.add(result.id);
@@ -212,7 +214,7 @@ function completedJSONExit(stdout, command) {
 
 function completedHumanOutput(stdout, command) {
   if (command !== "run" && command !== "regrade") return false;
-  const match = /^Status: fail; (\d+)\/(\d+) passed\nReport: (run_\d{8}T\d{6}_[a-f0-9]{8})\/report\.md\n$/.exec(stdout);
+  const match = /^Status: fail; (\d+)\/(\d+) passed\nComplete: yes\nReport: (run_\d{8}T\d{6}_[a-f0-9]{8})\/report\.md\n$/.exec(stdout);
   if (!match) return false;
   const passed = Number(match[1]);
   const total = Number(match[2]);
@@ -220,7 +222,8 @@ function completedHumanOutput(stdout, command) {
 }
 
 function safeRuntimeExit(result, parsed, stdout, stderr) {
-  if (result.finalized !== true || result.truncated || typeof result.stdout !== "string" || typeof result.stderr !== "string") {
+  if (result.termination !== "exit" || result.finalized !== true || result.truncated
+    || typeof result.stdout !== "string" || typeof result.stderr !== "string") {
     stderr.write("email-evals: runtime failure\n");
     return 4;
   }
@@ -231,9 +234,8 @@ function safeRuntimeExit(result, parsed, stdout, stderr) {
     stdout.write(result.stdout);
     return 0;
   }
-  if (result.code === completedExit && (result.stderr === "" || diagnosticExit === completedExit)) {
+  if (result.code === completedExit && result.stderr === "") {
     stdout.write(result.stdout);
-    if (result.stderr !== "") stderr.write(result.stderr);
     return result.code;
   }
   if (completedHuman && diagnosticExit !== undefined && result.code === diagnosticExit) {

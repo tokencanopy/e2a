@@ -196,9 +196,25 @@ test("completed human run and regrade summaries emit their fixed exit diagnostic
         ? ["run", "--suite", "suite.yaml"]
         : ["regrade", "--suite", "suite.yaml", "--run", "run"];
       assert.equal(await main(args, h.dependencies), exitCode, `${command}:${errorClass}`);
-      assert.match(stdout(h), /^Status: fail; 0\/1 passed\nReport: run_[a-zA-Z0-9_]+\/report\.md\n$/);
+      assert.match(stdout(h), /^Status: fail; 0\/1 passed\nComplete: yes\nReport: run_[a-zA-Z0-9_]+\/report\.md\n$/);
       assert.equal(stderr(h), `email-evals: ${errorClass}\n`, `${command}:${errorClass}`);
     }
+  }
+});
+
+test("incomplete run and regrade summaries never publish human results", async () => {
+  for (const command of ["run", "regrade"]) {
+    const incomplete = summary("transport_error");
+    incomplete.complete = false;
+    const h = harness(command === "run"
+      ? { runSummary: incomplete }
+      : { regradeSummary: incomplete });
+    const args = command === "run"
+      ? ["run", "--suite", "suite.yaml"]
+      : ["regrade", "--suite", "suite.yaml", "--run", "run"];
+    assert.equal(await main(args, h.dependencies), 4, command);
+    assert.equal(stdout(h), "", command);
+    assert.equal(stderr(h), "email-evals: unexpected runner failure\n", command);
   }
 });
 

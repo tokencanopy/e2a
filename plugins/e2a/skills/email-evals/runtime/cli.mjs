@@ -6,6 +6,7 @@ import { createE2AAdapter } from "./lib/e2a-adapter.mjs";
 import { CliUsageError, parseRuntimeArguments, usage } from "./lib/cli-arguments.mjs";
 import { EvalError } from "./lib/errors.mjs";
 import { regradeRun, runSuite } from "./lib/runner.mjs";
+import { isSafeResultCaseId } from "./lib/result-contract.mjs";
 
 
 const ERROR_EXIT_CODES = Object.freeze({
@@ -110,7 +111,7 @@ function safePlan(preflight, suite, capabilities) {
 
 function safeSummary(summary) {
   const cases = Array.isArray(summary?.cases) ? summary.cases.map((record) => ({
-    id: typeof record?.id === "string" ? record.id : "unknown",
+    id: isSafeResultCaseId(record?.id) ? record.id : "unknown-case",
     status: ["pass", "fail", "error"].includes(record?.status) ? record.status : "error",
     ...(typeof record?.primaryError?.class === "string" && ERROR_EXIT_CODES[record.primaryError.class] !== undefined
       ? { errorClass: record.primaryError.class } : {}),
@@ -144,6 +145,7 @@ function failureClassForSummary(summary) {
 }
 
 function exitForSummary(summary, { json, stderr }) {
+  if (summary?.complete !== true) return 4;
   if (summary?.status === "pass") return 0;
   const errorClass = failureClassForSummary(summary);
   if (!json && errorClass !== null) stderr.write(`email-evals: ${errorClass}\n`);
@@ -204,7 +206,13 @@ function writeResult({ command, json, value, report, stdout }) {
     return;
   }
   stdout.write(`Status: ${value.summary.status}; ${value.summary.counts.passed}/${value.summary.counts.total} passed\n`);
+  stdout.write("Complete: yes\n");
   if (report !== null) stdout.write(`Report: ${report}\n`);
+}
+
+function requireCompletedSummary(summary) {
+  if (summary?.complete !== true) throw new Error("incomplete evaluation result");
+  return summary;
 }
 
 function diagnostic(error, stderr) {
@@ -249,7 +257,7 @@ export async function main(argv, dependencies = {}) {
     const suite = await deps.loadSuite(suiteFile, { environment: deps.environment });
     if (parsed.command === "regrade") {
       const runDirectory = path.resolve(deps.cwd, parsed.run);
-      const result = await deps.regradeRun({ suite, runDirectory });
+      const result = requireCompletedSummary(await deps.regradeRun({ suite, runDirectory }));
       const report = await deps.validateReport({ command: parsed.command, summary: result, runDirectory });
       const output = { summary: safeSummary(result) };
       writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
@@ -268,11 +276,11 @@ export async function main(argv, dependencies = {}) {
     // result rather than repeating the adapter/network operation.
     const { preflight } = await preflightSuite(suite, adapter);
     const outputRoot = path.resolve(deps.cwd, parsed.output ?? "results");
-    const result = await deps.runSuite({
+    const result = requireCompletedSummary(await deps.runSuite({
       suite,
       adapter: cachePreflight(adapter, preflight),
       outputRoot,
-    });
+    }));
     const report = await deps.validateReport({ command: parsed.command, summary: result, outputRoot });
     const output = { summary: safeSummary(result) };
     writeResult({ command: parsed.command, json: parsed.json, value: output, report, stdout: deps.stdout });
