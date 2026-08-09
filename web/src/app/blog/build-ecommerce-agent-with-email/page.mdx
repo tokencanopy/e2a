@@ -1,0 +1,108 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("build-ecommerce-agent-with-email");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: { card: "summary_large_image", title: post.title, description: post.description },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Build an e-commerce agent that handles order email
+
+E-commerce workflows already run through email: customers ask where an order is, vendors confirm shipments, and support teams coordinate returns. An AI agent can handle the repetitive part, but it needs an inbox of its own and a safe boundary around actions such as refunds.
+
+This walkthrough shows the shape of an e-commerce support agent with e2a. The commerce system remains the source of truth for orders; e2a provides the authenticated email identity, inbound delivery, threading, and outbound controls.
+
+## The workflow
+
+1. A customer sends mail to `orders@example.com`.
+2. e2a evaluates SPF, DKIM, and DMARC and delivers the message to the agent.
+3. The agent looks up the order in the store or order-management system.
+4. It answers routine questions in the existing conversation.
+5. Refunds, replacements, or unusual requests can wait for human approval.
+
+For the complete workflow overview, see the [e-commerce agent use case](/use-cases/ecommerce-agent).
+
+## Receive the order question
+
+The Python SDK exposes the inbound event and the conversation identifier. The application can use the sender, message text, and its own order lookup API to assemble context:
+
+```python
+from e2a.v1 import AsyncE2AClient
+
+async with AsyncE2AClient(api_key="e2a_...") as client:
+    async for event in client.listen("orders@example.com"):
+        if event.type != "email.received":
+            continue
+
+        message = event.data
+        order = await shop.lookup_order_from_email(
+            message["header_from"],
+            message["text"],
+        )
+```
+
+Do not treat the `From` header as proof of identity by itself. Use the structured authentication evidence e2a delivers with the message, and apply your own business rules before taking an order action.
+
+## Answer routine questions in-thread
+
+The agent can answer shipping, delivery, and product questions, then reply to the original message:
+
+```python
+        reply = await commerce_agent.answer(
+            question=message["text"],
+            order=order,
+            conversation_id=message["conversation_id"],
+        )
+
+        await client.messages.reply(
+            message["delivered_to"],
+            message["message_id"],
+            {"text": reply},
+        )
+```
+
+The agent owns the commerce logic. e2a handles reply routing and the email thread, so the customer can continue the conversation without a separate ticket number or portal login.
+
+## Put refunds behind approval
+
+A useful first deployment pattern is to let the agent answer low-risk questions automatically while holding actions that create financial or reputational risk. Enable human-in-the-loop protection on the agent, then review held messages from the dashboard, API, SDK, CLI, or MCP tools.
+
+Typical approval rules include:
+
+- Refunds or partial refunds
+- Replacement shipments
+- Requests to change a delivery address
+- Messages to an unfamiliar vendor or recipient
+- Exceptions to the published return policy
+
+Approval is a delivery control, not a replacement for authorization in the commerce system. The agent should still call the store's refund or order API only when its application policy allows that action.
+
+## Connect vendor coordination
+
+The same pattern works for a vendor inbox. A procurement or operations agent can receive shipment notices, ask for an updated ETA, and associate the conversation with a purchase order. Use a separate agent identity when vendor communication should have a different sender, policy, or approval path from customer support.
+
+## What to build next
+
+- Add a [custom domain](/docs) so the address matches your store.
+- Add [MCP](/mcp) if the agent runtime is local or tool-driven.
+- Add a signed [webhook](/docs) when the commerce application runs in the cloud.
+- Start with [human-in-the-loop approval](/blog/human-in-the-loop-for-agent-email) for every outbound message, then narrow the policy as the workflow proves reliable.
+
+The key design choice is simple: let the commerce platform own orders and payments, and let e2a give the agent a trustworthy email interface to customers and vendors.

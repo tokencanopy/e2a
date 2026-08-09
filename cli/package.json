@@ -1,7 +1,7 @@
 {
   "name": "@e2a/cli",
   "version": "2.3.0",
-  "description": "CLI for e2a — email for AI agents",
+  "description": "CLI for e2a — give any AI agent a real, authenticated email inbox",
   "bin": {
     "e2a": "./dist/bin/e2a.js"
   },

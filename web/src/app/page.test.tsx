@@ -138,7 +138,7 @@ describe("Landing page", () => {
     ).toHaveAttribute("href", "#hitl");
     expect(screen.getByRole("link", { name: "Use cases" })).toHaveAttribute(
       "href",
-      "#use-cases",
+      "/use-cases",
     );
   });
 

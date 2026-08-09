@@ -95,6 +95,19 @@ You can either use the hosted instance or self-host.
 
 ## What you can build
 
+e2a is useful anywhere an AI agent needs a real inbox, persistent email
+threads, and a safe path from inbound message to outbound action. Start with a
+complete example:
+
+- [Build an AI support agent](https://e2a.dev/use-cases/support-agent) — triage customer requests, retrieve context, reply in-thread, and hold sensitive replies for approval.
+- [Build an AI receptionist](https://e2a.dev/use-cases/ai-receptionist) — answer common inquiries, route messages, and forward conversations to a human team.
+- [Build an AI scheduling agent](https://e2a.dev/use-cases/scheduling-agent) — coordinate participants, propose times, and preserve state across multi-turn replies.
+- [Build an e-commerce agent](https://e2a.dev/use-cases/ecommerce-agent) — answer order questions, handle returns, and coordinate with vendors through persistent email threads.
+- [Build a sales agent](https://e2a.dev/use-cases/sales-agent) — qualify inbound interest, personalize follow-ups, and keep every conversation moving.
+- [Build a recruiting agent](https://e2a.dev/use-cases/recruiting-agent) — coordinate candidates, schedule interviews, and keep hiring workflows in one thread.
+- [Build a voice follow-up agent](https://e2a.dev/use-cases/voice-agent) — turn a completed call into an email follow-up and keep the conversation going.
+- [Build a procurement agent](https://e2a.dev/use-cases/procurement-agent) — coordinate quotes, purchase orders, and vendor threads with human approval for commitments.
+
 - **A support inbox for your AI assistant** — give an agent `support@yourbrand.com`, receive customer mail with SPF/DKIM/DMARC already evaluated as structured evidence, and reply in-thread. Add HITL so anything sensitive waits for a human to approve before it goes out.
 - **Email between agents — yours and other organizations'** — every agent has a real, verified address, so two companies' agents can exchange mail the same way humans do: no new client, protocol, or shared platform to install.
 - **A personal concierge on your laptop** — subscribe over WebSocket (no public URL, no ngrok, no port forwarding), so a local agent can watch an inbox from behind any firewall, triage it, draft replies, and take actions.

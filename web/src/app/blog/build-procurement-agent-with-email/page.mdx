@@ -1,0 +1,87 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("build-procurement-agent-with-email");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: { title: post.title, description: post.description, url: `https://e2a.dev/blog/${post.slug}`, type: "article", publishedTime: new Date(post.date + "T00:00:00Z").toISOString() },
+  twitter: { card: "summary_large_image", title: post.title, description: post.description },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Build a procurement agent that coordinates with vendors
+
+Procurement teams spend a surprising amount of time in email: requesting quotes, chasing purchase orders, checking shipping updates, and asking vendors for missing information. An agent can handle that coordination while people retain control over purchasing and contractual commitments.
+
+This walkthrough shows the integration boundary with e2a. Your ERP, purchase-order system, and vendor records remain authoritative; e2a gives the procurement agent a real inbox, structured inbound authentication evidence, threaded replies, and an approval gate.
+
+See the complete [procurement agent use case](/use-cases/procurement-agent).
+
+## Receive vendor mail
+
+Listen on a dedicated vendor address and connect each message to purchase-order context:
+
+```python
+from e2a.v1 import AsyncE2AClient
+
+async with AsyncE2AClient(api_key="e2a_...") as client:
+    async for event in client.listen("vendors@example.com"):
+        if event.type != "email.received":
+            continue
+
+        message = event.data
+        purchase_order = await procurement.lookup_purchase_order(
+            message["text"]
+        )
+```
+
+Use e2a's authentication evidence as one signal in your policy. Domain authentication does not prove that the content is safe or that a specific employee authored the message.
+
+## Extract an update and reply
+
+The agent can extract an ETA or missing field, then ask a focused question in the same thread:
+
+```python
+        reply = await procurement_agent.follow_up(
+            message=message["text"],
+            purchase_order=purchase_order,
+            conversation_id=message["conversation_id"],
+        )
+
+        await client.messages.reply(
+            message["delivered_to"],
+            message["message_id"],
+            {"text": reply},
+        )
+```
+
+The application owns extraction, policy, and ERP updates. e2a owns the email boundary and preserves the conversation so the vendor can reply normally.
+
+## Hold commitments for approval
+
+Start with human approval for messages that could create financial or contractual impact:
+
+- Accepting a quote
+- Confirming a purchase or quantity
+- Changing delivery or payment terms
+- Sharing internal information with a new vendor
+- Escalating a dispute
+
+With e2a's approval gate enabled, the message is held before delivery. A reviewer can edit or reject it, and the application can record the decision next to the purchase-order workflow.
+
+## What to build next
+
+- Use separate identities for customer support, vendors, and internal operations when their policies differ.
+- Connect [MCP](/mcp) for a local operations agent or [SDKs](/docs) for a hosted service.
+- Add inbound screening for untrusted vendor content before the agent acts on it.
+- Pair the workflow with the [e-commerce agent pattern](/use-cases/ecommerce-agent) when customer and supplier communications share order context.
+
+The useful boundary is clear: let the procurement system authorize purchases, and let e2a give the agent a reliable email interface for the coordination around them.

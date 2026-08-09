@@ -1,0 +1,80 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("build-voice-follow-up-agent-with-email");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: { title: post.title, description: post.description, url: `https://e2a.dev/blog/${post.slug}`, type: "article", publishedTime: new Date(post.date + "T00:00:00Z").toISOString() },
+  twitter: { card: "summary_large_image", title: post.title, description: post.description },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Build a voice follow-up agent with email
+
+A voice agent can finish a call in seconds. The relationship often continues afterward: a summary, a confirmation, a document, or a reply to a question that came up after the call. Email gives that interaction a durable channel, but the voice agent needs an identity and a way to reconnect the reply to the original call.
+
+This walkthrough shows the pattern with e2a. Your voice platform and CRM remain the sources of truth for the call; e2a handles the agent's email identity, delivery, threading, and outbound controls.
+
+See the complete [voice follow-up use case](/use-cases/voice-agent).
+
+## Send the follow-up
+
+After a call, create a concise summary and send it from the voice agent's address:
+
+```ts
+const followUp = await voiceAgent.summarizeCall(call);
+
+await client.messages.send("voice@example.com", {
+  to: [{ email: call.recipient }],
+  subject: followUp.subject,
+  text: followUp.text,
+  conversation_id: call.id,
+});
+```
+
+Use a synthetic or verified domain address in examples, and make the sender identity clear to the recipient. e2a's outbound API creates the email; your application decides what the call summary is allowed to contain.
+
+## Receive the reply
+
+The recipient can reply from any normal email client. Consume the inbound event over a webhook, WebSocket, REST polling, or MCP:
+
+```ts
+for await (const event of client.listen("voice@example.com")) {
+  if (event.type !== "email.received") continue;
+
+  const message = event.data;
+  const call = await calls.lookup(message.conversation_id);
+  await voiceAgent.handleFollowUp({ call, message });
+}
+```
+
+The `conversation_id` is the bridge between the call and the email conversation. Bind it to your call ID or CRM record so the agent can answer in context instead of starting over.
+
+## Keep commitments reviewable
+
+Some follow-ups are routine; others make a commitment. Start with human approval for:
+
+- Pricing or commercial commitments
+- Appointment changes
+- Promises about delivery or support
+- Sensitive call details
+- Messages to a new or unfamiliar recipient
+
+e2a can hold the outbound message for review before it is dispatched. A person can approve, edit, or reject it through the dashboard, API, SDK, CLI, MCP tools, or a secure review link.
+
+## What to build next
+
+- Add the [MCP server](/mcp) if your voice workflow is tool-driven.
+- Use a signed [webhook](/docs) when the application is hosted.
+- Keep the voice transcript and consent policy in your voice platform; send only the follow-up context the recipient should receive.
+- Enable [human-in-the-loop approval](/blog/human-in-the-loop-for-agent-email) before allowing autonomous commitments.
+
+e2a gives the voice agent a durable email interface without requiring recipients to install a new app.
