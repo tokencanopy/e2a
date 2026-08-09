@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -462,6 +463,12 @@ type Server struct {
 	Router chi.Router
 	API    huma.API
 	deps   Deps
+
+	// destructiveInFlight counts in-flight destructiveOps per account ID
+	// (values are *int64). Process-local by design: it bounds what one
+	// instance's connection pool can be asked to do at once, which is the
+	// resource actually at risk, so it needs no shared state across slots.
+	destructiveInFlight sync.Map
 }
 
 // New builds the v1 server. It installs the e2a error envelope globally,

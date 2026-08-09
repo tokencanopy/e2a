@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -45,7 +46,7 @@ func TestLatestMigration(t *testing.T) {
 func TestReadyzHandler_Ready(t *testing.T) {
 	pool := migratedTestDB(t)
 	rec := httptest.NewRecorder()
-	readyzHandler(pool, nil)(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -70,7 +71,7 @@ func TestReadyzHandler_DBUnreachable(t *testing.T) {
 	pool.Close()
 
 	rec := httptest.NewRecorder()
-	readyzHandler(pool, nil)(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
@@ -96,7 +97,7 @@ func TestReadyzHandler_Draining(t *testing.T) {
 	var drain atomic.Bool
 	drain.Store(true)
 	rec := httptest.NewRecorder()
-	readyzHandler(pool, &drain)(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, &drain).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
@@ -104,5 +105,113 @@ func TestReadyzHandler_Draining(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	if out.Status != "not_ready" || out.Reason != "draining" {
 		t.Errorf("got status=%q reason=%q, want not_ready/draining", out.Status, out.Reason)
+	}
+}
+
+// TestReadinessToleratesTransientFailureWithinGrace is the regression guard for
+// the outage this monitor exists to prevent: a saturated (not absent) database
+// must not evict the instance from the load balancer.
+//
+// Previously /readyz called pool.Ping inline, so pool exhaustion timed out the
+// check and reported "database unreachable". HAProxy marked the only backend
+// DOWN and answered every request — including ones that never touch the DB —
+// with its own 503.
+func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, time.Hour, 2*time.Second)
+	defer m.Stop()
+
+	rec := httptest.NewRecorder()
+	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("precondition: status = %d, want 200", rec.Code)
+	}
+
+	m.probeFn = func() (string, error) { return "database unreachable", errNotApplied }
+	m.evaluate() // fails, but we are well inside the grace window
+
+	rec = httptest.NewRecorder()
+	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a transient probe failure inside the grace window evicted the instance; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// A failure that outlives the grace window must still flip readiness — the
+// tolerance above must not become "never report a dead database".
+func TestReadinessFlipsAfterGraceExpires(t *testing.T) {
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, 0, 2*time.Second)
+	defer m.Stop()
+
+	m.probeFn = func() (string, error) { return "database unreachable", errNotApplied }
+	time.Sleep(2 * time.Millisecond) // ensure now-lastOK exceeds the zero grace
+	m.evaluate()
+
+	rec := httptest.NewRecorder()
+	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 once the grace window has expired", rec.Code)
+	}
+}
+
+// The probe must not borrow from the pool. Probing through pool.Ping would
+// reintroduce the original bug in slower motion: a saturated pool starves the
+// probe just as it starved the inline check, so a saturation outlasting the
+// grace window would evict the instance anyway. Here every pooled connection is
+// held open and the probe must still succeed.
+func TestReadinessProbeSurvivesPoolExhaustion(t *testing.T) {
+	pool := migratedTestDB(t)
+	m := newReadinessMonitorWithConfig(pool, nil, time.Hour, 0, 3*time.Second)
+	defer m.Stop()
+
+	ctx := context.Background()
+	held := make([]*pgxpool.Conn, 0, pool.Config().MaxConns)
+	for i := int32(0); i < pool.Config().MaxConns; i++ {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			c.Release()
+		}
+	}()
+	if pool.Stat().AcquiredConns() != pool.Config().MaxConns {
+		t.Fatalf("precondition: pool not exhausted (%d/%d acquired)",
+			pool.Stat().AcquiredConns(), pool.Config().MaxConns)
+	}
+
+	// grace is 0, so any probe failure flips readiness immediately.
+	m.evaluate()
+
+	rec := httptest.NewRecorder()
+	m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: an exhausted pool made the probe report the database unreachable; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// The handler must never block on the pool: that head-of-line blocking is what
+// let a busy database stall the health check in the first place.
+func TestReadinessHandlerDoesNotTouchPool(t *testing.T) {
+	dead, err := pgxpool.New(context.Background(), testutil.TestDBURL())
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	dead.Close()
+
+	m := newReadinessMonitorWithConfig(dead, nil, time.Hour, time.Hour, 2*time.Second)
+	defer m.Stop()
+
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		rec := httptest.NewRecorder()
+		m.handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("50 readiness responses took %s: the handler is waiting on the pool", elapsed)
 	}
 }
