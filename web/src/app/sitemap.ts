@@ -15,6 +15,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { path: "/python-sdk", changeFrequency: "weekly", priority: 0.7 },
     { path: "/api-docs", changeFrequency: "weekly", priority: 0.7 },
     { path: "/use-cases", changeFrequency: "weekly", priority: 0.9 },
+    { path: "/email-api-for-ai-agents", changeFrequency: "weekly", priority: 0.9 },
     { path: "/use-cases/support-agent", changeFrequency: "monthly", priority: 0.8 },
     { path: "/use-cases/ai-receptionist", changeFrequency: "monthly", priority: 0.8 },
     { path: "/use-cases/scheduling-agent", changeFrequency: "monthly", priority: 0.8 },

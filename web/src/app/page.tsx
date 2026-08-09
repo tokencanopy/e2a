@@ -366,6 +366,13 @@ export default function Home() {
             support, scheduling, reception, and ecommerce work over email, with
             human approval when it matters.
           </p>
+          <Link
+            href="/email-api-for-ai-agents"
+            className="inline-flex mb-7 text-[13px]"
+            style={{ color: "var(--accent-strong)" }}
+          >
+            What is email infrastructure for AI agents? <span className="font-mono ml-1">→</span>
+          </Link>
           <div className="inline-flex flex-wrap items-center justify-center gap-2.5">
             <Link
               href="/get-started"
