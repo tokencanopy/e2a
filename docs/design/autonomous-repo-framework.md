@@ -244,7 +244,7 @@ runtime generic without a code plugin system.
 
 ### 4.5 Deploy skill (`/agentify`)
 
-Bundle layout (home: `plugins/e2a/skills/agentify/`):
+Bundle layout (home: `plugins/e2a-labs/skills/agentify/`):
 ```
 skills/agentify/SKILL.md                  # the deploy procedure (the only thing that "runs")
   templates/workflows/*.yml.tmpl          # triage, fix, comms, released
@@ -438,7 +438,7 @@ Slices 1+2 already beat the status quo; 3 adds the fix automation; 4 makes it di
 
 ### §10 addenda (slice 4: the `/agentify` deploy flow)
 
-Built on `main`. `plugins/e2a/skills/agentify/agentify-render.sh` is the deterministic
+Built on `main`. `plugins/e2a-labs/skills/agentify/agentify-render.sh` is the deterministic
 scaffolder; `SKILL.md` is the interactive wrapper.
 
 - **Render** fills `autonomous-repo.config.yml` from `ANS_*` answers (failing
@@ -495,7 +495,7 @@ is purely additive (zero loop changes).
 
 ### §10 addenda (test harness)
 
-`plugins/e2a/skills/agentify/test/run.sh` is the deterministic suite (CI:
+`plugins/e2a-labs/skills/agentify/test/run.sh` is the deterministic suite (CI:
 `.github/workflows/agentify-test.yml`): every script `_selftest` + the addon's
 `bridge.test.mjs` + bash/JS syntax + `test/validate.py` (YAML parse, the
 rendered config vs what the workflows read, **e2a MCP/REST URL host
@@ -522,21 +522,23 @@ escaping `tools/`). Each fix has a regression test.
 
 ### §10 addenda (plugin packaging)
 
-`/agentify` is shipped as a **skill in the e2a Claude Code plugin** so it's
-installable, not just copy-able:
+`/agentify` is shipped as an **experimental skill in the e2a-labs Claude Code
+plugin** so it's installable, not just copy-able. Core e2a remains the sole MCP
+owner:
 
-- The deploy procedure lives at `plugins/e2a/skills/agentify/SKILL.md` (a
-  second skill alongside the existing `skills/e2a/`); the plugin's marketplace
-  entry is unchanged, version bumped `0.3.2 → 0.4.0` across all manifests
-  (`scripts/validate-plugin.mjs` enforces the sync + the frontmatter rules).
+- The deploy procedure lives at `plugins/e2a-labs/skills/agentify/SKILL.md`.
+  Labs has independent Claude and Codex manifests, while core e2a supplies the
+  MCP connection and authentication (`scripts/validate-plugin.mjs` enforces
+  per-package versions, MCP ownership, and frontmatter rules).
 - The scaffolder + templates live in the skill's own directory,
-  `plugins/e2a/skills/agentify/` alongside `SKILL.md` (the conventional
+  `plugins/e2a-labs/skills/agentify/` alongside `SKILL.md` (the conventional
   skill-local layout); the skill references them via
   **`${CLAUDE_PLUGIN_ROOT}/skills/agentify/`** — the whole plugin ships to the
   install cache, so the bundled `agentify-render.sh` / `templates/` /
   `references/` resolve at runtime. (The CI workflows follow the same path.)
-- Install: `/plugin marketplace add tokencanopy/e2a` → `/plugin install e2a` →
-  `/agentify` is available (plus the e2a MCP tools).
+- Install core first: `/plugin marketplace add tokencanopy/e2a` → `/plugin
+  install e2a` → `/plugin install e2a-labs` → `/agentify` is available with
+  the e2a MCP tools supplied by core.
 
 ## 10. Implementation reconciliation (`feat/agentify-feedback-loop`)
 
