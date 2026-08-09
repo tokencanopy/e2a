@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=18" },
-  "scripts": { "test": "node --test test/*.test.mjs" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "live-responder": "node test/live-responder.mjs"
+  },
   "dependencies": {
     "@e2a/sdk": "5.6.0",
     "postal-mime": "2.7.5",

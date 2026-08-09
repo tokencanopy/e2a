@@ -3,6 +3,7 @@ import PostalMime from "postal-mime";
 import { EvalError } from "./errors.mjs";
 
 const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
+const MAX_MESSAGE_ID_BYTES = 998;
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MESSAGE_ID_TOKEN = /(?:^|[ \t])<([^<>\s\u0000-\u001F\u007F]+)>(?=$|[ \t])/g;
 
@@ -27,6 +28,13 @@ function canonicalBase64(value, maxBytes) {
     throw graderError("invalid_mime_base64", "Raw MIME must be canonical base64");
   }
   return bytes;
+}
+
+export function normalizeMessageIdToken(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_MESSAGE_ID_BYTES
+    || /[\r\n\u0000-\u001F\u007F]/.test(value)) return null;
+  const match = value.trim().match(/^<([^<>\s\u0000-\u001F\u007F]+)>$/);
+  return match?.[1] ?? null;
 }
 
 function safeToken(value) {

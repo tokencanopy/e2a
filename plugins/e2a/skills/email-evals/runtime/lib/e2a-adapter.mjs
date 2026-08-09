@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { E2AClient, E2AConnectionError } from "@e2a/sdk/v1";
 import { EvalError, isStableEvalErrorCode } from "./errors.mjs";
-import { parseMimeEvidence } from "./mime.mjs";
+import { normalizeMessageIdToken, parseMimeEvidence } from "./mime.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox } from "./normalize.mjs";
 
 const CAPABILITIES = Object.freeze([
@@ -553,6 +553,25 @@ function isRowBackedCandidate(metadata) {
   return !(metadata.event.type === "email.blocked" && typeof metadata.event.messageId !== "string");
 }
 
+function canonicalCandidateMessageId(event, data, mime) {
+  const rawMessageId = mime?.messageId ?? null;
+  const providerValue = data.provider_message_id;
+  if (providerValue === undefined || providerValue === null || providerValue === "") {
+    if (event.type === "email.sent" && rawMessageId === null) {
+      throw transportError("malformed_event", "Sent evaluation event omitted its provider message identity");
+    }
+    return rawMessageId;
+  }
+  const providerMessageId = normalizeMessageIdToken(providerValue);
+  if (providerMessageId === null) {
+    throw transportError("malformed_event", "Sent evaluation event carried a malformed provider message identity");
+  }
+  if (rawMessageId !== null && rawMessageId !== providerMessageId) {
+    throw transportError("conflicting_evidence", "Sender MIME and provider message identities conflict");
+  }
+  return rawMessageId ?? providerMessageId;
+}
+
 async function hydrateCandidateMetadata(sdk, target, metadata) {
   if (!isRowBackedCandidate(metadata)) return { ...metadata, message: null };
   const fetchedMessage = await sdk.messages.get(target, metadata.messageId);
@@ -572,6 +591,7 @@ async function normalizeCandidate(sdk, target, metadata) {
   let transitions = [];
   if (message) {
     mime = await mimeFromMessage(message, { required: event.type !== "email.review_requested" });
+    if (mime) mime = { ...mime, messageId: canonicalCandidateMessageId(event, data, mime) };
     transitions = await readLifecycle(sdk, target, messageId);
   }
   const observedAt = eventInstant(event).iso;

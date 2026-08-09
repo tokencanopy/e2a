@@ -22,7 +22,7 @@ async function fixture(name) {
 
 function rawMessage({ messageId, from, to, subject, inReplyTo, references, text }) {
   const headers = [
-    `Message-ID: <${messageId}>`,
+    ...(messageId ? [`Message-ID: <${messageId}>`] : []),
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
@@ -214,6 +214,55 @@ test("executeCase reuses one frozen stimulus and exact stable idempotency key af
   assert.doesNotMatch(JSON.stringify(evidence), /rawMessage|must not escape|Content-Transfer-Encoding/);
   for (const result of [...gradeCore(caseSpec().expect, evidence), ...gradeContent(caseSpec().expect, evidence)]) {
     assert.equal(result.status, "pass", `${result.id}: ${result.code}`);
+  }
+});
+
+test("executeCase uses validated provider identity when sender-side MIME predates provider Message-ID", async () => {
+  const events = await fixture("events-success.json");
+  events.find((event) => event.type === "email.sent").data.provider_message_id = "<reply@agents.localhost>";
+  const messages = successfulMessages();
+  messages.msg_synthetic_target_out.rawMessage = rawMessage({
+    from: `Target Agent <${TARGET}>`,
+    to: ACTOR,
+    subject: `Re: ${SUBJECT}`,
+    inReplyTo: "original@agents.localhost",
+    references: ["original@agents.localhost"],
+    text: "Refunds are available within 30 days.",
+  });
+  const client = fakeClient({ events, messages });
+
+  const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
+
+  assert.equal(evidence.candidates[0].mime.messageId, "reply@agents.localhost");
+  assert.equal(evidence.actorReceipt.messageId, "msg_synthetic_target_out");
+});
+
+test("executeCase fails closed on missing malformed or conflicting provider Message-ID evidence", async () => {
+  for (const scenario of ["missing", "malformed", "conflicting"]) {
+    const events = await fixture("events-success.json");
+    const sent = events.find((event) => event.type === "email.sent");
+    const messages = successfulMessages();
+    if (scenario !== "conflicting") {
+      messages.msg_synthetic_target_out.rawMessage = rawMessage({
+        from: `Target Agent <${TARGET}>`,
+        to: ACTOR,
+        subject: `Re: ${SUBJECT}`,
+        inReplyTo: "original@agents.localhost",
+        references: ["original@agents.localhost"],
+        text: "Refunds are available within 30 days.",
+      });
+    }
+    if (scenario === "malformed") sent.data.provider_message_id = "not-a-bracketed-message-id";
+    if (scenario === "conflicting") sent.data.provider_message_id = "<other@agents.localhost>";
+
+    await assert.rejects(
+      adapter(fakeClient({ events, messages })).adapter.executeCase(
+        caseSpec(), caseContext(),
+      ),
+      (error) => error.errorClass === "transport_error"
+        && error.code === (scenario === "conflicting" ? "conflicting_evidence" : "observation_failed"),
+      scenario,
+    );
   }
 });
 

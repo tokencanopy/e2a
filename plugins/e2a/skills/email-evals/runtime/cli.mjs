@@ -171,19 +171,17 @@ export async function validateReportArtifact({ command, summary, outputRoot, run
   if (command === "run") {
     const requestedRoot = path.resolve(outputRoot);
     canonicalRoot = await regularDirectory(requestedRoot);
-    requestedRun = path.join(requestedRoot, runId);
+    requestedRun = path.join(canonicalRoot, runId);
   } else if (command === "regrade") {
     requestedRun = path.resolve(runDirectory);
   } else {
     unsafeReport();
   }
-  const requestedReport = path.join(requestedRun, "report.md");
-  if (path.resolve(descriptor.value) !== requestedReport) unsafeReport();
   const canonicalRun = await regularDirectory(requestedRun);
   if (path.basename(canonicalRun) !== runId) unsafeReport();
   if (canonicalRoot && path.dirname(canonicalRun) !== canonicalRoot) unsafeReport();
   const expected = path.join(canonicalRun, "report.md");
-  if ((await regularFile(requestedReport)) !== expected) unsafeReport();
+  if ((await regularFile(path.resolve(descriptor.value))) !== expected) unsafeReport();
   return `${runId}/report.md`;
 }
 

@@ -233,6 +233,21 @@ test("report artifacts must be regular expected files in their canonical run dir
   assert.equal(await validateReportArtifact({ command: "run", summary: valid, outputRoot: root }), `${runId}/report.md`);
   assert.equal(await validateReportArtifact({ command: "regrade", summary: valid, runDirectory: run }), `${runId}/report.md`);
 
+  const aliasContainer = await mkdtemp(path.join(tmpdir(), "email-evals-report-alias-"));
+  const canonicalParent = path.join(aliasContainer, "canonical-parent");
+  const aliasParent = path.join(aliasContainer, "alias-parent");
+  const aliasedRoot = path.join(canonicalParent, "results");
+  const aliasedRun = path.join(aliasedRoot, runId);
+  const aliasedReport = path.join(aliasedRun, "report.md");
+  await mkdir(aliasedRun, { recursive: true });
+  await writeFile(aliasedReport, "# Synthetic report\n");
+  await symlink(canonicalParent, aliasParent, "dir");
+  assert.equal(await validateReportArtifact({
+    command: "run",
+    summary: { runId, files: { report: aliasedReport } },
+    outputRoot: path.join(aliasParent, "results"),
+  }), `${runId}/report.md`);
+
   for (const altered of [
     { runId, files: {} },
     { runId, files: { report: 42 } },

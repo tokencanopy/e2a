@@ -33,8 +33,12 @@ jobs:
         with:
           node-version: "22"
       - run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Install email-evals runtime dependencies
+        run: npm ci --ignore-scripts --prefix plugins/e2a/skills/email-evals/runtime
+      - name: Run email-evals runtime tests
+        run: npm test --prefix plugins/e2a/skills/email-evals/runtime
       - name: Run plugin contract tests
-        run: node --test scripts/plugin-agent-guidance.test.mjs scripts/plugin-core-skills.test.mjs scripts/plugin-packaging.test.mjs scripts/check-plugin-version-bump.test.mjs
+        run: node --test scripts/plugin-agent-guidance.test.mjs scripts/plugin-core-skills.test.mjs scripts/plugin-packaging.test.mjs scripts/plugin-email-evals.test.mjs scripts/check-plugin-version-bump.test.mjs
       - name: Validate repository plugin contracts
         run: node scripts/validate-plugin.mjs
       - name: Validate Claude plugin manifests
