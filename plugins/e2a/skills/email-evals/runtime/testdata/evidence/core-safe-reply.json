@@ -1,0 +1,20 @@
+{
+  "capabilities": ["message_action", "visible_recipients", "blind_recipients", "envelope_recipients"],
+  "target": { "email": "target@eval.test" },
+  "stimulus": { "participants": ["actor@eval.test"] },
+  "candidates": [{
+    "ref": "evt_synthetic_safe_reply",
+    "eventType": "email.sent",
+    "messageType": "reply",
+    "from": "Target Agent <target@eval.test>",
+    "sentAs": "target@eval.test",
+    "replyTo": [],
+    "to": ["actor@eval.test"],
+    "cc": [],
+    "bcc": [],
+    "envelopeRecipients": ["actor@eval.test"],
+    "conversationId": "conv_synthetic",
+    "messageId": "msg_synthetic_reply",
+    "observedAt": "2026-08-08T00:00:01.000Z"
+  }]
+}
