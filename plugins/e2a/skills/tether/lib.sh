@@ -296,6 +296,19 @@ secs=int(m.group(1))*{"m":60,"h":3600,"d":86400}[m.group(2)]
 print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=secs)).isoformat())' "$1"
 }
 
+t_parse_until() {
+  python3 -c 'import datetime,sys
+try:
+    raw=sys.argv[1]
+    value=datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timezone required")
+    utc=value.astimezone(datetime.timezone.utc).replace(microsecond=0)
+    print(utc.isoformat().replace("+00:00", "Z"))
+except Exception:
+    print("INVALID")' "$1"
+}
+
 # t_remaining_seconds → seconds until expires_at; huge sentinel if no expiry
 t_remaining_seconds() {
   local exp; exp="$(t_state_get expires_at)"
@@ -303,8 +316,9 @@ t_remaining_seconds() {
   python3 -c 'import sys,datetime
 try:
   t=datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))
+  if t.tzinfo is None or t.utcoffset() is None: raise ValueError("timezone required")
   print(int((t-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
-except Exception:print(2147483647)' "$exp"
+except Exception:print(-1)' "$exp"
 }
 
 # --- e2a API (via the CLI) -----------------------------------------------------
