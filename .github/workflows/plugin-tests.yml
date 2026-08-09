@@ -1,0 +1,150 @@
+# Consolidated CI for the stable e2a plugin and experimental e2a Labs plugin.
+# Package validation and deterministic tests run for every plugin change. The
+# model-backed Agentify fixtures run only when their prompts, fixture harness,
+# or this workflow change, and skip cleanly when model credentials are absent.
+name: Plugin tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - ".cursor-plugin/marketplace.json"
+      - ".github/workflows/agentify-lane-fixtures.yml"
+      - ".github/workflows/agentify-test.yml"
+      - ".github/workflows/plugin-tests.yml"
+      - ".github/workflows/test.yml"
+      - "mcp/tool-names.v1.json"
+      - "plugins/e2a/**"
+      - "plugins/e2a-labs/**"
+      - "scripts/check-plugin-version-bump.mjs"
+      - "scripts/check-plugin-version-bump.test.mjs"
+      - "scripts/plugin-agent-guidance.test.mjs"
+      - "scripts/plugin-core-skills.test.mjs"
+      - "scripts/plugin-packaging.test.mjs"
+      - "scripts/validate-plugin.mjs"
+  pull_request:
+    paths:
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - ".cursor-plugin/marketplace.json"
+      - ".github/workflows/agentify-lane-fixtures.yml"
+      - ".github/workflows/agentify-test.yml"
+      - ".github/workflows/plugin-tests.yml"
+      - ".github/workflows/test.yml"
+      - "mcp/tool-names.v1.json"
+      - "plugins/e2a/**"
+      - "plugins/e2a-labs/**"
+      - "scripts/check-plugin-version-bump.mjs"
+      - "scripts/check-plugin-version-bump.test.mjs"
+      - "scripts/plugin-agent-guidance.test.mjs"
+      - "scripts/plugin-core-skills.test.mjs"
+      - "scripts/plugin-packaging.test.mjs"
+      - "scripts/validate-plugin.mjs"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: Package and manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLAUDE_CODE_VERSION: "2.1.226"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Run plugin contract tests
+        run: node --test scripts/plugin-agent-guidance.test.mjs scripts/plugin-core-skills.test.mjs scripts/plugin-packaging.test.mjs scripts/check-plugin-version-bump.test.mjs
+      - name: Run Tether runtime self-test
+        run: bash plugins/e2a-labs/skills/tether/tether.sh _selftest
+      - name: Validate repository plugin contracts
+        run: node scripts/validate-plugin.mjs
+      - name: Validate Claude plugin manifests
+        run: |
+          claude plugin validate --strict plugins/e2a
+          claude plugin validate --strict plugins/e2a-labs
+      - name: Require plugin version bumps in pull requests
+        if: github.event_name == 'pull_request'
+        env:
+          PLUGIN_VERSION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
+      - name: Require plugin version bumps pushed to main
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          PLUGIN_VERSION_BASE: ${{ github.event.before }}
+        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
+
+  agentify:
+    name: Agentify deterministic suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML for config validation
+        run: pip install --quiet pyyaml
+      - name: Run Agentify tests
+        run: bash plugins/e2a-labs/skills/agentify/test/run.sh
+
+  agentify-fixtures:
+    name: Agentify live fixtures
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect fixture-relevant changes
+        id: fixture-changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            run_fixtures=true
+          elif git diff --quiet "$BASE_SHA"...HEAD -- \
+            plugins/e2a-labs/skills/agentify/templates/runtime-skill \
+            plugins/e2a-labs/skills/agentify/test/fixtures \
+            .github/workflows/plugin-tests.yml; then
+            run_fixtures=false
+          else
+            run_fixtures=true
+          fi
+          echo "run_fixtures=$run_fixtures" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v7
+        if: steps.fixture-changes.outputs.run_fixtures == 'true'
+        with:
+          node-version: "22"
+      - name: Install Claude Code and fixture dependencies
+        if: steps.fixture-changes.outputs.run_fixtures == 'true'
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          npm install --prefix plugins/e2a-labs/skills/agentify/test/fixtures/harness
+      - name: Run Agentify lane fixtures
+        if: steps.fixture-changes.outputs.run_fixtures == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash plugins/e2a-labs/skills/agentify/test/fixtures/run-fixtures.sh

@@ -127,7 +127,8 @@ version: 12
 - `description` (required) — write it as "Use when…"; this is how Claude Code
   decides to load the skill. ≤1024 chars.
 
-`node scripts/validate-plugin.mjs` (run by the **Plugin manifests** CI job)
+`node scripts/validate-plugin.mjs` (run by the **Plugin tests / Package and
+manifests** CI job)
 validates both plugin packages independently: their exact client manifest sets,
 per-package manifest versions, marketplace `source` paths, sole core ownership
 of the MCP server, and every `SKILL.md` frontmatter. A change that wouldn't load
