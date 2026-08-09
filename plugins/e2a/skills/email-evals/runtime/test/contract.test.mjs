@@ -5,7 +5,12 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite } from "../lib/contract.mjs";
-import { normalizeAddressSet, normalizeMailbox, parseDuration } from "../lib/normalize.mjs";
+import {
+  normalizeAddressSet,
+  normalizeMailbox,
+  parseDuration,
+  replaceMailboxText,
+} from "../lib/normalize.mjs";
 import { scaffoldSuite } from "../../scaffold.mjs";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -222,6 +227,7 @@ test("normalizers preserve parser-valid quoted local parts as round-trippable ad
     ['" a"@EXAMPLE.COM', { address: '" a"@example.com', displayName: undefined }],
     ['"a "@EXAMPLE.COM', { address: '"a "@example.com', displayName: undefined }],
     ['"a@b"@EXAMPLE.COM', { address: '"a@b"@example.com', displayName: undefined }],
+    ['"a"@[127.0.0.1]', { address: '"a"@[127.0.0.1]', displayName: undefined }],
     ['Quoted Person <"a b"@EXAMPLE.COM> (comment)', { address: '"a b"@example.com', displayName: "Quoted Person" }],
     ['Edge Person <" a "@EXAMPLE.COM> (comment)', { address: '" a "@example.com', displayName: "Edge Person" }],
     ['(leading) "a b"@EXAMPLE.COM (trailing)', { address: '"a b"@example.com', displayName: undefined }],
@@ -239,6 +245,58 @@ test("normalizers preserve parser-valid quoted local parts as round-trippable ad
   for (const malformed of [
     '"unterminated@example.com', '"dangling\\"@example.com', '"control\u0000"@example.com',
   ]) assert.throws(() => normalizeMailbox(malformed), /mailbox/i);
+});
+
+test("quoted mailbox normalization preserves a whitespace-only local part", () => {
+  assert.deepEqual(normalizeMailbox('" "@EXAMPLE.COM'), {
+    address: '" "@example.com',
+    displayName: undefined,
+  });
+  assert.equal(normalizeMailbox('" "@example.com').address, '" "@example.com');
+});
+
+test("quoted mailbox normalization accepts nested surrounding CFWS", () => {
+  assert.deepEqual(normalizeMailbox('(outer(inner)) "a b"@EXAMPLE.COM (tail(nested))'), {
+    address: '"a b"@example.com',
+    displayName: undefined,
+  });
+  assert.deepEqual(normalizeMailbox('Quoted Person <"a b"@EXAMPLE.COM> (tail(nested))'), {
+    address: '"a b"@example.com',
+    displayName: "Quoted Person",
+  });
+});
+
+test("mailbox normalization rejects raw and escaped controls", () => {
+  const controls = ["\t", "\r", "\n", "\0", "\x1f", "\x7f"];
+  const escapedTabLiteral = `"a"@[foo\\${controls[0]}bar]`;
+  assert.throws(() => normalizeMailbox(escapedTabLiteral), /mailbox/i);
+  assert.equal(replaceMailboxText(escapedTabLiteral, () => "unexpected"), "[REDACTED:address]");
+
+  for (const control of controls) {
+    for (const mailbox of [
+      `"a${control}b"@example.com`,
+      `"a\\${control}b"@example.com`,
+      `"a"@[foo${control}bar]`,
+      `"a"@[foo\\${control}bar]`,
+    ]) assert.throws(() => normalizeMailbox(mailbox), /mailbox/i);
+  }
+});
+
+test("mailbox normalization rejects malformed comments, quotes, and brackets conservatively", () => {
+  const malformed = [
+    '"a"@[foo\\]',
+    '"a"@[unterminated',
+    '"a"@example.com)',
+    '"a"@example].com',
+    '(unterminated "a"@example.com',
+    '(dangling\\ "a"@example.com',
+    '"unterminated@example.com',
+    '"dangling\\"@example.com',
+  ];
+  for (const mailbox of malformed) {
+    assert.throws(() => normalizeMailbox(mailbox), /mailbox/i);
+    assert.doesNotMatch(replaceMailboxText(mailbox, () => "aliased"), /@example|@\[foo/u);
+  }
 });
 
 test("closed contract rejects oversized suite and case identifiers with safe pointers", async () => {

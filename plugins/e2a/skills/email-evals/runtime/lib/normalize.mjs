@@ -78,6 +78,11 @@ export class NormalizationError extends Error {
   }
 }
 
+function isControl(character) {
+  const code = character.charCodeAt(0);
+  return code <= 0x1f || code === 0x7f;
+}
+
 function consumeCfws(value, start = 0) {
   let cursor = start;
   while (cursor < value.length) {
@@ -91,7 +96,7 @@ function consumeCfws(value, start = 0) {
     cursor += 1;
     while (cursor < value.length && depth > 0) {
       const character = value[cursor];
-      if ((character.charCodeAt(0) <= 0x1f && character !== "\t") || character.charCodeAt(0) === 0x7f) return -1;
+      if (isControl(character) && character !== "\t") return -1;
       if (escaped) escaped = false;
       else if (character === "\\") escaped = true;
       else if (character === "(") depth += 1;
@@ -107,7 +112,7 @@ function isCfws(value) {
   return consumeCfws(value) === value.length;
 }
 
-function sourceAddressSpec(value) {
+function sourceMailboxSyntax(value) {
   const source = value.trim();
   let quoted = false;
   let escaped = false;
@@ -133,6 +138,7 @@ function sourceAddressSpec(value) {
     }
     if (character === '"') quoted = true;
     else if (character === "(") commentDepth = 1;
+    else if (character === ")") return null;
     else if (character === "<") {
       if (angleStart !== -1 || angleEnd !== -1) return null;
       angleStart = index;
@@ -142,9 +148,12 @@ function sourceAddressSpec(value) {
     }
   }
   if (quoted || escaped || commentDepth > 0) return null;
-  if (angleStart === -1) return angleEnd === -1 ? source : null;
+  if (angleStart === -1) return angleEnd === -1 ? { addressSpec: source, displayPrefix: null } : null;
   if (angleEnd < angleStart || !isCfws(source.slice(angleEnd + 1))) return null;
-  return source.slice(angleStart + 1, angleEnd).trim();
+  return {
+    addressSpec: source.slice(angleStart + 1, angleEnd).trim(),
+    displayPrefix: source.slice(0, angleStart),
+  };
 }
 
 function quotedAddressSpec(value) {
@@ -157,7 +166,7 @@ function quotedAddressSpec(value) {
   for (let index = cursor + 1; index < value.length; index += 1) {
     const character = value[index];
     if (escaped) {
-      if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      if (isControl(character)) return null;
       decoded += character;
       escaped = false;
     } else if (character === "\\") {
@@ -166,7 +175,7 @@ function quotedAddressSpec(value) {
       closing = index;
       break;
     } else {
-      if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      if (isControl(character)) return null;
       decoded += character;
     }
   }
@@ -176,51 +185,53 @@ function quotedAddressSpec(value) {
   cursor = consumeCfws(value, cursor + 1);
   if (cursor < 0 || cursor >= value.length) return null;
   const domainStart = cursor;
-  if (value[cursor] === "[") {
+  const domainLiteral = value[cursor] === "[";
+  if (domainLiteral) {
     let domainEscaped = false;
+    let domainClosed = false;
     cursor += 1;
     while (cursor < value.length) {
       const character = value[cursor];
+      if (isControl(character)) return null;
       if (domainEscaped) domainEscaped = false;
       else if (character === "\\") domainEscaped = true;
-      else if (character === "]") { cursor += 1; break; }
-      else if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      else if (character === "]") { cursor += 1; domainClosed = true; break; }
       cursor += 1;
     }
-    if (value[cursor - 1] !== "]" || domainEscaped) return null;
+    if (!domainClosed || domainEscaped) return null;
   } else {
     while (cursor < value.length && value[cursor] !== " " && value[cursor] !== "\t" && value[cursor] !== "(") cursor += 1;
   }
   const domain = value.slice(domainStart, cursor);
-  if (!domain || /[@<>,;"\r\n]/u.test(domain)) return null;
+  if (!domain || /[\u0000-\u001f\u007f@<>,;"]/u.test(domain)) return null;
+  if (!domainLiteral && /[\[\]()]/u.test(domain)) return null;
   cursor = consumeCfws(value, cursor);
   if (cursor !== value.length) return null;
   const canonicalLocal = decoded.toLowerCase().replaceAll("\\", "\\\\").replaceAll('"', '\\"');
   return {
     address: `"${canonicalLocal}"@${domain.toLowerCase()}`,
-    parserSemantic: `${decoded.trim().toLowerCase()}@${domain.toLowerCase()}`,
+    parserLocal: decoded.trim().toLowerCase(),
+    domain: domain.toLowerCase(),
   };
 }
 
-function parsedAddressSemantic(value) {
+function parsedAddressParts(value) {
   const quoted = quotedAddressSpec(value);
-  if (quoted) return quoted.parserSemantic;
+  if (quoted) return { local: quoted.parserLocal, domain: quoted.domain };
   const address = value.trim().toLowerCase();
   const at = address.lastIndexOf("@");
-  if (at <= 0 || at === address.length - 1 || /[\r\n]/.test(address.slice(at + 1))) return null;
-  return `${address.slice(0, at)}@${address.slice(at + 1)}`;
+  if (at < 0 || at === address.length - 1 || /[\r\n]/.test(address.slice(at + 1))) return null;
+  return { local: address.slice(0, at), domain: address.slice(at + 1) };
 }
 
-function normalizedMailbox(entry, source) {
+function normalizedMailbox(entry, syntax, quoted) {
   if (!entry || typeof entry.address !== "string" || !entry.address || /[\r\n]/.test(entry.address)) {
     throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
   }
-  const addressSpec = sourceAddressSpec(source);
-  if (addressSpec === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
-  const quoted = quotedAddressSpec(addressSpec);
-  const addressStart = consumeCfws(addressSpec);
-  if (addressStart >= 0 && addressSpec[addressStart] === '"') {
-    if (!quoted || parsedAddressSemantic(entry.address) !== quoted.parserSemantic) {
+  const addressStart = consumeCfws(syntax.addressSpec);
+  if (addressStart >= 0 && syntax.addressSpec[addressStart] === '"') {
+    const parsed = parsedAddressParts(entry.address);
+    if (!quoted || !parsed || parsed.local !== quoted.parserLocal || parsed.domain !== quoted.domain) {
       throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
     }
     return { address: quoted.address, displayName: entry.name || undefined };
@@ -237,9 +248,18 @@ export function normalizeMailbox(value) {
   if (typeof value !== "string" || value.length === 0 || /[\r\n]/.test(value)) {
     throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
   }
-  const parsed = addressParser(value, { flatten: true });
+  const syntax = sourceMailboxSyntax(value);
+  if (syntax === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  const addressStart = consumeCfws(syntax.addressSpec);
+  const sourceIsQuoted = addressStart >= 0 && syntax.addressSpec[addressStart] === '"';
+  const quoted = sourceIsQuoted ? quotedAddressSpec(syntax.addressSpec) : null;
+  if (sourceIsQuoted && !quoted) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  const parserSource = quoted
+    ? syntax.displayPrefix === null ? quoted.address : `${syntax.displayPrefix}<${quoted.address}>`
+    : value;
+  const parsed = addressParser(parserSource, { flatten: true });
   if (parsed.length !== 1) throw new NormalizationError("invalid_mailbox", "Expected exactly one mailbox");
-  return normalizedMailbox(parsed[0], value);
+  return normalizedMailbox(parsed[0], syntax, quoted);
 }
 
 /** Replace parser-valid mailbox tokens in free text without matching address prefixes. */
