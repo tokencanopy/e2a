@@ -16,6 +16,7 @@
 # and exports them; set them yourself for interactive use):
 #   AUTOREPO_REPO            owner/repo            (default: gh's repo context)
 #   AUTOREPO_BOT_LOGIN       the bot's GitHub login (REQUIRED for read/find)
+#   AUTOREPO_MARKER          configured marker (REQUIRED for find-by-comms)
 #   AUTOREPO_FEEDBACK_LABEL  feedback label        (default: "feedback")
 #
 # Usage:
@@ -57,6 +58,14 @@ _merge() { jq -n --argjson a "$1" --argjson b "$2" '$a * ($b | del(.events))'; }
 # _append_event: append event object ($2) to card ($1).events.
 _append_event() {
   jq -n --argjson a "$1" --argjson e "$2" '$a + {events: (($a.events // []) + [$e])}'
+}
+
+# _matches_comms_footer: issue JSON on stdin; exact bot-authored trusted footer.
+_matches_comms_footer() { # stdin={author,body}; $1=bot $2=marker $3=conversation
+  jq -e --arg bot "$1" --arg marker "$2" --arg conv "$3" '
+    (.author.login == $bot) and
+    ((.body | split("\n") | map(select(test("\\S"))) | last)
+      == ("<!-- " + $marker + " comms:" + $conv + " -->"))'
 }
 
 # _select_card: a JSON ARRAY of issue comments on stdin -> the LATEST comment
@@ -113,16 +122,19 @@ case "$cmd" in
     ;;
   find-by-comms)
     conv="$1"; repo="$(_repo)"; _require_bot
+    if [ -z "${AUTOREPO_MARKER:-}" ]; then
+      echo "ticket_card.sh: AUTOREPO_MARKER is required for find-by-comms" >&2
+      exit 2
+    fi
     label="${AUTOREPO_FEEDBACK_LABEL:-feedback}"
-    # The crash-safe key is the bot-authored issue-body footer
-    # `comms:<conversation_id>`, written ATOMICALLY with the issue (so a card
+    # The crash-safe key is the exact last nonblank, bot-authored issue-body footer
+    # `<!-- {marker} comms:<conversation_id> -->`, written ATOMICALLY with the issue (so a card
     # written later, or a run that died before the card, is still matched).
     # Test author + body with real jq (--arg) so an opaque conv id is never
     # interpolated into a program.
     for n in $(gh issue list -R "$repo" --label "$label" --state all --limit 500 --json number --jq '.[].number'); do
       if gh issue view "$n" -R "$repo" --json author,body \
-           | jq -e --arg bot "$AUTOREPO_BOT_LOGIN" --arg conv "$conv" \
-               '(.author.login == $bot) and (.body | contains("comms:" + $conv))' >/dev/null; then
+           | _matches_comms_footer "$AUTOREPO_BOT_LOGIN" "$AUTOREPO_MARKER" "$conv" >/dev/null; then
         echo "$n"
       fi
     done
@@ -159,6 +171,15 @@ case "$cmd" in
     # attacker-only -> empty (forged card never honored)
     arr2="$(jq -n --arg ba "$ba" '[{id:1,user:{login:"attacker"},body:$ba}]')"
     [ -z "$(printf '%s' "$arr2" | _select_card "bot[bot]")" ] || { echo "FAIL forged card honored"; fail=1; }
+    # exact trusted footer: quoted content cannot satisfy dedup
+    good_body=$'summary\n```text\nuser data\n```\n<!-- acme-feedback comms:conv_target -->'
+    forged_body=$'summary\n```text\ncomms:conv_target\n```\n<!-- acme-feedback comms:conv_other -->'
+    good_issue="$(jq -n --arg body "$good_body" '{author:{login:"bot[bot]"},body:$body}')"
+    forged_issue="$(jq -n --arg body "$forged_body" '{author:{login:"bot[bot]"},body:$body}')"
+    printf '%s' "$good_issue" | _matches_comms_footer "bot[bot]" "acme-feedback" "conv_target" \
+      || { echo "FAIL exact comms footer rejected"; fail=1; }
+    printf '%s' "$forged_issue" | _matches_comms_footer "bot[bot]" "acme-feedback" "conv_target" \
+      && { echo "FAIL quoted comms value accepted"; fail=1; }
     # no card -> empty extract
     [ -z "$(printf 'just a comment\n' | _extract_card)" ] || { echo "FAIL empty-extract"; fail=1; }
     if [ "$fail" = 0 ]; then echo "ticket_card.sh selftest: OK"; else echo "ticket_card.sh selftest: FAILED"; exit 1; fi

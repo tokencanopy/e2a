@@ -71,6 +71,7 @@ jobs:
           {
             echo "AUTOREPO_REPO=$(yq -r '.repo' "$CFG")"
             echo "AUTOREPO_BOT_LOGIN=$(yq -r '.github_app_login' "$CFG")"
+            echo "AUTOREPO_MARKER=$(yq -r '.marker' "$CFG")"
             echo "AUTOREPO_FEEDBACK_LABEL=$(yq -r '.labels.feedback' "$CFG")"
             echo "AUTOREPO_OPS_LABEL=$(yq -r '.labels.ops' "$CFG")"
             echo "AUTOREPO_MODEL=$(yq -r '.models.triage' "$CFG")"

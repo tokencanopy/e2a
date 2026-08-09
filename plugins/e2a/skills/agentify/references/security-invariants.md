@@ -44,7 +44,9 @@ AND (later) a repo-write coding agent.
 3. **Authorship trust.** Decisions read only the bot-authored issue/PR body
    and `OWNER`/`MEMBER` comments. The ticket-card and the `marker` are
    honored ONLY from `github_app_login` — a third party can post a forged
-   card or marker on a public issue/PR, and it must never be trusted.
+   card or marker on a public issue/PR, and it must never be trusted. Conversation
+   dedup trusts only the exact last nonblank footer when both the configured marker
+   and bot author match; quoted content and untrusted authors never qualify.
 
 4. **Verified-reply routing.** Inbound email auto-routes (approvals,
    dispute-reopens) ONLY when the e2a `conversation_id` matches a ticket's
