@@ -313,16 +313,28 @@ except Exception:
 t_remaining_seconds() {
   local f; f="$(t_state_path)"
   [ -f "$f" ] || { echo 2147483647; return; }
-  python3 -c 'import sys,datetime,json
+  python3 -c 'import sys,datetime,json,os,fcntl
 try:
-  state=json.load(open(sys.argv[1]))
+  f=sys.argv[1]
+  lock=open(f+".lock","w"); fcntl.flock(lock,fcntl.LOCK_EX)
+  state=json.load(open(f))
   if not isinstance(state,dict): raise ValueError("state must be an object")
   if "expires_at" not in state or state["expires_at"] == "":
     print(2147483647); raise SystemExit
   exp=state["expires_at"]
   if not isinstance(exp,str): raise ValueError("expires_at must be a string")
   t=datetime.datetime.fromisoformat(exp.replace("Z","+00:00"))
-  if t.tzinfo is None or t.utcoffset() is None: raise ValueError("timezone required")
+  if t.tzinfo is None or t.utcoffset() is None:
+    # Older Tether versions accepted timezone-less --until values and stored
+    # them verbatim. Interpret that one legacy state shape as local wall time,
+    # then rewrite it once to the canonical UTC form. New --until input still
+    # requires an explicit RFC3339 offset in t_parse_until.
+    t=t.astimezone()
+    state["expires_at"]=t.astimezone(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+    tmp="%s.tmp.%d"%(f,os.getpid())
+    with open(tmp,"w") as out: json.dump(state,out,indent=2)
+    os.replace(tmp,f)
+  t=t.astimezone(datetime.timezone.utc)
   print(int((t-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
 except Exception:print(-1)' "$f"
 }
