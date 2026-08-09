@@ -12,6 +12,7 @@ for s in templates/scripts/ticket_card templates/scripts/comms_send templates/sc
   run bash "$s.sh" _selftest
 done
 run bash agentify-render.sh _selftest
+run python3 test/render-config.test.py
 
 section "addon bridge unit tests"
 run node templates/addons/submit-feedback-mcp/files/bridge.test.mjs
