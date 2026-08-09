@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, open, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -97,4 +97,39 @@ test("concurrent scaffolds exclusively create or preserve every starter file", a
   ]);
   assert.equal(first.created.length + second.created.length, expectedFiles.length);
   assert.equal(first.preserved.length + second.preserved.length, expectedFiles.length);
+});
+
+test("scaffold rejects symlinked roots and generated parents without writing outside the suite", async () => {
+  const root = await createRoot();
+  const outsideCases = path.join(root, "outside-cases");
+  await mkdir(outsideCases);
+  await symlink(outsideCases, path.join(root, "cases"));
+
+  await assert.rejects(scaffoldSuite({ root, ...validOptions }), /symlink/i);
+  assert.deepEqual(await readdir(outsideCases), []);
+
+  const outsideRoot = path.join(root, "outside-root");
+  const symlinkedRoot = path.join(root, "symlinked-root");
+  await mkdir(outsideRoot);
+  await symlink(outsideRoot, symlinkedRoot);
+  await assert.rejects(scaffoldSuite({ root: symlinkedRoot, ...validOptions }), /symlink/i);
+  assert.deepEqual(await readdir(outsideRoot), []);
+});
+
+test("scaffold removes a file it exclusively created when writing it fails", async () => {
+  const root = await createRoot();
+  const openFile = async (...args) => {
+    const handle = await open(...args);
+    return {
+      close: () => handle.close(),
+      stat: () => handle.stat(),
+      writeFile: async () => { throw new Error("simulated write failure"); },
+    };
+  };
+
+  await assert.rejects(
+    scaffoldSuite({ root, ...validOptions }, { openFile }),
+    /simulated write failure/,
+  );
+  await assert.rejects(access(path.join(root, ".gitignore")));
 });

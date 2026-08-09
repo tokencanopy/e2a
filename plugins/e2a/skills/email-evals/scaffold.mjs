@@ -1,4 +1,4 @@
-import { open, mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,32 +47,103 @@ function expandTemplate(source, { suiteName, targetEnv, actorEnv, apiKeyEnv }) {
   );
 }
 
-async function writeExclusive(file, content) {
-  let handle;
+async function pathEntry(file) {
   try {
-    handle = await open(file, "wx", 0o600);
-    await handle.writeFile(content, "utf8");
-    return true;
+    return await lstat(file);
   } catch (error) {
-    if (error?.code === "EEXIST") return false;
+    if (error?.code === "ENOENT") return null;
     throw error;
-  } finally {
-    await handle?.close();
   }
 }
 
-export async function scaffoldSuite(options) {
+function isContainedPath(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`) && relative !== "..");
+}
+
+function assertContainedPath(root, candidate) {
+  if (!isContainedPath(root, candidate)) {
+    throw new Error(`Scaffold path is outside the suite root: ${candidate}`);
+  }
+}
+
+async function assertSafeDirectory(directory) {
+  const entry = await pathEntry(directory);
+  if (entry?.isSymbolicLink()) throw new Error(`Refusing to follow symlink at ${directory}`);
+  if (!entry?.isDirectory()) throw new Error(`Scaffold path is not a directory: ${directory}`);
+}
+
+async function prepareRoot(root) {
+  const requestedRoot = path.resolve(root);
+  const existing = await pathEntry(requestedRoot);
+  if (existing?.isSymbolicLink()) throw new Error(`Refusing to follow symlink at ${requestedRoot}`);
+  if (!existing) await mkdir(requestedRoot, { recursive: true });
+  await assertSafeDirectory(requestedRoot);
+  return realpath(requestedRoot);
+}
+
+async function prepareParent(root, parent) {
+  assertContainedPath(root, parent);
+  await assertSafeDirectory(root);
+  const relative = path.relative(root, parent);
+  let current = root;
+  for (const segment of relative === "" ? [] : relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const entry = await pathEntry(current);
+    if (!entry) await mkdir(current);
+    await assertSafeDirectory(current);
+  }
+  const resolvedParent = await realpath(parent);
+  assertContainedPath(root, resolvedParent);
+}
+
+async function removeCreatedFile(file, identity) {
+  try {
+    const entry = await pathEntry(file);
+    if (entry?.isFile() && entry.dev === identity.dev && entry.ino === identity.ino) {
+      await unlink(file);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function writeExclusive(file, content, openFile = open) {
+  let handle;
+  let identity;
+  try {
+    handle = await openFile(file, "wx", 0o600);
+    identity = await handle.stat();
+    await handle.writeFile(content, "utf8");
+    await handle.close();
+    handle = undefined;
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") return false;
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        // The original write failure remains the caller-visible error.
+      }
+      handle = undefined;
+    }
+    if (identity) await removeCreatedFile(file, identity);
+    throw error;
+  }
+}
+
+export async function scaffoldSuite(options, { openFile = open } = {}) {
   validateOptions(options);
-  const root = path.resolve(options.root);
-  await mkdir(root, { recursive: true });
+  const root = await prepareRoot(options.root);
   const created = [];
   const preserved = [];
 
   for (const relativeFile of templateFiles) {
     const template = await readFile(path.join(templatesDirectory, relativeFile), "utf8");
     const destination = path.join(root, relativeFile);
-    await mkdir(path.dirname(destination), { recursive: true });
-    if (await writeExclusive(destination, expandTemplate(template, options))) {
+    await prepareParent(root, path.dirname(destination));
+    if (await writeExclusive(destination, expandTemplate(template, options), openFile)) {
       created.push(relativeFile);
     } else {
       preserved.push(relativeFile);
