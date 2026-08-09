@@ -114,8 +114,8 @@ jobs:
           E2A_API_KEY: ${{ secrets.E2A_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          # bypassPermissions is the only mode that auto-runs Bash headlessly,
-          # so the allowlist is the fence. It is deliberately NARROW:
+          # dontAsk makes unmatched calls fail, while --tools removes
+          # unneeded built-ins. The allowedTools below is deliberately NARROW:
           #   - the ticket-card helper (the only state Bash surface),
           #   - `gh issue` plus read-only `gh pr list`/`gh pr view` — never
           #     bare `gh` (that would allow `gh auth token` to print the App
@@ -136,7 +136,9 @@ jobs:
             immediately." \
             --model "$AUTOREPO_MODEL" \
             --mcp-config /tmp/e2a.mcp.json \
-            --permission-mode bypassPermissions \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --tools "Bash,Read" \
             --allowedTools \
               "Bash(scripts/ticket_card.sh:*)" "Bash(gh issue:*)" \
               "Bash(gh pr list:*)" "Bash(gh pr view:*)" "Read" \

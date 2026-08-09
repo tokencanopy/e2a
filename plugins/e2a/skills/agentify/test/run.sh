@@ -16,6 +16,9 @@ run bash agentify-render.sh _selftest
 section "addon bridge unit tests"
 run node templates/addons/submit-feedback-mcp/files/bridge.test.mjs
 
+section "permission contract"
+run node test/permission-contract.test.mjs
+
 section "bash syntax"
 while IFS= read -r f; do run bash -n "$f"; done < <(find . -name '*.sh')
 

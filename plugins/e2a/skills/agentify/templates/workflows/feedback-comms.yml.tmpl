@@ -117,6 +117,8 @@ jobs:
           # in untrusted email cannot relay mail off the verified domain or
           # bcc thread content out. e2a READ tools poll intent (get_message
           # marks read on fetch — comms.md only fetches what it will act on).
+          # dontAsk makes unmatched calls fail, while --tools removes
+          # unneeded built-ins. The allowedTools below is deliberately NARROW.
           claude -p "Run the comms procedure in .claude/skills/autonomous-repo/comms.md. \
             Read autonomous-repo.config.yml FIRST. Send owed notifications (via \
             scripts/comms_send.sh) and route VERIFIED inbound replies only. Use templates/ \
@@ -124,7 +126,9 @@ jobs:
             replies is a successful run — exit immediately." \
             --model "$AUTOREPO_MODEL" \
             --mcp-config /tmp/e2a.mcp.json \
-            --permission-mode bypassPermissions \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --tools "Bash,Read" \
             --allowedTools \
               "Bash(scripts/ticket_card.sh:*)" "Bash(scripts/comms_send.sh:*)" "Bash(gh issue:*)" "Read" \
               "mcp__e2a__list_messages" "mcp__e2a__get_message" "mcp__e2a__whoami" \
