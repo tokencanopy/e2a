@@ -377,7 +377,7 @@ manually on every API change even though the template won't remind you.
   plugin manifests, repo text integrity, SDK operation coverage, test
   harnesses).
 - `tests/e2e-prod/` is a production smoke harness — not part of local dev.
-- Two more CI workflows cover the `plugins/e2a/skills/agentify` framework:
+- Two more CI workflows cover the `plugins/e2a-labs/skills/agentify` framework:
   `.github/workflows/agentify-test.yml` (deterministic script/addon/config
   self-tests, every PR touching it) and `agentify-lane-fixtures.yml`
   (golden-fixture lane tests driving `claude -p` over a mocked world; skips

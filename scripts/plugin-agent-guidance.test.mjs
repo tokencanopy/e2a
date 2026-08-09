@@ -135,7 +135,7 @@ test("agent guidance teaches the opt-in always-review protection policy", async 
 });
 
 test("tether setup does not mutate review configuration", async () => {
-  const source = await readFile("plugins/e2a/skills/tether/tether.sh", "utf8");
+  const source = await readFile("plugins/e2a-labs/skills/tether/tether.sh", "utf8");
   assert.doesNotMatch(source, /protection set|outbound-review|outbound review/i);
   assert.match(source, /pending_review/);
 });

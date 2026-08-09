@@ -81,11 +81,12 @@ plugins/e2a/
 │   ├── templates.md             # email-template guide
 │   └── llms.txt                 # machine-readable hosted docs index
 ├── skills/e2a/SKILL.md          # the "operate-well" skill (surfaces as /e2a)
-├── skills/agentify/SKILL.md     # deploy the autonomous-repo feedback loop (/agentify)
-├── skills/tether/SKILL.md       # email handoff for long-running sessions (/tether)
-├── skills/autopilot/SKILL.md    # policy-first, always-on local email agent (/autopilot)
 └── clients/                     # manual paste-in configs for non-plugin clients
 ```
+
+Experimental autonomous workflows (`/agentify`, `/autopilot`, and `/tether`)
+live in the separate [`e2a-labs`](../e2a-labs/) package. Install core e2a
+first: it remains the sole owner of the hosted MCP connection.
 
 The marketplace manifests that expose this plugin live at the repo root:
 `.claude-plugin/marketplace.json`, `.cursor-plugin/marketplace.json`, and
@@ -111,10 +112,10 @@ version: 12
   decides to load the skill. ≤1024 chars.
 
 `node scripts/validate-plugin.mjs` (run by the **Plugin manifests** CI job)
-validates every manifest parses, that the version is identical across all
-Claude/Codex/Cursor manifests, that marketplace `source` paths resolve, and that
-each `SKILL.md` satisfies Claude Code's frontmatter constraints. A change that
-wouldn't load fails CI.
+validates both plugin packages independently: their exact client manifest sets,
+per-package manifest versions, marketplace `source` paths, sole core ownership
+of the MCP server, and every `SKILL.md` frontmatter. A change that wouldn't load
+fails CI.
 
 Agent-facing Markdown is authored in `docs/`. Run
 `node ../../scripts/sync-agent-docs.mjs` from this directory (or
@@ -123,9 +124,10 @@ committed `web/public/` mirrors. The repository-integrity CI job runs the same
 script with `--check` and fails if a hosted mirror drifts from its canonical
 source.
 
-When bumping the plugin version, update `.claude-plugin/plugin.json` (the source
-of truth) **and** the other manifests + marketplace metadata to match — the
-validator fails on drift.
+When bumping a plugin version, update its `.claude-plugin/plugin.json` (the
+source of truth) **and** its other client manifests to match. Core e2a's
+marketplace metadata must match the core version too; Labs is independently
+versioned.
 
 ## Reference
 
