@@ -1,3 +1,5 @@
+import { types as utilTypes } from "node:util";
+
 const STATUS_WEIGHT = Object.freeze({ pass: 0, fail: 1, error: 2 });
 // Eval evidence is normally fewer than ten levels deep, contains a handful of
 // candidates/attachments, and stays well below one thousand scalar fields.
@@ -75,6 +77,10 @@ function snapshotJsonSafePlainData(value) {
         continue;
       }
       if (type !== "object") return invalid("unsupported_value");
+      // Node exposes Proxy identity without consulting the handler. Reject it
+      // before Array.isArray, prototype checks, key enumeration, or descriptor
+      // reads so hostile traps cannot execute anywhere in the evidence graph.
+      if (utilTypes.isProxy(frame.source)) return invalid("proxy");
       if (active.has(frame.source)) return invalid("cycle");
 
       let target;
@@ -87,8 +93,8 @@ function snapshotJsonSafePlainData(value) {
         // Check length before enumerating keys or allocating the snapshot, so
         // sparse hostile arrays cannot force work proportional to their length.
         if (length > EVIDENCE_SNAPSHOT_LIMITS.maxArrayLength) return invalid("array_length_limit");
-        if (Object.getOwnPropertySymbols(frame.source).length > 0) return invalid("symbol_key");
-        const names = Object.getOwnPropertyNames(frame.source);
+        const names = Reflect.ownKeys(frame.source);
+        if (names.some((key) => typeof key === "symbol")) return invalid("symbol_key");
         if (names.length !== length + 1) return invalid("sparse_or_extended_array");
         target = new Array(length);
         children = [];
@@ -100,15 +106,18 @@ function snapshotJsonSafePlainData(value) {
         }
       } else {
         if (Object.getPrototypeOf(frame.source) !== Object.prototype) return invalid("non_plain_object");
-        if (Object.getOwnPropertySymbols(frame.source).length > 0) return invalid("symbol_key");
-        const names = Object.getOwnPropertyNames(frame.source);
+        // For ordinary objects the source already owns its keys. Materialize
+        // exactly one key array, enforce its bound immediately, then derive
+        // the string/symbol validation from that same enumeration.
+        const names = Reflect.ownKeys(frame.source);
         if (names.length > EVIDENCE_SNAPSHOT_LIMITS.maxObjectKeys) return invalid("object_key_limit");
+        if (names.some((key) => typeof key === "symbol")) return invalid("symbol_key");
         target = {};
         children = [];
         for (const key of names) {
+          if (frame.depth === 0) currentRootKey = key;
           const descriptor = Object.getOwnPropertyDescriptor(frame.source, key);
           if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
-            currentRootKey = frame.depth === 0 ? key : frame.rootKey;
             return invalid("accessor_or_hidden_property");
           }
           children.push([key, descriptor.value]);
@@ -312,8 +321,17 @@ function receiptState(evidence, candidates) {
 export function gradeContent(expectation = {}, evidence = {}) {
   const snapshot = snapshotJsonSafePlainData(evidence);
   if (!snapshot.ok) {
-    const code = snapshot.rootKey === "actorReceipt" ? "invalid_actor_receipt_evidence" : "malformed_candidate_evidence";
-    return [result("lifecycle.actor_received", "error", code, expectation?.lifecycle?.actorReceived ?? null, null)];
+    // A root Proxy is opaque: classifying it as candidate or actor-receipt
+    // evidence would itself require invoking a trap. Ordinary roots retain
+    // actorReceipt-specific errors because their top-level path is known.
+    const code = snapshot.reason === "proxy" && snapshot.rootKey === null
+      ? "malformed_evidence_proxy"
+      : snapshot.rootKey === "actorReceipt"
+        ? "invalid_actor_receipt_evidence"
+        : "malformed_candidate_evidence";
+    // Do not touch the expectation on this path. It may alias the same hostile
+    // evidence object, and the snapshot error must remain safe to construct.
+    return [result("lifecycle.actor_received", "error", code, null, null)];
   }
   evidence = snapshot.value;
   const candidates = candidatesOf(evidence);

@@ -272,6 +272,160 @@ test("top-level evidence accessors are classified without execution", () => {
   }
 });
 
+test("candidate proxies are rejected before descriptor traps or target getters execute", () => {
+  let descriptorTrapCalls = 0;
+  let getterCalls = 0;
+  const target = candidate();
+  Object.defineProperty(target, "diagnostic", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error("proxy target getter must not execute");
+    },
+  });
+  const hostileCandidate = new Proxy(target, {
+    getOwnPropertyDescriptor(source, key) {
+      descriptorTrapCalls += 1;
+      if (key === "diagnostic") source.diagnostic;
+      return Reflect.getOwnPropertyDescriptor(source, key);
+    },
+  });
+
+  const results = gradeContent(expectation(), evidence({ candidates: [hostileCandidate] }));
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  assert.equal(descriptorTrapCalls, 0);
+  assert.equal(getterCalls, 0);
+});
+
+test("candidate proxies are rejected before ownKeys traps execute", () => {
+  let ownKeysTrapCalls = 0;
+  const hostileCandidate = new Proxy(candidate(), {
+    ownKeys() {
+      ownKeysTrapCalls += 1;
+      throw new Error("candidate ownKeys trap must not execute");
+    },
+  });
+
+  const results = gradeContent(expectation(), evidence({ candidates: [hostileCandidate] }));
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_candidate_evidence");
+  assert.equal(ownKeysTrapCalls, 0);
+});
+
+test("proxies at every evidence container level are rejected with stable classifications", () => {
+  const trackedProxy = (name, target) => {
+    const counter = { name, calls: 0 };
+    const proxy = new Proxy(target, {
+      ownKeys() {
+        counter.calls += 1;
+        throw new Error(`${name} ownKeys trap must not execute`);
+      },
+    });
+    return { counter, proxy };
+  };
+  const candidatesArray = trackedProxy("candidates array", [candidate()]);
+  const nestedObject = trackedProxy("nested candidate object", { safe: true });
+  const nestedArray = trackedProxy("nested candidate array", ["safe"]);
+  const actorReceipt = trackedProxy("actor receipt", evidence().actorReceipt);
+  const cases = [
+    {
+      name: "candidates array",
+      evidence: evidence({ candidates: candidatesArray.proxy }),
+      code: "malformed_candidate_evidence",
+      counter: candidatesArray.counter,
+    },
+    {
+      name: "nested candidate object",
+      evidence: evidence({ candidates: [candidate({ diagnostic: nestedObject.proxy })] }),
+      code: "malformed_candidate_evidence",
+      counter: nestedObject.counter,
+    },
+    {
+      name: "nested candidate array",
+      evidence: evidence({ candidates: [candidate({ diagnostic: nestedArray.proxy })] }),
+      code: "malformed_candidate_evidence",
+      counter: nestedArray.counter,
+    },
+    {
+      name: "actor receipt",
+      evidence: evidence({ actorReceipt: actorReceipt.proxy }),
+      code: "invalid_actor_receipt_evidence",
+      counter: actorReceipt.counter,
+    },
+  ];
+
+  for (const probe of cases) {
+    assertResult(gradeContent(expectation(), probe.evidence), "lifecycle.actor_received", "error", probe.code);
+    assert.equal(probe.counter.calls, 0, probe.name);
+  }
+});
+
+test("root evidence proxies are rejected without traps as malformed top-level evidence", () => {
+  let ownKeysTrapCalls = 0;
+  let descriptorTrapCalls = 0;
+  const hostileEvidence = new Proxy(evidence(), {
+    ownKeys() {
+      ownKeysTrapCalls += 1;
+      throw new Error("root ownKeys trap must not execute");
+    },
+    getOwnPropertyDescriptor() {
+      descriptorTrapCalls += 1;
+      throw new Error("root descriptor trap must not execute");
+    },
+  });
+
+  const results = gradeContent(expectation(), hostileEvidence);
+  assertResult(results, "lifecycle.actor_received", "error", "malformed_evidence_proxy");
+  assert.equal(ownKeysTrapCalls, 0);
+  assert.equal(descriptorTrapCalls, 0);
+
+  const revokedEvidence = Proxy.revocable(evidence(), {});
+  revokedEvidence.revoke();
+  assertResult(
+    gradeContent(expectation(), revokedEvidence.proxy),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_evidence_proxy",
+  );
+});
+
+test("snapshot errors never reread an aliased hostile expectation", () => {
+  let getterCalls = 0;
+  const accessorAlias = evidence();
+  Object.defineProperty(accessorAlias, "lifecycle", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error("aliased lifecycle getter must not execute");
+    },
+  });
+  assertResult(
+    gradeContent(accessorAlias, accessorAlias),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_candidate_evidence",
+  );
+  assert.equal(getterCalls, 0);
+
+  let proxyTrapCalls = 0;
+  const proxyAlias = new Proxy(evidence(), {
+    get() {
+      proxyTrapCalls += 1;
+      throw new Error("aliased proxy get trap must not execute");
+    },
+    ownKeys() {
+      proxyTrapCalls += 1;
+      throw new Error("aliased proxy ownKeys trap must not execute");
+    },
+  });
+  assertResult(
+    gradeContent(proxyAlias, proxyAlias),
+    "lifecycle.actor_received",
+    "error",
+    "malformed_evidence_proxy",
+  );
+  assert.equal(proxyTrapCalls, 0);
+});
+
 test("candidate evidence traversal is bounded and iterative", () => {
   let diagnostic = { leaf: true };
   for (let depth = 0; depth < 15_000; depth += 1) diagnostic = { next: diagnostic };
@@ -310,7 +464,10 @@ test("oversized dense and sparse candidate arrays are rejected before traversal"
 });
 
 test("candidate object-key and total-node limits return stable malformed evidence", () => {
-  const tooManyKeys = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`key${index}`, index]));
+  // An ordinary object already owns these keys. Snapshotting materializes one
+  // key array, checks its count immediately, and rejects before descriptors or
+  // child nodes are copied.
+  const tooManyKeys = Object.fromEntries(Array.from({ length: 4_096 }, (_, index) => [`key${index}`, index]));
   assertResult(
     gradeContent(expectation(), evidence({ candidates: [candidate({ diagnostic: tooManyKeys })] })),
     "lifecycle.actor_received",
