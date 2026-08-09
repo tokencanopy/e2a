@@ -80,6 +80,11 @@ describe("sitemap", () => {
     expect(urls()).toContain("http://localhost:3000/email-api-for-ai-agents");
   });
 
+  it("includes the e2a comparison page", () => {
+    delete process.env[ENV_KEY];
+    expect(urls()).toContain("http://localhost:3000/compare/e2a-vs-agentmail");
+  });
+
   it("emits no duplicate URLs", () => {
     process.env[ENV_KEY] = "/pricing";
     const found = urls();
