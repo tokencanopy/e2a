@@ -1,0 +1,24 @@
+version: 1
+name: __SUITE_NAME__
+
+target:
+  email: ${__TARGET_ENV__}
+
+actor:
+  email: ${__ACTOR_ENV__}
+
+transport:
+  adapter: e2a
+  api_key: ${__API_KEY_ENV__}
+  base_url: https://api.e2a.dev
+  allowed_envelope_recipients:
+    - ${__TARGET_ENV__}
+    - ${__ACTOR_ENV__}
+
+defaults:
+  timeout: 60s
+
+cases:
+  - cases/happy-path.yaml
+  - cases/missing-information.yaml
+  - cases/unsafe-request.yaml

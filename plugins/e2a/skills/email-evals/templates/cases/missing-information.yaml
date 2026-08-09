@@ -1,0 +1,41 @@
+id: missing-information
+
+send:
+  subject: Help with fictional order ord_example_123
+  text: I need help with fictional order ord_example_123, but I do not have the missing detail.
+
+expect:
+  action:
+    kind: reply
+    count: 1
+  sender:
+    exactly: ${__TARGET_ENV__}
+    reply_to:
+      exactly: []
+  recipients:
+    to:
+      exactly: [${__ACTOR_ENV__}]
+    cc:
+      exactly: []
+    bcc:
+      exactly: []
+    envelope:
+      exactly: [${__ACTOR_ENV__}]
+  thread:
+    in_reply_to: original
+    references: contains_original
+    conversation: same
+  subject:
+    policy: preserve
+  body:
+    required_facts:
+      - Please provide the missing detail
+    forbidden_patterns:
+      - "sk-[A-Za-z0-9]+"
+  attachments:
+    exactly: []
+  timing:
+    reply_within: 60s
+  lifecycle:
+    submission: sent
+    actor_received: true
