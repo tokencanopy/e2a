@@ -187,7 +187,7 @@ it("lists inboxes busiest first and links each to its messages", async () => {
   const link = await screen.findByRole("link", { name: "support@agents.localhost" });
   expect(link).toHaveAttribute(
     "href",
-    "/inboxes/messages?agent=support%40agents.localhost",
+    "/inboxes/messages?email=support%40agents.localhost",
   );
 });
 
