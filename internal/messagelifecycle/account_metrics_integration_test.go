@@ -79,6 +79,58 @@ func TestAccountMetricsSumsEveryAgentAndExcludesOtherAccounts(t *testing.T) {
 	}
 }
 
+// TestAccountMetricsExcludesTrashedAgents: a deleted agent leaves the account
+// rollup, in both the totals and the per-agent breakdown.
+//
+// Agent deletion is soft, so without this the rollup keeps aggregating over
+// every agent the account has ever owned for the whole 30-day retention
+// window. That is both inconsistent with the other account-scoped surfaces
+// (quota counts, list, get) and a scaling cliff: past a few thousand
+// tombstones the planner drops idx_messages_agent_created and seq-scans the
+// whole table. Note this is deliberately NOT symmetric with trashed
+// *messages*, which stay counted — see TestCountByReasonCodeIncludesTrashedMessages.
+func TestAccountMetricsExcludesTrashedAgents(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	ctx := context.Background()
+
+	live := seedMetricsAgent(t, pool, "accttrashlive")
+	doomed := seedAccountAgent(t, pool, "usr_accttrashlive", "accttrashdead")
+
+	// One send each, so an accidental inclusion doubles the total.
+	for i, agentID := range []string{live, doomed} {
+		id := fmt.Sprintf("msg_accttrash_%d", i)
+		seedMetricsMessage(t, pool, id, agentID, "outbound", metricsBaseTime)
+		appendMetricsObservation(t, pool, id, "outbound", "accept", messagelifecycle.ReasonAcceptanceOutboundAPI, metricsBaseTime)
+	}
+
+	// Trash the second agent, leaving its messages in place — exactly the
+	// state a plain (non-permanent) DELETE /v1/agents leaves behind.
+	if _, err := pool.Exec(ctx,
+		`UPDATE agent_identities SET deleted_at = now() WHERE id = $1`, doomed); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_accttrashlive",
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true)
+	if err != nil {
+		t.Fatalf("CountByReasonCodeForAccount: %v", err)
+	}
+
+	if got := accountCountsByCode(metrics.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages; got != 1 {
+		t.Errorf("accepted messages = %d, want 1: a trashed agent's mail is still in the totals", got)
+	}
+	if metrics.Totals.MessagesInWindow != 1 {
+		t.Errorf("messages_in_window = %d, want 1: a trashed agent's mail is still counted", metrics.Totals.MessagesInWindow)
+	}
+	if len(metrics.Agents) != 1 {
+		t.Fatalf("agents = %d, want 1: the trashed agent still has a breakdown row", len(metrics.Agents))
+	}
+	if metrics.Agents[0].AgentEmail != live {
+		t.Errorf("breakdown agent = %q, want the live agent %q", metrics.Agents[0].AgentEmail, live)
+	}
+}
+
 // TestAccountMetricsGroupByAgentOrdersByVolume: the breakdown must be busiest
 // first, and each agent's slice must carry only its own traffic.
 func TestAccountMetricsGroupByAgentOrdersByVolume(t *testing.T) {
