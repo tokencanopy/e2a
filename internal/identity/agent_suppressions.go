@@ -191,6 +191,47 @@ func (s *Store) EffectiveSuppressions(ctx context.Context, userID, agentID strin
 	return out, rows.Err()
 }
 
+// EffectiveSuppressionsWithSource is EffectiveSuppressions plus the source
+// category for each hit, so the batch response can report a dropped item's
+// reason (bounce / complaint / manual / unsubscribe). Same union (account
+// suppressions ∪ exact-agent agent_suppressions) and same normalization as the
+// single-send check. When an address is suppressed at BOTH levels the account
+// row wins (ORDER BY pri; account rows carry pri 0, agent rows pri 1). Empty
+// input → empty map (not nil), so callers can iterate without a nil-check.
+func (s *Store) EffectiveSuppressionsWithSource(ctx context.Context, userID, agentID string, addresses []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(addresses) == 0 {
+		return out, nil
+	}
+	normalized := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		normalized = append(normalized, NormalizeMailboxAddress(address))
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT address, source, 0 AS pri FROM suppressions
+		  WHERE user_id = $1 AND address = ANY($2)
+		 UNION ALL
+		 SELECT address, source, 1 AS pri FROM agent_suppressions
+		  WHERE user_id = $1 AND agent_id = $3 AND address = ANY($2)
+		 ORDER BY pri`,
+		userID, normalized, NormalizeEmail(agentID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var address, source string
+		var pri int
+		if err := rows.Scan(&address, &source, &pri); err != nil {
+			return nil, err
+		}
+		if _, ok := out[address]; !ok {
+			out[address] = source
+		}
+	}
+	return out, rows.Err()
+}
+
 // PutUnsubscribeToken idempotently records a token hash's exact scope.
 func (s *Store) PutUnsubscribeToken(ctx context.Context, tokenHash []byte, userID, agentID, address string) error {
 	_, err := s.pool.Exec(ctx,

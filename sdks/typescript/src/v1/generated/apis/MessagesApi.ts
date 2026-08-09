@@ -10,6 +10,7 @@ import {SecurityAuthentication} from '../auth/auth.js';
 
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { BatchView } from '../models/BatchView.js';
 import { DeleteMessageResult } from '../models/DeleteMessageResult.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
@@ -19,6 +20,8 @@ import { PageMessageLifecycleTransition } from '../models/PageMessageLifecycleTr
 import { PageMessageSummaryView } from '../models/PageMessageSummaryView.js';
 import { RateLimitedEnvelope } from '../models/RateLimitedEnvelope.js';
 import { ReplyRequest } from '../models/ReplyRequest.js';
+import { SendBatchRequest } from '../models/SendBatchRequest.js';
+import { SendBatchResponse } from '../models/SendBatchResponse.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { UpdateMessageRequest } from '../models/UpdateMessageRequest.js';
@@ -279,6 +282,44 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param batchId The batch id, e.g. bat_abc123.
+     */
+    public async getBatch(batchId: string, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'batchId' is not null or undefined
+        if (batchId === null || batchId === undefined) {
+            throw new RequiredError("MessagesApi", "getBatch", "batchId");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/batches/{batch_id}'
+            .replace('{' + 'batch_id' + '}', encodeURIComponent(String(batchId)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
      * Fetch a single message (inbound or outbound) by id, scoped to an agent the caller owns. A trashed message remains readable by this direct GET and includes deleted_at until it is permanently purged (30 days after deletion by default, deployment-configurable); ordinary lists, conversations, reply targets, and forward targets exclude it. Includes the raw message and canonical inbound authentication evidence. Fetching an unread inbound message marks it read as a side effect.
      * Get a message
      * @param email The agent\&#39;s full email address.
@@ -394,6 +435,7 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
      * @param from_ Case-insensitive substring match on sender.
      * @param subjectContains Case-insensitive substring match on subject.
      * @param conversationId 
+     * @param batchId Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction&#x3D;outbound. Exact match on the batch id, e.g. bat_abc123.
      * @param labels Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
      * @param since RFC3339; created_at &gt;&#x3D; since.
      * @param until RFC3339; created_at &lt; until.
@@ -402,13 +444,14 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
      * @param deleted List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
      * @param filter Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      */
-    public async listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: Configuration): Promise<RequestContext> {
+    public async listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'email' is not null or undefined
         if (email === null || email === undefined) {
             throw new RequiredError("MessagesApi", "listMessages", "email");
         }
+
 
 
 
@@ -460,6 +503,11 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
         // Query Params
         if (conversationId !== undefined) {
             requestContext.setQueryParam("conversation_id", ObjectSerializer.serialize(conversationId, "string", ""));
+        }
+
+        // Query Params
+        if (batchId !== undefined) {
+            requestContext.setQueryParam("batch_id", ObjectSerializer.serialize(batchId, "string", ""));
         }
 
         // Query Params
@@ -619,6 +667,67 @@ export class MessagesApiRequestFactory extends BaseAPIRequestFactory {
         const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
         requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
 
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param email 
+     * @param sendBatchRequest 
+     * @param idempotencyKey Optional idempotency key for safe retries. Same semantics as single-send: 24h TTL, path+body hash, replay returns the cached 202 verbatim (409 in-flight, 422 mismatch).
+     */
+    public async sendBatch(email: string, sendBatchRequest: SendBatchRequest, idempotencyKey?: string, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'email' is not null or undefined
+        if (email === null || email === undefined) {
+            throw new RequiredError("MessagesApi", "sendBatch", "email");
+        }
+
+
+        // verify required parameter 'sendBatchRequest' is not null or undefined
+        if (sendBatchRequest === null || sendBatchRequest === undefined) {
+            throw new RequiredError("MessagesApi", "sendBatch", "sendBatchRequest");
+        }
+
+
+
+        // Path Params
+        const localVarPath = '/v1/agents/{email}/batches'
+            .replace('{' + 'email' + '}', encodeURIComponent(String(email)));
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+        // Header Params
+        requestContext.setHeaderParam("Idempotency-Key", ObjectSerializer.serialize(idempotencyKey, "string", ""));
+
+
+        // Body Params
+        const contentType = ObjectSerializer.getPreferredMediaType([
+            "application/json"
+        ]);
+        requestContext.setHeaderParam("Content-Type", contentType);
+        const serializedBody = ObjectSerializer.stringify(
+            ObjectSerializer.serialize(sendBatchRequest, "SendBatchRequest", ""),
+            contentType
+        );
+        requestContext.setBody(serializedBody);
 
         let authMethod: SecurityAuthentication | undefined;
         // Apply auth methods
@@ -975,6 +1084,49 @@ export class MessagesApiResponseProcessor {
      * Unwraps the actual response sent by the server from the response context and deserializes the response content
      * to the expected objects
      *
+     * @params response Response returned by the server for a request to getBatch
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getBatchWithHttpInfo(response: ResponseContext): Promise<HttpInfo<BatchView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: BatchView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "BatchView", ""
+            ) as BatchView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("404", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: BatchView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "BatchView", ""
+            ) as BatchView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
      * @params response Response returned by the server for a request to getMessage
      * @throws ApiException if the response code was not in [200, 299]
      */
@@ -1194,6 +1346,98 @@ export class MessagesApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "MessageView", ""
             ) as MessageView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to sendBatch
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async sendBatchWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendBatchResponse >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendBatchResponse = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendBatchResponse", ""
+            ) as SendBatchResponse;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("202", response.httpStatusCode)) {
+            const body: SendBatchResponse = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendBatchResponse", ""
+            ) as SendBatchResponse;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("400", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Bad Request — request-shape/validation failure. error.code includes invalid_request, invalid_recipient, too_many_messages, duplicate_recipient, invalid_attachment (undecodable base64). Per-item errors carry details.item_index identifying the offending messages[] index; batch-wide errors omit it.", body, response.headers);
+        }
+        if (isCodeInRange("402", response.httpStatusCode)) {
+            const body: LimitExceededEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "LimitExceededEnvelope", ""
+            ) as LimitExceededEnvelope;
+            throw new ApiException<LimitExceededEnvelope>(response.httpStatusCode, "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.&lt;resource&gt; / limits.max_&lt;resource&gt;. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.", body, response.headers);
+        }
+        if (isCodeInRange("403", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+        if (isCodeInRange("409", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code idempotency_in_flight: a request with this Idempotency-Key is still executing. Retry-able: wait for the first request to finish, then retry with the SAME key and byte-identical body — the retry replays the first request\&#39;s response instead of re-executing the side effect.", body, response.headers);
+        }
+        if (isCodeInRange("413", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Payload Too Large — error.code &#x3D; payload_too_large. An attachment exceeds 10 MiB decoded; combined attachments exceed 25 MiB decoded; or the composed message exceeds 10 MiB (10485760 bytes), measured as subject + text + html + decoded attachment bytes. error.details uses PayloadTooLargeDetails: {scope, actual_bytes, max_bytes, filename?}; scope identifies composed_message, attachment, attachments_total, or request_body.", body, response.headers);
+        }
+        if (isCodeInRange("422", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Unprocessable — branch on error.code. idempotency_key_reuse: this Idempotency-Key was already used with a DIFFERENT request body (the dedup hash covers the route + the raw body bytes) — do NOT retry as-is; a legitimate retry must resend the byte-identical body, and a genuinely new request needs a fresh key. invalid_request: a semantic validation failure in the request body.", body, response.headers);
+        }
+        if (isCodeInRange("429", response.httpStatusCode)) {
+            const body: RateLimitedEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "RateLimitedEnvelope", ""
+            ) as RateLimitedEnvelope;
+            throw new ApiException<RateLimitedEnvelope>(response.httpStatusCode, "Too Many Requests — a request-RATE / throughput limit was hit (code rate_limited). This is distinct from a 402 limit_exceeded (a QUOTA cap): a 429 is transient and retry-able — wait error.details.retry_after_seconds (mirrored on the Retry-After header), then the same request succeeds. Branch on the HTTP status: 429 → back off and retry; 402 → surface a quota/upgrade path.", body, response.headers);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: SendBatchResponse = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendBatchResponse", ""
+            ) as SendBatchResponse;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

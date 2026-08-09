@@ -18,6 +18,12 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { BatchMessage } from '../models/BatchMessage.js';
+import { BatchResult } from '../models/BatchResult.js';
+import { BatchStatusRollupView } from '../models/BatchStatusRollupView.js';
+import { BatchSuppressedItem } from '../models/BatchSuppressedItem.js';
+import { BatchSuppressedResult } from '../models/BatchSuppressedResult.js';
+import { BatchView } from '../models/BatchView.js';
 import { ContactDueContact } from '../models/ContactDueContact.js';
 import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
@@ -55,6 +61,7 @@ import { DomainSendingFailedData } from '../models/DomainSendingFailedData.js';
 import { DomainSendingVerifiedData } from '../models/DomainSendingVerifiedData.js';
 import { DomainSuppressionAddedData } from '../models/DomainSuppressionAddedData.js';
 import { DomainView } from '../models/DomainView.js';
+import { DuplicateRecipientDetails } from '../models/DuplicateRecipientDetails.js';
 import { EmailBouncedData } from '../models/EmailBouncedData.js';
 import { EmailComplainedData } from '../models/EmailComplainedData.js';
 import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
@@ -130,6 +137,8 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { SendBatchRequest } from '../models/SendBatchRequest.js';
+import { SendBatchResponse } from '../models/SendBatchResponse.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -143,6 +152,7 @@ import { TemplateView } from '../models/TemplateView.js';
 import { TestWebhookRequest } from '../models/TestWebhookRequest.js';
 import { TestWebhookResponse } from '../models/TestWebhookResponse.js';
 import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
+import { TooManyMessagesDetails } from '../models/TooManyMessagesDetails.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
@@ -1983,6 +1993,40 @@ export class ObservableMessagesApi {
     }
 
     /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param batchId The batch id, e.g. bat_abc123.
+     */
+    public getBatchWithHttpInfo(batchId: string, _options?: ConfigurationOptions): Observable<HttpInfo<BatchView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getBatch(batchId, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getBatchWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param batchId The batch id, e.g. bat_abc123.
+     */
+    public getBatch(batchId: string, _options?: ConfigurationOptions): Observable<BatchView> {
+        return this.getBatchWithHttpInfo(batchId, _options).pipe(map((apiResponse: HttpInfo<BatchView>) => apiResponse.data));
+    }
+
+    /**
      * Fetch a single message (inbound or outbound) by id, scoped to an agent the caller owns. A trashed message remains readable by this direct GET and includes deleted_at until it is permanently purged (30 days after deletion by default, deployment-configurable); ordinary lists, conversations, reply targets, and forward targets exclude it. Includes the raw message and canonical inbound authentication evidence. Fetching an unread inbound message marks it read as a side effect.
      * Get a message
      * @param email The agent\&#39;s full email address.
@@ -2068,6 +2112,7 @@ export class ObservableMessagesApi {
      * @param [from_] Case-insensitive substring match on sender.
      * @param [subjectContains] Case-insensitive substring match on subject.
      * @param [conversationId]
+     * @param [batchId] Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction&#x3D;outbound. Exact match on the batch id, e.g. bat_abc123.
      * @param [labels] Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
      * @param [since] RFC3339; created_at &gt;&#x3D; since.
      * @param [until] RFC3339; created_at &lt; until.
@@ -2076,10 +2121,10 @@ export class ObservableMessagesApi {
      * @param [deleted] List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
      * @param [filter] Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      */
-    public listMessagesWithHttpInfo(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: ConfigurationOptions): Observable<HttpInfo<PageMessageSummaryView>> {
+    public listMessagesWithHttpInfo(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: ConfigurationOptions): Observable<HttpInfo<PageMessageSummaryView>> {
         const _config = mergeConfiguration(this.configuration, _options);
 
-        const requestContextPromise = this.requestFactory.listMessages(email, direction, readStatus, sort, from_, subjectContains, conversationId, labels, since, until, cursor, limit, deleted, filter, _config);
+        const requestContextPromise = this.requestFactory.listMessages(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, filter, _config);
         // build promise chain
         let middlewarePreObservable = from<RequestContext>(requestContextPromise);
         for (const middleware of _config.middleware) {
@@ -2106,6 +2151,7 @@ export class ObservableMessagesApi {
      * @param [from_] Case-insensitive substring match on sender.
      * @param [subjectContains] Case-insensitive substring match on subject.
      * @param [conversationId]
+     * @param [batchId] Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction&#x3D;outbound. Exact match on the batch id, e.g. bat_abc123.
      * @param [labels] Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
      * @param [since] RFC3339; created_at &gt;&#x3D; since.
      * @param [until] RFC3339; created_at &lt; until.
@@ -2114,8 +2160,8 @@ export class ObservableMessagesApi {
      * @param [deleted] List the trash instead: messages that were soft-deleted and are restorable until purged (30 days after deletion by default, deployment-configurable). Defaults to false (live messages only).
      * @param [filter] Boolean filter expression (AIP-160-derived). v1 fields: label, from, subject, created. Operators: : &#x3D; !&#x3D; &lt; &lt;&#x3D; &gt; &gt;&#x3D; with AND / OR / NOT and parentheses; whitespace is implicit AND and binds looser than OR. Composes with (ANDs) the flat filters. Unknown fields/operators are rejected with a positioned invalid_filter error. Max 500 chars.
      */
-    public listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: ConfigurationOptions): Observable<PageMessageSummaryView> {
-        return this.listMessagesWithHttpInfo(email, direction, readStatus, sort, from_, subjectContains, conversationId, labels, since, until, cursor, limit, deleted, filter, _options).pipe(map((apiResponse: HttpInfo<PageMessageSummaryView>) => apiResponse.data));
+    public listMessages(email: string, direction?: 'inbound' | 'outbound' | 'all', readStatus?: 'unread' | 'read' | 'all', sort?: 'asc' | 'desc', from_?: string, subjectContains?: string, conversationId?: string, batchId?: string, labels?: Array<string>, since?: string, until?: string, cursor?: string, limit?: number, deleted?: boolean, filter?: string, _options?: ConfigurationOptions): Observable<PageMessageSummaryView> {
+        return this.listMessagesWithHttpInfo(email, direction, readStatus, sort, from_, subjectContains, conversationId, batchId, labels, since, until, cursor, limit, deleted, filter, _options).pipe(map((apiResponse: HttpInfo<PageMessageSummaryView>) => apiResponse.data));
     }
 
     /**
@@ -2194,6 +2240,44 @@ export class ObservableMessagesApi {
      */
     public restoreMessage(email: string, id: string, _options?: ConfigurationOptions): Observable<MessageView> {
         return this.restoreMessageWithHttpInfo(email, id, _options).pipe(map((apiResponse: HttpInfo<MessageView>) => apiResponse.data));
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param email
+     * @param sendBatchRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries. Same semantics as single-send: 24h TTL, path+body hash, replay returns the cached 202 verbatim (409 in-flight, 422 mismatch).
+     */
+    public sendBatchWithHttpInfo(email: string, sendBatchRequest: SendBatchRequest, idempotencyKey?: string, _options?: ConfigurationOptions): Observable<HttpInfo<SendBatchResponse>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.sendBatch(email, sendBatchRequest, idempotencyKey, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.sendBatchWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param email
+     * @param sendBatchRequest
+     * @param [idempotencyKey] Optional idempotency key for safe retries. Same semantics as single-send: 24h TTL, path+body hash, replay returns the cached 202 verbatim (409 in-flight, 422 mismatch).
+     */
+    public sendBatch(email: string, sendBatchRequest: SendBatchRequest, idempotencyKey?: string, _options?: ConfigurationOptions): Observable<SendBatchResponse> {
+        return this.sendBatchWithHttpInfo(email, sendBatchRequest, idempotencyKey, _options).pipe(map((apiResponse: HttpInfo<SendBatchResponse>) => apiResponse.data));
     }
 
     /**

@@ -22,6 +22,7 @@ export class Message {
     * Inbound SMTP authentication evidence. Only dmarc.status=pass authenticates the RFC 5322 From domain; even a pass does not authenticate the mailbox local part, a person, or message content. Null means there was no authenticating inbound SMTP peer, as with outbound or providerless loopback delivery.
     */
     'authentication': Authentication | null;
+    'batchId'?: string;
     'bcc'?: Array<string> | null;
     'cc'?: Array<string> | null;
     'conversationId'?: string;
@@ -111,6 +112,12 @@ export class Message {
             "name": "authentication",
             "baseName": "authentication",
             "type": "Authentication",
+            "format": ""
+        },
+        {
+            "name": "batchId",
+            "baseName": "batch_id",
+            "type": "string",
             "format": ""
         },
         {

@@ -31,6 +31,7 @@ import (
 // state which of the three categories the field falls into, and record it in a
 // comment on the struct tag.
 var closedResponseEnumAllowlist = map[string]string{
+	"BatchResult.status":                     "binary invariant of the discriminated union (every slot is exactly accepted or suppressed)",
 	"EmailBouncedData.bounce_type":           "normalized exhaustive classification (undetermined is the guaranteed catch-all)",
 	"MessageSummaryView.direction":           "binary invariant of the model",
 	"MessageView.direction":                  "binary invariant of the model",

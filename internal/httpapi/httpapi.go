@@ -231,7 +231,23 @@ type Deps struct {
 
 	// outbound (the shared live delivery path extracted from agent.API)
 	DeliverOutbound func(ctx context.Context, user *identity.User, ag *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx agent.AcceptIdemCompleter) (*agent.OutboundResult, *agent.OutboundError)
-	SendTest        func(ctx context.Context, ag *identity.AgentIdentity) (*agent.OutboundResult, *agent.OutboundError)
+	// DeliverBatch is the batch-send accept-tx orchestrator, called by
+	// handleSendBatch. Same shape as DeliverOutbound but for a slice of
+	// SendRequest items — see docs/design/batch-send.md §9. Optional; when
+	// nil the /v1/agents/{email}/batches operation is still registered but
+	// returns 501 not_implemented for every call (matches the
+	// nil-DeliverOutbound behavior of single-send). Wired in apiserver
+	// via agent.API.DeliverBatch.
+	DeliverBatch func(ctx context.Context, user *identity.User, ag *identity.AgentIdentity, items []outbound.SendRequest, idemCompleteTx agent.BatchAcceptIdemCompleter) (*agent.BatchAcceptResult, *agent.OutboundError)
+	// GetBatch loads a batch header by id (nil on miss). The handler
+	// enforces ownership by comparing batch.UserID to the caller and
+	// conflating a foreign/missing batch to 404. BatchStatusRollup
+	// computes the per-delivery-status count over the batch's child
+	// messages. Both back GET /v1/batches/{batch_id} (§7.1). Optional —
+	// nil returns 501 not_implemented.
+	GetBatch          func(ctx context.Context, batchID string) (*identity.Batch, error)
+	BatchStatusRollup func(ctx context.Context, batchID string) (*identity.BatchStatusRollup, error)
+	SendTest          func(ctx context.Context, ag *identity.AgentIdentity) (*agent.OutboundResult, *agent.OutboundError)
 	// PollSendOutcome reads an async send's current delivery_status for wait=sent.
 	// Optional — nil disables the wait valve (accepted is returned immediately).
 	PollSendOutcome func(ctx context.Context, messageID string) (identity.SendOutcome, error)
@@ -743,6 +759,7 @@ func (s *Server) registerOperations() {
 	s.registerEngagements()
 	s.registerAPIKeys()
 	s.registerOutbound()
+	s.registerSendBatch()
 	s.registerReviews()
 	// Not an operation: exports the typed per-event `data` payload schemas
 	// (EmailReceivedData, …) into components.schemas for docs + codegen.

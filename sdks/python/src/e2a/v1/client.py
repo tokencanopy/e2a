@@ -74,6 +74,9 @@ from .generated.models import (
     RotateSecretResponse,
     SendEmailRequest,
     SendResultView,
+    SendBatchRequest,
+    SendBatchResponse,
+    BatchView,
     StarterTemplateDetailView,
     StarterTemplateView,
     SuppressionView,
@@ -498,6 +501,7 @@ class MessagesResource:
         from_: Optional[str] = None,
         subject_contains: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
         labels: Optional[List[str]] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
@@ -519,6 +523,7 @@ class MessagesResource:
                     from_=from_,
                     subject_contains=subject_contains,
                     conversation_id=conversation_id,
+                    batch_id=batch_id,
                     labels=labels,
                     since=since,
                     until=until,
@@ -674,6 +679,40 @@ class MessagesResource:
             lambda h: self._api.send_message(email, req, wait=wait, _headers=h),
             idempotency_key,
         )
+
+    async def send_batch(
+        self,
+        email: str,
+        body: Body,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> SendBatchResponse:
+        """Send a batch of up to 100 independent messages in one call (beta).
+
+        Each item in ``body.messages`` is a self-contained message with its own
+        recipients and content; ``results`` in the response is positionally
+        aligned to it. A suppressed item is a compliance drop, not a failure,
+        and does not stop the rest. Always asynchronous (202); poll
+        :meth:`get_batch` or the child messages for terminal delivery. HITL-
+        enabled agents are refused (403 ``batch_hitl_unsupported``) — use
+        per-recipient :meth:`send` for those. The batch surface is beta and may
+        change before it is declared stable.
+        """
+        req = _coerce(SendBatchRequest, body)
+        return await self._c._write_keyed(
+            lambda h: self._api.send_batch(email, req, _headers=h),
+            idempotency_key,
+        )
+
+    async def get_batch(self, batch_id: str) -> BatchView:
+        """Fetch a batch header (counts + accept-time suppressions) plus a live
+        per-delivery-status rollup of its child messages (beta).
+
+        Account-scoped: the batch id alone identifies it, so no agent email is
+        needed; a batch owned by another account returns 404. The batch surface
+        is beta and may change before it is declared stable.
+        """
+        return await self._c._read(lambda h: self._api.get_batch(batch_id, _headers=h))
 
     async def reply(
         self,

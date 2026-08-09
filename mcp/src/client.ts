@@ -7,6 +7,9 @@ import type {
   MessageSummaryView,
   ReviewView,
   SendResultView,
+  SendBatchRequest,
+  SendBatchResponse,
+  BatchView,
   RejectResultView,
   UpdateMessageResultView,
   ConversationSummaryView,
@@ -382,6 +385,28 @@ export class McpClient {
 
   getMessage(messageId: string, explicitAddress?: string): Promise<MessageView> {
     return this.sdk.messages.get(this.resolveAddress(explicitAddress), messageId);
+  }
+
+  /**
+   * Beta: send a batch of up to 100 messages in one call. Async (202); the
+   * response `results` are positionally aligned to `body.messages`. Suppressed
+   * items are a compliance drop, not a send failure.
+   */
+  sendBatch(
+    body: SendBatchRequest,
+    opts: SendOpts = {},
+    explicitAddress?: string,
+  ): Promise<SendBatchResponse> {
+    return this.sdk.messages.sendBatch(this.resolveAddress(explicitAddress), body, opts);
+  }
+
+  /**
+   * Beta: fetch a batch header (counts + accept-time suppressions) plus a live
+   * delivery-status rollup of its child messages. Account-scoped — the batch id
+   * alone identifies it, no agent address needed.
+   */
+  getBatch(batchId: string): Promise<BatchView> {
+    return this.sdk.messages.getBatch(batchId);
   }
 
   /** Beta: fetch the canonical observations for one message. */

@@ -1279,6 +1279,11 @@ type OutboundError struct {
 	// Details carries optional code-specific structured context across the
 	// agent/httpapi boundary. It stays transport-neutral to avoid a package cycle.
 	Details map[string]any
+	// RetryAfter is the Retry-After seconds hint for retryable errors
+	// (429 rate_limited, 503 limits_unavailable). Zero means "no hint";
+	// the httpapi layer copies non-zero values to both the Retry-After
+	// header and the details' retry_after_seconds field.
+	RetryAfter int
 }
 
 func (e *OutboundError) Error() string { return e.Msg }

@@ -29,6 +29,12 @@ from e2a.v1.generated.models.attachment import Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView
 from e2a.v1.generated.models.attachment_view import AttachmentView
 from e2a.v1.generated.models.authentication import Authentication
+from e2a.v1.generated.models.batch_message import BatchMessage
+from e2a.v1.generated.models.batch_result import BatchResult
+from e2a.v1.generated.models.batch_status_rollup_view import BatchStatusRollupView
+from e2a.v1.generated.models.batch_suppressed_item import BatchSuppressedItem
+from e2a.v1.generated.models.batch_suppressed_result import BatchSuppressedResult
+from e2a.v1.generated.models.batch_view import BatchView
 from e2a.v1.generated.models.contact_due_contact import ContactDueContact
 from e2a.v1.generated.models.contact_due_data import ContactDueData
 from e2a.v1.generated.models.contact_engagement_view import ContactEngagementView
@@ -68,6 +74,7 @@ from e2a.v1.generated.models.domain_sending_failed_data import DomainSendingFail
 from e2a.v1.generated.models.domain_sending_verified_data import DomainSendingVerifiedData
 from e2a.v1.generated.models.domain_suppression_added_data import DomainSuppressionAddedData
 from e2a.v1.generated.models.domain_view import DomainView
+from e2a.v1.generated.models.duplicate_recipient_details import DuplicateRecipientDetails
 from e2a.v1.generated.models.email_bounced_data import EmailBouncedData
 from e2a.v1.generated.models.email_complained_data import EmailComplainedData
 from e2a.v1.generated.models.email_delivered_data import EmailDeliveredData
@@ -143,6 +150,8 @@ from e2a.v1.generated.models.retry_after_details import RetryAfterDetails
 from e2a.v1.generated.models.review_view import ReviewView
 from e2a.v1.generated.models.rotate_secret_response import RotateSecretResponse
 from e2a.v1.generated.models.spf_result import SPFResult
+from e2a.v1.generated.models.send_batch_request import SendBatchRequest
+from e2a.v1.generated.models.send_batch_response import SendBatchResponse
 from e2a.v1.generated.models.send_email_request import SendEmailRequest
 from e2a.v1.generated.models.send_result_view import SendResultView
 from e2a.v1.generated.models.sending_ramp_view import SendingRampView
@@ -157,6 +166,7 @@ from e2a.v1.generated.models.template_view import TemplateView
 from e2a.v1.generated.models.test_webhook_request import TestWebhookRequest
 from e2a.v1.generated.models.test_webhook_response import TestWebhookResponse
 from e2a.v1.generated.models.threat_category_view import ThreatCategoryView
+from e2a.v1.generated.models.too_many_messages_details import TooManyMessagesDetails
 from e2a.v1.generated.models.too_many_recipients_details import TooManyRecipientsDetails
 from e2a.v1.generated.models.unsubscribe_options import UnsubscribeOptions
 from e2a.v1.generated.models.update_agent_request import UpdateAgentRequest

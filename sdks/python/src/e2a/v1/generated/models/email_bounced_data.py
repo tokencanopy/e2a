@@ -28,6 +28,7 @@ class EmailBouncedData(BaseModel):
     EmailBouncedData
     """ # noqa: E501
     agent_email: StrictStr
+    batch_id: Optional[StrictStr] = None
     bounce_sub_type: Optional[StrictStr] = None
     bounce_type: StrictStr
     delivered_to: StrictStr = Field(description="The one recipient address this per-recipient outcome is about.")
@@ -37,7 +38,7 @@ class EmailBouncedData(BaseModel):
     smtp_detail: Optional[StrictStr] = None
     subject: Optional[StrictStr] = None
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "bounce_sub_type", "bounce_type", "delivered_to", "direction", "lifecycle_transitions", "message_id", "smtp_detail", "subject"]
+    __properties: ClassVar[List[str]] = ["agent_email", "batch_id", "bounce_sub_type", "bounce_type", "delivered_to", "direction", "lifecycle_transitions", "message_id", "smtp_detail", "subject"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -105,6 +106,7 @@ class EmailBouncedData(BaseModel):
 
         _obj = cls.model_validate({
             "agent_email": obj.get("agent_email"),
+            "batch_id": obj.get("batch_id"),
             "bounce_sub_type": obj.get("bounce_sub_type"),
             "bounce_type": obj.get("bounce_type"),
             "delivered_to": obj.get("delivered_to"),

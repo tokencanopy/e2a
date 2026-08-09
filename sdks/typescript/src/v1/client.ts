@@ -36,6 +36,9 @@ import type {
   AttachmentView,
   MessageSummaryView,
   SendEmailRequest,
+  SendBatchRequest,
+  SendBatchResponse,
+  BatchView,
   ReplyRequest,
   ForwardRequest,
   ApproveRequest,
@@ -360,6 +363,7 @@ export interface ListMessagesParams {
   from_?: string;
   subjectContains?: string;
   conversationId?: string;
+  batchId?: string;
   labels?: string[];
   since?: string;
   until?: string;
@@ -385,6 +389,7 @@ class MessagesResource {
         params.from_,
         params.subjectContains,
         params.conversationId,
+        params.batchId,
         params.labels,
         params.since,
         params.until,
@@ -473,6 +478,25 @@ class MessagesResource {
   }
   forward(email: string, messageId: string, body: ForwardInput, opts: SendOptions = {}): Promise<SendResultView> {
     return call(() => this.api.forwardMessage(email, messageId, body as ForwardRequest, opts.idempotencyKey, opts.wait));
+  }
+  /**
+   * Beta: send a batch of up to 100 messages in one call. Each item is an
+   * independent message with its own recipients/state; the response `results`
+   * are positionally aligned to `messages` (each slot is accepted with a
+   * message_id, or suppressed). Always async (202) — there is no `wait`. See
+   * docs/design/batch-send.md. The batch surface may change before stable.
+   */
+  sendBatch(email: string, body: SendBatchRequest, opts: SendOptions = {}): Promise<SendBatchResponse> {
+    return call(() => this.api.sendBatch(email, body, opts.idempotencyKey));
+  }
+  /**
+   * Beta: fetch a batch's header (counts + suppressed items at accept time)
+   * plus a live delivery-status rollup of its child messages. Account-scoped:
+   * a batch owned by another account returns 404. For per-recipient detail use
+   * `list(email, { batchId })`.
+   */
+  getBatch(batchId: string): Promise<BatchView> {
+    return call(() => this.api.getBatch(batchId));
   }
   // Approve/reject a held message live on the account-scoped review queue —
   // `client.reviews.approve(id, body)` / `client.reviews.reject(id, body)`. The

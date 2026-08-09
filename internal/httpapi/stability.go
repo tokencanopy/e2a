@@ -244,6 +244,14 @@ func (s *Server) applyEvolutionStance() {
 	for _, schema := range []string{"HoldReasonView", "ProtectionFindingView", "ThreatCategoryView"} {
 		markSchema(schemas, schema, extStabilityLevel, stabilityBeta)
 	}
+	// Batch send is a beta feature. Its own operations (sendBatch, getBatch)
+	// declare beta at registration, so their exclusive schemas inherit the
+	// marker above. The batch_id correlation field, however, rides on the STABLE
+	// outbound event payloads — mark it beta per-field so the parent event
+	// schemas stay stable while batch remains evolvable (mentor review).
+	for _, schema := range []string{"EmailSentData", "EmailFailedData", "EmailDeliveredData", "EmailBouncedData", "EmailComplainedData"} {
+		markProperty(schemas, schema, "batch_id", extStabilityLevel, stabilityBeta)
+	}
 	// ErrorBody.code is a stable open discriminator; only the outbound
 	// gate-policy value remains experimental.
 	markProperty(schemas, "ErrorBody", "code", extExperimentalValues, []string{"blocked_by_policy"})

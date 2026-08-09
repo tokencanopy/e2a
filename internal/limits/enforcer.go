@@ -224,6 +224,19 @@ func (e *DBEnforcer) CheckDomainCreate(ctx context.Context, userID string) error
 // the user sees "messages_month" as the reason, which is the easier one
 // to explain ("you sent N this month").
 func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string) error {
+	return e.CheckMessageSendN(ctx, userID, 1)
+}
+
+// CheckMessageSendN is the count-aware form of CheckMessageSend: it blocks when
+// accepting n more messages this month would exceed the month-flow cap (i.e.
+// current count + n > MaxMessagesMonth). Batch send passes n = the number of
+// accepted items so the cap accounts for every item, not just one free slot.
+// n = 1 is exactly CheckMessageSend (count+1 > cap ⟺ count >= cap). The storage
+// stock cap is a point-in-time check and is unaffected by n.
+func (e *DBEnforcer) CheckMessageSendN(ctx context.Context, userID string, n int) error {
+	if n < 1 {
+		n = 1
+	}
 	lim, err := e.Get(ctx, userID)
 	if err != nil {
 		return err
@@ -232,7 +245,7 @@ func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string) error 
 	if err != nil {
 		return err
 	}
-	if msgCount >= lim.MaxMessagesMonth {
+	if msgCount+n > lim.MaxMessagesMonth {
 		return &LimitExceededError{
 			Resource: "messages_month",
 			Limit:    lim.MaxMessagesMonth,

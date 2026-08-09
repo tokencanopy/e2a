@@ -18,6 +18,7 @@ import { listen } from "../commands/listen.js";
 import { whoami } from "../commands/whoami.js";
 import { doctor } from "../commands/doctor.js";
 import { send, reply } from "../commands/send.js";
+import { batchSend, batchGet } from "../commands/batch.js";
 import { messagesList, messagesGet, messagesLifecycle } from "../commands/messages.js";
 import { agentsList, agentsCreate, agentsGet } from "../commands/agents.js";
 import { protectionGet, protectionSet } from "../commands/protection.js";
@@ -125,6 +126,12 @@ Usage:
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
   e2a reply <message-id> [options]  Reply in-thread (same body options as send)
+  e2a batch send [options]          Send a batch of up to 100 messages (beta)
+        --file <path|->            JSON batch body ({"messages":[…]}); - reads stdin
+        --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
+        --idempotency-key <k>      Stable key so a retried invocation can't double-send
+        --json                     Print the full batch result as JSON
+  e2a batch get <batch-id> [--json] Show a batch's header + delivery-status rollup (beta)
   e2a messages list [options]       List messages, oldest first
         --direction <d>            inbound|outbound|all
         --since <ISO>              Messages created AT or after this timestamp
@@ -696,6 +703,28 @@ async function main() {
         json: hasFlag(args, "--json"),
       });
       break;
+    case "batch": {
+      const sub = args[0];
+      const rest = args.slice(1);
+      if (sub === "send") {
+        checkFlags(rest, ["--file", "--agent", "--idempotency-key", "--json"]);
+        getPositionals(rest, 0, "usage: e2a batch send --file <path|-> [options]");
+        await batchSend({
+          file: getFlagChecked(rest, "--file"),
+          agent: getFlagChecked(rest, "--agent"),
+          idempotencyKey: getFlagChecked(rest, "--idempotency-key"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "get") {
+        checkFlags(rest, ["--json"]);
+        const [batchId] = getPositionals(rest, 1, "usage: e2a batch get <batch-id> [--json]");
+        await batchGet(batchId, { json: hasFlag(rest, "--json") });
+      } else {
+        process.stderr.write("Usage: e2a batch [send --file <path>|get <batch-id>]\n");
+        process.exit(EXIT.USAGE);
+      }
+      break;
+    }
     case "messages": {
       const sub = args[0];
       const rest = args.slice(1);

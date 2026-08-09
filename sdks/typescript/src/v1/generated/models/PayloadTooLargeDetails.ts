@@ -22,11 +22,15 @@ export class PayloadTooLargeDetails {
     */
     'filename'?: string;
     /**
+    * For batch-send: the offending item\'s index in messages[]. Absent for single-send responses and for batch-wide scope violations.
+    */
+    'itemIndex'?: number;
+    /**
     * Maximum bytes accepted for this scope.
     */
     'maxBytes': number;
     /**
-    * Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body.
+    * Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body, batch (batch-send total attachment bytes across all items).
     */
     'scope': string;
 
@@ -46,6 +50,12 @@ export class PayloadTooLargeDetails {
             "baseName": "filename",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "itemIndex",
+            "baseName": "item_index",
+            "type": "number",
+            "format": "int64"
         },
         {
             "name": "maxBytes",

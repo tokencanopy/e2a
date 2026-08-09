@@ -54,7 +54,7 @@ type ErrorEnvelope struct {
 
 // ErrorBody is the inner object of the envelope.
 type ErrorBody struct {
-	Code      string `json:"code" doc:"Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, precondition_failed, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), precondition_failed (412, optimistic-concurrency validator is stale), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), contact_limit_reached, template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."`
+	Code      string `json:"code" doc:"Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, batch_hitl_unsupported, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, too_many_messages, duplicate_recipient, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, precondition_failed, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental), batch_hitl_unsupported (403, batch send refused for HITL-enabled agent — use single-send per recipient or disable HITL). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, too_many_messages (batch: cap on messages[]), duplicate_recipient (batch: same address in to across items), template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), precondition_failed (412, optimistic-concurrency validator is stale), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), contact_limit_reached, template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."`
 	Message   string `json:"message" doc:"Human-readable explanation. Not for branching — use code."`
 	Details   any    `json:"details,omitempty" doc:"Optional structured context, polymorphic by code. Treat it as an open object keyed off code; unknown codes and fields must be preserved."`
 	RequestID string `json:"request_id" doc:"Echoes the X-Request-Id response header so a failing call is greppable in logs."`
@@ -83,12 +83,14 @@ type ValidationErrorDetails struct {
 // understands the extensions can offer stable typed views for known codes.
 func (ErrorBody) TransformSchema(r huma.Registry, s *huma.Schema) *huma.Schema {
 	detailTypes := map[string]reflect.Type{
-		"ValidationErrorDetails":   reflect.TypeOf(ValidationErrorDetails{}),
-		"TooManyRecipientsDetails": reflect.TypeOf(TooManyRecipientsDetails{}),
-		"PayloadTooLargeDetails":   reflect.TypeOf(PayloadTooLargeDetails{}),
-		"LimitExceededDetails":     reflect.TypeOf(LimitExceededDetails{}),
-		"RateLimitedDetails":       reflect.TypeOf(RateLimitedDetails{}),
-		"RetryAfterDetails":        reflect.TypeOf(RetryAfterDetails{}),
+		"ValidationErrorDetails":    reflect.TypeOf(ValidationErrorDetails{}),
+		"TooManyRecipientsDetails":  reflect.TypeOf(TooManyRecipientsDetails{}),
+		"TooManyMessagesDetails":    reflect.TypeOf(TooManyMessagesDetails{}),
+		"DuplicateRecipientDetails": reflect.TypeOf(DuplicateRecipientDetails{}),
+		"PayloadTooLargeDetails":    reflect.TypeOf(PayloadTooLargeDetails{}),
+		"LimitExceededDetails":      reflect.TypeOf(LimitExceededDetails{}),
+		"RateLimitedDetails":        reflect.TypeOf(RateLimitedDetails{}),
+		"RetryAfterDetails":         reflect.TypeOf(RetryAfterDetails{}),
 	}
 	for name, typ := range detailTypes {
 		r.Schema(typ, true, name)
@@ -139,14 +141,38 @@ type TooManyRecipientsDetails struct {
 	Provided      int `json:"provided" minimum:"1" doc:"Combined recipient count supplied by the caller."`
 }
 
+// TooManyMessagesDetails is the typed error.details payload for a batch-send
+// request that exceeds the per-request cap on len(messages). Distinct from
+// TooManyRecipientsDetails, which caps recipients within a single message —
+// batch send caps ITEMS in the batch (each of which is a full message).
+type TooManyMessagesDetails struct {
+	MaxMessages int `json:"max_messages" minimum:"1" doc:"Maximum BatchMessage items per batch request."`
+	Provided    int `json:"provided" minimum:"1" doc:"Item count supplied by the caller."`
+}
+
+// DuplicateRecipientDetails is the typed error.details payload for a batch-send
+// request whose messages[].to sets contain the same recipient address across
+// more than one item. Cross-item duplicates in `to` are rejected up front (see
+// design/batch-send.md §2.1, §14 Q11); duplicates within cc/bcc across items
+// are allowed (common shape when a shared address cc's every item).
+type DuplicateRecipientDetails struct {
+	Address     string `json:"address" doc:"The recipient address that appears in more than one item's to."`
+	ItemIndices []int  `json:"item_indices" nullable:"false" doc:"Positions in the request's messages[] where the address appears in to. Length ≥ 2."`
+}
+
 type PayloadTooLargeDetails struct {
 	// Scope is an OPEN set (evolving response-side vocabulary): a new byte
-	// budget (e.g. a future batch or template cap) means a new value here,
-	// and that must not break spec-generated clients.
-	Scope       string `json:"scope" doc:"Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body."`
+	// budget (e.g. a future template cap) means a new value here, and that
+	// must not break spec-generated clients.
+	Scope       string `json:"scope" doc:"Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body, batch (batch-send total attachment bytes across all items)."`
 	ActualBytes int64  `json:"actual_bytes" minimum:"0" doc:"Observed byte count. Exact when Content-Length or decoded content is available; for chunked request bodies this is the lower bound observed before rejection."`
 	MaxBytes    int64  `json:"max_bytes" minimum:"1" doc:"Maximum bytes accepted for this scope."`
 	Filename    string `json:"filename,omitempty" doc:"Attachment filename when scope is attachment."`
+	// ItemIndex is populated only for batch-send responses when the failure is
+	// tied to a specific item in the messages[] array. Absent for single-send
+	// responses (backward-compatible extension); when Scope="batch" the total
+	// is over the whole request and ItemIndex is also absent.
+	ItemIndex *int `json:"item_index,omitempty" doc:"For batch-send: the offending item's index in messages[]. Absent for single-send responses and for batch-wide scope violations."`
 }
 
 // LimitExceededDetails is the typed `error.details` payload carried by a 402

@@ -161,3 +161,66 @@ func TestCleanupLoopKeepsActiveEntries(t *testing.T) {
 		t.Errorf("expected active bucket to remain, got %d buckets", count)
 	}
 }
+
+func TestAllowN_ReservesAllOrNone(t *testing.T) {
+	l := New(1*time.Second, 10)
+	// Batch of 5 in an empty bucket → allowed.
+	if ok, _ := l.AllowN("k", 5); !ok {
+		t.Fatalf("expected AllowN(5) to succeed on empty bucket")
+	}
+	// Bucket now has 5. Another batch of 5 → allowed (fills to 10).
+	if ok, _ := l.AllowN("k", 5); !ok {
+		t.Fatalf("expected AllowN(5) to succeed when bucket has 5")
+	}
+	// Bucket is now full. Any batch >= 1 → denied without recording.
+	if ok, _ := l.AllowN("k", 1); ok {
+		t.Fatal("expected AllowN(1) to deny on full bucket")
+	}
+	// The denied attempt above must not have consumed a slot — retrying
+	// as a single Allow (in the same window) should also deny.
+	if l.Allow("k") {
+		t.Fatal("denied AllowN must not consume a slot")
+	}
+}
+
+func TestAllowN_AllOrNothingOnOverflow(t *testing.T) {
+	l := New(1*time.Second, 10)
+	// Use 8 slots.
+	if ok, _ := l.AllowN("k", 8); !ok {
+		t.Fatalf("expected AllowN(8) to succeed")
+	}
+	// Now request 5 — bucket has 8, request would overflow to 13 > 10.
+	// Must deny WITHOUT recording any of the 5.
+	if ok, retry := l.AllowN("k", 5); ok || retry < time.Second {
+		t.Fatalf("expected AllowN(5) to deny with >=1s retryAfter, got ok=%v retry=%v", ok, retry)
+	}
+	// The 2 remaining slots must still be available for smaller reservations.
+	if ok, _ := l.AllowN("k", 2); !ok {
+		t.Fatalf("expected AllowN(2) to succeed on remaining capacity")
+	}
+}
+
+func TestAllowN_ZeroIsNoOp(t *testing.T) {
+	l := New(1*time.Second, 1)
+	if ok, retry := l.AllowN("k", 0); !ok || retry != 0 {
+		t.Errorf("AllowN(0) should be no-op, got ok=%v retry=%v", ok, retry)
+	}
+	// The one slot must still be available afterwards.
+	if !l.Allow("k") {
+		t.Fatal("AllowN(0) must not consume the slot")
+	}
+}
+
+func TestAllowN_NExceedsMaxCleanRetry(t *testing.T) {
+	l := New(1*time.Second, 10)
+	// Request 100 against a max-10 window → cannot ever succeed. Still
+	// deny cleanly (no negative reservation, no panic) with retryAfter
+	// clamped to at least 1s.
+	ok, retry := l.AllowN("k", 100)
+	if ok {
+		t.Fatal("expected AllowN(100) with max=10 to deny")
+	}
+	if retry < time.Second {
+		t.Errorf("expected retry >= 1s, got %v", retry)
+	}
+}

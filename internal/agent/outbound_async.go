@@ -50,6 +50,11 @@ type OutboundEnqueuer interface {
 	// (scheduled send). Same outbox transaction as EnqueueSendTx; only the job's
 	// first-run time differs. *outboundsend.Jobs satisfies it.
 	EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error)
+	// EnqueueBatchTx enqueues N outbound_send jobs in one round-trip
+	// within the caller's tx. Returns job ids positionally aligned with
+	// messageIDs so the accept-tx can stamp messages.send_job_id per row.
+	// Used by DeliverBatch; single-send stays on EnqueueSendTx.
+	EnqueueBatchTx(ctx context.Context, tx pgx.Tx, messageIDs []string) ([]int64, error)
 }
 
 // outboundSendStore implements outboundsend.Store over identity.Store +
@@ -485,6 +490,7 @@ func buildEmailSentEventFromRow(info *identity.OutboundSentInfo, providerMessage
 		BCC:                  m.BCC,
 		Subject:              m.Subject,
 		MessageType:          m.Type,
+		BatchID:              m.BatchID,
 		LifecycleTransitions: transitions,
 	}
 	return webhookpub.Event{
@@ -514,6 +520,7 @@ func buildEmailFailedEventFromRow(info *identity.OutboundSentInfo, detail string
 		BCC:                  m.BCC,
 		Subject:              m.Subject,
 		MessageType:          m.Type,
+		BatchID:              m.BatchID,
 		Reason:               detail,
 		LifecycleTransitions: transitions,
 	}

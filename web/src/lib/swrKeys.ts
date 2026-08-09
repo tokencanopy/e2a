@@ -93,6 +93,12 @@ export const messageDetailKey = (id: string) =>
 export const messageLifecycleKey = (email: string, id: string) =>
   ["message-lifecycle", email, id] as const;
 
+// One batch (GET /v1/batches/{id}), for the batch monitor page. Keyed by the
+// batch id alone — batch ids are globally unique and account-scoped, so the id
+// is the identity. The status rollup is computed on read, so re-fetching this
+// key (e.g. SWR refresh) is how the page shows live delivery progress.
+export const batchKey = (id: string) => ["batch", id] as const;
+
 // One webhook subscription (GET /v1/webhooks/{id}), for the detail page.
 export const webhookKey = (id: string) => ["webhook", id] as const;
 

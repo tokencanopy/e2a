@@ -85,6 +85,27 @@ function makeStubClient(
     send: vi.fn(async () => ({ messageId: "msg_sent", status: "sent" })),
     reply: vi.fn(async () => ({ messageId: "msg_reply", status: "sent" })),
     forward: vi.fn(async () => ({ messageId: "msg_fwd", status: "sent" })),
+    sendBatch: vi.fn(async () => ({
+      batchId: "bat_stub",
+      accepted: 1,
+      suppressedCount: 1,
+      results: [
+        { status: "accepted", messageId: "msg_b1" },
+        { status: "suppressed", suppressed: { address: "blocked@example.com", reason: "bounce" } },
+      ],
+    })),
+    getBatch: vi.fn(async (batchId: string) => ({
+      batchId,
+      agentId: "bot@example.com",
+      requested: 2,
+      accepted: 1,
+      suppressed: [{ itemIndex: 1, address: "blocked@example.com", reason: "bounce" }],
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      statusRollup: {
+        accepted: 1, sending: 0, sent: 0, delivered: 0,
+        deferred: 0, bounced: 0, complained: 0, failed: 0,
+      },
+    })),
     updateMessageLabels: vi.fn(async () => ({ messageId: "msg_in", labels: ["urgent"] })),
     // Cursor-paginated lists return a Page { items, next_cursor }.
     listConversations: vi.fn(async () => ({ items: [{ conversationId: "conv_1" }], next_cursor: undefined })),
@@ -551,7 +572,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(80);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -584,7 +605,7 @@ describe("e2a MCP server", () => {
     registerMetricsTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(80);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -593,15 +614,15 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
-    expect(RUNTIME_TOOLS.size).toBe(21);
+    expect(RUNTIME_TOOLS.size).toBe(23);
     expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(toolNamesForScope("account").size).toBe(80);
   });
 
   it("account scope exposes all 78 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(80);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -611,7 +632,7 @@ describe("e2a MCP server", () => {
   it("agent scope exposes runtime inbox and outreach tools", async () => {
     const ag = await connect(makeStubClient({ scope: "agent" }));
     const names = new Set((await ag.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(21);
+    expect(names.size).toBe(23);
     // Runtime tools present: an agent can send and read its own mailbox, but
     // account review discovery and decisions stay with the account owner.
     for (const n of [
@@ -725,6 +746,58 @@ describe("e2a MCP server", () => {
       "raise@example.com",
       undefined,
     );
+  });
+
+  it("send_batch maps per-item fields and projects the positional results", async () => {
+    const res = await client.callTool({
+      name: "send_batch",
+      arguments: {
+        messages: [
+          { to: ["a@example.com"], subject: "one", text: "hi", conversation_id: "conv_x" },
+          { to: ["blocked@example.com"], subject: "two", text: "yo" },
+        ],
+        reply_to: "ops@example.com",
+        idempotency_key: "idem-batch-1",
+      },
+    });
+    expect(res.isError ?? false).toBe(false);
+
+    // snake_case per-item input is mapped to the SDK's camelCase body.
+    expect(stub.sendBatch).toHaveBeenCalledWith(
+      {
+        messages: [
+          { to: ["a@example.com"], subject: "one", text: "hi", conversationId: "conv_x" },
+          { to: ["blocked@example.com"], subject: "two", text: "yo" },
+        ],
+        replyTo: "ops@example.com",
+      },
+      { idempotencyKey: "idem-batch-1" },
+      undefined,
+    );
+
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    expect(payload.batch_id).toBe("bat_stub");
+    expect(payload.accepted).toBe(1);
+    expect(payload.suppressed).toBe(1);
+    expect(payload.results).toEqual([
+      { status: "accepted", message_id: "msg_b1" },
+      { status: "suppressed", suppressed: { address: "blocked@example.com", reason: "bounce" } },
+    ]);
+  });
+
+  it("get_batch projects the header + delivery rollup by batch id", async () => {
+    const res = await client.callTool({ name: "get_batch", arguments: { batch_id: "bat_stub" } });
+    expect(res.isError ?? false).toBe(false);
+    expect(stub.getBatch).toHaveBeenCalledWith("bat_stub");
+
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    expect(payload.batch_id).toBe("bat_stub");
+    expect(payload.requested).toBe(2);
+    expect(payload.accepted).toBe(1);
+    expect(payload.status_rollup.accepted).toBe(1);
+    expect(payload.suppressed).toEqual([
+      { item_index: 1, address: "blocked@example.com", reason: "bounce" },
+    ]);
   });
 
   it("contact tools reject date-only and offsetless timestamps", async () => {

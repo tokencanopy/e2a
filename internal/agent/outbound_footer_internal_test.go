@@ -25,7 +25,10 @@ func (f *fakeFooterEnforcer) Get(ctx context.Context, userID string) (limits.Lim
 func (f *fakeFooterEnforcer) CheckAgentCreate(context.Context, string) error  { return nil }
 func (f *fakeFooterEnforcer) CheckDomainCreate(context.Context, string) error { return nil }
 func (f *fakeFooterEnforcer) CheckMessageSend(context.Context, string) error  { return nil }
-func (f *fakeFooterEnforcer) Invalidate(string)                               {}
+func (f *fakeFooterEnforcer) CheckMessageSendN(context.Context, string, int) error {
+	return nil
+}
+func (f *fakeFooterEnforcer) Invalidate(string) {}
 
 // TestResolveOutboundFooterMatrix pins the gating decision:
 //

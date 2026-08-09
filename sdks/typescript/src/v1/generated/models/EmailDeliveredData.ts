@@ -15,6 +15,7 @@ import { HttpFile } from '../http/http.js';
 
 export class EmailDeliveredData {
     'agentEmail': string;
+    'batchId'?: string;
     /**
     * The one recipient address this per-recipient outcome is about.
     */
@@ -36,6 +37,12 @@ export class EmailDeliveredData {
         {
             "name": "agentEmail",
             "baseName": "agent_email",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "batchId",
+            "baseName": "batch_id",
             "type": "string",
             "format": ""
         },

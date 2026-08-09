@@ -41,6 +41,9 @@ func (f failEnq) Insert(_ context.Context, _ river.JobArgs, _ *river.InsertOpts)
 func (f failEnq) InsertTx(_ context.Context, _ pgx.Tx, _ river.JobArgs, _ *river.InsertOpts) (*rivertype.JobInsertResult, error) {
 	return nil, f.err
 }
+func (f failEnq) InsertManyTx(_ context.Context, _ pgx.Tx, _ []river.InsertManyParams) ([]*rivertype.JobInsertResult, error) {
+	return nil, f.err
+}
 
 // TestDeliverWorker_MissingDeliveryRowIsNoop: the delivery row can disappear
 // between enqueue and execution (webhook deleted, cascade) — Work treats a gone

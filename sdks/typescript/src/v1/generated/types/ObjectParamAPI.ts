@@ -17,6 +17,12 @@ import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
 import { AttachmentView } from '../models/AttachmentView.js';
+import { BatchMessage } from '../models/BatchMessage.js';
+import { BatchResult } from '../models/BatchResult.js';
+import { BatchStatusRollupView } from '../models/BatchStatusRollupView.js';
+import { BatchSuppressedItem } from '../models/BatchSuppressedItem.js';
+import { BatchSuppressedResult } from '../models/BatchSuppressedResult.js';
+import { BatchView } from '../models/BatchView.js';
 import { ContactDueContact } from '../models/ContactDueContact.js';
 import { ContactDueData } from '../models/ContactDueData.js';
 import { ContactEngagementView } from '../models/ContactEngagementView.js';
@@ -54,6 +60,7 @@ import { DomainSendingFailedData } from '../models/DomainSendingFailedData.js';
 import { DomainSendingVerifiedData } from '../models/DomainSendingVerifiedData.js';
 import { DomainSuppressionAddedData } from '../models/DomainSuppressionAddedData.js';
 import { DomainView } from '../models/DomainView.js';
+import { DuplicateRecipientDetails } from '../models/DuplicateRecipientDetails.js';
 import { EmailBouncedData } from '../models/EmailBouncedData.js';
 import { EmailComplainedData } from '../models/EmailComplainedData.js';
 import { EmailDeliveredData } from '../models/EmailDeliveredData.js';
@@ -129,6 +136,8 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { SendBatchRequest } from '../models/SendBatchRequest.js';
+import { SendBatchResponse } from '../models/SendBatchResponse.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -142,6 +151,7 @@ import { TemplateView } from '../models/TemplateView.js';
 import { TestWebhookRequest } from '../models/TestWebhookRequest.js';
 import { TestWebhookResponse } from '../models/TestWebhookResponse.js';
 import { ThreatCategoryView } from '../models/ThreatCategoryView.js';
+import { TooManyMessagesDetails } from '../models/TooManyMessagesDetails.js';
 import { TooManyRecipientsDetails } from '../models/TooManyRecipientsDetails.js';
 import { UnsubscribeOptions } from '../models/UnsubscribeOptions.js';
 import { UpdateAgentRequest } from '../models/UpdateAgentRequest.js';
@@ -1926,6 +1936,16 @@ export interface MessagesApiGetAttachmentRequest {
     inline?: boolean
 }
 
+export interface MessagesApiGetBatchRequest {
+    /**
+     * The batch id, e.g. bat_abc123.
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApigetBatch
+     */
+    batchId: string
+}
+
 export interface MessagesApiGetMessageRequest {
     /**
      * The agent\&#39;s full email address.
@@ -2026,6 +2046,13 @@ export interface MessagesApiListMessagesRequest {
      * @memberof MessagesApilistMessages
      */
     conversationId?: string
+    /**
+     * Filter to the child messages of a batch send (docs/design/batch-send.md §7.2). Outbound only; pair with direction&#x3D;outbound. Exact match on the batch id, e.g. bat_abc123.
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApilistMessages
+     */
+    batchId?: string
     /**
      * Comma-separated list (e.g. labels&#x3D;urgent,follow-up); AND-matched — a message must carry every given label.
      * Defaults to: undefined
@@ -2131,6 +2158,29 @@ export interface MessagesApiRestoreMessageRequest {
      * @memberof MessagesApirestoreMessage
      */
     id: string
+}
+
+export interface MessagesApiSendBatchRequest {
+    /**
+     *
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApisendBatch
+     */
+    email: string
+    /**
+     *
+     * @type SendBatchRequest
+     * @memberof MessagesApisendBatch
+     */
+    sendBatchRequest: SendBatchRequest
+    /**
+     * Optional idempotency key for safe retries. Same semantics as single-send: 24h TTL, path+body hash, replay returns the cached 202 verbatim (409 in-flight, 422 mismatch).
+     * Defaults to: undefined
+     * @type string
+     * @memberof MessagesApisendBatch
+     */
+    idempotencyKey?: string
 }
 
 export interface MessagesApiSendMessageRequest {
@@ -2266,6 +2316,24 @@ export class ObjectMessagesApi {
     }
 
     /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param param the request object
+     */
+    public getBatchWithHttpInfo(param: MessagesApiGetBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<BatchView>> {
+        return this.api.getBatchWithHttpInfo(param.batchId,  options).toPromise();
+    }
+
+    /**
+     * Returns the batch header (counts + the list of items dropped by the suppression filter at accept time) plus a live rollup of the batch\'s child messages by delivery status. The rollup is computed on read from the messages table — poll it after a batch send to watch delivery progress. For per-recipient detail beyond the aggregate, use GET /v1/messages?batch_id={batch_id}. Account-scoped: a batch owned by another account returns 404 not_found.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Get a batch\'s header and delivery-status rollup (beta)
+     * @param param the request object
+     */
+    public getBatch(param: MessagesApiGetBatchRequest, options?: ConfigurationOptions): Promise<BatchView> {
+        return this.api.getBatch(param.batchId,  options).toPromise();
+    }
+
+    /**
      * Fetch a single message (inbound or outbound) by id, scoped to an agent the caller owns. A trashed message remains readable by this direct GET and includes deleted_at until it is permanently purged (30 days after deletion by default, deployment-configurable); ordinary lists, conversations, reply targets, and forward targets exclude it. Includes the raw message and canonical inbound authentication evidence. Fetching an unread inbound message marks it read as a side effect.
      * Get a message
      * @param param the request object
@@ -2307,7 +2375,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessagesWithHttpInfo(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<HttpInfo<PageMessageSummaryView>> {
-        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
+        return this.api.listMessagesWithHttpInfo(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.batchId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
     }
 
     /**
@@ -2316,7 +2384,7 @@ export class ObjectMessagesApi {
      * @param param the request object
      */
     public listMessages(param: MessagesApiListMessagesRequest, options?: ConfigurationOptions): Promise<PageMessageSummaryView> {
-        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
+        return this.api.listMessages(param.email, param.direction, param.readStatus, param.sort, param.from_, param.subjectContains, param.conversationId, param.batchId, param.labels, param.since, param.until, param.cursor, param.limit, param.deleted, param.filter,  options).toPromise();
     }
 
     /**
@@ -2353,6 +2421,24 @@ export class ObjectMessagesApi {
      */
     public restoreMessage(param: MessagesApiRestoreMessageRequest, options?: ConfigurationOptions): Promise<MessageView> {
         return this.api.restoreMessage(param.email, param.id,  options).toPromise();
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param param the request object
+     */
+    public sendBatchWithHttpInfo(param: MessagesApiSendBatchRequest, options?: ConfigurationOptions): Promise<HttpInfo<SendBatchResponse>> {
+        return this.api.sendBatchWithHttpInfo(param.email, param.sendBatchRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Fan out N independent emails in one API call. Each `messages[i]` item is a full send request in its own right (to/subject/body/template/attachments/reply_to) — the batch endpoint is essentially single-send in a loop, sharing rate-limit reservation and idempotency across all N items. Response `results[]` is positionally aligned with the input `messages[]`; each slot is either `{message_id}` (accepted) or `{suppressed: {address, reason}}` (dropped because a recipient was on this account\'s suppression list). See docs/design/batch-send.md for the full contract.  MVP restrictions: HITL-enabled agents are refused with 403 `batch_hitl_unsupported` (§5.1); per-item content override is native (each item carries its own body or template_data); attachments are per-item with a 25 MiB batch-wide combined cap (§14 Q15); rate limits count as N sends (§4.2); duplicate recipients across items are rejected (§14 Q11). All error responses include `details.item_index` (or `details.item_indices`) to identify the offending item where relevant.  Aggregate size limit: the whole request body is capped at 60 MiB (payload_too_large 413) — the base-64/JSON-encoded sum of every item\'s content and attachments. This aggregate ceiling is separate from, and stricter in total than, the per-item body caps: a batch whose items are each schema-valid but whose combined body exceeds 60 MiB is rejected. Size requests against this ceiling and split an oversized batch across multiple calls.  Beta: the batch-send surface (both operations, the batch schemas, and the batch_id fields on stable event payloads) may change before it is declared stable.
+     * Send a batch of up to 100 emails (beta)
+     * @param param the request object
+     */
+    public sendBatch(param: MessagesApiSendBatchRequest, options?: ConfigurationOptions): Promise<SendBatchResponse> {
+        return this.api.sendBatch(param.email, param.sendBatchRequest, param.idempotencyKey,  options).toPromise();
     }
 
     /**

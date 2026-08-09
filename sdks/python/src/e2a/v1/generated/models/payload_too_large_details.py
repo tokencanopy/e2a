@@ -17,7 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
 from typing_extensions import Annotated
 from typing import Optional, Set
@@ -29,10 +29,11 @@ class PayloadTooLargeDetails(BaseModel):
     """ # noqa: E501
     actual_bytes: Annotated[int, Field(strict=True, ge=0)] = Field(description="Observed byte count. Exact when Content-Length or decoded content is available; for chunked request bodies this is the lower bound observed before rejection.")
     filename: Optional[StrictStr] = Field(default=None, description="Attachment filename when scope is attachment.")
+    item_index: Optional[StrictInt] = Field(default=None, description="For batch-send: the offending item's index in messages[]. Absent for single-send responses and for batch-wide scope violations.")
     max_bytes: Annotated[int, Field(strict=True, ge=1)] = Field(description="Maximum bytes accepted for this scope.")
-    scope: StrictStr = Field(description="Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body.")
+    scope: StrictStr = Field(description="Which byte budget was exceeded. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: composed_message, attachment, attachments_total, request_body, batch (batch-send total attachment bytes across all items).")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["actual_bytes", "filename", "max_bytes", "scope"]
+    __properties: ClassVar[List[str]] = ["actual_bytes", "filename", "item_index", "max_bytes", "scope"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -94,6 +95,7 @@ class PayloadTooLargeDetails(BaseModel):
         _obj = cls.model_validate({
             "actual_bytes": obj.get("actual_bytes"),
             "filename": obj.get("filename"),
+            "item_index": obj.get("item_index"),
             "max_bytes": obj.get("max_bytes"),
             "scope": obj.get("scope")
         })

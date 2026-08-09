@@ -187,6 +187,43 @@ test("approveReview: approve a HITL-held outbound (200 terminal or 202 enqueued)
   assert.equal(ap.body?.status, ap.status === 202 ? "accepted" : "sent");
 });
 
+test("sendBatch + getBatch: accept a batch and read its header + rollup (2xx)", async () => {
+  // Batch send + batch read are only exercised here; the coverage gate records
+  // sendBatch/getBatch on a 2xx, so without this they'd read as UNCOVERED (the
+  // #774 failure mode). Two independent items to the simulator so both accept.
+  const email = await freshAgent("covbatch");
+  const send = await client.post<{
+    batch_id: string;
+    accepted: number;
+    suppressed_count: number;
+    results: Array<{ status: string; message_id?: string }>;
+  }>(`/v1/agents/${encodeURIComponent(email)}/batches`, {
+    body: {
+      messages: [
+        { to: [SIMULATOR], subject: uniqueSubject("cov batch 1"), text: "batch coverage item one" },
+        { to: [SIMULATOR], subject: uniqueSubject("cov batch 2"), text: "batch coverage item two" },
+      ],
+    },
+    expect: [200, 202],
+  });
+  const batchId = send.body!.batch_id;
+  assert.ok(batchId, "send_batch returned a batch id");
+  assert.equal(send.body?.accepted, 2, "both items accepted");
+  assert.equal(send.body?.results?.length, 2, "results are positionally aligned to the 2 items");
+  assert.equal(send.body?.results?.[0]?.status, "accepted");
+
+  const view = await client.get<{
+    batch_id: string;
+    requested: number;
+    accepted: number;
+    status_rollup: Record<string, number>;
+  }>(`/v1/batches/${encodeURIComponent(batchId)}`, { expect: 200 });
+  assert.equal(view.body?.batch_id, batchId, "getBatch returns the same batch id");
+  assert.equal(view.body?.requested, 2);
+  assert.equal(view.body?.accepted, 2);
+  assert.ok(view.body?.status_rollup, "batch view carries a live status rollup");
+});
+
 after(async () => {
   await cleanup(client);
   await writeReport(`./reports/${SUITE}.json`);

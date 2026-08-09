@@ -28,10 +28,14 @@ import (
 // whole river.Client — keeps the store/agent layer testable with a fake and River
 // swappable. Insert enqueues immediately; InsertTx enqueues WITHIN the caller's
 // transaction (the outbox pattern: the job commits atomically with the business
-// write and can never be lost). *river.Client[pgx.Tx] satisfies this directly.
+// write and can never be lost). InsertManyTx enqueues N jobs in one round-trip
+// within the caller's tx — used by batch-send accept-tx (docs/design/batch-send.md
+// §9 step 10.d) to enqueue up to 100 outbound_send jobs atomically with the
+// batches + messages inserts. *river.Client[pgx.Tx] satisfies all three directly.
 type Enqueuer interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
 	InsertTx(ctx context.Context, tx pgx.Tx, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
+	InsertManyTx(ctx context.Context, tx pgx.Tx, params []river.InsertManyParams) ([]*rivertype.JobInsertResult, error)
 }
 
 // Registrar is what each domain implements to contribute its jobs to the shared

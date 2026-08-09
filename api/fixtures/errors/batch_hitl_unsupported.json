@@ -1,0 +1,1 @@
+{"error":{"code":"batch_hitl_unsupported","message":"batch send is not available for agents with HITL enabled","request_id":"req_fixture"}}

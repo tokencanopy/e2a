@@ -133,3 +133,45 @@ func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, a
 	}
 	return res.Job.ID, nil
 }
+
+// EnqueueBatchTx enqueues N outbound_send jobs in one round-trip WITHIN the
+// caller's transaction — the batch-send analog of EnqueueSendTx. Returns
+// the enqueued river_job ids in the same order as messageIDs, so the
+// caller can stamp messages.send_job_id per row without additional lookup.
+//
+// Same outbox semantics as EnqueueSendTx: the batch's messages inserts and
+// these jobs commit together, so no `accepted` batch child can exist
+// without its job (and vice versa). Uses river.InsertManyTx for one
+// round-trip regardless of N, which is why the batches accept-tx budget
+// (docs/design/batch-send.md §12 load-smoke, <100ms at N=100) is
+// realistic — the N grows the batch INSERT and the job INSERT but not the
+// round-trip count.
+//
+// An empty messageIDs slice is a no-op — returns (nil, nil). Callers
+// generally guard against this at the accept-tx site (an all-suppressed
+// batch skips the enqueue entirely) but the defence is here too so the
+// call is safe to make unconditionally.
+func (j *Jobs) EnqueueBatchTx(ctx context.Context, tx pgx.Tx, messageIDs []string) ([]int64, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	params := make([]river.InsertManyParams, len(messageIDs))
+	for i, id := range messageIDs {
+		params[i] = river.InsertManyParams{
+			Args: OutboundSendArgs{MessageID: id},
+			InsertOpts: &river.InsertOpts{
+				Queue:       jobs.QueueOutbound,
+				MaxAttempts: MaxSendAttempts,
+			},
+		}
+	}
+	results, err := j.enq.InsertManyTx(ctx, tx, params)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, len(results))
+	for i, r := range results {
+		ids[i] = r.Job.ID
+	}
+	return ids, nil
+}

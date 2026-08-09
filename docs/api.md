@@ -304,6 +304,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `unauthorized` | 401 | Missing or invalid credentials (REST and the WebSocket handshake). |
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
+| `batch_hitl_unsupported` | 403 | Batch send refused because the agent has HITL enabled (`outbound.gate.action=review` or `outbound.scan.sensitivity != off`). Use single-send per recipient or disable HITL on the agent. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -311,6 +312,8 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `invalid_domain`, `invalid_slug`, `invalid_recipient`, `invalid_attachment`, `invalid_template`, `invalid_event_type`, `invalid_webhook_url`, `invalid_expires_at`, `invalid_scope` | 400 | Field/resource-specific refinements of `invalid_request`. |
 | `reserved_domain` | 400 | The domain is reserved by the deployment (e.g. the shared domain). |
 | `too_many_recipients` | 400 | Send/reply/forward recipient count over the cap. |
+| `too_many_messages` | 400 | Batch-send `messages[]` count over the per-request cap (100). Distinct from `too_many_recipients` which caps recipients within one message. |
+| `duplicate_recipient` | 400 | Batch-send: the same recipient address appears in the `to` set of more than one item. Deduplicate the input; e2a does NOT silently drop duplicates. |
 | `template_render_failed`, `template_rendered_empty` | 400 | Template send: rendering failed / produced an empty body. |
 | `recipient_suppressed` | 422 | A recipient is on the account-wide or exact sending-agent suppression list — un-suppress or drop it. |
 | **Not found / gone** | | |
@@ -405,6 +408,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `getAccountMetrics` | `GET /v1/metrics` | Delivery metrics |
 | `getAgentMetrics` | `GET /v1/agents/{email}/metrics` | Delivery metrics |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
+| `getBatch` | `GET /v1/batches/{batch_id}` | Batch send |
 | `getContact` | `GET /v1/contacts/{address}` | Contacts |
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
@@ -420,6 +424,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `listTemplates` | `GET /v1/templates` | Templates |
 | `putAgentProtection` | `PUT /v1/agents/{email}/protection` | Protection config |
 | `rejectReview` | `POST /v1/reviews/{id}/reject` | Reviews |
+| `sendBatch` | `POST /v1/agents/{email}/batches` | Batch send |
 | `updateContact` | `PATCH /v1/contacts/{address}` | Contacts |
 | `updateTemplate` | `PATCH /v1/templates/{id}` | Templates |
 | `upsertEngagement` | `PUT /v1/agents/{email}/contacts/{address}` | Contacts |
