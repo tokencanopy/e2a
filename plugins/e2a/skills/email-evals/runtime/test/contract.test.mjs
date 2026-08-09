@@ -69,6 +69,14 @@ test("complete references resolve in IDs, enums, policies, and nested attachment
   assert.equal(suite.cases[0].expect.attachments.exactly[0].filename, "synthetic.txt");
 });
 
+test("empty attachment expectation mappings are rejected instead of becoming count-only", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-attachment-"));
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:", "  action: { kind: none, count: 0 }", "  attachments:", "    exactly: [{}]", "",
+  ].join("\n") });
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.errorClass === "configuration_error" && error.code === "invalid_attachment_expectation");
+});
+
 for (const [field, source] of [
   ["id", "id: bad-${E2A_CASE_ID}"],
   ["enum", "expect:\n  action:\n    kind: reply-${E2A_ACTION}\n    count: 1"],

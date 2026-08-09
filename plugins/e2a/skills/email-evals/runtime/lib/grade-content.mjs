@@ -29,7 +29,10 @@ function hasCapability(evidence, capability) {
 }
 
 function aggregate(id, expected, candidates, evaluate, extraRefs = []) {
-  const byRef = candidates.map((candidate) => ({ ref: typeof candidate.ref === "string" ? candidate.ref : null, actual: evaluate(candidate) }));
+  const byRef = candidates
+    .map((candidate) => ({ ref: typeof candidate.ref === "string" ? candidate.ref : null, actual: evaluate(candidate) }))
+    .sort((left, right) => String(left.ref ?? "").localeCompare(String(right.ref ?? ""))
+      || canonical(left.actual).localeCompare(canonical(right.actual)));
   const highest = Math.max(...byRef.map((entry) => STATUS_WEIGHT[entry.actual.status] ?? 2));
   const selected = byRef
     .filter((entry) => (STATUS_WEIGHT[entry.actual.status] ?? 2) === highest)
@@ -45,10 +48,9 @@ function mimeOf(candidate) {
 
 function threadToken(value) {
   if (typeof value !== "string" || /[\r\n\u0000-\u001F\u007F]/.test(value)) return null;
-  const match = value.match(/<([^<>\s\u0000-\u001F\u007F]+)>/);
+  const match = /(?:^|[ \t])<([^<>\s\u0000-\u001F\u007F]+)>(?=$|[ \t])/.exec(value);
   if (match) return match[1];
-  const token = value.trim().split(/[ \t]+/, 1)[0];
-  return token && !/[<>\s]/.test(token) ? token : null;
+  return /[<>\s]/.test(value) ? null : value;
 }
 
 function stripReplyPrefixes(subject) {
@@ -74,7 +76,11 @@ function compileRegex(value) {
 
 function expectedAttachments(value) {
   if (!Array.isArray(value)) return null;
-  return value.map((entry) => typeof entry === "string" ? { filename: entry } : entry && typeof entry === "object" ? entry : null);
+  return value.map((entry) => {
+    if (typeof entry === "string") return entry.length > 0 ? { filename: entry } : null;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).length === 0) return null;
+    return entry;
+  });
 }
 
 function normalizedAttachments(value) {
@@ -98,15 +104,46 @@ function attachmentMatch(expected, actual) {
 
 function timestamp(value) {
   if (typeof value !== "string") return { error: "missing_timing_evidence" };
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? { milliseconds } : { error: "invalid_timestamp" };
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) return { error: "invalid_timestamp" };
+  const [year, month, day, hour, minute, second, millisecond = "0", zone] = match.slice(1);
+  const values = [year, month, day, hour, minute, second, millisecond].map(Number);
+  if (values.some((entry) => !Number.isSafeInteger(entry))) return { error: "invalid_timestamp" };
+  const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber, millisecondNumber] = values;
+  if (monthNumber < 1 || monthNumber > 12 || dayNumber < 1 || hourNumber > 23 || minuteNumber > 59 || secondNumber > 59 || millisecondNumber > 999) return { error: "invalid_timestamp" };
+  const local = new Date(0);
+  local.setUTCFullYear(yearNumber, monthNumber - 1, dayNumber);
+  local.setUTCHours(hourNumber, minuteNumber, secondNumber, millisecondNumber);
+  if (local.getUTCFullYear() !== yearNumber || local.getUTCMonth() !== monthNumber - 1 || local.getUTCDate() !== dayNumber
+    || local.getUTCHours() !== hourNumber || local.getUTCMinutes() !== minuteNumber || local.getUTCSeconds() !== secondNumber
+    || local.getUTCMilliseconds() !== millisecondNumber) return { error: "invalid_timestamp" };
+  let offsetMinutes = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "+" ? 1 : -1;
+    const offsetHour = Number(zone.slice(1, 3));
+    const offsetMinute = Number(zone.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return { error: "invalid_timestamp" };
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const milliseconds = local.getTime() - offsetMinutes * 60_000;
+  return Number.isSafeInteger(milliseconds) && Number.isFinite(milliseconds) ? { milliseconds } : { error: "invalid_timestamp" };
 }
 
-function receiptState(evidence) {
+function receiptState(evidence, candidates) {
   if (!Object.hasOwn(evidence ?? {}, "actorReceipt")) return { status: "error", code: "missing_actor_receipt_evidence", actual: null, refs: [] };
   const receipt = evidence.actorReceipt;
-  if (receipt === true || (receipt && typeof receipt === "object")) return { status: "pass", code: "matched", actual: true, refs: receipt?.ref ? [receipt.ref] : [] };
-  return { status: "fail", code: "actor_receipt_missing", actual: false, refs: [] };
+  if (receipt === null) return { status: "valid", present: false, actual: false, refs: [] };
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+    || typeof receipt.ref !== "string" || receipt.ref.length === 0
+    || typeof receipt.messageId !== "string" || receipt.messageId.length === 0) {
+    return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [] };
+  }
+  if (timestamp(receipt.observedAt).error) return { status: "error", code: "invalid_actor_receipt_evidence", actual: null, refs: [receipt.ref] };
+  const candidateIds = candidates.map((candidate) => candidate.messageId).filter((value) => typeof value === "string" && value.length > 0);
+  if (candidateIds.length === 0 || !candidateIds.includes(receipt.messageId)) {
+    return { status: "fail", code: "unexpected_actor_receipt", actual: { messageId: receipt.messageId }, refs: [receipt.ref] };
+  }
+  return { status: "valid", present: true, actual: { messageId: receipt.messageId }, refs: [receipt.ref] };
 }
 
 /** Grade normalized MIME/content evidence without retaining raw MIME. */
@@ -203,22 +240,27 @@ export function gradeContent(expectation = {}, evidence = {}) {
         if (body[key] !== undefined) results.push(result(id, "error", "missing_raw_mime_evidence", body[key], null, candidates));
       }
     } else {
-      const text = (candidate) => typeof mimeOf(candidate)?.text === "string" ? { value: mimeOf(candidate).text } : { error: { status: "error", code: "missing_plain_text_evidence", actual: null } };
+      const text = (candidate) => {
+        const mime = mimeOf(candidate);
+        if (!mime || !Object.hasOwn(mime, "text")) return { error: { status: "error", code: "missing_plain_text_evidence", actual: null } };
+        if (mime.text !== null && typeof mime.text !== "string") return { error: { status: "error", code: "invalid_plain_text_evidence", actual: null } };
+        return { value: mime.text };
+      };
       if (body.requiredFacts !== undefined) results.push(aggregate("body.required_facts", body.requiredFacts, candidates, (candidate) => {
         const found = text(candidate); if (found.error) return found.error;
-        const missing = body.requiredFacts.filter((fact) => !found.value.includes(fact));
+        const missing = found.value === null ? [...body.requiredFacts] : body.requiredFacts.filter((fact) => !found.value.includes(fact));
         return { status: missing.length === 0 ? "pass" : "fail", code: missing.length === 0 ? "matched" : "required_fact_missing", actual: { missing } };
       }));
       if (body.forbiddenPatterns !== undefined) results.push(aggregate("body.forbidden_patterns", body.forbiddenPatterns, candidates, (candidate) => {
         const found = text(candidate); if (found.error) return found.error;
         const patterns = body.forbiddenPatternRegexes ?? body.forbiddenPatterns.map((pattern) => compileRegex(pattern));
         if (patterns.some((pattern) => !pattern)) return { status: "error", code: "invalid_forbidden_pattern", actual: null };
-        const matched = patterns.map((pattern, index) => ({ pattern: body.forbiddenPatterns[index], matched: pattern.test(found.value) })).filter((entry) => entry.matched).map((entry) => entry.pattern);
+        const matched = found.value === null ? [] : patterns.map((pattern, index) => ({ pattern: body.forbiddenPatterns[index], matched: pattern.test(found.value) })).filter((entry) => entry.matched).map((entry) => entry.pattern);
         return { status: matched.length === 0 ? "pass" : "fail", code: matched.length === 0 ? "matched" : "forbidden_pattern_matched", actual: { matched } };
       }));
       if (body.plainText !== undefined) results.push(aggregate("body.plain_text", body.plainText, candidates, (candidate) => {
-        const value = mimeOf(candidate)?.text;
-        const present = typeof value === "string" && value.length > 0;
+        const found = text(candidate); if (found.error) return found.error;
+        const present = typeof found.value === "string" && found.value.length > 0;
         const passes = body.plainText === "required" ? present : !present;
         return { status: passes ? "pass" : "fail", code: passes ? "matched" : body.plainText === "required" ? "plain_text_required" : "plain_text_forbidden", actual: present };
       }));
@@ -235,7 +277,7 @@ export function gradeContent(expectation = {}, evidence = {}) {
     else {
       const expected = expectedAttachments(expectation.attachments.exactly);
       results.push(aggregate("attachments.exactly", expectation.attachments.exactly, candidates, (candidate) => {
-        if (!expected) return { status: "error", code: "invalid_attachment_expectation", actual: null };
+        if (!expected || expected.some((entry) => entry === null)) return { status: "error", code: "invalid_attachment_expectation", actual: null };
         return attachmentMatch(expected, normalizedAttachments(mimeOf(candidate)?.attachments));
       }));
     }
@@ -258,14 +300,22 @@ export function gradeContent(expectation = {}, evidence = {}) {
       if (lifecycle.actorReceived !== undefined) results.push(result("lifecycle.actor_received", "error", "missing_delivery_lifecycle_evidence", lifecycle.actorReceived, null, candidates));
     } else {
       if (lifecycle.submission !== undefined) results.push(aggregate("lifecycle.submission", lifecycle.submission, candidates, (candidate) => {
-        const actual = candidate.lifecycle?.submission ?? evidence.lifecycle?.submission;
-        if (typeof actual !== "string") return { status: "error", code: "missing_lifecycle_evidence", actual: null };
+        if (!candidate.lifecycle || typeof candidate.lifecycle !== "object" || Array.isArray(candidate.lifecycle) || !Object.hasOwn(candidate.lifecycle, "submission")) {
+          return { status: "error", code: "missing_lifecycle_evidence", actual: null };
+        }
+        const actual = candidate.lifecycle.submission;
+        if (typeof actual !== "string") return { status: "error", code: "invalid_lifecycle_evidence", actual: null };
         return { status: actual === lifecycle.submission ? "pass" : "fail", code: actual === lifecycle.submission ? "matched" : "submission_state_mismatch", actual };
       }));
       if (lifecycle.actorReceived !== undefined) {
-        const state = receiptState(evidence);
-        const passes = lifecycle.actorReceived ? state.status === "pass" : state.status === "fail";
-        results.push(result("lifecycle.actor_received", state.status === "error" ? "error" : passes ? "pass" : "fail", state.status === "error" ? state.code : passes ? "matched" : state.code, lifecycle.actorReceived, state.actual, candidates, state.refs));
+        const state = receiptState(evidence, candidates);
+        let status;
+        let code;
+        if (state.status === "error") ({ status, code } = state);
+        else if (state.status === "fail") ({ status, code } = state);
+        else if (state.present === lifecycle.actorReceived) ({ status, code } = { status: "pass", code: "matched" });
+        else ({ status, code } = { status: "fail", code: lifecycle.actorReceived ? "actor_receipt_missing" : "unexpected_actor_receipt" });
+        results.push(result("lifecycle.actor_received", status, code, lifecycle.actorReceived, state.actual, candidates, state.refs));
       }
     }
   }

@@ -327,6 +327,9 @@ function normalizeCase(rawCase, environment, casePath) {
         continue;
       }
       const object = allowedObject(attachment, attachmentKeys, `/expect/attachments/exactly/${index}`);
+      if (Object.keys(object).length === 0) {
+        throw configurationError("invalid_attachment_expectation", "Attachment expectations must name at least one metadata field", `/expect/attachments/exactly/${index}`);
+      }
       const normalized = {};
       const normalizedCanonical = {};
       for (const [rawKey, normalizedKey] of [["filename", "filename"], ["content_type", "contentType"], ["disposition", "disposition"], ["sha256", "sha256"]]) {

@@ -4,7 +4,7 @@ import { EvalError } from "./errors.mjs";
 
 const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const MESSAGE_ID_TOKEN = /<([^<>\s\u0000-\u001F\u007F]+)>/g;
+const MESSAGE_ID_TOKEN = /(?:^|[ \t])<([^<>\s\u0000-\u001F\u007F]+)>(?=$|[ \t])/g;
 
 function graderError(code, message) {
   return new EvalError("grader_error", code, message);
@@ -33,9 +33,7 @@ function safeToken(value) {
   if (typeof value !== "string" || /[\r\n\u0000-\u001F\u007F]/.test(value)) return null;
   MESSAGE_ID_TOKEN.lastIndex = 0;
   const bracketed = MESSAGE_ID_TOKEN.exec(value);
-  if (bracketed) return bracketed[1];
-  const token = value.trim().split(/[ \t]+/, 1)[0];
-  return token && !/[<>\s]/.test(token) ? token : null;
+  return bracketed?.[1] ?? null;
 }
 
 function referenceTokens(value) {

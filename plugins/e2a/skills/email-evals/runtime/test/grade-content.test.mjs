@@ -5,6 +5,7 @@ import { gradeContent } from "../lib/grade-content.mjs";
 function candidate(overrides = {}) {
   return {
     ref: "evt_synthetic_reply",
+    messageId: "msg_synthetic_reply",
     conversationId: "conv_synthetic",
     observedAt: "2026-08-08T12:00:04.000Z",
     mime: {
@@ -31,7 +32,7 @@ function evidence(overrides = {}) {
       receivedAt: "2026-08-08T12:00:00.000Z",
     },
     candidates: [candidate()],
-    actorReceipt: { ref: "evt_synthetic_actor_receipt", receivedAt: "2026-08-08T12:00:05.000Z" },
+    actorReceipt: { ref: "evt_synthetic_actor_receipt", messageId: "msg_synthetic_reply", observedAt: "2026-08-08T12:00:05.000Z" },
     ...overrides,
   };
 }
@@ -62,6 +63,16 @@ test("content grading checks original RFC Message-ID and conversation together",
   assertResult(results, "thread.in_reply_to", "fail", "wrong_in_reply_to");
   assertResult(results, "thread.references", "fail", "missing_original_reference");
   assertResult(results, "thread.conversation", "fail", "wrong_conversation");
+});
+
+test("fused and punctuation-prefixed thread tokens cannot satisfy thread assertions", () => {
+  const results = gradeContent(expectation(), evidence({ candidates: [candidate({ mime: {
+    ...candidate().mime,
+    inReplyTo: "junk<original@agents.localhost>",
+    references: ["prefix<original@agents.localhost>", ",<original@agents.localhost>"],
+  } })] }));
+  assertResult(results, "thread.in_reply_to", "error", "missing_thread_header_evidence");
+  assertResult(results, "thread.references", "fail", "missing_original_reference");
 });
 
 test("subject policies preserve repeated reply prefixes and require forward prefixes", () => {
@@ -100,6 +111,8 @@ test("content grading checks ordered attachment metadata and explicit capabiliti
   assertResult(reversed, "attachments.exactly", "fail", "attachment_set_mismatch");
   const missingCapability = gradeContent(expectation(), evidence({ capabilities: ["thread_headers", "raw_mime"], candidates: [candidate({ mime: { ...candidate().mime, attachments: undefined } })] }));
   assertResult(missingCapability, "attachments.exactly", "error", "missing_attachment_hash_evidence");
+  const malformedExpectation = gradeContent(expectation({ attachments: { exactly: [{}] } }), evidence({ candidates: [candidate({ mime: { ...candidate().mime, attachments: [attachment] } })] }));
+  assertResult(malformedExpectation, "attachments.exactly", "error", "invalid_attachment_expectation");
 });
 
 test("literal Unicode facts and missing MIME fields stay deterministic", () => {
@@ -121,9 +134,48 @@ test("timing and lifecycle parse timestamps and fail closed on missing evidence"
   assertResult(lifecycle, "lifecycle.actor_received", "fail", "actor_receipt_missing");
 });
 
+test("timing accepts only calendar-valid timezone-qualified instants", () => {
+  const validOffset = gradeContent(expectation(), evidence({ candidates: [candidate({ observedAt: "2026-08-08T05:00:04-07:00" })] }));
+  assertResult(validOffset, "timing.reply_within", "pass");
+  for (const observedAt of ["2026-08-08T12:00:04", "2026-02-30T12:00:04Z", "2026-8-08T12:00:04Z"]) {
+    assertResult(gradeContent(expectation(), evidence({ candidates: [candidate({ observedAt })] })), "timing.reply_within", "error", "invalid_timestamp");
+  }
+});
+
+test("lifecycle requires per-candidate submission and a complete matching actor receipt", () => {
+  const globalFallback = gradeContent(expectation(), evidence({ lifecycle: { submission: "sent" }, candidates: [candidate(), candidate({ ref: "evt_synthetic_missing_lifecycle", messageId: "msg_synthetic_missing_lifecycle", lifecycle: undefined })] }));
+  assertResult(globalFallback, "lifecycle.submission", "error", "missing_lifecycle_evidence");
+  assert.equal(globalFallback.find((entry) => entry.id === "lifecycle.submission").actual.byRef.length, 2);
+  const malformedLifecycle = gradeContent(expectation(), evidence({ candidates: [candidate({ lifecycle: { submission: 9 } })] }));
+  assertResult(malformedLifecycle, "lifecycle.submission", "error", "invalid_lifecycle_evidence");
+  const malformedReceipt = gradeContent(expectation(), evidence({ actorReceipt: {}, candidates: [candidate()] }));
+  assertResult(malformedReceipt, "lifecycle.actor_received", "error", "invalid_actor_receipt_evidence");
+  const wrongReceipt = gradeContent(expectation(), evidence({ actorReceipt: { ref: "evt_synthetic_actor_receipt", messageId: "msg_other", observedAt: "2026-08-08T12:00:05.000Z" } }));
+  assertResult(wrongReceipt, "lifecycle.actor_received", "fail", "unexpected_actor_receipt");
+  const unexpectedReceipt = gradeContent(expectation({ lifecycle: { submission: "sent", actorReceived: false } }), evidence());
+  assertResult(unexpectedReceipt, "lifecycle.actor_received", "fail", "unexpected_actor_receipt");
+});
+
+test("plain-text forbidden requires normalized evidence but accepts explicit null", () => {
+  const forbidden = expectation({ body: { plainText: "forbidden" } });
+  assertResult(gradeContent(forbidden, evidence({ candidates: [candidate({ mime: { ...candidate().mime, text: null } })] })), "body.plain_text", "pass");
+  const missing = candidate({ mime: { ...candidate().mime } });
+  delete missing.mime.text;
+  assertResult(gradeContent(forbidden, evidence({ candidates: [missing] })), "body.plain_text", "error", "missing_plain_text_evidence");
+  assertResult(gradeContent(forbidden, evidence({ candidates: [candidate({ mime: { ...candidate().mime, text: {} } })] })), "body.plain_text", "error", "invalid_plain_text_evidence");
+});
+
 test("all correlated candidates are graded and no candidate produces no assertions", () => {
   const results = gradeContent(expectation(), evidence({ candidates: [candidate(), candidate({ ref: "evt_synthetic_second", mime: { ...candidate().mime, text: "missing fact" } })] }));
   assertResult(results, "body.required_facts", "fail", "required_fact_missing");
   assert.deepEqual(results.find((entry) => entry.id === "body.required_facts").evidenceRefs, ["evt_synthetic_reply", "evt_synthetic_second"]);
   assert.deepEqual(gradeContent(expectation(), evidence({ candidates: [] })), []);
+});
+
+test("aggregate diagnostics are independent of candidate input ordering", () => {
+  const first = candidate({ ref: "evt_z", mime: { ...candidate().mime, text: "missing" } });
+  const second = candidate({ ref: "evt_a", mime: { ...candidate().mime, text: "also missing" } });
+  const forward = gradeContent(expectation(), evidence({ candidates: [first, second] }));
+  const reversed = gradeContent(expectation(), evidence({ candidates: [second, first] }));
+  assert.deepEqual(forward.find((entry) => entry.id === "body.required_facts").actual, reversed.find((entry) => entry.id === "body.required_facts").actual);
 });

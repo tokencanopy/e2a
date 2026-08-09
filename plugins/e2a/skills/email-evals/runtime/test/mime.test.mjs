@@ -40,3 +40,16 @@ test("parseMimeEvidence keeps injected headers separate and selects only safe fi
   assert.deepEqual(parsed.references, ["root@agents.localhost", "first@agents.localhost", "second@agents.localhost"]);
   assert.doesNotMatch(JSON.stringify(parsed), /injected@agents\.localhost/);
 });
+
+test("parseMimeEvidence rejects fused and punctuation-prefixed thread tokens", async () => {
+  const raw = [
+    "Message-ID: junk<message@agents.localhost>",
+    "In-Reply-To: prefix<original@agents.localhost>",
+    "References: junk<original@agents.localhost> ,<punctuation@agents.localhost> <valid@agents.localhost>",
+    "Content-Type: text/plain; charset=utf-8", "", "Synthetic body.", "",
+  ].join("\r\n");
+  const parsed = await parseMimeEvidence(Buffer.from(raw, "utf8").toString("base64"));
+  assert.equal(parsed.messageId, null);
+  assert.equal(parsed.inReplyTo, null);
+  assert.deepEqual(parsed.references, ["valid@agents.localhost"]);
+});
