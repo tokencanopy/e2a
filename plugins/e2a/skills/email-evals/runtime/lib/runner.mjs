@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
-import { assertEvalIdentifierLength, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
+import { assertEvalIdentifier, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
 import {
   EVAL_ERROR_CODE_REGISTRY,
   EvalError,
@@ -44,6 +44,7 @@ const SECONDARY_CODES = new Set([
   "on_case_failed", "path_outside_output", "reporting_failed", "run_directory_changed", "run_directory_exists",
   "serialization_failed", "symlink_path", "writer_closed",
 ]);
+const GRADER_BOUNDARIES = new Set(["core", "content"]);
 
 function invalidEvidence() {
   throw new TypeError("invalid evidence");
@@ -368,9 +369,9 @@ function validateSuite(suite) {
     || suite.cases.some((testCase) => !testCase || typeof testCase !== "object" || typeof testCase.id !== "string")) {
     throw new EvalError("configuration_error", "invalid_suite", "Resolved evaluation suite is invalid");
   }
-  assertEvalIdentifierLength(suite.name, "suiteNameBytes", "/name");
+  assertEvalIdentifier(suite.name, "suiteNameBytes", "/name");
   suite.cases.forEach((testCase, index) => {
-    assertEvalIdentifierLength(testCase.id, "caseIdBytes", `/cases/${index}/id`);
+    assertEvalIdentifier(testCase.id, "caseIdBytes", `/cases/${index}/id`);
   });
 }
 
@@ -389,12 +390,33 @@ function normalizePreflightError(error) {
   return new EvalError("configuration_error", "preflight_failed", "Evaluation preflight did not complete safely");
 }
 
-function primaryEvalError(errorClass, code, message, origin) {
+function primaryEvalError(errorClass, code, message, origin, boundary) {
   if (!isStableEvalErrorOrigin(errorClass, code, origin)) {
     throw new TypeError("Invalid primary evaluation error contract");
   }
+  if (boundary !== undefined && !GRADER_BOUNDARIES.has(boundary)) {
+    throw new TypeError("Invalid grader boundary contract");
+  }
   const serialized = new EvalError(errorClass, code, message).toJSON();
-  return { class: serialized.class, code: serialized.code, origin, message: serialized.message };
+  return {
+    class: serialized.class, code: serialized.code, origin,
+    ...(boundary === undefined ? {} : { boundary }),
+    message: serialized.message,
+  };
+}
+
+function runGraders(expectation, evidence) {
+  let core;
+  try {
+    core = gradeCore(expectation, evidence);
+  } catch {
+    return { assertions: [], boundary: "core" };
+  }
+  try {
+    return { assertions: [...core, ...gradeContent(expectation, evidence)], boundary: null };
+  } catch {
+    return { assertions: [], boundary: "content" };
+  }
 }
 
 function adapterExecutionError(error) {
@@ -525,13 +547,15 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
 
   if (!error) {
     const gradingStart = laterInstant(now, executionEnd).value;
-    try {
-      const core = gradeCore(testCase.expect, evidence);
-      const content = gradeContent(testCase.expect, evidence);
-      assertions = [...core, ...content];
+    const graded = runGraders(testCase.expect, evidence);
+    if (graded.boundary === null) {
+      assertions = graded.assertions;
       ({ status, error } = classifyAssertions(assertions));
-    } catch {
-      error = primaryEvalError("grader_error", "grader_threw", "A deterministic grader threw while evaluating captured evidence", "grader");
+    } else {
+      error = primaryEvalError(
+        "grader_error", "grader_threw",
+        "A deterministic grader threw while evaluating captured evidence", "grader", graded.boundary,
+      );
       status = "error";
     }
     const gradingEnd = laterInstant(now, gradingStart).value;
@@ -825,6 +849,21 @@ function restoreAliasValue(value, parentKey = "", forceAddress = false) {
   return result;
 }
 
+function trustedReplayExpectation(testCase, storedExpectation) {
+  const rebuilt = restoreAliasValue(storedExpectation);
+  const sourceBody = testCase?.expect?.body;
+  const targetBody = rebuilt?.body;
+  if (!sourceBody || !targetBody || !Array.isArray(targetBody.forbiddenPatterns)) return rebuilt;
+  const descriptor = Object.getOwnPropertyDescriptor(sourceBody, "forbiddenPatternRegexes");
+  if (descriptor && !descriptor.enumerable && Object.hasOwn(descriptor, "value")
+    && Array.isArray(descriptor.value) && descriptor.value.length === targetBody.forbiddenPatterns.length) {
+    // This state comes only from the caller-provided trusted resolved suite.
+    // Stored artifacts can neither supply nor override executable grader state.
+    Object.defineProperty(targetBody, "forbiddenPatternRegexes", { value: descriptor.value });
+  }
+  return rebuilt;
+}
+
 function aliasSuiteFor(record, suite) {
   const probes = new Set();
   const serialized = JSON.stringify(record);
@@ -928,7 +967,7 @@ function projectStoredError(value, { secondary = false } = {}) {
   if (value === null && !secondary) return null;
   const allowed = secondary
     ? new Set(["stage", "class", "code", "message"])
-    : new Set(["class", "code", "origin", "message"]);
+    : new Set(["class", "code", "origin", "boundary", "message"]);
   const source = exactCaseObject(value, allowed);
   const result = {};
   if (secondary) {
@@ -939,6 +978,7 @@ function projectStoredError(value, { secondary = false } = {}) {
   if (!secondary) {
     if (!Object.hasOwn(source, "origin")) invalidCaseArtifact();
     result.origin = safeStoredIdentifier(source.origin);
+    if (Object.hasOwn(source, "boundary")) result.boundary = safeStoredIdentifier(source.boundary);
   }
   if (!Object.hasOwn(source, "code") || !Object.hasOwn(source, "message")) invalidCaseArtifact();
   result.code = safeStoredIdentifier(source.code);
@@ -1050,6 +1090,9 @@ function validateStoredRecord(record, suite, testCase) {
   if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
   if (primaryError && (!isStableEvalErrorCode(primaryError.class, primaryError.code)
     || !isStableEvalErrorOrigin(primaryError.class, primaryError.code, primaryError.origin))) invalidCaseArtifact();
+  if (primaryError?.class === "grader_error") {
+    if (!GRADER_BOUNDARIES.has(primaryError.boundary)) invalidCaseArtifact();
+  } else if (primaryError && Object.hasOwn(primaryError, "boundary")) invalidCaseArtifact();
   const allAssertionsPass = assertions.length > 0 && assertions.every((assertion) => assertion.status === "pass");
   if (evidence === null && assertions.length > 0) invalidCaseArtifact();
   if (primaryError === null) {
@@ -1076,16 +1119,10 @@ function validateStoredRecord(record, suite, testCase) {
       // crossed this boundary. Rebuild exclusively from the trusted suite
       // expectation and the closed evidence projection, then require the same
       // deterministic boundary to throw now. The stored message is never used.
-      const rebuiltExpectation = restoreAliasValue(expected);
+      const rebuiltExpectation = trustedReplayExpectation(testCase, expected);
       const rebuiltEvidence = restoreAliasValue(evidence);
-      let graderThrew = false;
-      try {
-        gradeCore(rebuiltExpectation, rebuiltEvidence);
-        gradeContent(rebuiltExpectation, rebuiltEvidence);
-      } catch {
-        graderThrew = true;
-      }
-      if (!graderThrew) invalidCaseArtifact();
+      const graded = runGraders(rebuiltExpectation, rebuiltEvidence);
+      if (graded.boundary !== primaryError.boundary) invalidCaseArtifact();
     } else {
       const classified = classifyAssertions(assertions);
       if (classified.status !== source.status || classified.error?.class !== primaryError.class
@@ -1230,22 +1267,26 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     if (compact) artifactLimitSuffix = true;
   }
 
-  const cases = validatedRecords.map((storedRecord) => {
+  const cases = validatedRecords.map((storedRecord, index) => {
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
       || storedRecord.primaryError?.class === "target_timeout"
       || storedRecord.primaryError?.class === "grader_error"
       || (storedRecord.primaryError?.class === "transport_error" && storedRecord.primaryError.origin !== "grader")) return storedRecord;
-    const expectation = restoreAliasValue(storedRecord.expectation);
+    const expectation = trustedReplayExpectation(suite.cases[index], storedRecord.expectation);
     const evidence = restoreAliasValue(storedRecord.evidence);
     let assertions = [];
     let status = "pass";
     let error = null;
-    try {
-      assertions = [...gradeCore(expectation, evidence), ...gradeContent(expectation, evidence)];
+    const graded = runGraders(expectation, evidence);
+    if (graded.boundary === null) {
+      assertions = graded.assertions;
       ({ status, error } = classifyAssertions(assertions));
-    } catch {
+    } else {
       status = "error";
-      error = primaryEvalError("grader_error", "grader_threw", "A deterministic grader threw while evaluating captured evidence", "grader");
+      error = primaryEvalError(
+        "grader_error", "grader_threw",
+        "A deterministic grader threw while evaluating captured evidence", "grader", graded.boundary,
+      );
     }
     return aliasCaseRecord({ ...storedRecord, status, expectation, evidence, assertions, primaryError: error }, aliasSuiteFor(storedRecord, suite));
   });

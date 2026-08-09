@@ -210,6 +210,7 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.equal(thrown.cases[0].primaryError.class, "grader_error");
   assert.equal(thrown.cases[0].primaryError.code, "grader_threw");
   assert.equal(thrown.cases[0].primaryError.origin, "grader");
+  assert.equal(thrown.cases[0].primaryError.boundary, "content");
   assert.ok(thrown.cases[0].evidence);
   assert.deepEqual(thrown.cases[0].assertions, []);
   const stored = (await readFile(thrown.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
@@ -229,11 +230,67 @@ test("regrade rejects a forged grader_threw over clean projected evidence", asyn
   records[0].status = "error";
   records[0].assertions = [];
   records[0].primaryError = {
-    class: "grader_error", code: "grader_threw", origin: "grader", message: "Forged grader failure",
+    class: "grader_error", code: "grader_threw", origin: "grader", boundary: "content", message: "Forged grader failure",
   };
   await writeFile(original.files.cases, `${records.map(JSON.stringify).join("\n")}\n`);
   await assert.rejects(
     regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+});
+
+test("loader-produced hidden grader state and its exact throwing boundary survive replay", async () => {
+  const fixtureRoot = await root();
+  await mkdir(path.join(fixtureRoot, "cases"));
+  await writeFile(path.join(fixtureRoot, "suite.yaml"), `
+version: 1
+name: hidden-grader-state
+target: { email: "${TARGET}" }
+actor: { email: "${ACTOR}" }
+transport:
+  adapter: e2a
+  api_key: "\${E2A_EVAL_API_KEY}"
+  base_url: https://api.example.test
+  allowed_envelope_recipients: ["${ACTOR}", "${TARGET}"]
+cases: [cases/hidden.yaml]
+`);
+  await writeFile(path.join(fixtureRoot, "cases/hidden.yaml"), `
+id: hidden-grader
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: reply, count: 1 }
+  sender: { exactly: "${TARGET}" }
+  recipients:
+    to: { exactly: ["${ACTOR}"] }
+    cc: { exactly: [] }
+    bcc: { exactly: [] }
+    envelope: { exactly: ["${ACTOR}"] }
+  body:
+    required_facts: [Synthetic answer]
+    forbidden_patterns: ["blocked-[0-9]+"]
+`);
+  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
+    E2A_EVAL_API_KEY: "synthetic-credential",
+  } });
+  const compiled = loaded.cases[0].expect.body.forbiddenPatternRegexes[0];
+  Object.defineProperty(compiled, "exec", {
+    configurable: true,
+    value() { throw new Error("Synthetic trusted compiled-state failure"); },
+  });
+
+  const original = await runSuite({ suite: loaded, adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+  assert.equal(original.cases[0].primaryError.code, "grader_threw");
+  assert.equal(original.cases[0].primaryError.boundary, "content");
+  assert.doesNotMatch(await readFile(original.files.cases, "utf8"), /forbiddenPatternRegexes|compiled-state failure/);
+
+  const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) });
+  assert.deepEqual(regraded.cases[0].primaryError, original.cases[0].primaryError);
+
+  const forgedBoundary = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  forgedBoundary[0].primaryError.boundary = "core";
+  await writeFile(original.files.cases, `${forgedBoundary.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) }),
     (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
   );
 });
@@ -256,7 +313,35 @@ test("direct run rejects oversized resolved identifiers before preflight or send
   }
 });
 
-test("identifier boundaries and quoted mailbox evidence survive live grading and regrade", async () => {
+test("direct suite and case identifiers use loader grammar before any side effect", async () => {
+  const probes = [
+    { suiteName: "safe\n# injected", caseId: "valid-case", code: "invalid_suite_name", pointer: "/name" },
+    { suiteName: "valid-suite", caseId: "safe\u0000id", code: "invalid_case_id", pointer: "/cases/0/id" },
+    { suiteName: `${"é".repeat(64)}a`, caseId: "valid-case", code: "identifier_too_long", pointer: "/name" },
+    { suiteName: "valid-suite", caseId: "é".repeat(64), code: "invalid_case_id", pointer: "/cases/0/id" },
+  ];
+  for (const probe of probes) {
+    const one = suite([{ id: probe.caseId, send: { subject: "Identifier", text: "Synthetic" }, expect: expectation("none") }]);
+    one.name = probe.suiteName;
+    const fake = adapter();
+    const outputRoot = await root();
+    await assert.rejects(
+      runSuite({ suite: one, adapter: fake, outputRoot, runId: RUN_ID }),
+      (error) => error.errorClass === "configuration_error" && error.code === probe.code
+        && error.details?.path === probe.pointer && Object.keys(error.details).length === 1,
+    );
+    await assert.rejects(
+      regradeRun({ suite: one, runDirectory: path.join(outputRoot, "missing-run") }),
+      (error) => error.errorClass === "configuration_error" && error.code === probe.code
+        && error.details?.path === probe.pointer && Object.keys(error.details).length === 1,
+    );
+    assert.equal(fake.calls.preflight, 0);
+    assert.equal(fake.calls.execute.length, 0);
+    assert.deepEqual(await readdir(outputRoot), []);
+  }
+});
+
+test("identifier boundaries and canonically equivalent quoted mailbox evidence survive live grading and regrade", async () => {
   const actor = '"a b"@example.com';
   const target = '"a@b"@example.com';
   const quotedExpectation = expectation();
@@ -273,11 +358,11 @@ test("identifier boundaries and quoted mailbox evidence survive live grading and
     adapter: adapter((testCase) => {
       const captured = evidence(testCase);
       captured.target.email = target;
-      captured.stimulus.participants = [`Actor Alias <${actor}>`];
+      captured.stimulus.participants = ['Actor Alias <"a\\ b"@EXAMPLE.COM> (comment)'];
       captured.candidates[0].from = `Target Alias <${target}>`;
       captured.candidates[0].sentAs = target;
-      captured.candidates[0].to = [`Actor Alias <${actor}>`];
-      captured.candidates[0].envelopeRecipients = [actor];
+      captured.candidates[0].to = ['Actor Alias <"a\\ b"@EXAMPLE.COM> (comment)'];
+      captured.candidates[0].envelopeRecipients = ['"a\\ b"@EXAMPLE.COM'];
       return captured;
     }),
     outputRoot: await root(), runId: RUN_ID,

@@ -339,6 +339,7 @@ function safeError(value, stage, patterns, sensitive) {
     ...(stage ? { stage } : {}),
     ...(typeof source.class === "string" ? { class: source.class } : {}),
     ...(typeof source.origin === "string" ? { origin: source.origin } : {}),
+    ...(typeof source.boundary === "string" ? { boundary: source.boundary } : {}),
     code: typeof source.code === "string" ? source.code : "operation_failed",
     message: typeof source.message === "string" ? source.message : "Evaluation operation failed",
     ...(source.details && typeof source.details === "object" ? { details: source.details } : {}),

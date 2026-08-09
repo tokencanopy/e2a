@@ -78,6 +78,35 @@ export class NormalizationError extends Error {
   }
 }
 
+function consumeCfws(value, start = 0) {
+  let cursor = start;
+  while (cursor < value.length) {
+    if (value[cursor] === " " || value[cursor] === "\t") {
+      cursor += 1;
+      continue;
+    }
+    if (value[cursor] !== "(") break;
+    let depth = 1;
+    let escaped = false;
+    cursor += 1;
+    while (cursor < value.length && depth > 0) {
+      const character = value[cursor];
+      if ((character.charCodeAt(0) <= 0x1f && character !== "\t") || character.charCodeAt(0) === 0x7f) return -1;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "(") depth += 1;
+      else if (character === ")") depth -= 1;
+      cursor += 1;
+    }
+    if (depth > 0 || escaped) return -1;
+  }
+  return cursor;
+}
+
+function isCfws(value) {
+  return consumeCfws(value) === value.length;
+}
+
 function sourceAddressSpec(value) {
   const source = value.trim();
   let quoted = false;
@@ -114,16 +143,18 @@ function sourceAddressSpec(value) {
   }
   if (quoted || escaped || commentDepth > 0) return null;
   if (angleStart === -1) return angleEnd === -1 ? source : null;
-  if (angleEnd < angleStart || source.slice(angleEnd + 1).trim().length > 0) return null;
+  if (angleEnd < angleStart || !isCfws(source.slice(angleEnd + 1))) return null;
   return source.slice(angleStart + 1, angleEnd).trim();
 }
 
 function quotedAddressSpec(value) {
-  if (typeof value !== "string" || value[0] !== '"') return null;
+  if (typeof value !== "string") return null;
+  let cursor = consumeCfws(value);
+  if (cursor < 0 || value[cursor] !== '"') return null;
   let decoded = "";
   let escaped = false;
   let closing = -1;
-  for (let index = 1; index < value.length; index += 1) {
+  for (let index = cursor + 1; index < value.length; index += 1) {
     const character = value[index];
     if (escaped) {
       if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
@@ -139,19 +170,41 @@ function quotedAddressSpec(value) {
       decoded += character;
     }
   }
-  if (closing === -1 || escaped || value[closing + 1] !== "@") return null;
-  const domain = value.slice(closing + 2);
-  if (!domain || /[\s@<>,;:]/u.test(domain)) return null;
-  const quotedLocal = value.slice(0, closing + 1).toLowerCase();
+  if (closing === -1 || escaped) return null;
+  cursor = consumeCfws(value, closing + 1);
+  if (cursor < 0 || value[cursor] !== "@") return null;
+  cursor = consumeCfws(value, cursor + 1);
+  if (cursor < 0 || cursor >= value.length) return null;
+  const domainStart = cursor;
+  if (value[cursor] === "[") {
+    let domainEscaped = false;
+    cursor += 1;
+    while (cursor < value.length) {
+      const character = value[cursor];
+      if (domainEscaped) domainEscaped = false;
+      else if (character === "\\") domainEscaped = true;
+      else if (character === "]") { cursor += 1; break; }
+      else if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      cursor += 1;
+    }
+    if (value[cursor - 1] !== "]" || domainEscaped) return null;
+  } else {
+    while (cursor < value.length && value[cursor] !== " " && value[cursor] !== "\t" && value[cursor] !== "(") cursor += 1;
+  }
+  const domain = value.slice(domainStart, cursor);
+  if (!domain || /[@<>,;"\r\n]/u.test(domain)) return null;
+  cursor = consumeCfws(value, cursor);
+  if (cursor !== value.length) return null;
+  const canonicalLocal = decoded.toLowerCase().replaceAll("\\", "\\\\").replaceAll('"', '\\"');
   return {
-    address: `${quotedLocal}@${domain.toLowerCase()}`,
-    semantic: `${decoded.toLowerCase()}@${domain.toLowerCase()}`,
+    address: `"${canonicalLocal}"@${domain.toLowerCase()}`,
+    parserSemantic: `${decoded.trim().toLowerCase()}@${domain.toLowerCase()}`,
   };
 }
 
 function parsedAddressSemantic(value) {
   const quoted = quotedAddressSpec(value);
-  if (quoted) return quoted.semantic;
+  if (quoted) return quoted.parserSemantic;
   const address = value.trim().toLowerCase();
   const at = address.lastIndexOf("@");
   if (at <= 0 || at === address.length - 1 || /[\r\n]/.test(address.slice(at + 1))) return null;
@@ -165,8 +218,9 @@ function normalizedMailbox(entry, source) {
   const addressSpec = sourceAddressSpec(source);
   if (addressSpec === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
   const quoted = quotedAddressSpec(addressSpec);
-  if (addressSpec.startsWith('"')) {
-    if (!quoted || parsedAddressSemantic(entry.address) !== quoted.semantic) {
+  const addressStart = consumeCfws(addressSpec);
+  if (addressStart >= 0 && addressSpec[addressStart] === '"') {
+    if (!quoted || parsedAddressSemantic(entry.address) !== quoted.parserSemantic) {
       throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
     }
     return { address: quoted.address, displayName: entry.name || undefined };

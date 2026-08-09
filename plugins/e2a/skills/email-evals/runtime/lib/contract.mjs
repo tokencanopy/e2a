@@ -35,6 +35,7 @@ const subjectPolicies = new Set(["preserve", "forward"]);
 const plainTextPolicies = new Set(["required", "forbidden"]);
 const htmlPolicies = new Set(["required", "forbidden", "equivalent_if_present"]);
 const submissionStates = new Set(["sent", "failed", "pending_review", "scheduled"]);
+const evalIdentifierPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const EVAL_IDENTIFIER_LIMITS = Object.freeze({ suiteNameBytes: 128, caseIdBytes: 128 });
 
 function configurationError(code, message, pointer) {
@@ -45,6 +46,19 @@ export function assertEvalIdentifierLength(value, kind, pointer) {
   const limit = EVAL_IDENTIFIER_LIMITS[kind];
   if (typeof value === "string" && Number.isSafeInteger(limit) && Buffer.byteLength(value, "utf8") > limit) {
     throw configurationError("identifier_too_long", "Evaluation identifier exceeds its size limit", pointer);
+  }
+  return value;
+}
+
+export function assertEvalIdentifier(value, kind, pointer) {
+  assertEvalIdentifierLength(value, kind, pointer);
+  if (!evalIdentifierPattern.test(value)) {
+    const suiteName = kind === "suiteNameBytes";
+    throw configurationError(
+      suiteName ? "invalid_suite_name" : "invalid_case_id",
+      suiteName ? "Invalid suite name" : "Invalid case identifier",
+      pointer,
+    );
   }
   return value;
 }
@@ -179,11 +193,11 @@ function normalizeRecipientSet(value, environment, pointer) {
   return normalizeMailboxSet(object.exactly, environment, pathOf(pointer, "exactly"));
 }
 
-function normalizeCase(rawCase, environment, casePath) {
+function normalizeCase(rawCase, environment, casePath, casePointer) {
   const item = allowedObject(rawCase, caseKeys, "", ["id", "send", "expect"]);
-  const id = resolveString(item.id, environment, "/id");
-  assertEvalIdentifierLength(id.value, "caseIdBytes", "/id");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id.value)) throw configurationError("invalid_case_id", "Invalid case identifier", "/id");
+  const idPointer = pathOf(casePointer, "id");
+  const id = resolveString(item.id, environment, idPointer);
+  assertEvalIdentifier(id.value, "caseIdBytes", idPointer);
   const sendRaw = allowedObject(item.send, sendKeys, "/send", ["subject", "text"]);
   const send = {
     subject: resolveString(sendRaw.subject, environment, "/send/subject"),
@@ -508,8 +522,7 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
   const suite = allowedObject(rawSuite, suiteKeys, "", ["version", "name", "target", "actor", "transport", "cases"]);
   if (suite.version !== 1) throw configurationError("unsupported_version", "Unsupported suite version", "/version");
   const name = resolveString(suite.name, environment, "/name");
-  assertEvalIdentifierLength(name.value, "suiteNameBytes", "/name");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name.value)) throw configurationError("invalid_suite_name", "Invalid suite name", "/name");
+  assertEvalIdentifier(name.value, "suiteNameBytes", "/name");
   const targetRaw = allowedObject(suite.target, identityKeys, "/target", ["email"]);
   const actorRaw = allowedObject(suite.actor, identityKeys, "/actor", ["email"]);
   const target = normalizeScalarMailbox(targetRaw.email, environment, "/target/email");
@@ -548,7 +561,7 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
     if (!contained(suiteRoot, candidate)) throw configurationError("path_outside_suite", "Case path is outside the suite root", `/cases/${index}`);
     const caseDocument = await readYaml(candidate, "case", { root: suiteRoot, pointer: `/cases/${index}`, openFile, beforeRead });
     const caseFile = caseDocument.resolved;
-    const normalized = normalizeCase(caseDocument.value, environment, caseFile);
+    const normalized = normalizeCase(caseDocument.value, environment, caseFile, `/cases/${index}`);
     if (caseIds.has(normalized.value.id)) throw configurationError("duplicate_case_id", "Duplicate case identifier", `/cases/${index}`);
     caseIds.add(normalized.value.id);
     for (const recipient of normalized.sourceRecipients) {

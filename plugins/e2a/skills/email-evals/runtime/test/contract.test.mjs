@@ -219,10 +219,15 @@ test("normalizers preserve display names, reject duplicates before dedupe, and b
 test("normalizers preserve parser-valid quoted local parts as round-trippable addresses", () => {
   const mailboxes = [
     ['"a b"@EXAMPLE.COM', { address: '"a b"@example.com', displayName: undefined }],
+    ['" a"@EXAMPLE.COM', { address: '" a"@example.com', displayName: undefined }],
+    ['"a "@EXAMPLE.COM', { address: '"a "@example.com', displayName: undefined }],
     ['"a@b"@EXAMPLE.COM', { address: '"a@b"@example.com', displayName: undefined }],
-    ['Quoted Person <"a b"@EXAMPLE.COM>', { address: '"a b"@example.com', displayName: "Quoted Person" }],
+    ['Quoted Person <"a b"@EXAMPLE.COM> (comment)', { address: '"a b"@example.com', displayName: "Quoted Person" }],
+    ['Edge Person <" a "@EXAMPLE.COM> (comment)', { address: '" a "@example.com', displayName: "Edge Person" }],
+    ['(leading) "a b"@EXAMPLE.COM (trailing)', { address: '"a b"@example.com', displayName: undefined }],
     ['Escaped Quote <"a\\\"b"@EXAMPLE.COM>', { address: '"a\\\"b"@example.com', displayName: "Escaped Quote" }],
     ['Escaped Slash <"a\\\\b"@EXAMPLE.COM>', { address: '"a\\\\b"@example.com', displayName: "Escaped Slash" }],
+    ['Escaped Space <"a\\ b"@EXAMPLE.COM>', { address: '"a b"@example.com', displayName: "Escaped Space" }],
   ];
   for (const [source, expected] of mailboxes) {
     const normalized = normalizeMailbox(source);
@@ -230,6 +235,10 @@ test("normalizers preserve parser-valid quoted local parts as round-trippable ad
     assert.equal(normalizeMailbox(normalized.address).address, normalized.address);
   }
   assert.throws(() => normalizeAddressSet(['"A B"@example.com', '"a b"@EXAMPLE.COM']), /duplicate/i);
+  assert.throws(() => normalizeAddressSet(['"a b"@example.com', '"a\\ b"@EXAMPLE.COM']), /duplicate/i);
+  for (const malformed of [
+    '"unterminated@example.com', '"dangling\\"@example.com', '"control\u0000"@example.com',
+  ]) assert.throws(() => normalizeMailbox(malformed), /mailbox/i);
 });
 
 test("closed contract rejects oversized suite and case identifiers with safe pointers", async () => {
@@ -247,8 +256,29 @@ test("closed contract rejects oversized suite and case identifiers with safe poi
   await assert.rejects(
     loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_CASE_ID: "c".repeat(129) } }),
     (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
-      && error.details?.path === "/id" && Object.keys(error.details).length === 1,
+      && error.details?.path === "/cases/0/id" && Object.keys(error.details).length === 1,
   );
+
+  for (const [environment, code, pointer] of [
+    [{ E2A_SUITE_NAME: "safe\n# injected" }, "invalid_suite_name", "/name"],
+    [{ E2A_CASE_ID: "safe\u0000id" }, "invalid_case_id", "/cases/0/id"],
+    [{ E2A_CASE_ID: `${"é".repeat(64)}a` }, "identifier_too_long", "/cases/0/id"],
+    [{ E2A_CASE_ID: "é".repeat(64) }, "invalid_case_id", "/cases/0/id"],
+  ]) {
+    await writeMinimalSuite(root, {
+      name: environment.E2A_SUITE_NAME === undefined ? "synthetic" : "${E2A_SUITE_NAME}",
+      caseSource: [
+        `id: ${environment.E2A_CASE_ID === undefined ? "synthetic-case" : "${E2A_CASE_ID}"}`,
+        "send: { subject: Synthetic, text: Synthetic }",
+        "expect: { action: { kind: none, count: 0 } }", "",
+      ].join("\n"),
+    });
+    await assert.rejects(
+      loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, ...environment } }),
+      (error) => error.errorClass === "configuration_error" && error.code === code
+        && error.details?.path === pointer && Object.keys(error.details).length === 1,
+    );
+  }
 });
 
 test("scaffolded synthetic starter templates satisfy the same closed loader", async () => {
