@@ -15,9 +15,16 @@ address, create the agent, and verify the inbox read.
    write. Do not seek piecemeal record approvals.
 5. Apply the records through the chosen provider or give the user a clean,
    copyable record table for manual entry.
-6. Call `verify_domain`. If DNS has not propagated, report the observed state
-   and a safe resume step; do not poll indefinitely. `verify_domain` is safe to
-   retry after propagation.
+6. Call `verify_domain` once. Then make one user-driven post-verification
+   `get_domain` read and report inbound verification and outbound branded-
+   sending capability from that response separately.
+7. If DNS propagation or either capability is not ready, report the observed
+   state and stop. Resume only when the user asks: retry `verify_domain`, make
+   one new `get_domain` read, and report the new state. Do not poll.
+8. When both capabilities are ready, ask for the desired local part and show
+   the complete branded address. Obtain confirmation for that complete branded
+   address before calling `create_agent`, then call `list_messages` for the new
+   inbox to verify the harmless read.
 
 ## Provider guidance
 
@@ -27,10 +34,12 @@ address, create the agent, and verify the inbox read.
 
 ## Capability report
 
-Registration alone does not make a domain ready. Report these separately:
+Registration alone does not make a domain ready. From the post-verification
+`get_domain` response, report these separately:
 
 - **Inbound:** e2a domain verification and DNS records needed to receive mail.
 - **Outbound branded sending:** e2a's reported sending readiness for the domain.
 
 If either remains pending, name the missing record, propagation state, or next
-manual action without claiming that mail is ready.
+manual action without claiming that mail is ready. Do not create the branded
+inbox until both are ready.
