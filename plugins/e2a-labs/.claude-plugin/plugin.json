@@ -16,5 +16,5 @@
     "automation",
     "experimental"
   ],
-  "dependencies": [{ "name": "e2a", "version": "^0.7.0" }]
+  "dependencies": ["e2a"]
 }
