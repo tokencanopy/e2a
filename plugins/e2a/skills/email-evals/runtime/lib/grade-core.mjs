@@ -187,6 +187,14 @@ function requiredEnvelopeAssertion(expected, candidate) {
   return envelopeAssertion(expected, candidate);
 }
 
+function crossFieldAssertion(expectation, evidence, candidate) {
+  if (!evidence.capabilities?.includes("visible_recipients")) return { status: "error", code: "missing_recipient_evidence", actual: null };
+  if (!evidence.capabilities?.includes("blind_recipients")) return { status: "error", code: "missing_blind_recipient_evidence", actual: null };
+  if (RECIPIENT_FIELDS.some((field) => !hasRecipientField(candidate, field))) return { status: "error", code: "missing_recipient_evidence", actual: null };
+  const actual = fieldPlacement(expectation, candidate);
+  return { status: actual.length === 0 ? "pass" : "fail", code: actual.length === 0 ? "matched" : "recipient_cross_field", actual };
+}
+
 function targetAddress(evidence) {
   return mailbox(evidence?.target?.email) ?? mailbox(evidence?.targetEmail) ?? mailbox(evidence?.target);
 }
@@ -197,9 +205,14 @@ function diagnostic(candidate, actual) {
 
 function aggregate(id, expected, attempts, evaluate) {
   const byRef = attempts.map((candidate) => diagnostic(candidate, evaluate(candidate)));
-  const failed = byRef.find((entry) => entry.actual.status === "error" || entry.actual.status === "fail");
-  const status = failed?.actual.status ?? "pass";
-  return result(id, status, failed?.actual.code ?? "matched", expected, { byRef }, attempts);
+  const severity = { pass: 0, fail: 1, error: 2 };
+  const highest = Math.max(0, ...byRef.map((entry) => severity[entry.actual.status] ?? 2));
+  const selected = byRef
+    .filter((entry) => (severity[entry.actual.status] ?? 2) === highest)
+    .sort((left, right) => String(left.actual.code).localeCompare(String(right.actual.code))
+      || String(left.ref ?? "").localeCompare(String(right.ref ?? ""))
+      || canonical(left.actual.actual).localeCompare(canonical(right.actual.actual)))[0];
+  return result(id, selected?.actual.status ?? "pass", selected?.actual.code ?? "matched", expected, { byRef }, attempts);
 }
 
 function blockedAssertions(expectation, evidence, attempts, code, actual) {
@@ -284,9 +297,7 @@ export function gradeCore(expectation = {}, evidence = {}) {
         results.push(aggregate("recipients.envelope", expectedAddresses(expectation.recipients.envelope), attempts, (candidate) => requiredEnvelopeAssertion(expectation.recipients.envelope, candidate)));
       }
     }
-    results.push(aggregate("recipients.cross_field", "same recipient fields", attempts, (candidate) => {
-      const actual = fieldPlacement(expectation, candidate); return { status: actual.length === 0 ? "pass" : "fail", code: actual.length === 0 ? "matched" : "recipient_cross_field", actual };
-    }));
+    results.push(aggregate("recipients.cross_field", "same recipient fields", attempts, (candidate) => crossFieldAssertion(expectation, evidence, candidate)));
     const target = targetAddress(evidence);
     results.push(aggregate("recipients.no_target_self", target, attempts, (candidate) => {
       if (target === null) return { status: "error", code: "missing_target_identity_evidence", actual: [] };

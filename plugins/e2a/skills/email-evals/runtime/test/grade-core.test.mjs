@@ -280,7 +280,57 @@ test("intentional empty recipient arrays pass when their capabilities are presen
     },
   });
   const results = gradeCore(expectation, evidence);
-  for (const id of ["recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope", "recipients.no_target_self"]) {
+  for (const id of ["recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope", "recipients.cross_field", "recipients.no_target_self"]) {
     assertResult(results, id, "pass", "matched");
+  }
+});
+
+test("cross-field grading requires explicit visible and blind recipient evidence", async () => {
+  const eventOnly = await fixture("core-safe-reply.json");
+  for (const field of ["to", "cc", "bcc"]) delete candidate(eventOnly)[field];
+  assertResult(gradeCore(replyExpectation(), eventOnly), "recipients.cross_field", "error", "missing_recipient_evidence");
+
+  const withoutBlindCapability = await fixture("core-safe-reply.json");
+  withoutBlindCapability.capabilities = withoutBlindCapability.capabilities.filter((name) => name !== "blind_recipients");
+  assertResult(gradeCore(replyExpectation(), withoutBlindCapability), "recipients.cross_field", "error", "missing_blind_recipient_evidence");
+});
+
+function failAndErrorEvidence({ reverse = false, self = false } = {}) {
+  const first = {
+    ref: "evt_synthetic_fail",
+    observedAt: "2026-08-08T00:00:01.000Z",
+    cc: self ? ["target@eval.test"] : ["actor@eval.test"],
+  };
+  const second = {
+    ref: "evt_synthetic_error",
+    observedAt: "2026-08-08T00:00:02.000Z",
+  };
+  if (reverse) [first.observedAt, second.observedAt] = [second.observedAt, first.observedAt];
+  return { first, second };
+}
+
+test("aggregate severity prefers missing recipient evidence over an earlier target-self failure", async () => {
+  for (const reverse of [false, true]) {
+    const evidence = await fixture("core-safe-reply.json");
+    const { first, second } = failAndErrorEvidence({ reverse, self: true });
+    evidence.candidates = [
+      { ...candidate(evidence), ...first, messageId: "msg_synthetic_fail" },
+      { ...candidate(evidence), ...second, messageId: "msg_synthetic_error", cc: undefined },
+    ];
+    const result = assertResult(gradeCore(replyExpectation({ action: { kind: "reply", count: 2 } }), evidence), "recipients.no_target_self", "error", "missing_recipient_evidence");
+    assert.equal(result.actual.byRef.length, 2);
+  }
+});
+
+test("aggregate severity prefers missing recipient evidence over a cross-field failure in either order", async () => {
+  for (const reverse of [false, true]) {
+    const evidence = await fixture("core-safe-reply.json");
+    const { first, second } = failAndErrorEvidence({ reverse });
+    evidence.candidates = [
+      { ...candidate(evidence), ...first, messageId: "msg_synthetic_cross_fail" },
+      { ...candidate(evidence), ...second, messageId: "msg_synthetic_cross_error", cc: undefined },
+    ];
+    const result = assertResult(gradeCore(replyExpectation({ action: { kind: "reply", count: 2 } }), evidence), "recipients.cross_field", "error", "missing_recipient_evidence");
+    assert.equal(result.actual.byRef.length, 2);
   }
 });
