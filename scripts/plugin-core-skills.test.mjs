@@ -5,6 +5,13 @@ import { test } from "node:test";
 const read = (path) => readFile(path, "utf8");
 const section = (source, heading) =>
   source.split(`## ${heading}\n`)[1]?.split(/\n## /)[0] ?? "";
+const description = (source) => {
+  const match = source.match(/^description: "((?:[^"\\]|\\.)*)"$/m);
+  assert.ok(match, "skill description must be quoted YAML");
+  return JSON.parse(`"${match[1]}"`);
+};
+
+const e2aOperationDescription = "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior.";
 
 test("e2a-setup bootstraps MCP, inboxes, and optional custom domains", async () => {
   const [source, clients, customDomains, setupGuide, setupMirror] = await Promise.all([
@@ -20,8 +27,9 @@ test("e2a-setup bootstraps MCP, inboxes, and optional custom domains", async () 
   assert.match(source, /OAuth/i);
   assert.match(source, /never ask.*API key/i);
   assert.match(source, /whoami/);
+  assert.match(source, /e2a MCP [`"]?whoami.*never.*(?:Unix|shell).*whoami/is);
   assert.match(source, /tool registry.*e2a tools/i);
-  assert.match(source, /list_messages/);
+  assert.match(source, /list_messages[\s\S]*?resume the user's original request/is);
   assert.match(clients, /MCP [`"]?whoami/i);
   assert.match(clients, /claude mcp add --transport http --scope user e2a https:\/\/api\.e2a\.dev\/mcp/);
   assert.match(clients, /codex mcp login e2a/);
@@ -55,11 +63,21 @@ test("stable skill descriptions separate setup, integration, operation, and diag
       await read(`plugins/e2a/skills/${name}/SKILL.md`),
     ]),
   ));
-  assert.match(sources["e2a-setup"], /connect|authorize|create.*inbox/i);
-  assert.match(sources["e2a-integrate"], /application|codebase|SDK|webhook/i);
-  assert.match(sources.e2a, /read|send|reply|forward/i);
-  assert.match(sources["e2a-doctor"], /failing|diagnos|delivery/i);
-  assert.doesNotMatch(sources.e2a.match(/^description:.*$/m)[0], /integrating.*software/i);
+  const descriptions = Object.fromEntries(
+    Object.entries(sources).map(([name, source]) => [name, description(source)]),
+  );
+
+  assert.equal(descriptions.e2a, e2aOperationDescription);
+  assert.doesNotMatch(descriptions.e2a, /\b(?:application|codebase|SDK|webhook|diagnos|failing|delivery)\b/i);
+
+  assert.match(descriptions["e2a-setup"], /connect|authorize|create.*inbox/i);
+  assert.doesNotMatch(descriptions["e2a-setup"], /\b(?:SDK|webhook|diagnos|failing|delivery|send(?:ing)?|reply(?:ing)?|forward(?:ing)?)\b/i);
+
+  assert.match(descriptions["e2a-integrate"], /application|codebase|SDK|webhook/i);
+  assert.doesNotMatch(descriptions["e2a-integrate"], /\b(?:already-connected|contacts\/outreach|templates|scheduling mail|diagnos|failing|delivery)\b/i);
+
+  assert.match(descriptions["e2a-doctor"], /failing|diagnos|delivery/i);
+  assert.doesNotMatch(descriptions["e2a-doctor"], /\b(?:OAuth|create an agent inbox|contacts\/outreach|templates|scheduling mail)\b/i);
 });
 
 test("e2a-integrate is language-aware and security-complete", async () => {
