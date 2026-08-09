@@ -111,6 +111,18 @@ function normalizeKnownAddress(value) {
   }
 }
 
+function normalizeKnownMailbox(value) {
+  if (typeof value !== "string") return null;
+  try {
+    return normalizeMailbox(value);
+  } catch (error) {
+    if (error instanceof NormalizationError) return null;
+    throw error;
+  }
+}
+
+const MAILBOX_IN_TEXT = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
 function aliasMapFor(suite) {
   const actor = normalizeKnownAddress(suite?.actor?.email);
   const target = normalizeKnownAddress(suite?.target?.email);
@@ -128,6 +140,11 @@ function collectTypedAddresses(value, result, parentKey = "", forceAddress = fal
   if (typeof value === "string") {
     if (forceAddress) {
       const normalized = normalizeKnownAddress(value);
+      if (normalized) result.add(normalized);
+    }
+    MAILBOX_IN_TEXT.lastIndex = 0;
+    for (const match of value.matchAll(MAILBOX_IN_TEXT)) {
+      const normalized = normalizeKnownAddress(match[0]);
       if (normalized) result.add(normalized);
     }
     return;
@@ -155,12 +172,22 @@ function aliasesForRecord(suite, parts) {
 }
 
 function aliasAddress(value, aliases) {
-  const normalized = normalizeKnownAddress(value);
-  return normalized && aliases.has(normalized) ? aliases.get(normalized) : value;
+  const mailbox = normalizeKnownMailbox(value);
+  if (!mailbox || !aliases.has(mailbox.address)) return value;
+  const address = aliases.get(mailbox.address);
+  return mailbox.displayName ? { address, displayName: aliasText(mailbox.displayName, aliases) } : address;
+}
+
+function aliasText(value, aliases) {
+  MAILBOX_IN_TEXT.lastIndex = 0;
+  return value.replace(MAILBOX_IN_TEXT, (candidate) => {
+    const normalized = normalizeKnownAddress(candidate);
+    return normalized && aliases.has(normalized) ? aliases.get(normalized) : "[REDACTED:address]";
+  });
 }
 
 function transformTypedAddresses(value, aliases, parentKey = "", forceAddress = false) {
-  if (typeof value === "string") return forceAddress ? aliasAddress(value, aliases) : value;
+  if (typeof value === "string") return forceAddress ? aliasAddress(value, aliases) : aliasText(value, aliases);
   if (Array.isArray(value)) {
     const childAddress = forceAddress || ADDRESS_ARRAYS.has(parentKey);
     return value.map((entry) => transformTypedAddresses(entry, aliases, parentKey, childAddress));
@@ -391,7 +418,7 @@ export function aliasCaseRecord(record, suite) {
       ? tokenizeObservedEnvironment(transformTypedAddresses(evidence.value, aliases), environment)
       : { unavailable: "serialization_error" },
     assertions: assertions.ok && Array.isArray(assertions.value)
-      ? tokenizeObservedEnvironment(aliasAssertions(assertions.value, aliases, patterns, sensitive), environment) : [],
+      ? tokenizeObservedEnvironment(transformTypedAddresses(aliasAssertions(assertions.value, aliases, patterns, sensitive), aliases), environment) : [],
     primaryError: source.primaryError ? safeError(source.primaryError, null, patterns, sensitive) : null,
     secondaryErrors: secondary,
   };

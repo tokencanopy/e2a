@@ -90,7 +90,7 @@ test("finalize rejects a swapped run parent and preserves outside artifacts", as
   assert.equal(await readFile(path.join(outside, "report.md"), "utf8"), "report-sentinel\n");
 });
 
-test("aliasing covers nested normalized address fields but preserves display text collisions", () => {
+test("aliasing covers nested normalized address fields and mailbox-like display text", () => {
   const record = aliasCaseRecord({
     id: "alias",
     status: "fail",
@@ -115,11 +115,11 @@ test("aliasing covers nested normalized address fields but preserves display tex
     secondaryErrors: [],
   }, suite());
   assert.equal(record.expectation.sender.exactly, "target");
-  assert.equal(record.expectation.sender.displayName, ACTOR);
-  assert.equal(record.expectation.body.requiredFacts[0], ACTOR);
+  assert.equal(record.expectation.sender.displayName, "actor");
+  assert.equal(record.expectation.body.requiredFacts[0], "actor");
   assert.deepEqual(record.expectation.recipients.envelope.exactly, ["actor", "probe:1"]);
   assert.equal(record.evidence.candidates[0].from, "target");
-  assert.equal(record.evidence.candidates[0].mime.text, ACTOR);
+  assert.equal(record.evidence.candidates[0].mime.text, "actor");
   assert.equal(Object.hasOwn(record.evidence.candidates[0], "rawMime"), false);
   assert.equal(Object.hasOwn(record.evidence.candidates[0], "attachmentBytes"), false);
   assert.equal(record.assertions[0].actual.addresses[0], "actor");

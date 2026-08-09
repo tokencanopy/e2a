@@ -1,6 +1,7 @@
 {
   "runId": "run_20260808T120000_0123abcd",
   "status": "pass",
+  "complete": true,
   "startedAt": "2026-08-08T12:00:00.000Z",
   "completedAt": "2026-08-08T12:00:01.000Z",
   "counts": { "total": 1, "passed": 1, "failed": 0, "errors": 0 },

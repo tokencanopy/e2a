@@ -3,6 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
+import { RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
 import { EvalError } from "./errors.mjs";
 import { gradeContent } from "./grade-content.mjs";
 import { gradeCore } from "./grade-core.mjs";
@@ -29,6 +30,28 @@ const SEMANTIC_ENV_VALUES = Object.freeze([
 const MAX_EVIDENCE_STRING = 1_048_576;
 const MAX_CASES_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MAX_CASE_LINE_BYTES = 2 * 1024 * 1024;
+const MAX_PROJECTED_EVIDENCE_BYTES = 1024 * 1024;
+const DANGEROUS_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const PRIMARY_ERROR_CODES = Object.freeze({
+  assertion_failure: new Set(["assertions_failed"]),
+  capability_error: new Set(["required_evidence_unavailable"]),
+  grader_error: new Set(["grader_threw"]),
+  target_timeout: new Set(["no_terminal_response"]),
+  transport_error: new Set([
+    "adapter_failed", "agent_lookup_failed", "ambiguous_correlation", "baseline_read_failed", "conflicting_event_ref",
+    "conflicting_evidence", "invalid_clock", "invalid_clock_after_send", "invalid_evidence", "malformed_event",
+    "malformed_lifecycle", "malformed_page", "message_identity_mismatch", "mime_observation_failed", "observation_failed",
+    "observation_limit_exceeded", "poll_failed", "raw_mime_unavailable", "send_acceptance_unknown", "stimulus_identity_mismatch",
+    "stimulus_not_delivered", "stimulus_not_observed", "stimulus_send_failed",
+  ]),
+});
+const SECONDARY_STAGES = new Set(["reporting", "on_case", "cleanup"]);
+const SECONDARY_CODES = new Set([
+  "artifact_changed", "artifact_write_failed", "cleanup_failed", "invalid_alias_source", "invalid_artifact",
+  "invalid_output_root", "invalid_run_directory", "invalid_run_id", "missing_cases_artifact", "missing_run_directory",
+  "on_case_failed", "path_outside_output", "reporting_failed", "run_directory_changed", "run_directory_exists",
+  "serialization_failed", "symlink_path", "writer_closed",
+]);
 
 function invalidEvidence() {
   throw new TypeError("invalid evidence");
@@ -36,7 +59,7 @@ function invalidEvidence() {
 
 function exactObject(value, allowed) {
   if (!value || Array.isArray(value) || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) invalidEvidence();
-  if (Object.keys(value).some((key) => !allowed.has(key))) invalidEvidence();
+  if (Object.keys(value).some((key) => DANGEROUS_OBJECT_KEYS.has(key) || !allowed.has(key))) invalidEvidence();
   return value;
 }
 
@@ -44,6 +67,22 @@ function textValue(value, { nullable = false } = {}) {
   if (nullable && value === null) return null;
   if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidEvidence();
   return value;
+}
+
+function tokenValue(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  const result = textValue(value);
+  const grammarValue = result.replace(/\[ENV:[A-Z][A-Z0-9_]*(?::semantic:\d+)?\]/g, "ENV");
+  if (result.length > 4_096 || /[\u0000-\u001F\u007F@]/.test(result)
+    || !/^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(grammarValue)) invalidEvidence();
+  return result;
+}
+
+function headerTokenValue(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  const result = textValue(value);
+  if (result.length > 4_096 || /[\u0000-\u001F\u007F]/.test(result)) invalidEvidence();
+  return result;
 }
 
 function booleanValue(value) {
@@ -64,6 +103,14 @@ function stringArray(value, mapper = textValue) {
 
 function mailboxValue(value, stored, { nullable = false } = {}) {
   if (nullable && value === null) return null;
+  if (stored && value && typeof value === "object" && !Array.isArray(value)) {
+    const source = exactObject(value, new Set(["address", "displayName"]));
+    if (!Object.hasOwn(source, "address") || !Object.hasOwn(source, "displayName")) invalidEvidence();
+    const address = mailboxValue(source.address, true);
+    const displayName = textValue(source.displayName);
+    if (/[\r\n\u0000]/.test(displayName)) invalidEvidence();
+    return { address, displayName };
+  }
   const text = textValue(value);
   if (stored) {
     if (!/^(?:actor|target|probe:\d+|observed:\d+)$/.test(text)) invalidEvidence();
@@ -96,8 +143,9 @@ function projectMime(value, stored) {
     "messageId", "inReplyTo", "references", "subject", "from", "replyTo", "text", "htmlPresent", "sizeBytes", "attachments",
   ]));
   const result = {};
-  for (const key of ["messageId", "inReplyTo", "subject", "text"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
-  copyOptional(source, result, "references", (entry) => stringArray(entry));
+  for (const key of ["messageId", "inReplyTo"]) copyOptional(source, result, key, (entry) => headerTokenValue(entry, { nullable: true }));
+  for (const key of ["subject", "text"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "references", (entry) => stringArray(entry, headerTokenValue));
   copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
   copyOptional(source, result, "replyTo", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
   copyOptional(source, result, "htmlPresent", booleanValue);
@@ -115,7 +163,7 @@ function projectTransition(value, stored) {
   ]));
   const result = {};
   for (const key of ["id", "messageId", "direction", "stage", "outcome", "reasonCode", "occurredAt"]) {
-    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+    copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
   for (const key of ["retryable", "reconstructed"]) copyOptional(source, result, key, booleanValue);
   copyOptional(source, result, "recipient", (entry) => mailboxValue(entry, stored, { nullable: true }));
@@ -125,7 +173,7 @@ function projectTransition(value, stored) {
 function projectCandidateLifecycle(value, stored) {
   const source = exactObject(value, new Set(["submission", "transitions"]));
   const result = {};
-  copyOptional(source, result, "submission", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "submission", (entry) => tokenValue(entry, { nullable: true }));
   copyOptional(source, result, "transitions", (entry) => {
     if (!Array.isArray(entry)) invalidEvidence();
     return entry.map((transition) => projectTransition(transition, stored));
@@ -140,7 +188,7 @@ function projectCandidate(value, stored) {
   ]));
   const result = {};
   for (const key of ["ref", "eventType", "direction", "provenance", "messageType", "conversationId", "messageId", "observedAt", "sentAt"]) {
-    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+    copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
   for (const key of ["from", "sentAs"]) copyOptional(source, result, key, (entry) => mailboxValue(entry, stored, { nullable: true }));
   for (const key of ["replyTo", "to", "cc", "bcc", "envelopeRecipients"]) {
@@ -156,9 +204,11 @@ function projectStimulus(value, stored) {
     "ref", "messageId", "outboundMessageId", "conversationId", "rfcMessageId", "subject", "receivedAt", "participants",
   ]));
   const result = {};
-  for (const key of ["ref", "messageId", "outboundMessageId", "conversationId", "rfcMessageId", "subject", "receivedAt"]) {
-    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  for (const key of ["ref", "messageId", "outboundMessageId", "conversationId", "receivedAt"]) {
+    copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
+  copyOptional(source, result, "rfcMessageId", (entry) => headerTokenValue(entry, { nullable: true }));
+  copyOptional(source, result, "subject", (entry) => textValue(entry, { nullable: true }));
   copyOptional(source, result, "participants", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
   return result;
 }
@@ -167,21 +217,21 @@ function projectActorReceipt(value) {
   if (value === null) return null;
   const source = exactObject(value, new Set(["ref", "messageId", "receiptMessageId", "observedAt"]));
   const result = {};
-  for (const key of ["ref", "messageId", "receiptMessageId", "observedAt"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  for (const key of ["ref", "messageId", "receiptMessageId", "observedAt"]) copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   return result;
 }
 
 function projectEvidenceLifecycle(value, stored) {
   const source = exactObject(value, new Set(["stimulus", "candidates", "actorReceived"]));
   const result = {};
-  copyOptional(source, result, "stimulus", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "stimulus", (entry) => tokenValue(entry, { nullable: true }));
   copyOptional(source, result, "candidates", (entry) => {
     if (!Array.isArray(entry)) invalidEvidence();
     return entry.map((candidate) => {
       const item = exactObject(candidate, new Set(["ref", "submission", "transitions"]));
       const projected = {};
-      copyOptional(item, projected, "ref", (field) => textValue(field, { nullable: true }));
-      copyOptional(item, projected, "submission", (field) => textValue(field, { nullable: true }));
+      copyOptional(item, projected, "ref", (field) => tokenValue(field, { nullable: true }));
+      copyOptional(item, projected, "submission", (field) => tokenValue(field, { nullable: true }));
       copyOptional(item, projected, "transitions", (field) => {
         if (!Array.isArray(field)) invalidEvidence();
         return field.map((transition) => projectTransition(transition, stored));
@@ -200,7 +250,7 @@ function projectTimings(value) {
   ]));
   const result = {};
   for (const key of ["runStartedAt", "caseStartedAt", "sendAcceptedAt", "targetReceivedAt", "firstCandidateAt", "completedAt"]) {
-    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+    copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
   for (const key of ["timeoutMs", "settleMs", "pollIntervalMs"]) copyOptional(source, result, key, integerValue);
   return result;
@@ -212,11 +262,11 @@ function projectRefs(value) {
   copyOptional(source, result, "stimulus", (entry) => {
     const item = exactObject(entry, new Set(["event", "message", "outboundMessage"]));
     const projected = {};
-    for (const key of ["event", "message", "outboundMessage"]) copyOptional(item, projected, key, (field) => textValue(field, { nullable: true }));
+    for (const key of ["event", "message", "outboundMessage"]) copyOptional(item, projected, key, (field) => tokenValue(field, { nullable: true }));
     return projected;
   });
-  copyOptional(source, result, "candidates", (entry) => stringArray(entry));
-  copyOptional(source, result, "actorReceipt", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "candidates", (entry) => stringArray(entry, tokenValue));
+  copyOptional(source, result, "actorReceipt", (entry) => tokenValue(entry, { nullable: true }));
   return result;
 }
 
@@ -240,6 +290,7 @@ function projectEvidence(value, { stored = false } = {}) {
   copyOptional(source, result, "lifecycle", (entry) => projectEvidenceLifecycle(entry, stored));
   copyOptional(source, result, "timings", projectTimings);
   copyOptional(source, result, "refs", projectRefs);
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_PROJECTED_EVIDENCE_BYTES) invalidEvidence();
   return result;
 }
 
@@ -331,9 +382,9 @@ function normalizePreflightError(error) {
   return new EvalError("configuration_error", "preflight_failed", "Evaluation preflight did not complete safely");
 }
 
-function primaryError(error, fallbackClass, fallbackCode, fallbackMessage) {
-  if (error instanceof EvalError) return error.toJSON();
-  return new EvalError(fallbackClass, fallbackCode, fallbackMessage).toJSON();
+function adapterExecutionError(error) {
+  if (error instanceof EvalError && error.errorClass === "transport_error") return error.toJSON();
+  return new EvalError("transport_error", "adapter_failed", "Evaluation adapter failed during case execution").toJSON();
 }
 
 function countsFor(cases) {
@@ -353,7 +404,7 @@ function runStatus(counts, expectedTotal = counts.total, secondaryErrors = []) {
 function classifyAssertions(assertions) {
   const errors = assertions.filter((assertion) => assertion.status === "error");
   if (errors.length > 0) {
-    const missing = errors.every((assertion) => /^missing_.*_evidence$/.test(assertion.code));
+    const missing = errors.every((assertion) => /^missing_/.test(assertion.code));
     return missing
       ? { status: "error", error: new EvalError("capability_error", "required_evidence_unavailable", "Required evaluation evidence was unavailable").toJSON() }
       : { status: "error", error: new EvalError("transport_error", "invalid_evidence", "Captured evaluation evidence was malformed").toJSON() };
@@ -370,11 +421,12 @@ function validEvidence(evidence) {
     && Array.isArray(evidence.capabilities);
 }
 
-function summaryDocument({ runId, startedAt, completedAt, suite, capabilities, cases, durations, files, secondaryErrors = [] }) {
+function summaryDocument({ runId, startedAt, completedAt, suite, capabilities, cases, durations, files, secondaryErrors = [], complete = false }) {
   const counts = countsFor(cases);
   return {
     runId,
-    status: runStatus(counts, suite.cases.length, secondaryErrors),
+    status: complete ? runStatus(counts, suite.cases.length, secondaryErrors) : "incomplete",
+    complete,
     startedAt,
     completedAt,
     counts,
@@ -421,7 +473,7 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
   try {
     evidence = await adapter.executeCase(testCase, executionContext(suite, testCase, runId, runStartedAt));
   } catch (caught) {
-    error = primaryError(caught, "transport_error", "adapter_threw", "Evaluation transport failed during case execution");
+    error = adapterExecutionError(caught);
     status = "error";
   }
   if (!error) {
@@ -522,7 +574,16 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
       const raw = await executeOne({ suite, adapter, testCase, runId: resolvedRunId, runStartedAt: runStart.iso, now });
       executionMs += raw.durations.executionMs;
       gradingMs += raw.durations.gradingMs;
-      const record = aliasCaseRecord(raw, suite);
+      let record = aliasCaseRecord(raw, suite);
+      if (Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8") > MAX_CASE_LINE_BYTES) {
+        record = aliasCaseRecord({
+          ...raw,
+          status: "error",
+          evidence: null,
+          assertions: [],
+          primaryError: new EvalError("transport_error", "invalid_evidence", "Evaluation evidence exceeded the artifact size limit").toJSON(),
+        }, suite);
+      }
 
       cases.push(record);
       let caseLineDurable = false;
@@ -583,13 +644,14 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
       },
       files: writer.files,
       secondaryErrors: runSecondary,
+      complete: true,
     });
     try {
       await writer.finalize(summary);
     } catch (error) {
       const secondary = reportingError(error, "reporting", suite);
       runSecondary.push(secondary);
-      summary = { ...summary, status: "fail", secondaryErrors: [...runSecondary] };
+      summary = { ...summary, status: "fail", complete: false, secondaryErrors: [...runSecondary] };
       try {
         await writer.commitFailure(summary);
       } catch (commitError) {
@@ -628,6 +690,11 @@ function restoreAliasValue(value, parentKey = "", forceAddress = false) {
     return value.map((entry) => restoreAliasValue(entry, parentKey, childAddress));
   }
   if (!value || typeof value !== "object") return value;
+  if (forceAddress && Object.keys(value).length === 2
+    && typeof value.address === "string" && typeof value.displayName === "string") {
+    const address = restoreAliasValue(value.address, "address", true);
+    return `${JSON.stringify(value.displayName)} <${address}>`;
+  }
   const result = {};
   for (const [key, entry] of Object.entries(value)) {
     const childAddress = ["address", "email", "mailbox", "from", "headerFrom", "sentAs", "recipient", "actor", "target"].includes(key)
@@ -685,6 +752,33 @@ function safeStoredIdentifier(value) {
   const result = safeStoredString(value);
   if (!/^[a-z][a-z0-9_.:-]{0,127}$/.test(result)) invalidCaseArtifact();
   return result;
+}
+
+function storedArtifactContainsSecret(value, suite) {
+  const secrets = [suite?.transport?.apiKey, ...(suite?.[RESOLVED_ENVIRONMENT_VALUES] ?? []).map((entry) => entry?.value)]
+    .filter((entry) => typeof entry === "string" && entry.length > 0 && !SEMANTIC_ENV_VALUES.includes(entry));
+  let unsafe = false;
+  const visit = (entry) => {
+    if (unsafe) return;
+    if (typeof entry === "string") {
+      unsafe = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(entry)
+        || /\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(entry)
+        || secrets.some((secret) => entry.includes(secret));
+      return;
+    }
+    if (Array.isArray(entry)) {
+      for (const item of entry) visit(item);
+      return;
+    }
+    if (entry && typeof entry === "object") {
+      for (const [key, item] of Object.entries(entry)) {
+        if (DANGEROUS_OBJECT_KEYS.has(key)) { unsafe = true; return; }
+        visit(item);
+      }
+    }
+  };
+  visit(value);
+  return unsafe;
 }
 
 function projectStoredDiagnostic(value, depth = 0) {
@@ -753,7 +847,27 @@ function expectedArtifactExpectation(suite, testCase) {
   }, suite).expectation;
 }
 
+function canonicalObservedAliases(value) {
+  const aliases = new Map();
+  let next = 1;
+  const visit = (entry) => {
+    if (typeof entry === "string") {
+      return entry.replace(/observed:\d+/g, (alias) => {
+        if (!aliases.has(alias)) aliases.set(alias, `observed:${next++}`);
+        return aliases.get(alias);
+      });
+    }
+    if (Array.isArray(entry)) return entry.map(visit);
+    if (entry && typeof entry === "object") {
+      return Object.fromEntries(Object.entries(entry).map(([key, item]) => [key, visit(item)]));
+    }
+    return entry;
+  };
+  return visit(value);
+}
+
 function validateStoredRecord(record, suite, testCase) {
+  if (storedArtifactContainsSecret(record, suite)) invalidCaseArtifact();
   const source = exactCaseObject(record, new Set([
     "id", "status", "startedAt", "completedAt", "durations", "versions", "suite", "expectation", "evidence",
     "assertions", "primaryError", "secondaryErrors",
@@ -764,7 +878,8 @@ function validateStoredRecord(record, suite, testCase) {
   const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest"]));
   if (versions.evidence !== EVIDENCE_VERSION || suiteRef.version !== suite.version || suiteRef.digest !== suite.digest) invalidCaseArtifact();
   const expected = expectedArtifactExpectation(suite, testCase);
-  if (JSON.stringify(source.expectation) !== JSON.stringify(expected)) invalidCaseArtifact();
+  if (JSON.stringify(canonicalObservedAliases(source.expectation))
+    !== JSON.stringify(canonicalObservedAliases(expected))) invalidCaseArtifact();
 
   let evidence = null;
   if (source.evidence !== null) {
@@ -786,17 +901,37 @@ function validateStoredRecord(record, suite, testCase) {
   }
   const allowedClasses = new Set(["transport_error", "target_timeout", "capability_error", "assertion_failure", "grader_error"]);
   if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
+  if (primaryError && !PRIMARY_ERROR_CODES[primaryError.class]?.has(primaryError.code)) invalidCaseArtifact();
+  for (const secondary of secondaryErrors) {
+    if (!SECONDARY_STAGES.has(secondary.stage) || !SECONDARY_CODES.has(secondary.code)) invalidCaseArtifact();
+    if (secondary.class && !new Set([...allowedClasses, "configuration_error"]).has(secondary.class)) invalidCaseArtifact();
+  }
+
+  const canonicalPrimary = primaryError ? {
+    ...primaryError,
+    message: {
+      assertion_failure: "One or more required assertions did not pass",
+      capability_error: "Required evaluation evidence was unavailable",
+      grader_error: "A deterministic grader threw while evaluating captured evidence",
+      target_timeout: "Target produced no terminal response",
+      transport_error: "Evaluation transport did not complete safely",
+    }[primaryError.class],
+  } : null;
+  const canonicalSecondary = secondaryErrors.map((entry) => ({
+    ...entry,
+    message: "Evaluation reporting did not complete safely",
+  }));
 
   const result = {
     id: safeStoredString(source.id),
     status: source.status,
     versions: { evidence: EVIDENCE_VERSION },
     suite: { version: suite.version, digest: suite.digest },
-    expectation: expected,
+    expectation: source.expectation,
     evidence,
     assertions,
-    primaryError,
-    secondaryErrors,
+    primaryError: canonicalPrimary,
+    secondaryErrors: canonicalSecondary,
   };
   for (const key of ["startedAt", "completedAt"]) copyOptional(source, result, key, (entry) => safeStoredString(entry));
   if (Object.hasOwn(source, "durations")) {
@@ -936,6 +1071,7 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   const summary = {
     runId: path.basename(stored.canonical),
     status: runStatus(counts, suite.cases.length),
+    complete: true,
     startedAt: prior.startedAt,
     completedAt: prior.completedAt,
     counts,

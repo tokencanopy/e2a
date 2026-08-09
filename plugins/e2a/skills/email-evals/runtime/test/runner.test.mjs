@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -130,6 +130,8 @@ test("runSuite executes cases with a plain sequential boundary and persists ever
   assert.deepEqual(observed, ["first", "second", "unsafe-request"]);
   assert.equal(fake.calls.preflight, 1);
   assert.deepEqual(summary.counts, { total: 3, passed: 2, failed: 0, errors: 1 });
+  assert.equal(summary.complete, true);
+  assert.equal(JSON.parse(await readFile(summary.files.summary, "utf8")).complete, true);
   const lines = (await readFile(summary.files.cases, "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(lines.length, 3);
   assert.equal(lines[2].primaryError.class, "transport_error");
@@ -458,6 +460,7 @@ expect:
   sender:
     exactly: "\${E2A_EVAL_TARGET}"
     sent_as: "\${E2A_EVAL_TARGET}"
+    display_name: Synthetic Target
     reply_to: { exactly: ["\${E2A_PROBE_CC}"] }
   recipients:
     to: { exactly: ["\${E2A_EVAL_ACTOR}"] }
@@ -475,10 +478,11 @@ expect:
     suite: loaded,
     adapter: adapter((testCase) => {
       const captured = evidence(testCase);
-      captured.stimulus.participants = [ACTOR, probeCc];
+      captured.stimulus.participants = [`Synthetic Actor <${ACTOR}>`, `CC Probe <${probeCc}>`];
       Object.assign(captured.candidates[0], {
-        from: TARGET, sentAs: TARGET, replyTo: [probeCc], to: [ACTOR], cc: [probeCc], bcc: [probeBcc],
-        envelopeRecipients: [ACTOR, probeCc, probeBcc],
+        from: `Synthetic Target <${TARGET}>`, sentAs: `Synthetic Target <${TARGET}>`, replyTo: [`CC Probe <${probeCc}>`],
+        to: [`Synthetic Actor <${ACTOR}>`], cc: [`CC Probe <${probeCc}>`], bcc: [`BCC Probe <${probeBcc}>`],
+        envelopeRecipients: [`Synthetic Actor <${ACTOR}>`, `CC Probe <${probeCc}>`, `BCC Probe <${probeBcc}>`],
       });
       return captured;
     }),
@@ -486,12 +490,16 @@ expect:
   });
   assert.equal(summary.status, "pass");
   assert.deepEqual(summary.cases[0].expectation.sender, {
-    exactly: "target", sentAs: "target", replyTo: { exactly: ["probe:2"] },
+    exactly: "target", sentAs: "target", displayName: "Synthetic Target", replyTo: { exactly: ["probe:2"] },
   });
   assert.deepEqual(summary.cases[0].expectation.recipients, {
     to: { exactly: ["actor"] }, cc: { exactly: ["probe:2"] }, bcc: { exactly: ["probe:1"] },
     envelope: { exactly: ["actor", "probe:1", "probe:2"] },
   });
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].from, { address: "target", displayName: "Synthetic Target" });
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].sentAs, { address: "target", displayName: "Synthetic Target" });
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].replyTo, [{ address: "probe:2", displayName: "CC Probe" }]);
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].to, [{ address: "actor", displayName: "Synthetic Actor" }]);
   const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "pass");
   assert.deepEqual(regraded.cases[0].expectation, summary.cases[0].expectation);
@@ -519,6 +527,46 @@ test("adapter evidence is a strict projection and unknown nested data never reac
   }
 });
 
+test("evidence token fields and aggregate CaseRecord size fail closed before append", async () => {
+  const scenarios = [
+    (captured) => { captured.candidates[0].ref = "outside@example.com"; },
+    (captured) => {
+      captured.candidates[0].mime.subject = "S".repeat(1_048_000);
+      captured.candidates[0].mime.text = "T".repeat(1_048_000);
+    },
+  ];
+  for (const [index, mutate] of scenarios.entries()) {
+    const one = suite([{ id: `bounded-${index}`, send: { subject: "Bounded", text: "Synthetic" }, expect: expectation() }]);
+    const summary = await runSuite({
+      suite: one,
+      adapter: adapter((testCase) => { const captured = evidence(testCase); mutate(captured); return captured; }),
+      outputRoot: await root(), runId: RUN_ID,
+    });
+    assert.equal(summary.cases[0].primaryError.class, "transport_error");
+    assert.equal(summary.cases[0].primaryError.code, "invalid_evidence");
+    assert.ok((await stat(summary.files.cases)).size < 2 * 1024 * 1024);
+    assert.doesNotMatch(await readFile(summary.files.cases, "utf8"), /outside@example\.com/);
+  }
+});
+
+test("body mailbox text is artifact-safe and replay-equivalent", async () => {
+  const addressFact = "Contact outside@example.com for the synthetic answer";
+  const expected = expectation();
+  expected.body.requiredFacts = [addressFact];
+  const one = suite([{ id: "body-address", send: { subject: "Body", text: "Synthetic" }, expect: expected }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => evidence(testCase, {
+      candidates: [{ ...evidence(testCase).candidates[0], mime: { ...evidence(testCase).candidates[0].mime, text: addressFact } }],
+    })),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass");
+  assert.doesNotMatch(await readFile(summary.files.cases, "utf8"), /outside@example\.com/);
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "pass");
+});
+
 test("nonthrowing malformed observations are transport errors while thrown graders remain grader errors", async () => {
   const scenarios = [
     (captured) => { captured.actorReceipt = {}; },
@@ -538,6 +586,26 @@ test("nonthrowing malformed observations are transport errors while thrown grade
   }
 });
 
+test("missing original subject is capability_error and adapter-thrown grader_error is remapped", async () => {
+  const expected = { ...expectation(), subject: { policy: "preserve" } };
+  const one = suite([{ id: "missing-subject", send: { subject: "Subject", text: "Synthetic" }, expect: expected }]);
+  const missing = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => { const captured = evidence(testCase); captured.stimulus.subject = null; return captured; }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(missing.cases[0].primaryError.class, "capability_error");
+  assert.equal(missing.cases[0].primaryError.code, "required_evidence_unavailable");
+
+  const external = await runSuite({
+    suite: one,
+    adapter: adapter(async () => { throw new EvalError("grader_error", "grader_threw", "External grader impersonation"); }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(external.cases[0].primaryError.class, "transport_error");
+  assert.equal(external.cases[0].primaryError.code, "adapter_failed");
+});
+
 test("regrade rejects untrusted CaseRecords before copying any stored fields", async () => {
   const mutations = [
     (record) => { record.status = "pass"; record.evidence = null; record.primaryError = { class: "transport_error", code: "adapter_threw", message: "Synthetic" }; },
@@ -545,6 +613,19 @@ test("regrade rejects untrusted CaseRecords before copying any stored fields", a
     (record) => { record.evidence.candidates[0].from = "outside@example.com"; },
     (record) => { record.assertions[0].status = "unknown"; },
     (record) => { record.secondaryErrors.push({ stage: "reporting", code: "synthetic", message: "e2a_secret_must_not_escape" }); },
+    (record) => {
+      record.status = "error";
+      record.evidence.candidates = [];
+      record.assertions = [];
+      record.primaryError = { class: "target_timeout", code: "adapter_threw", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "transport_error", code: "poll_failed", message: "synthetic-credential" };
+    },
+    (record) => { record.secondaryErrors.push({ stage: "arbitrary", code: "synthetic", message: "Synthetic" }); },
   ];
   for (const mutate of mutations) {
     const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
@@ -564,6 +645,22 @@ test("regrade rejects untrusted CaseRecords before copying any stored fields", a
     regradeRun({ suite: suite(), runDirectory: path.dirname(duplicateKey.files.cases) }),
     (error) => error.errorClass === "configuration_error" && error.code === "invalid_cases_artifact",
   );
+
+  for (const key of ["__proto__", "constructor", "prototype"]) {
+    const poisoned = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+    const beforeSummary = await readFile(poisoned.files.summary, "utf8");
+    const beforeReport = await readFile(poisoned.files.report, "utf8");
+    const lines = (await readFile(poisoned.files.cases, "utf8")).trimEnd().split("\n");
+    lines[0] = lines[0].replace("{", `{${JSON.stringify(key)}:{"polluted":true},`);
+    await writeFile(poisoned.files.cases, `${lines.join("\n")}\n`);
+    await assert.rejects(
+      regradeRun({ suite: suite(), runDirectory: path.dirname(poisoned.files.cases) }),
+      (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    );
+    assert.equal({}.polluted, undefined);
+    assert.equal(await readFile(poisoned.files.summary, "utf8"), beforeSummary);
+    assert.equal(await readFile(poisoned.files.report, "utf8"), beforeReport);
+  }
 });
 
 test("regrade rebuilds summary status and counts and projects prior metadata", async () => {
@@ -601,10 +698,32 @@ test("a report-only finalize failure durably marks both returned and on-disk sum
   });
   const stored = JSON.parse(await readFile(summary.files.summary, "utf8"));
   assert.equal(summary.status, "fail");
+  assert.equal(summary.complete, false);
   assert.equal(stored.status, "fail");
+  assert.equal(stored.complete, false);
   assert.deepEqual(stored.secondaryErrors, summary.secondaryErrors);
   assert.ok(stored.secondaryErrors.some((error) => error.stage === "reporting"));
   assert.equal(await readFile(sentinel, "utf8"), "sentinel\n");
+});
+
+test("incremental summary remains explicitly incomplete when report and failure-summary publication both fail", async () => {
+  const outputRoot = await root();
+  const runDirectory = path.join(outputRoot, RUN_ID);
+  let callbacks = 0;
+  const summary = await runSuite({
+    suite: suite(), adapter: adapter(), outputRoot, runId: RUN_ID,
+    onCase: async () => {
+      callbacks += 1;
+      if (callbacks === 3) await chmod(runDirectory, 0o500);
+    },
+  });
+  await chmod(runDirectory, 0o700);
+  const stored = JSON.parse(await readFile(path.join(runDirectory, "summary.json"), "utf8"));
+  assert.equal(summary.status, "fail");
+  assert.equal(summary.complete, false);
+  assert.equal(stored.status, "incomplete");
+  assert.equal(stored.complete, false);
+  assert.equal(await readFile(path.join(runDirectory, "cases.jsonl"), "utf8").then((value) => value.trim().split("\n").length), 3);
 });
 
 test("regradeRun uses stored aliased evidence, makes no adapter call, and never rewrites cases.jsonl", async () => {
