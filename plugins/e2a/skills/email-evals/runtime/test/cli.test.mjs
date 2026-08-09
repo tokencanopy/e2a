@@ -173,6 +173,26 @@ test("run caches its preflight for runSuite and maps result and preflight errors
   assert.equal(await main(["run", "--suite", "suite.yaml"], configuration.dependencies), 2);
 });
 
+test("preflight preserves every recognized error class and makes unknown failure unexpected", async () => {
+  for (const [errorClass, exit] of [
+    ["assertion_failure", 1], ["configuration_error", 2], ["capability_error", 2],
+    ["transport_error", 3], ["target_timeout", 3], ["grader_error", 4],
+  ]) {
+    const h = harness({ adapter: {
+      async preflight() { throw new EvalError(errorClass, "synthetic", "unsafe actor@eval.test"); },
+      async executeCase() { throw new Error("must not execute"); },
+    } });
+    assert.equal(await main(["run", "--suite", "suite.yaml"], h.dependencies), exit, errorClass);
+    assert.equal(stderr(h), `email-evals: ${errorClass}\n`, errorClass);
+  }
+  const unknown = harness({ adapter: {
+    async preflight() { throw new Error("unsafe actor@eval.test"); },
+    async executeCase() { throw new Error("must not execute"); },
+  } });
+  assert.equal(await main(["run", "--suite", "suite.yaml"], unknown.dependencies), 4);
+  assert.equal(stderr(unknown), "email-evals: grader_error\n");
+});
+
 test("regrade loads the suite but creates no adapter and makes no transport call", async () => {
   const h = harness();
   assert.equal(await main(["regrade", "--suite", "suite.yaml", "--run", "runs/run_20260808T120000_0123abcd", "--json"], h.dependencies), 0);
@@ -188,14 +208,15 @@ test("JSON stdout is one object and human output carries a safe report path", as
 
   const human = harness();
   assert.equal(await main(["run", "--suite", "suite.yaml"], human.dependencies), 0);
-  assert.match(stdout(human), /Report: \.\.\/results\/run_20260808T120000_0123abcd\/report\.md/);
+  assert.match(stdout(human), /Report: run_20260808T120000_0123abcd\/report\.md/);
   assert.doesNotMatch(stdout(human), /actor@eval\.test|target@eval\.test|e2a_acct_/);
 
   const pathLeak = summary();
   pathLeak.files.report = `/results/${ACTOR}/e2a_acct_synthetic/report.md`;
   const redactedPath = harness({ runSummary: pathLeak });
   assert.equal(await main(["run", "--suite", "suite.yaml"], redactedPath.dependencies), 0);
-  assert.doesNotMatch(stdout(redactedPath), /actor@eval\.test|e2a_acct_/);
+  assert.match(stdout(redactedPath), /Report: run_20260808T120000_0123abcd\/report\.md/);
+  assert.doesNotMatch(stdout(redactedPath), /actor@eval\.test|e2a_acct_|\/results\//);
 });
 
 test("unexpected errors have stable safe diagnostics", async () => {

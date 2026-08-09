@@ -2,17 +2,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSuite } from "./lib/contract.mjs";
 import { createE2AAdapter } from "./lib/e2a-adapter.mjs";
+import { CliUsageError, parseRuntimeArguments, usage } from "./lib/cli-arguments.mjs";
 import { EvalError } from "./lib/errors.mjs";
 import { regradeRun, runSuite } from "./lib/runner.mjs";
 
-const COMMANDS = new Set(["validate", "run", "regrade"]);
-const OPTION_NAMES = new Set(["--suite", "--output", "--run", "--json"]);
-const COMMAND_OPTIONS = Object.freeze({
-  validate: new Set(["--suite", "--json"]),
-  run: new Set(["--suite", "--output", "--json"]),
-  regrade: new Set(["--suite", "--run", "--json"]),
-});
-const VALUE_OPTIONS = new Set(["--suite", "--output", "--run"]);
+
 const ERROR_EXIT_CODES = Object.freeze({
   assertion_failure: 1,
   configuration_error: 2,
@@ -25,49 +19,6 @@ const CAPABILITY_NAMES = new Set([
   "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
   "thread_headers", "raw_mime", "attachment_hashes", "delivery_lifecycle",
 ]);
-
-function usage() {
-  return [
-    "Usage:",
-    "  email-evals validate --suite <suite.yaml> [--json]",
-    "  email-evals run --suite <suite.yaml> [--output <results-dir>] [--json]",
-    "  email-evals regrade --suite <suite.yaml> --run <run-dir> [--json]",
-  ].join("\n");
-}
-
-class CliUsageError extends Error {}
-
-function safeOption(option) {
-  return /^--[a-z][a-z0-9-]*$/.test(option) ? option : "[invalid option]";
-}
-
-function parse(argv) {
-  if (argv.length === 1 && argv[0] === "--help") return { help: true };
-  const [command, ...tokens] = argv;
-  if (!COMMANDS.has(command)) throw new CliUsageError(command === undefined ? "Missing command" : "Unknown command");
-  const values = {};
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (!OPTION_NAMES.has(token)) {
-      if (typeof token === "string" && token.startsWith("--")) throw new CliUsageError(`Unknown option: ${safeOption(token)}`);
-      throw new CliUsageError("Unexpected positional argument");
-    }
-    if (!COMMAND_OPTIONS[command].has(token)) throw new CliUsageError(`Option not allowed for ${command}: ${token}`);
-    if (Object.hasOwn(values, token)) throw new CliUsageError(`Duplicate option: ${token}`);
-    if (VALUE_OPTIONS.has(token)) {
-      const value = tokens[index + 1];
-      if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) throw new CliUsageError(`Missing value for: ${token}`);
-      values[token] = value;
-      index += 1;
-    } else {
-      values[token] = true;
-    }
-  }
-  for (const required of command === "regrade" ? ["--suite", "--run"] : ["--suite"]) {
-    if (!Object.hasOwn(values, required)) throw new CliUsageError(`Missing required option: ${required}`);
-  }
-  return { command, suite: values["--suite"], output: values["--output"], run: values["--run"], json: values["--json"] === true };
-}
 
 // This intentionally mirrors runner.mjs's private requiredCapabilities helper.
 // Task 9 cannot alter runner.mjs, while validate must fail before sending if an
@@ -113,8 +64,8 @@ function checkCapabilities(suite, preflight, adapter) {
 }
 
 function normalizePreflightError(error) {
-  if (error instanceof EvalError && ["configuration_error", "capability_error"].includes(error.errorClass)) return error;
-  return new EvalError("configuration_error", "preflight_failed", "Evaluation preflight did not complete safely");
+  if (error instanceof EvalError && ERROR_EXIT_CODES[error.errorClass] !== undefined) return error;
+  return new EvalError("grader_error", "grader_threw", "Evaluation preflight did not complete safely");
 }
 
 async function preflightSuite(suite, adapter) {
@@ -189,23 +140,10 @@ function exitForSummary(summary) {
   return 4;
 }
 
-function redactPathValue(value, suite) {
-  const sensitive = [
-    suite?.actor?.email, suite?.target?.email, suite?.transport?.apiKey,
-    ...(suite?.[Symbol.for("e2a.email-evals.resolved-environment-values")] ?? []).map((entry) => entry?.value),
-  ].filter((entry) => typeof entry === "string" && entry.length > 0);
-  let safe = value;
-  for (const secret of sensitive.sort((left, right) => right.length - left.length)) safe = safe.split(secret).join("[REDACTED]");
-  return safe
-    .replace(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+/g, "[REDACTED:address]")
-    .replace(/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/g, "[REDACTED:credential]");
-}
-
-function reportPath(summary, cwd, suite) {
-  const report = summary?.files?.report;
-  if (typeof report !== "string" || /[\u0000-\u001F\u007f]/.test(report)) return null;
-  const relative = path.relative(cwd, report);
-  return redactPathValue(relative === "" ? "." : relative, suite);
+function reportPath(summary) {
+  const runId = typeof summary?.runId === "string" && /^run_\d{8}T\d{6}_[a-f0-9]{8}$/.test(summary.runId)
+    ? summary.runId : null;
+  return runId ? `${runId}/report.md` : null;
 }
 
 function writeResult({ command, json, value, report, stdout }) {
@@ -248,7 +186,7 @@ export async function main(argv, dependencies = {}) {
   };
   let parsed;
   try {
-    parsed = parse(argv);
+    parsed = parseRuntimeArguments(argv);
   } catch (error) {
     return diagnostic(error, deps.stderr);
   }
@@ -263,7 +201,7 @@ export async function main(argv, dependencies = {}) {
     if (parsed.command === "regrade") {
       const result = await deps.regradeRun({ suite, runDirectory: path.resolve(deps.cwd, parsed.run) });
       const output = { summary: safeSummary(result) };
-      writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result, deps.cwd, suite), stdout: deps.stdout });
+      writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result), stdout: deps.stdout });
       return exitForSummary(result);
     }
 
@@ -284,7 +222,7 @@ export async function main(argv, dependencies = {}) {
       outputRoot: path.resolve(deps.cwd, parsed.output ?? "results"),
     });
     const output = { summary: safeSummary(result) };
-    writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result, deps.cwd, suite), stdout: deps.stdout });
+    writeResult({ command: parsed.command, json: parsed.json, value: output, report: reportPath(result), stdout: deps.stdout });
     return exitForSummary(result);
   } catch (error) {
     return diagnostic(error, deps.stderr);
