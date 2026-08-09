@@ -377,10 +377,12 @@ manually on every API change even though the template won't remind you.
   repo text integrity, SDK operation coverage, test harnesses).
 - `tests/e2e-prod/` is a production smoke harness — not part of local dev.
 - Plugin CI is consolidated in `.github/workflows/plugin-tests.yml`: package,
-  manifest, version, and Tether checks; the deterministic Agentify suite; and
-  golden-fixture lane tests driving `claude -p` over a mocked world. The model
-  layer runs only for fixture-relevant changes and skips without
-  `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+  manifest, and version checks; parallel deterministic Agentify, Autopilot, and
+  Tether suites; and golden-fixture lane tests driving `claude -p` over a
+  mocked world. It runs on every PR and main push so the version gate fails
+  closed even for very large diffs. The model layer runs only for
+  fixture-relevant changes and skips without `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY`.
 
 ## Conventions
 

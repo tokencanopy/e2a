@@ -1,47 +1,14 @@
 # Consolidated CI for the stable e2a plugin and experimental e2a Labs plugin.
-# Package validation and deterministic tests run for every plugin change. The
-# model-backed Agentify fixtures run only when their prompts, fixture harness,
-# or this workflow change, and skip cleanly when model credentials are absent.
+# Package validation and skill suites run in parallel on every pull request and
+# main push so the release gate cannot be skipped by GitHub's path-filter file
+# limit. The model-backed Agentify fixtures run only when their inputs change,
+# and skip cleanly when model credentials are absent.
 name: Plugin tests
 
 on:
   push:
     branches: [main]
-    paths:
-      - ".agents/plugins/marketplace.json"
-      - ".claude-plugin/marketplace.json"
-      - ".cursor-plugin/marketplace.json"
-      - ".github/workflows/agentify-lane-fixtures.yml"
-      - ".github/workflows/agentify-test.yml"
-      - ".github/workflows/plugin-tests.yml"
-      - ".github/workflows/test.yml"
-      - "mcp/tool-names.v1.json"
-      - "plugins/e2a/**"
-      - "plugins/e2a-labs/**"
-      - "scripts/check-plugin-version-bump.mjs"
-      - "scripts/check-plugin-version-bump.test.mjs"
-      - "scripts/plugin-agent-guidance.test.mjs"
-      - "scripts/plugin-core-skills.test.mjs"
-      - "scripts/plugin-packaging.test.mjs"
-      - "scripts/validate-plugin.mjs"
   pull_request:
-    paths:
-      - ".agents/plugins/marketplace.json"
-      - ".claude-plugin/marketplace.json"
-      - ".cursor-plugin/marketplace.json"
-      - ".github/workflows/agentify-lane-fixtures.yml"
-      - ".github/workflows/agentify-test.yml"
-      - ".github/workflows/plugin-tests.yml"
-      - ".github/workflows/test.yml"
-      - "mcp/tool-names.v1.json"
-      - "plugins/e2a/**"
-      - "plugins/e2a-labs/**"
-      - "scripts/check-plugin-version-bump.mjs"
-      - "scripts/check-plugin-version-bump.test.mjs"
-      - "scripts/plugin-agent-guidance.test.mjs"
-      - "scripts/plugin-core-skills.test.mjs"
-      - "scripts/plugin-packaging.test.mjs"
-      - "scripts/validate-plugin.mjs"
   workflow_dispatch: {}
 
 permissions:
@@ -65,14 +32,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
       - name: Run plugin contract tests
         run: node --test scripts/plugin-agent-guidance.test.mjs scripts/plugin-core-skills.test.mjs scripts/plugin-packaging.test.mjs scripts/check-plugin-version-bump.test.mjs
-      - name: Run Tether runtime self-test
-        run: bash plugins/e2a-labs/skills/tether/tether.sh _selftest
       - name: Validate repository plugin contracts
         run: node scripts/validate-plugin.mjs
       - name: Validate Claude plugin manifests
@@ -107,6 +69,33 @@ jobs:
       - name: Run Agentify tests
         run: bash plugins/e2a-labs/skills/agentify/test/run.sh
 
+  autopilot:
+    name: Autopilot suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Run Autopilot tests
+        run: node --test plugins/e2a-labs/skills/autopilot/test/*.test.mjs
+
+  tether:
+    name: Tether self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Run Tether runtime self-test
+        run: bash plugins/e2a-labs/skills/tether/tether.sh _selftest
+
   agentify-fixtures:
     name: Agentify live fixtures
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
@@ -126,6 +115,8 @@ jobs:
             run_fixtures=true
           elif git diff --quiet "$BASE_SHA"...HEAD -- \
             plugins/e2a-labs/skills/agentify/templates/runtime-skill \
+            plugins/e2a-labs/skills/agentify/templates/workflows/feedback-triage.yml.tmpl \
+            plugins/e2a-labs/skills/agentify/examples/e2a/autonomous-repo.config.yml \
             plugins/e2a-labs/skills/agentify/test/fixtures \
             .github/workflows/plugin-tests.yml; then
             run_fixtures=false

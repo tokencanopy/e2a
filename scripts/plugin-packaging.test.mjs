@@ -68,7 +68,7 @@ test("Labs tracks the core plugin without requiring release tags", async () => {
   assert.deepEqual(labs.dependencies, ["e2a"]);
 });
 
-test("plugin CI is consolidated without losing its three test lanes", async () => {
+test("plugin CI is consolidated into parallel package and skill lanes", async () => {
   const workflow = await readFile(".github/workflows/plugin-tests.yml", "utf8");
   const generalTests = await readFile(".github/workflows/test.yml", "utf8");
 
@@ -78,7 +78,11 @@ test("plugin CI is consolidated without losing its three test lanes", async () =
   assert.match(workflow, /^name: Plugin tests$/m);
   assert.match(workflow, /^  package:$/m);
   assert.match(workflow, /^  agentify:$/m);
+  assert.match(workflow, /^  autopilot:$/m);
+  assert.match(workflow, /^  tether:$/m);
   assert.match(workflow, /^  agentify-fixtures:$/m);
+  assert.doesNotMatch(workflow, /^\s+needs:/m);
+  assert.doesNotMatch(workflow, /^    paths(?:-ignore)?:/m);
   assert.match(
     workflow,
     /bash plugins\/e2a-labs\/skills\/tether\/tether\.sh _selftest/,
@@ -86,6 +90,10 @@ test("plugin CI is consolidated without losing its three test lanes", async () =
   assert.match(
     workflow,
     /bash plugins\/e2a-labs\/skills\/agentify\/test\/run\.sh/,
+  );
+  assert.match(
+    workflow,
+    /node --test plugins\/e2a-labs\/skills\/autopilot\/test\/\*\.test\.mjs/,
   );
   assert.match(
     workflow,
@@ -99,11 +107,9 @@ test("consolidated plugin CI preserves release gates and fixture isolation", asy
 
   assert.match(workflow, /github\.event\.pull_request\.base\.sha/);
   assert.match(workflow, /github\.event\.before/);
-  assert.match(workflow, /\.github\/workflows\/test\.yml/);
-  assert.match(workflow, /\.github\/workflows\/agentify-test\.yml/);
-  assert.match(workflow, /\.github\/workflows\/agentify-lane-fixtures\.yml/);
-  assert.match(workflow, /mcp\/tool-names\.v1\.json/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/runtime-skill/);
+  assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/workflows\/feedback-triage\.yml\.tmpl/);
+  assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/examples\/e2a\/autonomous-repo\.config\.yml/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/test\/fixtures/);
   assert.match(workflow, /git diff --quiet "\$BASE_SHA"\.\.\.HEAD --/);
   assert.match(workflow, /CLAUDE_CODE_OAUTH_TOKEN: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/);
