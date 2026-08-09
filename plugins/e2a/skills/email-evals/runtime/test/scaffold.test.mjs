@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, mkdir, open, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, open, readFile, readdir, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,7 +24,7 @@ const expectedFiles = [
 ];
 
 async function createRoot() {
-  return mkdtemp(path.join(tmpdir(), "email-evals-scaffold-"));
+  return realpath(await mkdtemp(path.join(tmpdir(), "email-evals-scaffold-")));
 }
 
 test("scaffold creates three synthetic cases and preserves existing files", async () => {
@@ -114,6 +114,17 @@ test("scaffold rejects symlinked roots and generated parents without writing out
   await symlink(outsideRoot, symlinkedRoot);
   await assert.rejects(scaffoldSuite({ root: symlinkedRoot, ...validOptions }), /symlink/i);
   assert.deepEqual(await readdir(outsideRoot), []);
+
+  const requestedParent = path.join(root, "requested-parent");
+  const outsideAncestor = path.join(root, "outside-ancestor");
+  await mkdir(requestedParent);
+  await mkdir(outsideAncestor);
+  await symlink(outsideAncestor, path.join(requestedParent, "link"));
+  await assert.rejects(
+    scaffoldSuite({ root: path.join(requestedParent, "link", "evals", "email"), ...validOptions }),
+    /symlink/i,
+  );
+  assert.deepEqual(await readdir(outsideAncestor), []);
 });
 
 test("scaffold removes a file it exclusively created when writing it fails", async () => {
@@ -123,7 +134,10 @@ test("scaffold removes a file it exclusively created when writing it fails", asy
     return {
       close: () => handle.close(),
       stat: () => handle.stat(),
-      writeFile: async () => { throw new Error("simulated write failure"); },
+      writeFile: async () => {
+        await writeFile(path.join(root, ".gitignore"), "later user replacement\n", { flag: "wx" });
+        throw new Error("simulated write failure");
+      },
     };
   };
 
@@ -131,5 +145,21 @@ test("scaffold removes a file it exclusively created when writing it fails", asy
     scaffoldSuite({ root, ...validOptions }, { openFile }),
     /simulated write failure/,
   );
-  await assert.rejects(access(path.join(root, ".gitignore")));
+  assert.equal(await readFile(path.join(root, ".gitignore"), "utf8"), "later user replacement\n");
+});
+
+test("scaffold does not publish through a parent swapped before the no-clobber link", async () => {
+  const root = await createRoot();
+  const movedRoot = `${root}-moved`;
+  const outside = `${root}-outside`;
+  await mkdir(outside);
+
+  const linkFile = async (temporary, destination) => {
+    await rename(root, movedRoot);
+    await symlink(outside, root);
+    return link(temporary, destination);
+  };
+
+  await assert.rejects(scaffoldSuite({ root, ...validOptions }, { linkFile }), /ENOENT/);
+  assert.deepEqual(await readdir(outside), []);
 });

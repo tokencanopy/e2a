@@ -1,5 +1,7 @@
-import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const scaffoldDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -73,53 +75,95 @@ async function assertSafeDirectory(directory) {
   if (!entry?.isDirectory()) throw new Error(`Scaffold path is not a directory: ${directory}`);
 }
 
-async function prepareRoot(root) {
+async function createSafeDirectory(directory) {
+  const existing = await pathEntry(directory);
+  if (!existing) {
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  await assertSafeDirectory(directory);
+}
+
+async function canonicalizeTemporaryDirectoryRoot(root) {
   const requestedRoot = path.resolve(root);
-  const existing = await pathEntry(requestedRoot);
-  if (existing?.isSymbolicLink()) throw new Error(`Refusing to follow symlink at ${requestedRoot}`);
-  if (!existing) await mkdir(requestedRoot, { recursive: true });
-  await assertSafeDirectory(requestedRoot);
+  const configuredTempDirectory = path.resolve(tmpdir());
+  if (!isContainedPath(configuredTempDirectory, requestedRoot)) return requestedRoot;
+  return path.join(
+    await realpath(configuredTempDirectory),
+    path.relative(configuredTempDirectory, requestedRoot),
+  );
+}
+
+async function prepareRoot(root) {
+  const requestedRoot = await canonicalizeTemporaryDirectoryRoot(root);
+  const parsed = path.parse(requestedRoot);
+  let current = parsed.root;
+  for (const segment of path.relative(parsed.root, requestedRoot).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    await createSafeDirectory(current);
+  }
   return realpath(requestedRoot);
+}
+
+async function inspectSafeParent(root, parent) {
+  assertContainedPath(root, parent);
+  await assertSafeDirectory(parent);
+  const resolvedParent = await realpath(parent);
+  assertContainedPath(root, resolvedParent);
+  const entry = await pathEntry(parent);
+  return { dev: entry.dev, ino: entry.ino };
 }
 
 async function prepareParent(root, parent) {
   assertContainedPath(root, parent);
-  await assertSafeDirectory(root);
-  const relative = path.relative(root, parent);
   let current = root;
-  for (const segment of relative === "" ? [] : relative.split(path.sep)) {
+  for (const segment of path.relative(root, parent).split(path.sep).filter(Boolean)) {
     current = path.join(current, segment);
-    const entry = await pathEntry(current);
-    if (!entry) await mkdir(current);
-    await assertSafeDirectory(current);
+    await createSafeDirectory(current);
   }
-  const resolvedParent = await realpath(parent);
-  assertContainedPath(root, resolvedParent);
+  return inspectSafeParent(root, parent);
 }
 
-async function removeCreatedFile(file, identity) {
+async function assertUnchangedParent(root, parent, identity) {
+  const current = await inspectSafeParent(root, parent);
+  if (current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw new Error(`Scaffold parent changed during write: ${parent}`);
+  }
+}
+
+async function removePublishedTemporary(file) {
   try {
-    const entry = await pathEntry(file);
-    if (entry?.isFile() && entry.dev === identity.dev && entry.ino === identity.ino) {
-      await unlink(file);
-    }
+    await unlink(file);
   } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+    if (error?.code !== "ENOENT") {
+      // The destination is already atomically published; a stale private temp
+      // file is safer than failing or touching the destination.
+    }
   }
 }
 
-async function writeExclusive(file, content, openFile = open) {
+async function writeExclusive(destination, content, { root, parent, parentIdentity, openFile = open, linkFile = link }) {
+  const temporary = path.join(parent, `.${path.basename(destination)}.email-evals-${randomUUID()}.tmp`);
   let handle;
-  let identity;
   try {
-    handle = await openFile(file, "wx", 0o600);
-    identity = await handle.stat();
+    handle = await openFile(temporary, "wx", 0o600);
     await handle.writeFile(content, "utf8");
     await handle.close();
     handle = undefined;
+    await assertUnchangedParent(root, parent, parentIdentity);
+    try {
+      await linkFile(temporary, destination);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await removePublishedTemporary(temporary);
+      return false;
+    }
+    await removePublishedTemporary(temporary);
     return true;
   } catch (error) {
-    if (error?.code === "EEXIST") return false;
     if (handle) {
       try {
         await handle.close();
@@ -128,12 +172,13 @@ async function writeExclusive(file, content, openFile = open) {
       }
       handle = undefined;
     }
-    if (identity) await removeCreatedFile(file, identity);
+    // Do not delete a failed temporary path: without openat-style APIs, a
+    // later path replacement could be user-owned. No destination was linked.
     throw error;
   }
 }
 
-export async function scaffoldSuite(options, { openFile = open } = {}) {
+export async function scaffoldSuite(options, { openFile = open, linkFile = link } = {}) {
   validateOptions(options);
   const root = await prepareRoot(options.root);
   const created = [];
@@ -142,8 +187,15 @@ export async function scaffoldSuite(options, { openFile = open } = {}) {
   for (const relativeFile of templateFiles) {
     const template = await readFile(path.join(templatesDirectory, relativeFile), "utf8");
     const destination = path.join(root, relativeFile);
-    await prepareParent(root, path.dirname(destination));
-    if (await writeExclusive(destination, expandTemplate(template, options), openFile)) {
+    const parent = path.dirname(destination);
+    const parentIdentity = await prepareParent(root, parent);
+    if (await writeExclusive(destination, expandTemplate(template, options), {
+      root,
+      parent,
+      parentIdentity,
+      openFile,
+      linkFile,
+    })) {
       created.push(relativeFile);
     } else {
       preserved.push(relativeFile);
