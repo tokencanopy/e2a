@@ -203,6 +203,43 @@ describe.skipIf(!live)("cli live parity", () => {
     recordCovered("whoami");
   });
 
+  it("metrics: account rollup and per-inbox, both --json (exit 0)", () => {
+    // Asserted on SHAPE and INVARIANTS, never on specific counts: this runs
+    // against a shared deployment whose traffic is not this suite's to control,
+    // so any assertion on a particular number would be flaky by construction.
+    // Creates nothing — metrics are read-only.
+    //
+    // Note the CLI emits camelCase, not the REST payload's snake_case.
+    const acct = run(["metrics", "--json"]);
+    expect(acct.code, acct.stderr).toBe(0);
+    const a = JSON.parse(acct.stdout);
+    expect(Date.parse(a.start)).toBeLessThan(Date.parse(a.end));
+    expect(a.messagesInWindow).toBeGreaterThanOrEqual(0);
+    expect(a.messagesWithLifecycle).toBeLessThanOrEqual(a.messagesInWindow);
+    // The contract's sharpest promise: a zero denominator yields null, never 0
+    // — 0% is indistinguishable from total delivery failure.
+    if (a.messagesInWindow === 0) {
+      expect(a.rates.bounceRate).toBeNull();
+      expect(a.rates.deliveredRate).toBeNull();
+    }
+
+    // --by-agent is the only shape-changing flag on the rollup. Per-agent rows
+    // are a partition of the account total, so they cannot claim more than the
+    // whole they came from.
+    const byAgent = run(["metrics", "--by-agent", "--json"]);
+    expect(byAgent.code, byAgent.stderr).toBe(0);
+    const g = JSON.parse(byAgent.stdout);
+    if (!g.agentsTruncated) {
+      const perAgent = (g.agents ?? []).reduce(
+        (sum: number, x: { messagesInWindow: number }) => sum + x.messagesInWindow,
+        0,
+      );
+      expect(perAgent).toBeLessThanOrEqual(g.messagesInWindow);
+    }
+
+    recordCovered("metrics");
+  });
+
   it("agents create → get → list, then send → messages list (self loopback)", async () => {
     const bot = `cli-live-${Date.now().toString(36)}@${DOMAIN}`;
 
