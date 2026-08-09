@@ -7,13 +7,11 @@ const skillNames = async (plugin) => (await readdir(`plugins/${plugin}/skills`, 
   .map((entry) => entry.name)
   .sort();
 
-test("experimental workflows live only in e2a-labs", async () => {
+test("core and experimental workflows have exact skill ownership", async () => {
   assert.deepEqual(await skillNames("e2a-labs"), ["agentify", "autopilot", "tether"]);
-  const core = await skillNames("e2a");
-  assert.ok(core.includes("e2a"));
-  for (const experimental of ["agentify", "autopilot", "tether"]) {
-    assert.ok(!core.includes(experimental), `${experimental} leaked into core`);
-  }
+  assert.deepEqual(await skillNames("e2a"), [
+    "e2a", "e2a-doctor", "e2a-integrate", "e2a-setup",
+  ]);
 });
 
 test("only core registers the e2a MCP server", async () => {
