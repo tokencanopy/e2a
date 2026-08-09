@@ -242,8 +242,18 @@ function tokenizeObservedEnvironment(value, environment) {
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, tokenizeObservedEnvironment(entry, environment)]));
 }
 
-function tokenizeResolvedSource(value, source, environment) {
+function artifactAlias(value) {
+  return typeof value === "string" && /^(?:actor|target|probe:\d+|observed:\d+)$/.test(value);
+}
+
+function typedAddressField(key, parentKey) {
+  return ADDRESS_SCALARS.has(key) || ADDRESS_ARRAYS.has(key)
+    || (key === "exactly" && ["sender", "replyTo", "to", "cc", "bcc", "envelope"].includes(parentKey));
+}
+
+function tokenizeResolvedSource(value, source, environment, parentKey = "", forceAddress = false) {
   if (typeof source === "string") {
+    if (forceAddress && artifactAlias(value)) return value;
     const match = source.match(/^\$\{([A-Z][A-Z0-9_]*)\}$/);
     if (match) {
       const named = environment.find((candidate) => candidate.replacement === `[ENV:${match[1]}]`);
@@ -253,11 +263,12 @@ function tokenizeResolvedSource(value, source, environment) {
     return value;
   }
   if (Array.isArray(value) && Array.isArray(source)) {
-    return value.map((entry, index) => tokenizeResolvedSource(entry, source[index], environment));
+    const childAddress = forceAddress || ADDRESS_ARRAYS.has(parentKey);
+    return value.map((entry, index) => tokenizeResolvedSource(entry, source[index], environment, parentKey, childAddress));
   }
   if (!value || typeof value !== "object" || !source || typeof source !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
-    key, tokenizeResolvedSource(entry, source[key], environment),
+    key, tokenizeResolvedSource(entry, source[key], environment, key, typedAddressField(key, parentKey)),
   ]));
 }
 
@@ -587,11 +598,19 @@ export async function createArtifactWriter({ outputRoot, runId }) {
     async finalize(summary) {
       if (closed) throw reportError("writer_closed", "Evaluation artifact writer is closed");
       await verifyRunAndCases();
-      await atomicWrite(files.summary, `${JSON.stringify(diskSummary(summary), null, 2)}\n`, verifyRunAndCases);
+      // report.md is prepared before summary.json. The final summary rename is
+      // the run's commit marker, so an on-disk pass can never name a missing
+      // or failed final report.
       await atomicWrite(files.report, renderMarkdown(summary), verifyRunAndCases);
+      await atomicWrite(files.summary, `${JSON.stringify(diskSummary(summary), null, 2)}\n`, verifyRunAndCases);
       await casesHandle.close();
       closed = true;
       await syncDirectory(canonicalRun);
+    },
+    async commitFailure(summary) {
+      if (closed) throw reportError("writer_closed", "Evaluation artifact writer is closed");
+      await verifyRunAndCases();
+      await atomicWrite(files.summary, `${JSON.stringify(diskSummary(summary), null, 2)}\n`, verifyRunAndCases);
     },
     async close() {
       if (!closed) {

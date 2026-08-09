@@ -435,6 +435,178 @@ expect: { action: { kind: "\${E2A_ACTION}", count: 0 } }
   assert.equal(regraded.cases[0].status, "pass");
 });
 
+test("environment-backed mailbox fields retain typed aliases through run and regrade", async () => {
+  const fixtureRoot = await root();
+  await mkdir(path.join(fixtureRoot, "cases"));
+  await writeFile(path.join(fixtureRoot, "suite.yaml"), `
+version: 1
+name: mailbox-parity
+target: { email: "\${E2A_EVAL_TARGET}" }
+actor: { email: "\${E2A_EVAL_ACTOR}" }
+transport:
+  adapter: e2a
+  api_key: "\${E2A_EVAL_API_KEY}"
+  base_url: https://api.example.test
+  allowed_envelope_recipients: ["\${E2A_EVAL_TARGET}", "\${E2A_EVAL_ACTOR}", "\${E2A_PROBE_CC}", "\${E2A_PROBE_BCC}"]
+cases: [cases/mailboxes.yaml]
+`);
+  await writeFile(path.join(fixtureRoot, "cases/mailboxes.yaml"), `
+id: mailbox-parity
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: reply_all, count: 1 }
+  sender:
+    exactly: "\${E2A_EVAL_TARGET}"
+    sent_as: "\${E2A_EVAL_TARGET}"
+    reply_to: { exactly: ["\${E2A_PROBE_CC}"] }
+  recipients:
+    to: { exactly: ["\${E2A_EVAL_ACTOR}"] }
+    cc: { exactly: ["\${E2A_PROBE_CC}"] }
+    bcc: { exactly: ["\${E2A_PROBE_BCC}"] }
+    envelope: { exactly: ["\${E2A_EVAL_ACTOR}", "\${E2A_PROBE_CC}", "\${E2A_PROBE_BCC}"] }
+`);
+  const probeCc = "cc-probe@eval.test";
+  const probeBcc = "bcc-probe@eval.test";
+  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
+    E2A_EVAL_TARGET: TARGET, E2A_EVAL_ACTOR: ACTOR, E2A_EVAL_API_KEY: "synthetic-credential",
+    E2A_PROBE_CC: probeCc, E2A_PROBE_BCC: probeBcc,
+  } });
+  const summary = await runSuite({
+    suite: loaded,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      captured.stimulus.participants = [ACTOR, probeCc];
+      Object.assign(captured.candidates[0], {
+        from: TARGET, sentAs: TARGET, replyTo: [probeCc], to: [ACTOR], cc: [probeCc], bcc: [probeBcc],
+        envelopeRecipients: [ACTOR, probeCc, probeBcc],
+      });
+      return captured;
+    }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass");
+  assert.deepEqual(summary.cases[0].expectation.sender, {
+    exactly: "target", sentAs: "target", replyTo: { exactly: ["probe:2"] },
+  });
+  assert.deepEqual(summary.cases[0].expectation.recipients, {
+    to: { exactly: ["actor"] }, cc: { exactly: ["probe:2"] }, bcc: { exactly: ["probe:1"] },
+    envelope: { exactly: ["actor", "probe:1", "probe:2"] },
+  });
+  const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "pass");
+  assert.deepEqual(regraded.cases[0].expectation, summary.cases[0].expectation);
+});
+
+test("adapter evidence is a strict projection and unknown nested data never reaches artifacts", async () => {
+  const mutations = [
+    (captured) => { captured.rawMimeBase64 = "secret-root outside@example.com"; },
+    (captured) => { captured.candidates[0].mailboxMap = { "outside@example.com": "secret-map" }; },
+    (captured) => { captured.candidates[0].mime.attachments.push({ filename: "x", contentType: "text/plain", disposition: "attachment", sizeBytes: 1, sha256: "a".repeat(64), content: "secret-bytes" }); },
+    (captured) => { captured.candidates[0].diagnostic = "secret-diagnostic outside@example.com"; },
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    const one = suite([{ id: `strict-${index}`, send: { subject: "Strict", text: "Synthetic" }, expect: expectation() }]);
+    const summary = await runSuite({
+      suite: one,
+      adapter: adapter((testCase) => { const captured = evidence(testCase); mutate(captured); return captured; }),
+      outputRoot: await root(), runId: RUN_ID,
+    });
+    assert.equal(summary.cases[0].status, "error");
+    assert.equal(summary.cases[0].primaryError.class, "transport_error");
+    assert.equal(summary.cases[0].primaryError.code, "invalid_evidence");
+    const artifacts = (await Promise.all(Object.values(summary.files).map((file) => readFile(file, "utf8")))).join("\n");
+    assert.doesNotMatch(artifacts, /secret-root|secret-map|secret-bytes|secret-diagnostic|outside@example\.com/);
+  }
+});
+
+test("nonthrowing malformed observations are transport errors while thrown graders remain grader errors", async () => {
+  const scenarios = [
+    (captured) => { captured.actorReceipt = {}; },
+    (captured) => { captured.candidates[0].observedAt = "not-a-timestamp"; },
+  ];
+  for (const [index, mutate] of scenarios.entries()) {
+    const expected = { ...expectation(), timing: { replyWithinMs: 5_000 }, lifecycle: { actorReceived: true } };
+    const one = suite([{ id: `malformed-${index}`, send: { subject: "Malformed", text: "Synthetic" }, expect: expected }]);
+    const summary = await runSuite({
+      suite: one,
+      adapter: adapter((testCase) => { const captured = evidence(testCase); mutate(captured); return captured; }),
+      outputRoot: await root(), runId: RUN_ID,
+    });
+    assert.equal(summary.cases[0].status, "error");
+    assert.equal(summary.cases[0].primaryError.class, "transport_error");
+    assert.equal(summary.cases[0].primaryError.code, "invalid_evidence");
+  }
+});
+
+test("regrade rejects untrusted CaseRecords before copying any stored fields", async () => {
+  const mutations = [
+    (record) => { record.status = "pass"; record.evidence = null; record.primaryError = { class: "transport_error", code: "adapter_threw", message: "Synthetic" }; },
+    (record) => { record.rawMimeBase64 = "secret-root"; },
+    (record) => { record.evidence.candidates[0].from = "outside@example.com"; },
+    (record) => { record.assertions[0].status = "unknown"; },
+    (record) => { record.secondaryErrors.push({ stage: "reporting", code: "synthetic", message: "e2a_secret_must_not_escape" }); },
+  ];
+  for (const mutate of mutations) {
+    const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+    const records = (await readFile(original.files.cases, "utf8")).trim().split("\n").map(JSON.parse);
+    mutate(records[0]);
+    await writeFile(original.files.cases, `${records.map(JSON.stringify).join("\n")}\n`);
+    await assert.rejects(
+      regradeRun({ suite: suite(), runDirectory: path.dirname(original.files.cases) }),
+      (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    );
+  }
+
+  const duplicateKey = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+  const source = await readFile(duplicateKey.files.cases, "utf8");
+  await writeFile(duplicateKey.files.cases, source.replace('{"id":"first"', '{"id":"first","status":"pass"'));
+  await assert.rejects(
+    regradeRun({ suite: suite(), runDirectory: path.dirname(duplicateKey.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_cases_artifact",
+  );
+});
+
+test("regrade rebuilds summary status and counts and projects prior metadata", async () => {
+  const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+  const stored = JSON.parse(await readFile(original.files.summary, "utf8"));
+  Object.assign(stored, {
+    status: "fail",
+    counts: { total: 999, passed: 0, failed: 999, errors: 0 },
+    primaryError: { message: "secret-summary outside@example.com" },
+    secondaryErrors: [{ message: "e2a_secret_summary" }],
+    capabilities: ["message_action", "outside@example.com"],
+    durations: { arbitrary: "secret-duration" },
+  });
+  await writeFile(original.files.summary, `${JSON.stringify(stored)}\n`);
+  const regraded = await regradeRun({ suite: suite(), runDirectory: path.dirname(original.files.cases) });
+  assert.equal(regraded.status, "pass");
+  assert.deepEqual(regraded.counts, { total: 3, passed: 3, failed: 0, errors: 0 });
+  assert.deepEqual(regraded.capabilities, []);
+  assert.deepEqual(regraded.durations, { preflightMs: 0, executionMs: 0, gradingMs: 0, reportingMs: 0, totalMs: 0 });
+  assert.doesNotMatch(await readFile(original.files.summary, "utf8"), /secret-summary|outside@example\.com|e2a_secret_summary|secret-duration/);
+});
+
+test("a report-only finalize failure durably marks both returned and on-disk summary failed", async () => {
+  const outputRoot = await root();
+  const outside = await root();
+  const sentinel = path.join(outside, "report.md");
+  await writeFile(sentinel, "sentinel\n");
+  let callbacks = 0;
+  const summary = await runSuite({
+    suite: suite(), adapter: adapter(), outputRoot, runId: RUN_ID,
+    onCase: async () => {
+      callbacks += 1;
+      if (callbacks === 3) await symlink(sentinel, path.join(outputRoot, RUN_ID, "report.md"));
+    },
+  });
+  const stored = JSON.parse(await readFile(summary.files.summary, "utf8"));
+  assert.equal(summary.status, "fail");
+  assert.equal(stored.status, "fail");
+  assert.deepEqual(stored.secondaryErrors, summary.secondaryErrors);
+  assert.ok(stored.secondaryErrors.some((error) => error.stage === "reporting"));
+  assert.equal(await readFile(sentinel, "utf8"), "sentinel\n");
+});
+
 test("regradeRun uses stored aliased evidence, makes no adapter call, and never rewrites cases.jsonl", async () => {
   const outputRoot = await root();
   const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot, runId: RUN_ID });

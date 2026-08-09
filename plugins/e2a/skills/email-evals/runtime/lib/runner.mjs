@@ -2,9 +2,11 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { parseDocument } from "yaml";
 import { EvalError } from "./errors.mjs";
 import { gradeContent } from "./grade-content.mjs";
 import { gradeCore } from "./grade-core.mjs";
+import { NormalizationError, normalizeMailbox } from "./normalize.mjs";
 import {
   aliasCaseRecord,
   artifactCaseId,
@@ -24,6 +26,222 @@ const SEMANTIC_ENV_VALUES = Object.freeze([
   "required", "forbidden", "equivalent_if_present", "sent", "failed",
   "pending_review", "scheduled", "original", "contains_original", "same",
 ]);
+const MAX_EVIDENCE_STRING = 1_048_576;
+const MAX_CASES_ARTIFACT_BYTES = 16 * 1024 * 1024;
+const MAX_CASE_LINE_BYTES = 2 * 1024 * 1024;
+
+function invalidEvidence() {
+  throw new TypeError("invalid evidence");
+}
+
+function exactObject(value, allowed) {
+  if (!value || Array.isArray(value) || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) invalidEvidence();
+  if (Object.keys(value).some((key) => !allowed.has(key))) invalidEvidence();
+  return value;
+}
+
+function textValue(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidEvidence();
+  return value;
+}
+
+function booleanValue(value) {
+  if (typeof value !== "boolean") invalidEvidence();
+  return value;
+}
+
+function integerValue(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0) invalidEvidence();
+  return value;
+}
+
+function stringArray(value, mapper = textValue) {
+  if (!Array.isArray(value)) invalidEvidence();
+  return value.map((entry) => mapper(entry));
+}
+
+function mailboxValue(value, stored, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  const text = textValue(value);
+  if (stored) {
+    if (!/^(?:actor|target|probe:\d+|observed:\d+)$/.test(text)) invalidEvidence();
+    return text;
+  }
+  try {
+    normalizeMailbox(text);
+    return text;
+  } catch (error) {
+    if (error instanceof NormalizationError) invalidEvidence();
+    throw error;
+  }
+}
+
+function copyOptional(source, target, key, project) {
+  if (Object.hasOwn(source, key)) target[key] = project(source[key]);
+}
+
+function projectAttachment(value) {
+  const source = exactObject(value, new Set(["filename", "contentType", "disposition", "sizeBytes", "sha256"]));
+  const result = {};
+  for (const key of ["filename", "contentType", "disposition", "sha256"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "sizeBytes", (entry) => integerValue(entry, { nullable: true }));
+  return result;
+}
+
+function projectMime(value, stored) {
+  if (value === null) return null;
+  const source = exactObject(value, new Set([
+    "messageId", "inReplyTo", "references", "subject", "from", "replyTo", "text", "htmlPresent", "sizeBytes", "attachments",
+  ]));
+  const result = {};
+  for (const key of ["messageId", "inReplyTo", "subject", "text"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "references", (entry) => stringArray(entry));
+  copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "replyTo", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
+  copyOptional(source, result, "htmlPresent", booleanValue);
+  copyOptional(source, result, "sizeBytes", integerValue);
+  copyOptional(source, result, "attachments", (entry) => {
+    if (!Array.isArray(entry)) invalidEvidence();
+    return entry.map(projectAttachment);
+  });
+  return result;
+}
+
+function projectTransition(value, stored) {
+  const source = exactObject(value, new Set([
+    "id", "messageId", "direction", "stage", "outcome", "reasonCode", "retryable", "reconstructed", "recipient", "occurredAt",
+  ]));
+  const result = {};
+  for (const key of ["id", "messageId", "direction", "stage", "outcome", "reasonCode", "occurredAt"]) {
+    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  }
+  for (const key of ["retryable", "reconstructed"]) copyOptional(source, result, key, booleanValue);
+  copyOptional(source, result, "recipient", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  return result;
+}
+
+function projectCandidateLifecycle(value, stored) {
+  const source = exactObject(value, new Set(["submission", "transitions"]));
+  const result = {};
+  copyOptional(source, result, "submission", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "transitions", (entry) => {
+    if (!Array.isArray(entry)) invalidEvidence();
+    return entry.map((transition) => projectTransition(transition, stored));
+  });
+  return result;
+}
+
+function projectCandidate(value, stored) {
+  const source = exactObject(value, new Set([
+    "ref", "eventType", "direction", "provenance", "messageType", "from", "sentAs", "replyTo", "to", "cc", "bcc",
+    "envelopeRecipients", "conversationId", "messageId", "observedAt", "sentAt", "mime", "lifecycle",
+  ]));
+  const result = {};
+  for (const key of ["ref", "eventType", "direction", "provenance", "messageType", "conversationId", "messageId", "observedAt", "sentAt"]) {
+    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  }
+  for (const key of ["from", "sentAs"]) copyOptional(source, result, key, (entry) => mailboxValue(entry, stored, { nullable: true }));
+  for (const key of ["replyTo", "to", "cc", "bcc", "envelopeRecipients"]) {
+    copyOptional(source, result, key, (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
+  }
+  copyOptional(source, result, "mime", (entry) => projectMime(entry, stored));
+  copyOptional(source, result, "lifecycle", (entry) => projectCandidateLifecycle(entry, stored));
+  return result;
+}
+
+function projectStimulus(value, stored) {
+  const source = exactObject(value, new Set([
+    "ref", "messageId", "outboundMessageId", "conversationId", "rfcMessageId", "subject", "receivedAt", "participants",
+  ]));
+  const result = {};
+  for (const key of ["ref", "messageId", "outboundMessageId", "conversationId", "rfcMessageId", "subject", "receivedAt"]) {
+    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  }
+  copyOptional(source, result, "participants", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
+  return result;
+}
+
+function projectActorReceipt(value) {
+  if (value === null) return null;
+  const source = exactObject(value, new Set(["ref", "messageId", "receiptMessageId", "observedAt"]));
+  const result = {};
+  for (const key of ["ref", "messageId", "receiptMessageId", "observedAt"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  return result;
+}
+
+function projectEvidenceLifecycle(value, stored) {
+  const source = exactObject(value, new Set(["stimulus", "candidates", "actorReceived"]));
+  const result = {};
+  copyOptional(source, result, "stimulus", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "candidates", (entry) => {
+    if (!Array.isArray(entry)) invalidEvidence();
+    return entry.map((candidate) => {
+      const item = exactObject(candidate, new Set(["ref", "submission", "transitions"]));
+      const projected = {};
+      copyOptional(item, projected, "ref", (field) => textValue(field, { nullable: true }));
+      copyOptional(item, projected, "submission", (field) => textValue(field, { nullable: true }));
+      copyOptional(item, projected, "transitions", (field) => {
+        if (!Array.isArray(field)) invalidEvidence();
+        return field.map((transition) => projectTransition(transition, stored));
+      });
+      return projected;
+    });
+  });
+  copyOptional(source, result, "actorReceived", booleanValue);
+  return result;
+}
+
+function projectTimings(value) {
+  const source = exactObject(value, new Set([
+    "runStartedAt", "caseStartedAt", "sendAcceptedAt", "targetReceivedAt", "firstCandidateAt", "completedAt",
+    "timeoutMs", "settleMs", "pollIntervalMs",
+  ]));
+  const result = {};
+  for (const key of ["runStartedAt", "caseStartedAt", "sendAcceptedAt", "targetReceivedAt", "firstCandidateAt", "completedAt"]) {
+    copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
+  }
+  for (const key of ["timeoutMs", "settleMs", "pollIntervalMs"]) copyOptional(source, result, key, integerValue);
+  return result;
+}
+
+function projectRefs(value) {
+  const source = exactObject(value, new Set(["stimulus", "candidates", "actorReceipt"]));
+  const result = {};
+  copyOptional(source, result, "stimulus", (entry) => {
+    const item = exactObject(entry, new Set(["event", "message", "outboundMessage"]));
+    const projected = {};
+    for (const key of ["event", "message", "outboundMessage"]) copyOptional(item, projected, key, (field) => textValue(field, { nullable: true }));
+    return projected;
+  });
+  copyOptional(source, result, "candidates", (entry) => stringArray(entry));
+  copyOptional(source, result, "actorReceipt", (entry) => textValue(entry, { nullable: true }));
+  return result;
+}
+
+function projectEvidence(value, { stored = false } = {}) {
+  const source = exactObject(value, new Set([
+    "version", "capabilities", "target", "stimulus", "candidates", "actorReceipt", "lifecycle", "timings", "refs",
+  ]));
+  if (source.version !== EVIDENCE_VERSION || !Array.isArray(source.capabilities) || !Array.isArray(source.candidates)) invalidEvidence();
+  const result = {
+    version: EVIDENCE_VERSION,
+    capabilities: stringArray(source.capabilities),
+    candidates: source.candidates.map((candidate) => projectCandidate(candidate, stored)),
+  };
+  copyOptional(source, result, "target", (entry) => {
+    const item = exactObject(entry, new Set(["email"]));
+    if (!Object.hasOwn(item, "email")) invalidEvidence();
+    return { email: mailboxValue(item.email, stored) };
+  });
+  copyOptional(source, result, "stimulus", (entry) => projectStimulus(entry, stored));
+  copyOptional(source, result, "actorReceipt", projectActorReceipt);
+  copyOptional(source, result, "lifecycle", (entry) => projectEvidenceLifecycle(entry, stored));
+  copyOptional(source, result, "timings", projectTimings);
+  copyOptional(source, result, "refs", projectRefs);
+  return result;
+}
 
 function instant(now) {
   let value;
@@ -135,10 +353,10 @@ function runStatus(counts, expectedTotal = counts.total, secondaryErrors = []) {
 function classifyAssertions(assertions) {
   const errors = assertions.filter((assertion) => assertion.status === "error");
   if (errors.length > 0) {
-    const missing = errors.every((assertion) => /^(?:missing_|unexpected_actor_receipt$)/.test(assertion.code));
+    const missing = errors.every((assertion) => /^missing_.*_evidence$/.test(assertion.code));
     return missing
       ? { status: "error", error: new EvalError("capability_error", "required_evidence_unavailable", "Required evaluation evidence was unavailable").toJSON() }
-      : { status: "error", error: new EvalError("grader_error", "invalid_grader_evidence", "Captured evidence could not be graded safely").toJSON() };
+      : { status: "error", error: new EvalError("transport_error", "invalid_evidence", "Captured evaluation evidence was malformed").toJSON() };
   }
   if (assertions.some((assertion) => assertion.status === "fail")) {
     return { status: "fail", error: new EvalError("assertion_failure", "assertions_failed", "One or more required assertions did not pass").toJSON() };
@@ -208,8 +426,9 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
   }
   if (!error) {
     const captured = snapshotJsonData(evidence);
-    if (captured.ok) evidence = captured.value;
-    else {
+    try {
+      evidence = captured.ok ? projectEvidence(captured.value) : invalidEvidence();
+    } catch {
       evidence = null;
       error = new EvalError("transport_error", "invalid_evidence", "Evaluation adapter returned an invalid evidence envelope").toJSON();
       status = "error";
@@ -370,10 +589,16 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
     } catch (error) {
       const secondary = reportingError(error, "reporting", suite);
       runSecondary.push(secondary);
-      summary = { ...summary, secondaryErrors: runSecondary };
-      summary.status = "fail";
+      summary = { ...summary, status: "fail", secondaryErrors: [...runSecondary] };
+      try {
+        await writer.commitFailure(summary);
+      } catch (commitError) {
+        runSecondary.push(reportingError(commitError, "cleanup", suite));
+        summary = { ...summary, secondaryErrors: [...runSecondary] };
+      }
       await writer.close().catch((closeError) => {
         runSecondary.push(reportingError(closeError, "cleanup", suite));
+        summary = { ...summary, secondaryErrors: [...runSecondary] };
       });
     }
     // The final artifact and returned value intentionally share this exact
@@ -435,6 +660,182 @@ function aliasSuiteFor(record, suite) {
   return aliased;
 }
 
+function invalidCaseArtifact() {
+  throw new EvalError("configuration_error", "invalid_case_artifact", "Stored evaluation case is invalid");
+}
+
+function exactCaseObject(value, allowed) {
+  try {
+    return exactObject(value, allowed);
+  } catch {
+    invalidCaseArtifact();
+  }
+}
+
+function safeStoredString(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidCaseArtifact();
+  if (/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(value)
+    && !/@agents\.localhost\b/i.test(value)) invalidCaseArtifact();
+  if (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(value)) invalidCaseArtifact();
+  return value;
+}
+
+function safeStoredIdentifier(value) {
+  const result = safeStoredString(value);
+  if (!/^[a-z][a-z0-9_.:-]{0,127}$/.test(result)) invalidCaseArtifact();
+  return result;
+}
+
+function projectStoredDiagnostic(value, depth = 0) {
+  if (depth > 64) invalidCaseArtifact();
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") return safeStoredString(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) invalidCaseArtifact();
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((entry) => projectStoredDiagnostic(entry, depth + 1));
+  const source = exactCaseObject(value, new Set(Object.keys(value ?? {})));
+  const result = {};
+  for (const [key, entry] of Object.entries(source)) {
+    if (/^(?:raw(?:mime|message)?(?:base64)?|attachmentbytes|contentbytes|bytes|content)$/i.test(key)) invalidCaseArtifact();
+    result[key] = projectStoredDiagnostic(entry, depth + 1);
+  }
+  return result;
+}
+
+function projectStoredError(value, { secondary = false } = {}) {
+  if (value === null && !secondary) return null;
+  const allowed = secondary
+    ? new Set(["stage", "class", "code", "message"])
+    : new Set(["class", "code", "message"]);
+  const source = exactCaseObject(value, allowed);
+  const result = {};
+  if (secondary) {
+    if (!Object.hasOwn(source, "stage")) invalidCaseArtifact();
+    result.stage = safeStoredIdentifier(source.stage);
+  }
+  if (Object.hasOwn(source, "class")) result.class = safeStoredIdentifier(source.class);
+  if (!Object.hasOwn(source, "code") || !Object.hasOwn(source, "message")) invalidCaseArtifact();
+  result.code = safeStoredIdentifier(source.code);
+  result.message = safeStoredString(source.message);
+  return result;
+}
+
+function projectStoredAssertion(value) {
+  const source = exactCaseObject(value, new Set(["id", "status", "code", "expected", "actual", "evidenceRefs"]));
+  if (!["pass", "fail", "error"].includes(source.status)
+    || !Object.hasOwn(source, "id") || !Object.hasOwn(source, "code")
+    || !Object.hasOwn(source, "expected") || !Object.hasOwn(source, "actual")
+    || !Array.isArray(source.evidenceRefs)) invalidCaseArtifact();
+  return {
+    id: safeStoredIdentifier(source.id),
+    status: source.status,
+    code: safeStoredIdentifier(source.code),
+    expected: projectStoredDiagnostic(source.expected),
+    actual: projectStoredDiagnostic(source.actual),
+    evidenceRefs: source.evidenceRefs.map((entry) => safeStoredString(entry)),
+  };
+}
+
+function expectedArtifactExpectation(suite, testCase) {
+  return aliasCaseRecord({
+    id: testCase.id,
+    status: "pass",
+    versions: { evidence: EVIDENCE_VERSION },
+    suite: { version: suite.version, digest: suite.digest },
+    expectation: testCase.expect,
+    evidence: { version: EVIDENCE_VERSION, capabilities: [], candidates: [] },
+    assertions: [],
+    primaryError: null,
+    secondaryErrors: [],
+  }, suite).expectation;
+}
+
+function validateStoredRecord(record, suite, testCase) {
+  const source = exactCaseObject(record, new Set([
+    "id", "status", "startedAt", "completedAt", "durations", "versions", "suite", "expectation", "evidence",
+    "assertions", "primaryError", "secondaryErrors",
+  ]));
+  if (!["pass", "fail", "error"].includes(source.status) || !Array.isArray(source.assertions)
+    || !Array.isArray(source.secondaryErrors)) invalidCaseArtifact();
+  const versions = exactCaseObject(source.versions, new Set(["evidence"]));
+  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest"]));
+  if (versions.evidence !== EVIDENCE_VERSION || suiteRef.version !== suite.version || suiteRef.digest !== suite.digest) invalidCaseArtifact();
+  const expected = expectedArtifactExpectation(suite, testCase);
+  if (JSON.stringify(source.expectation) !== JSON.stringify(expected)) invalidCaseArtifact();
+
+  let evidence = null;
+  if (source.evidence !== null) {
+    try { evidence = projectEvidence(source.evidence, { stored: true }); } catch { invalidCaseArtifact(); }
+  }
+  const assertions = source.assertions.map(projectStoredAssertion);
+  const primaryError = projectStoredError(source.primaryError);
+  const secondaryErrors = source.secondaryErrors.map((entry) => projectStoredError(entry, { secondary: true }));
+  const hasAssertionError = assertions.some((assertion) => assertion.status === "error");
+  const hasAssertionFailure = assertions.some((assertion) => assertion.status === "fail");
+  if (evidence === null && assertions.length > 0) invalidCaseArtifact();
+  if (source.status === "pass" && (evidence === null || assertions.length === 0
+    || primaryError !== null || assertions.some((entry) => entry.status !== "pass"))) invalidCaseArtifact();
+  if (source.status === "fail" && (evidence === null || primaryError?.class !== "assertion_failure"
+    || primaryError.code !== "assertions_failed" || !hasAssertionFailure || hasAssertionError)) invalidCaseArtifact();
+  if (source.status === "error") {
+    if (!primaryError || primaryError.class === "assertion_failure") invalidCaseArtifact();
+    if (hasAssertionError && (evidence === null || !["capability_error", "transport_error"].includes(primaryError.class))) invalidCaseArtifact();
+  }
+  const allowedClasses = new Set(["transport_error", "target_timeout", "capability_error", "assertion_failure", "grader_error"]);
+  if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
+
+  const result = {
+    id: safeStoredString(source.id),
+    status: source.status,
+    versions: { evidence: EVIDENCE_VERSION },
+    suite: { version: suite.version, digest: suite.digest },
+    expectation: expected,
+    evidence,
+    assertions,
+    primaryError,
+    secondaryErrors,
+  };
+  for (const key of ["startedAt", "completedAt"]) copyOptional(source, result, key, (entry) => safeStoredString(entry));
+  if (Object.hasOwn(source, "durations")) {
+    const durations = exactCaseObject(source.durations, new Set(["executionMs", "gradingMs", "totalMs"]));
+    result.durations = {};
+    for (const key of ["executionMs", "gradingMs", "totalMs"]) {
+      if (!Number.isFinite(durations[key]) || durations[key] < 0) invalidCaseArtifact();
+      result.durations[key] = durations[key];
+    }
+  }
+  return result;
+}
+
+function priorRunMetadata(value) {
+  const defaults = {
+    startedAt: null,
+    completedAt: null,
+    durations: { preflightMs: 0, executionMs: 0, gradingMs: 0, reportingMs: 0, totalMs: 0 },
+    capabilities: [],
+  };
+  const safe = snapshotJsonData(value);
+  if (!safe.ok || !safe.value || typeof safe.value !== "object" || Array.isArray(safe.value)) return defaults;
+  const source = safe.value;
+  const timestamp = (entry) => typeof entry === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(entry)
+    && Number.isFinite(Date.parse(entry)) ? entry : null;
+  const capabilities = Array.isArray(source.capabilities)
+    && source.capabilities.every((entry) => typeof entry === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(entry))
+    ? [...new Set(source.capabilities)].sort() : [];
+  let durations = defaults.durations;
+  if (source.durations && typeof source.durations === "object" && !Array.isArray(source.durations)) {
+    const keys = ["preflightMs", "executionMs", "gradingMs", "reportingMs", "totalMs"];
+    if (Object.keys(source.durations).length === keys.length
+      && keys.every((key) => Number.isFinite(source.durations[key]) && source.durations[key] >= 0)) {
+      durations = Object.fromEntries(keys.map((key) => [key, source.durations[key]]));
+    }
+  }
+  return { startedAt: timestamp(source.startedAt), completedAt: timestamp(source.completedAt), durations, capabilities };
+}
+
 async function readStoredRun(runDirectory) {
   validateRunId(path.basename(runDirectory));
   const state = await lstat(runDirectory);
@@ -444,6 +845,7 @@ async function readStoredRun(runDirectory) {
   const casesFile = path.join(canonical, "cases.jsonl");
   const casesState = await lstat(casesFile);
   if (casesState.isSymbolicLink() || !casesState.isFile()) throw new EvalError("configuration_error", "invalid_cases_artifact", "Invalid evaluation cases artifact");
+  if (casesState.size > MAX_CASES_ARTIFACT_BYTES) throw new EvalError("configuration_error", "invalid_cases_artifact", "Evaluation cases artifact exceeds its size limit");
   let casesHandle;
   let source;
   try {
@@ -462,7 +864,15 @@ async function readStoredRun(runDirectory) {
   if (!source.endsWith("\n")) throw new EvalError("configuration_error", "interrupted_cases_artifact", "Evaluation cases artifact ends with an incomplete line");
   let records;
   try {
-    records = source.length === 0 ? [] : source.trimEnd().split("\n").map((line) => JSON.parse(line));
+    records = source.length === 0 ? [] : source.trimEnd().split("\n").map((line) => {
+      if (Buffer.byteLength(line, "utf8") > MAX_CASE_LINE_BYTES) throw new Error("oversized case line");
+      const parsed = JSON.parse(line);
+      const yaml = parseDocument(line, { strict: true, uniqueKeys: true });
+      if (yaml.errors.length > 0) throw new Error("duplicate JSON key");
+      const safe = snapshotJsonData(parsed);
+      if (!safe.ok) throw new Error("unsafe case record");
+      return safe.value;
+    });
   } catch {
     throw new EvalError("configuration_error", "invalid_cases_artifact", "Evaluation cases artifact is not valid JSONL");
   }
@@ -485,8 +895,9 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     || new Set(storedIds).size !== storedIds.length) {
     throw new EvalError("configuration_error", "case_set_mismatch", "Stored run cases do not exactly match the resolved suite");
   }
+  const validatedRecords = stored.records.map((record, index) => validateStoredRecord(record, suite, suite.cases[index]));
 
-  const cases = stored.records.map((storedRecord) => {
+  const cases = validatedRecords.map((storedRecord) => {
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
       || ["transport_error", "target_timeout"].includes(storedRecord.primaryError?.class)) return storedRecord;
     const expectation = restoreAliasValue(storedRecord.expectation);
@@ -520,15 +931,16 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   } catch {
     prior = {};
   }
+  prior = priorRunMetadata(prior);
   const counts = countsFor(cases);
   const summary = {
     runId: path.basename(stored.canonical),
     status: runStatus(counts, suite.cases.length),
-    startedAt: prior.startedAt ?? null,
-    completedAt: prior.completedAt ?? null,
+    startedAt: prior.startedAt,
+    completedAt: prior.completedAt,
     counts,
-    durations: prior.durations ?? { preflightMs: 0, executionMs: 0, gradingMs: 0, reportingMs: 0, totalMs: 0 },
-    capabilities: Array.isArray(prior.capabilities) ? [...prior.capabilities].sort() : [],
+    durations: prior.durations,
+    capabilities: prior.capabilities,
     versions: { runner: RUNNER_VERSION, sdk: SDK_VERSION, suite: suite.version, evidence: EVIDENCE_VERSION },
     suite: { name: artifactSuiteName(suite), version: suite.version, digest: suite.digest },
     cases,

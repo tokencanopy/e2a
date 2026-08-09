@@ -8,7 +8,7 @@
 | Case | Status | Primary result |
 | --- | --- | --- |
 | failed-case | fail | assertions_failed |
-| error-case | error | grader_threw |
+| error-case | error | required_evidence_unavailable |
 
 ## Failed assertions
 
