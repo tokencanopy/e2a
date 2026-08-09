@@ -63,9 +63,9 @@ test("core Codex description advertises every stable capability", async () => {
   assert.match(codex.interface.longDescription, /diagnosis/i);
 });
 
-test("Labs pins its Claude dependency to the compatible core release", async () => {
+test("Labs tracks the core plugin without requiring release tags", async () => {
   const labs = JSON.parse(await readFile("plugins/e2a-labs/.claude-plugin/plugin.json", "utf8"));
-  assert.deepEqual(labs.dependencies, [{ name: "e2a", version: "^0.7.0" }]);
+  assert.deepEqual(labs.dependencies, ["e2a"]);
 });
 
 test("migration guidance refreshes core and keeps the Cursor boundary conservative", async () => {

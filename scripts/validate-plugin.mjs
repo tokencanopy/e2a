@@ -163,16 +163,8 @@ function validatePlugin(plugin, mcpToolCount) {
 
   if (plugin.name === "e2a-labs" && claudeManifest) {
     const dependencies = claudeManifest.dependencies;
-    const dependency = Array.isArray(dependencies) && dependencies.length === 1
-      ? dependencies[0]
-      : null;
-    if (
-      !dependency
-      || dependency.name !== "e2a"
-      || dependency.version !== "^0.7.0"
-      || JSON.stringify(Object.keys(dependency).sort()) !== JSON.stringify(["name", "version"])
-    ) {
-      fail(`${rel(clientManifestPath(plugin, ".claude-plugin"))}: dependencies must be exactly [{"name":"e2a","version":"^0.7.0"}]`);
+    if (!Array.isArray(dependencies) || dependencies.length !== 1 || dependencies[0] !== "e2a") {
+      fail(`${rel(clientManifestPath(plugin, ".claude-plugin"))}: dependencies must be exactly ["e2a"]`);
     }
   }
 
