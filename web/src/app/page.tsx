@@ -343,15 +343,16 @@ export default function Home() {
               color: "var(--fg)",
             }}
           >
-            Every agent gets{" "}
+            Build the best{" "}
             <em
               style={{
                 fontStyle: "italic",
                 color: "var(--accent-strong)",
               }}
             >
-              its own inbox.
+              email agents
             </em>
+            {" "}with e2a.
           </h1>
           <p
             className="mx-auto mb-9 leading-[1.55]"
@@ -361,10 +362,9 @@ export default function Home() {
               maxWidth: 540,
             }}
           >
-            The first open-source email service built for AI agents. Give each
-            one a real, authenticated address — then put it to work like anyone
-            else on the team: it takes requests, replies in thread, and checks
-            with you before anything ships.
+            e2a gives every agent a real, authenticated inbox — so it can handle
+            support, scheduling, reception, and ecommerce work over email, with
+            human approval when it matters.
           </p>
           <div className="inline-flex flex-wrap items-center justify-center gap-2.5">
             <Link

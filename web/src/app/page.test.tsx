@@ -43,16 +43,13 @@ describe("Landing page", () => {
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: /Every agent gets its own inbox/i,
+        name: /Build the best email agents with e2a/i,
       }),
     ).toBeInTheDocument();
-    // The two claims the hero leads on: open source, and an agent that works
-    // like a member of the team rather than a script you call.
+    // The hero leads with the product promise and makes the first use cases
+    // explicit rather than asking a visitor to infer what e2a is for.
     expect(
-      screen.getByText(/first open-source email service built for AI agents/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/put it to work like anyone else on the team/i),
+      screen.getByText(/e2a gives every agent a real, authenticated inbox/i),
     ).toBeInTheDocument();
   });
 
