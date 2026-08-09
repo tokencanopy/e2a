@@ -1,12 +1,12 @@
 ---
 name: e2a
 description: "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior."
-version: 26
+version: 27
 ---
 
 # Using e2a
 
-<!-- version: 26 -->
+<!-- version: 27 -->
 
 e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
 

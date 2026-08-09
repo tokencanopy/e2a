@@ -57,7 +57,7 @@ is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
 | MCP server | `mcp/` | TypeScript, Express | `@e2a/mcp-server` (hosted-only; npm publish retired) |
 | Web dashboard | `web/` | Next.js 16 App Router, React 19, Tailwind CSS 4, static export | private |
 | Design system | `design-system/` | React + tsup + Storybook | `@e2a/ui` ("Loft", consumed via `file:` dep) |
-| Agent plugin | `plugins/e2a/` | Markdown skills + manifests | Claude / Codex / Cursor marketplaces |
+| Agent plugins | `plugins/e2a/`, `plugins/e2a-labs/` | Markdown skills + manifests | Core: Claude / Codex / Cursor; Labs: Claude / Codex |
 
 Toolchain versions: `go.mod` declares Go 1.25; CI and the Dockerfiles build
 with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
