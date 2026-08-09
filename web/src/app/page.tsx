@@ -34,7 +34,7 @@ type NavItem = {
 const PRODUCT_LINKS: NavItem[] = [
   { label: "Build agent systems", href: "#build" },
   { label: "Human-in-the-loop", href: "#hitl" },
-  { label: "Use cases", href: "#use-cases" },
+  { label: "Use cases", href: "/use-cases" },
   { label: "FAQ", href: "#faq" },
 ];
 
@@ -47,14 +47,50 @@ const RESOURCE_LINKS: NavItem[] = [
   { label: "Blog", href: "/blog", newTab: true },
 ];
 
-const USE_CASES: { eyebrow: string; title: string; desc: string }[] = [
-  { eyebrow: "Support", title: "Support and intake", desc: "Triage inbound requests, answer common questions, and hand off to humans without changing how customers reach you." },
-  { eyebrow: "Admin", title: "Scheduling and admin", desc: "Coordinate meetings, send reminders, and follow up where most people already live — their inbox." },
-  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving with a verified agent identity." },
+const USE_CASES: { eyebrow: string; title: string; desc: string; href?: string }[] = [
+  { eyebrow: "Support", title: "Support and intake", desc: "Triage inbound requests, answer common questions, and hand off to humans without changing how customers reach you.", href: "/use-cases/support-agent" },
+  { eyebrow: "Admin", title: "Scheduling and admin", desc: "Coordinate meetings, send reminders, and follow up where most people already live — their inbox.", href: "/use-cases/scheduling-agent" },
+  { eyebrow: "Reception", title: "AI receptionist", desc: "Answer common inquiries, route messages, and forward conversations to the right person.", href: "/use-cases/ai-receptionist" },
+  { eyebrow: "Commerce", title: "E-commerce agents", desc: "Answer order questions, handle returns, and coordinate with vendors through persistent email threads.", href: "/use-cases/ecommerce-agent" },
+  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving with a verified agent identity.", href: "/use-cases/sales-agent" },
+  { eyebrow: "Recruiting", title: "Recruiting agents", desc: "Coordinate candidates, schedule interviews, and keep hiring conversations organized.", href: "/use-cases/recruiting-agent" },
   { eyebrow: "Auth", title: "OTP and verification", desc: "Receive verification codes, confirmation emails, and magic links — then act on them automatically." },
   { eyebrow: "Voice", title: "Voice agents", desc: "After a call ends, your voice agent sends a follow-up, receives a reply, and keeps the thread going." },
   { eyebrow: "Procurement", title: "Procurement", desc: "Coordinate with vendors, chase POs, and manage supplier threads with partners who still run on email." },
 ];
+
+function UseCaseCardContent({
+  useCase,
+}: {
+  useCase: (typeof USE_CASES)[number];
+}) {
+  return (
+    <>
+      <div
+        className="font-mono text-[11px] font-semibold uppercase mb-2.5"
+        style={{
+          color: "var(--accent-strong)",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {useCase.eyebrow}
+      </div>
+      <div
+        className="text-[15px] font-semibold mb-1.5"
+        style={{ color: "var(--fg)" }}
+      >
+        {useCase.title}
+        {useCase.href ? <span className="font-mono ml-1.5" aria-hidden="true">→</span> : null}
+      </div>
+      <div
+        className="text-[13px] leading-[1.6]"
+        style={{ color: "var(--fg-muted)" }}
+      >
+        {useCase.desc}
+      </div>
+    </>
+  );
+}
 
 // Token Canopy's channels, not e2a's — the accounts are the umbrella brand's,
 // so they sit beside the "by Token Canopy" credit rather than in with the
@@ -829,8 +865,23 @@ export default function Home() {
             {USE_CASES.map((u, i) => {
               const col3 = i % 3;
               const lastRow = i >= USE_CASES.length - 3;
-              return (
-                <div
+              return u.href ? (
+                  <Link
+                    href={u.href}
+                    key={u.title}
+                    className="block p-6 md:p-7 transition hover:bg-[var(--bg-elev)]"
+                    style={{
+                      borderRight:
+                        col3 < 2 ? "1px solid var(--border)" : "none",
+                      borderBottom: lastRow
+                        ? "none"
+                        : "1px solid var(--border)",
+                    }}
+                  >
+                    <UseCaseCardContent useCase={u} />
+                  </Link>
+                ) : (
+                  <div
                   key={u.title}
                   className="p-6 md:p-7"
                   style={{
@@ -841,29 +892,9 @@ export default function Home() {
                       : "1px solid var(--border)",
                   }}
                 >
-                  <div
-                    className="font-mono text-[11px] font-semibold uppercase mb-2.5"
-                    style={{
-                      color: "var(--accent-strong)",
-                      letterSpacing: "0.08em",
-                    }}
-                  >
-                    {u.eyebrow}
+                    <UseCaseCardContent useCase={u} />
                   </div>
-                  <div
-                    className="text-[15px] font-semibold mb-1.5"
-                    style={{ color: "var(--fg)" }}
-                  >
-                    {u.title}
-                  </div>
-                  <div
-                    className="text-[13px] leading-[1.6]"
-                    style={{ color: "var(--fg-muted)" }}
-                  >
-                    {u.desc}
-                  </div>
-                </div>
-              );
+                );
             })}
           </div>
         </div>

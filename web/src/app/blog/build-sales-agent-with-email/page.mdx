@@ -1,0 +1,107 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("build-sales-agent-with-email");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: { card: "summary_large_image", title: post.title, description: post.description },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Build a sales follow-up agent with authenticated email
+
+Most sales agents can generate a draft. The harder problem is maintaining a real conversation: receiving a reply, looking up the right context, deciding what to do next, and sending from an identity the recipient can recognize.
+
+This walkthrough shows a safe sales follow-up workflow with e2a. Your CRM remains the source of truth for lead and account data; e2a gives the agent an inbox, threaded replies, and an approval boundary for outbound mail.
+
+See the complete [sales agent use case](/use-cases/sales-agent) for the workflow overview.
+
+## The workflow
+
+1. A lead replies to a message or emails the sales agent directly.
+2. e2a delivers the inbound event with authentication evidence.
+3. The agent looks up the lead and account context in the CRM.
+4. It qualifies the reply and drafts a relevant next step.
+5. The agent replies in-thread, with approval required for sensitive outreach.
+
+## Listen for a lead reply
+
+Use the TypeScript SDK, a webhook, WebSocket, REST polling, or the hosted MCP server. The important part is to bind e2a's conversation identifier to the sales workflow's own state:
+
+```ts
+for await (const event of client.listen("sales@example.com")) {
+  if (event.type !== "email.received") continue;
+
+  const message = event.data;
+  const lead = await crm.lookupByEmail(message.header_from);
+  const nextStep = await salesAgent.run({
+    lead,
+    message: message.text,
+    conversationId: message.conversation_id,
+  });
+```
+
+The agent should treat authentication evidence as one input to its policy, not as proof that the message content is safe or that a particular individual authored it.
+
+## Reply in the same conversation
+
+Once the agent has selected a next step, reply to the inbound message rather than starting an unrelated message:
+
+```ts
+  await client.messages.reply(
+    message.delivered_to,
+    message.message_id,
+    { text: nextStep.reply },
+  );
+}
+```
+
+This keeps the lead's replies, the agent's context, and the application's session correlation together. The recipient experiences a normal email conversation; the application receives structured events.
+
+## Add a human approval boundary
+
+Start with approval enabled for the outbound paths that deserve review:
+
+- Messages to a new recipient
+- Pricing, discounts, or commercial commitments
+- Claims about security, compliance, or product availability
+- Follow-ups that include sensitive account context
+- Bulk or scheduled outreach
+
+e2a's per-agent human-in-the-loop queue can hold a send before dispatch. A reviewer can approve, edit, or reject from the dashboard, API, SDK, CLI, MCP tools, or a secure link.
+
+## Keep the agent useful without making it reckless
+
+The best sales agents do not need unrestricted autonomy. Give the agent narrow tools and explicit policies:
+
+- Read the lead and account record
+- Draft a reply using approved product context
+- Propose a next action
+- Send only when the recipient and policy allow it
+- Escalate pricing, legal, or unusual requests to a person
+
+For scheduled follow-ups, e2a supports scheduled sending in the explicitly beta surface. You can also schedule in your own job system and call e2a only when the message is ready.
+
+## What to build next
+
+- Start with the [TypeScript or Python SDK](/docs) and a single agent identity.
+- Use [MCP](/mcp) when a local coding agent should manage the inbox directly.
+- Enable [human-in-the-loop approval](/blog/human-in-the-loop-for-agent-email) before connecting production recipients.
+- Add a custom domain once the workflow is ready for a branded sender.
+
+e2a handles the email boundary. Your CRM, product data, and sales policy remain yours.

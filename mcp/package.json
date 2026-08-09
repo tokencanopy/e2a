@@ -1,7 +1,7 @@
 {
   "name": "@e2a/mcp-server",
   "version": "0.5.0",
-  "description": "MCP server for e2a — email for AI agents",
+  "description": "MCP server for e2a — give AI support, receptionist, and scheduling agents a real email inbox",
   "mcpName": "dev.e2a/mcp-server",
   "type": "module",
   "main": "./dist/bin/http.js",
@@ -31,7 +31,15 @@
     "claude",
     "anthropic",
     "openai",
-    "agents"
+    "agents",
+    "support-agent",
+    "receptionist",
+    "scheduling",
+    "ecommerce",
+    "sales",
+    "recruiting",
+    "voice-agent",
+    "procurement"
   ],
   "license": "Apache-2.0",
   "repository": {

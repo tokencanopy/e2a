@@ -10,6 +10,17 @@ After installation, authorize e2a through your client's MCP flow (Claude Code:
 run `/mcp`; Codex CLI: `codex mcp login e2a`) — no API key to paste. For
 headless/CI, an account API key works too; see [`clients/`](./clients).
 
+With an e2a inbox, developers can build [support agents](https://e2a.dev/use-cases/support-agent),
+[AI receptionists](https://e2a.dev/use-cases/ai-receptionist),
+[scheduling agents](https://e2a.dev/use-cases/scheduling-agent),
+[e-commerce agents](https://e2a.dev/use-cases/ecommerce-agent),
+[sales agents](https://e2a.dev/use-cases/sales-agent),
+[recruiting agents](https://e2a.dev/use-cases/recruiting-agent),
+[voice follow-up agents](https://e2a.dev/use-cases/voice-agent), and
+[procurement agents](https://e2a.dev/use-cases/procurement-agent) that receive
+real email, keep conversation state, and reply safely. See the complete
+[use-case catalog](https://e2a.dev/use-cases).
+
 ## Install
 
 The same plugin ships native manifests for Claude Code, Codex, and Cursor.

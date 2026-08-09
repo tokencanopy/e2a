@@ -56,6 +56,23 @@ own, with two-way send and receive.
 - [MCP overview](https://e2a.dev/mcp): Per-client connection instructions (Claude Code, Codex, Cursor/Windsurf/Claude Desktop, VS Code + Copilot), what the agent can do once connected, and how an agent-owned inbox differs from a mailbox integration.
 - MCP endpoint: `https://api.e2a.dev/mcp` (Streamable HTTP, OAuth 2.1). Add with `claude mcp add --transport http --scope user e2a https://api.e2a.dev/mcp`, then run `/mcp` to authorize (`--scope user` installs it globally; drop it for current-directory only). Per-client config (Cursor, VS Code, Codex, …) is in [setup.md](https://e2a.dev/setup.md).
 
+## Use cases
+
+The use-case pages below describe concrete workflows developers can build with
+an agent-owned inbox. e2a provides the email identity, inbound authentication
+evidence, delivery, threading, and outbound controls; the application remains
+the source of truth for business data and policy.
+
+- [What can you build with e2a?](https://e2a.dev/use-cases): The canonical use-case directory.
+- [Support agent](https://e2a.dev/use-cases/support-agent): Triage customer requests, retrieve context, reply in-thread, and hold sensitive replies for approval.
+- [AI receptionist](https://e2a.dev/use-cases/ai-receptionist): Answer common inquiries, route messages, and forward conversations to a human team.
+- [Scheduling agent](https://e2a.dev/use-cases/scheduling-agent): Coordinate participants, propose times, handle replies, and preserve conversation state.
+- [E-commerce agent](https://e2a.dev/use-cases/ecommerce-agent): Answer order questions, handle returns, and coordinate with vendors through persistent threads.
+- [Sales agent](https://e2a.dev/use-cases/sales-agent): Qualify inbound interest, personalize follow-ups, and keep sales conversations moving.
+- [Recruiting agent](https://e2a.dev/use-cases/recruiting-agent): Coordinate candidates, schedule interviews, and keep hiring workflows organized.
+- [Voice follow-up agent](https://e2a.dev/use-cases/voice-agent): Turn a completed call into an email follow-up, receive replies, and continue the conversation.
+- [Procurement agent](https://e2a.dev/use-cases/procurement-agent): Coordinate quotes, purchase orders, and vendor threads with approval for sensitive commitments.
+
 ## Pricing
 
 - [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, sender verification, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
@@ -66,6 +83,11 @@ own, with two-way send and receive.
 - [Send real email from a Python AI agent in 20 lines](https://e2a.dev/blog/send-email-from-python-agent): Give a Python agent an address, send verified mail, receive replies over webhook or WebSocket, and thread the conversation.
 - [Give your OpenClaw agent an email address (with real-time WebSocket delivery)](https://e2a.dev/blog/email-for-openclaw-agents): Wiring a locally-running agent to a real inbox over WebSocket, with no public URL to host.
 - [Give your Google ADK agent an email inbox (with conversation memory)](https://e2a.dev/blog/email-agent-with-google-adk): HMAC-verified webhooks and multi-turn memory across email replies, binding `conversation_id` to an ADK `session_id`. Full runnable example.
+- [Build an e-commerce agent that handles order email](https://e2a.dev/blog/build-ecommerce-agent-with-email): Connect order context to customer email, reply in-thread, and hold refunds or replacements for approval.
+- [Build a sales follow-up agent with authenticated email](https://e2a.dev/blog/build-sales-agent-with-email): Connect replies to CRM context, personalize follow-ups, and add human approval for sensitive outreach.
+- [Build a recruiting agent that coordinates candidates by email](https://e2a.dev/blog/build-recruiting-agent-with-email): Connect candidate email to ATS and calendar context, coordinate interviews, and review high-impact messages.
+- [Build a voice follow-up agent with email](https://e2a.dev/blog/build-voice-follow-up-agent-with-email): Turn a completed call into an authenticated follow-up, reconnect replies to call context, and review commitments.
+- [Build a procurement agent that coordinates with vendors](https://e2a.dev/blog/build-procurement-agent-with-email): Connect vendor email to purchase-order context, extract updates, and hold commitments for approval.
 
 ## Source
 
