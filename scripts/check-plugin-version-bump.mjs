@@ -6,6 +6,55 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const IDENTIFIER = String.raw`(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)`;
+const SEMVER_RE = new RegExp(
+  String.raw`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)`
+    + String.raw`(?:-(${IDENTIFIER}(?:\.${IDENTIFIER})*))?`
+    + String.raw`(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$`,
+);
+
+function parseSemVer(version, label = "version") {
+  if (typeof version !== "string") {
+    throw new Error(`${label} ${JSON.stringify(version)} is invalid SemVer`);
+  }
+  const match = version.match(SEMVER_RE);
+  if (!match) throw new Error(`${label} "${version}" is invalid SemVer`);
+  return {
+    major: BigInt(match[1]),
+    minor: BigInt(match[2]),
+    patch: BigInt(match[3]),
+    prerelease: match[4]?.split(".").map((identifier) => ({
+      numeric: /^\d+$/.test(identifier),
+      value: /^\d+$/.test(identifier) ? BigInt(identifier) : identifier,
+    })) ?? null,
+  };
+}
+
+function compareParsedSemVer(left, right) {
+  for (const field of ["major", "minor", "patch"]) {
+    if (left[field] > right[field]) return 1;
+    if (left[field] < right[field]) return -1;
+  }
+  if (left.prerelease === null && right.prerelease === null) return 0;
+  if (left.prerelease === null) return 1;
+  if (right.prerelease === null) return -1;
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftIdentifier = left.prerelease[index];
+    const rightIdentifier = right.prerelease[index];
+    if (leftIdentifier === undefined) return -1;
+    if (rightIdentifier === undefined) return 1;
+    if (leftIdentifier.numeric && !rightIdentifier.numeric) return -1;
+    if (!leftIdentifier.numeric && rightIdentifier.numeric) return 1;
+    if (leftIdentifier.value > rightIdentifier.value) return 1;
+    if (leftIdentifier.value < rightIdentifier.value) return -1;
+  }
+  return 0;
+}
+
+export function compareSemVer(left, right) {
+  return compareParsedSemVer(parseSemVer(left), parseSemVer(right));
+}
 
 export function changedPlugins(paths) {
   return [...new Set(paths.flatMap((path) =>
@@ -15,9 +64,12 @@ export function changedPlugins(paths) {
 }
 
 export function unchangedVersions({ changed, baseVersions, currentVersions }) {
-  return changed.filter((name) =>
-    baseVersions[name] !== undefined && baseVersions[name] === currentVersions[name],
-  );
+  return changed.filter((name) => {
+    if (baseVersions[name] === undefined) return false;
+    const current = parseSemVer(currentVersions[name], `${name}: current version`);
+    const base = parseSemVer(baseVersions[name], `${name}: base version`);
+    return compareParsedSemVer(current, base) <= 0;
+  });
 }
 
 function manifestPath(name) {
@@ -106,7 +158,11 @@ function main(args) {
     if (unchanged.length > 0) {
       console.error("Changed plugins must bump their versions:");
       for (const name of unchanged) {
-        console.error(`  - ${name} remains at ${currentVersions[name]}`);
+        if (baseVersions[name] === currentVersions[name]) {
+          console.error(`  - ${name} remains at ${currentVersions[name]}`);
+        } else {
+          console.error(`  - ${name}: ${baseVersions[name]} -> ${currentVersions[name]} does not increase SemVer precedence`);
+        }
       }
       process.exitCode = 1;
       return;

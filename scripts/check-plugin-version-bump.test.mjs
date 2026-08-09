@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { changedPlugins, unchangedVersions } from "./check-plugin-version-bump.mjs";
+import {
+  changedPlugins,
+  compareSemVer,
+  unchangedVersions,
+} from "./check-plugin-version-bump.mjs";
 
 const gateSource = fileURLToPath(new URL("./check-plugin-version-bump.mjs", import.meta.url));
 
@@ -108,6 +112,27 @@ test("reports every changed plugin whose version is unchanged", () => {
   }), ["e2a", "e2a-labs"]);
 });
 
+test("compares strict SemVer 2.0.0 precedence", () => {
+  const ordered = [
+    "1.0.0-alpha",
+    "1.0.0-alpha.1",
+    "1.0.0-alpha.beta",
+    "1.0.0-beta",
+    "1.0.0-beta.2",
+    "1.0.0-beta.11",
+    "1.0.0-rc.1",
+    "1.0.0",
+  ];
+  for (let index = 1; index < ordered.length; index += 1) {
+    assert.equal(compareSemVer(ordered[index], ordered[index - 1]), 1);
+  }
+  assert.equal(compareSemVer("1.0.0+build.2", "1.0.0+build.1"), 0);
+  assert.equal(compareSemVer("100000000000000000000.0.0", "99999999999999999999.0.0"), 1);
+  for (const invalid of ["v1.0.0", "1.0", "01.0.0", "1.0.0-01", "1.0.0+", "1.0.0 ", "1.0.0\n"]) {
+    assert.throws(() => compareSemVer(invalid, "1.0.0"), /invalid SemVer/);
+  }
+});
+
 test("CLI treats a detected cross-root rename as changes to both plugins", async () => {
   await withRepo(async (repo) => {
     await putManifest(repo, "e2a", "0.7.0");
@@ -205,6 +230,96 @@ test("CLI diagnostics list every unchanged changed plugin", async () => {
     const result = runGate(repo, base);
     assert.equal(result.status, 1);
     const reported = [...result.stderr.matchAll(/^  - (e2a(?:-labs)?) remains at/gm)]
+      .map((match) => match[1])
+      .sort();
+    assert.deepEqual(reported, ["e2a", "e2a-labs"]);
+  });
+});
+
+test("CLI rejects a version downgrade", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a", "0.7.0");
+    await put(repo, "plugins/e2a/README.md", "core before\n");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a", "0.6.9");
+    await put(repo, "plugins/e2a/README.md", "core after\n");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /e2a.*0\.7\.0.*0\.6\.9.*SemVer precedence/is);
+  });
+});
+
+test("CLI rejects a build-metadata-only version change", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a", "0.7.0+build.1");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a", "0.7.0+build.2");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /e2a.*0\.7\.0\+build\.1.*0\.7\.0\+build\.2.*SemVer precedence/is);
+  });
+});
+
+test("CLI rejects a lower prerelease", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a-labs", "1.0.0-beta.11");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a-labs", "1.0.0-beta.2");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /e2a-labs.*1\.0\.0-beta\.11.*1\.0\.0-beta\.2.*SemVer precedence/is);
+  });
+});
+
+test("CLI rejects invalid SemVer", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a", "0.7.0");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a", "v0.8.0");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /e2a.*v0\.8\.0.*invalid SemVer/is);
+  });
+});
+
+test("CLI accepts valid independent precedence increases", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a", "0.7.0");
+    await putManifest(repo, "e2a-labs", "0.1.0-rc.1");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a", "0.7.1");
+    await putManifest(repo, "e2a-labs", "0.1.0");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 0, result.stderr);
+    const reported = result.stdout.trim().replace("Plugin version bumps are current: ", "")
+      .split(", ")
+      .sort();
+    assert.deepEqual(reported, ["e2a", "e2a-labs"]);
+  });
+});
+
+test("CLI diagnostics identify every non-increasing package", async () => {
+  await withRepo(async (repo) => {
+    await putManifest(repo, "e2a", "0.7.0");
+    await putManifest(repo, "e2a-labs", "0.1.0+build.1");
+    const base = commitAll(repo, "base");
+
+    await putManifest(repo, "e2a", "0.6.9");
+    await putManifest(repo, "e2a-labs", "0.1.0+build.2");
+
+    const result = runGate(repo, base);
+    assert.equal(result.status, 1);
+    const reported = [...result.stderr.matchAll(/^  - (e2a(?:-labs)?):/gm)]
       .map((match) => match[1])
       .sort();
     assert.deepEqual(reported, ["e2a", "e2a-labs"]);

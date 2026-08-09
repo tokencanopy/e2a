@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "e2a",
     "shortDescription": "Authenticated email for AI agents",
-    "longDescription": "Bundles the hosted e2a MCP server and an operate-well skill so an agent can send and receive real email from per-agent inboxes — with SPF/DKIM verification, custom domains, attachments, and a replayable event log.",
+    "longDescription": "Bundles the hosted e2a MCP server and four stable skills for setup, application integration, inbox operation, and diagnosis — with SPF/DKIM verification, custom domains, attachments, and a replayable event log.",
     "developerName": "TokenCanopy",
     "category": "Productivity",
     "websiteURL": "https://e2a.dev",

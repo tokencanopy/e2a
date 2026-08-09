@@ -110,11 +110,32 @@ test("e2a-integrate is language-aware and security-complete", async () => {
 });
 
 test("e2a-integrate preserves SDK runtime and failure semantics", async () => {
-  const source = await read("plugins/e2a/skills/e2a-integrate/references/sdk-recipes.md");
-  assert.match(source, /E2AClient.*synchronous.*AsyncE2AClient.*asynchronous/is);
-  assert.match(source, /timeoutMs.*timeout_ms/is);
-  assert.match(source, /E2AError.*code.*retryable/is);
-  assert.match(source, /separate.*accepted.*held.*delivery/is);
+  const [skill, sdk, rest] = await Promise.all([
+    read("plugins/e2a/skills/e2a-integrate/SKILL.md"),
+    read("plugins/e2a/skills/e2a-integrate/references/sdk-recipes.md"),
+    read("plugins/e2a/skills/e2a-integrate/references/rest-openapi.md"),
+  ]);
+  assert.match(sdk, /E2AClient.*synchronous.*AsyncE2AClient.*asynchronous/is);
+  assert.match(sdk, /timeoutMs.*timeout_ms/is);
+  assert.match(sdk, /E2AError.*code.*retryable/is);
+
+  for (const [name, source] of [["skill", skill], ["SDK reference", sdk], ["REST reference", rest]]) {
+    assert.match(
+      source,
+      /`accepted`,\s+`scheduled`,\s+and\s+`pending_review`/,
+      `${name} must name every canonical durable send state`,
+    );
+    assert.match(
+      source,
+      /must not be (?:resent|retried)/i,
+      `${name} must forbid retrying a durably accepted send`,
+    );
+    assert.match(
+      source,
+      /durable acceptance.*(?:is not|does not mean|distinct from).*terminal delivery/is,
+      `${name} must distinguish durable acceptance from terminal delivery`,
+    );
+  }
 });
 
 test("e2a-doctor is MCP-first, read-first, and repair-capable", async () => {
