@@ -400,6 +400,8 @@ jobs:
           node-version: "22"
       - run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
       - run: node --test scripts/plugin-agent-guidance.test.mjs scripts/plugin-core-skills.test.mjs scripts/plugin-packaging.test.mjs scripts/check-plugin-version-bump.test.mjs
+      - name: Run Tether runtime self-test
+        run: bash plugins/e2a-labs/skills/tether/tether.sh _selftest
       - run: node scripts/validate-plugin.mjs
       - run: claude plugin validate --strict plugins/e2a
       - run: claude plugin validate --strict plugins/e2a-labs
