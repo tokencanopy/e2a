@@ -27,7 +27,15 @@ TEMPLATES="$BASE/templates"
 _yaml_dq_content() {
   python3 -c 'import json,sys
 s=json.dumps(sys.argv[1], ensure_ascii=False)
-print(s[1:-1])' "$1"
+s=s[1:-1]
+out=[]
+for ch in s:
+  cp=ord(ch)
+  if cp == 0x7f or 0x80 <= cp <= 0x84 or 0x86 <= cp <= 0x9f or cp in (0xfffe, 0xffff):
+    out.append("\\x%02X" % cp if cp <= 0xff else "\\u%04X" % cp)
+  else:
+    out.append(ch)
+print("".join(out))' "$1"
 }
 
 _sed_replacement() {
