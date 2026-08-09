@@ -15,11 +15,12 @@ questions or new instructions — are picked up within a few minutes. Reply
 `stop` to end.
 
 > **Transport primer.** tether rides on e2a. The e2a *operate-well manual* —
-> the `e2a` skill (`${CLAUDE_PLUGIN_ROOT}/skills/e2a/SKILL.md`) — carries the
+> the dependency-provided `e2a` skill — carries the
 > mental model this skill assumes: how threading really works (reply headers +
 > stable subject, **not** `conversation_id`), when a shared `agents.e2a.dev`
 > address is all you need vs. a custom domain, and how to handle send statuses.
-> Read it if you're new to e2a; tether does not re-explain those.
+> Read the `e2a` skill by name if you're new to e2a; tether does not re-explain
+> those.
 
 ## Architecture (why this shape)
 
