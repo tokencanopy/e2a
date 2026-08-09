@@ -56,12 +56,13 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     const email = `${slug("sdkc-batch")}@agents.e2a.dev`;
     await client.agents.create({ email });
     try {
-      // Two self-send loopback items — deterministic accepts (no suppression),
-      // so results are positionally aligned and every slot is "accepted".
+      // Two items with DISTINCT recipients — the batch rejects the same address
+      // across items (duplicate_recipient), and neither is suppressed, so both
+      // slots come back "accepted", positionally aligned to the input.
       const res = await client.messages.sendBatch(email, {
         messages: [
           { to: [email], subject: "batch one", text: "self-send loopback 1" },
-          { to: [email], subject: "batch two", text: "self-send loopback 2" },
+          { to: [`${slug("rcpt")}@example.com`], subject: "batch two", text: "external item 2" },
         ],
       });
       expect(res.batchId).toMatch(/^bat_/);
