@@ -65,32 +65,7 @@ func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Both aggregates below use count(DISTINCT message_id), which forces a
-	// GroupAggregate over a sort of every transition in the window rather than
-	// a hash aggregate. At the default 4MB that sort spills hard. Raising it
-	// for this transaction only is the whole optimisation — measured on a
-	// seeded account (50 agents / 300k messages / 900k transitions, warm
-	// cache, medians):
-	//
-	//	work_mem   totals    per-agent
-	//	4MB        ~780ms    ~1510ms
-	//	32MB       ~480ms    ~1230ms
-	//	64MB       ~450ms    ~1070ms
-	//
-	// 32MB takes most of the win; past it the curve flattens while the
-	// per-node cost keeps scaling with concurrency. Note the sort still spills
-	// even here (~60MB totals / ~70MB per-agent) — sizing work_mem to hold it
-	// outright would cost more memory than the remaining ~10% is worth.
-	//
-	// Two rewrites were measured and REJECTED, so don't re-derive them:
-	// reshaping the aggregate into a two-phase group-then-sum was ~2.5x SLOWER
-	// on the totals query and noise on the per-agent one, and a covering index
-	// on (reason_code, stage, outcome, retryable, message_id) was not adopted
-	// by the planner at all — identical plan, identical spill.
-	//
-	// SET LOCAL is scoped to this transaction and reverts on commit/rollback,
-	// so it cannot leak onto a pooled connection.
-	if _, err := tx.Exec(ctx, "SET LOCAL work_mem = '32MB'"); err != nil {
+	if err := setAccountMetricsWorkMem(ctx, tx); err != nil {
 		return metrics, fmt.Errorf("set work_mem for account metrics: %w", err)
 	}
 
@@ -128,6 +103,39 @@ func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, 
 	}
 	metrics.Agents = coverage
 	return metrics, nil
+}
+
+// accountMetricsWorkMem is raised above the Postgres default (4MB) for the
+// account-metrics read transaction only. Both aggregates in
+// CountByReasonCodeForAccount use count(DISTINCT message_id), which forces a
+// GroupAggregate over a sort of every transition in the window rather than a
+// hash aggregate. At the default that sort spills hard. Raising it for that
+// transaction only is the whole optimisation — measured on a seeded account
+// (50 agents / 300k messages / 900k transitions, warm cache, medians):
+//
+//	work_mem   totals    per-agent
+//	4MB        ~780ms    ~1510ms
+//	32MB       ~480ms    ~1230ms
+//	64MB       ~450ms    ~1070ms
+//
+// 32MB takes most of the win; past it the curve flattens while the per-node
+// cost keeps scaling with concurrency. Note the sort still spills even here
+// (~60MB totals / ~70MB per-agent) — sizing work_mem to hold it outright
+// would cost more memory than the remaining ~10% is worth.
+//
+// Two rewrites were measured and REJECTED, so don't re-derive them: reshaping
+// the aggregate into a two-phase group-then-sum was ~2.5x SLOWER on the
+// totals query and noise on the per-agent one, and a covering index on
+// (reason_code, stage, outcome, retryable, message_id) was not adopted by the
+// planner at all — identical plan, identical spill.
+const accountMetricsWorkMem = "32MB"
+
+// setAccountMetricsWorkMem raises work_mem for one account-metrics read
+// transaction. SET LOCAL is scoped to the transaction and reverts on
+// commit/rollback, so it cannot leak onto a pooled connection.
+func setAccountMetricsWorkMem(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "SET LOCAL work_mem = '"+accountMetricsWorkMem+"'")
+	return err
 }
 
 func accountTotalsTx(ctx context.Context, tx pgx.Tx, userID string, start, end time.Time) (AgentMetrics, error) {
