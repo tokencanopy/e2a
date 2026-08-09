@@ -409,7 +409,7 @@ v0; `always_hitl` safety valve **on** even when `mode: auto`.
    auto | hitl`. `auto` = triage opens a PR directly; `hitl` (e2a default) =
    triage emails the approver, and a verified approval reply triggers the PR.
    PR merge stays the ship gate in both. Remaining sub-decisions in §4.7.
-4. **Build location** — inside `e2a/plugins/e2a/skills/agentify` first then extract to a
+4. **Build location** — inside `e2a/plugins/e2a-labs/skills/agentify` first then extract to a
    standalone repo at the second real adopter (recommended; extract-after-second-use),
    vs standalone from day one (purer framework-first).
 5. **Shared-source for the runtime skill across adopters** — vendored copy (deploy
@@ -540,11 +540,14 @@ owner:
   install e2a` → `/plugin install e2a-labs` → `/agentify` is available with
   the e2a MCP tools supplied by core.
 
-## 10. Implementation reconciliation (`feat/agentify-feedback-loop`)
+## 10. Historical implementation reconciliation (`feat/agentify-feedback-loop`)
 
-Deviations recorded at build time (slice 1 — intake + triage):
+Deviations recorded at build time (slice 1 — intake + triage). The framework's
+current package home is `plugins/e2a-labs/skills/agentify/`; this section
+preserves the original implementation context.
 
-- **Home / shape**: the framework lives at `plugins/e2a/skills/agentify/` — a deploy
+- **Home / shape (current location)**: the framework lives at
+  `plugins/e2a-labs/skills/agentify/` — a deploy
   skill (`SKILL.md` + `references/`) whose `templates/` *are* the framework
   (`autonomous-repo.config.yml.tmpl`, `runtime-skill/**`,
   `workflows/feedback-triage.yml.tmpl`, `scripts/ticket_card.sh`).

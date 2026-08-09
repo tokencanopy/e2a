@@ -139,3 +139,9 @@ test("tether setup does not mutate review configuration", async () => {
   assert.doesNotMatch(source, /protection set|outbound-review|outbound review/i);
   assert.match(source, /pending_review/);
 });
+
+test("tether relies on the dependency-provided e2a skill without a Labs-local core path", async () => {
+  const source = await readFile("plugins/e2a-labs/skills/tether/SKILL.md", "utf8");
+  assert.match(source, /the `e2a` skill/i);
+  assert.doesNotMatch(source, /\$\{CLAUDE_PLUGIN_ROOT\}\/skills\/e2a\/SKILL\.md/);
+});
