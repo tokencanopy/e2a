@@ -16,9 +16,50 @@ const CAPABILITIES = Object.freeze([
 
 const TIMEOUTS = Object.freeze({ maxRetries: 2, maxElapsedMs: 15_000, timeoutMs: 10_000 });
 
-class SerializableSet extends Set {
+class ReadonlyCapabilitySet {
+  #values;
+  #members;
+
+  constructor(values) {
+    this.#values = Object.freeze([...values]);
+    this.#members = new Set(this.#values);
+    Object.freeze(this);
+  }
+
+  get size() {
+    return this.#values.length;
+  }
+
+  has(value) {
+    return this.#members.has(value);
+  }
+
+  values() {
+    return this.#values.values();
+  }
+
+  keys() {
+    return this.values();
+  }
+
+  entries() {
+    return this.#values.map((value) => [value, value]).values();
+  }
+
+  forEach(callback, thisArg) {
+    for (const value of this.#values) callback.call(thisArg, value, value, this);
+  }
+
+  [Symbol.iterator]() {
+    return this.values();
+  }
+
+  toArray() {
+    return [...this.#values];
+  }
+
   toJSON() {
-    return [...this];
+    return this.toArray();
   }
 }
 
@@ -32,6 +73,25 @@ function stableJson(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function serializableBaseUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value ?? "https://api.e2a.dev");
+  } catch {
+    throw configurationError("invalid_base_url", "Invalid evaluation API base URL");
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw configurationError("invalid_base_url", "Invalid evaluation API base URL");
+  }
+  // The SDK receives the original configured endpoint. Only the copy rendered
+  // in dry-run artifacts drops components that commonly contain credentials.
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
 }
 
 function normalizeAddress(value, code = "invalid_mailbox") {
@@ -172,11 +232,12 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => Date.now
   void now;
   void sleep;
   const sdk = client ?? new E2AClient({ apiKey, baseUrl, ...TIMEOUTS });
-  const capabilities = new SerializableSet(CAPABILITIES);
+  const capabilities = new ReadonlyCapabilitySet(CAPABILITIES);
 
   return Object.freeze({
     capabilities,
     async preflight(resolvedSuite) {
+      const safeBaseUrl = serializableBaseUrl(baseUrl);
       const actor = normalizeAddress(resolvedSuite?.actor?.email);
       const target = normalizeAddress(resolvedSuite?.target?.email);
       if (actor === target) throw configurationError("same_actor_target", "Actor and target must differ");
@@ -222,7 +283,7 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => Date.now
         target: { email: "target" },
         probes: probes.map((address) => aliasOf(aliases, address)),
         protectionDigest,
-        plan: makePlan({ baseUrl, aliases, allowedAliases, cases }),
+        plan: makePlan({ baseUrl: safeBaseUrl, aliases, allowedAliases, cases }),
       };
     },
   });

@@ -80,9 +80,16 @@ function adapter(client) {
 test("preflight accepts the exact containment sets and returns an alias-only plan", async () => {
   const safe = await fixture("protection-safe.json");
   const client = fakeClient({ protections: safe });
-  const result = await adapter(client).preflight(resolvedSuite());
+  const e2a = adapter(client);
+  assert.equal(e2a.capabilities.size, 8);
+  assert.equal(e2a.capabilities.add, undefined);
+  assert.equal(e2a.capabilities.delete, undefined);
+  assert.equal(e2a.capabilities.clear, undefined);
+  assert.throws(() => e2a.capabilities.add("unexpected"), TypeError);
+  const result = await e2a.preflight(resolvedSuite());
 
   assert.deepEqual(result.probes, ["probe:1"]);
+  assert.equal(result.capabilities, e2a.capabilities);
   assert.ok(result.capabilities.has("blind_recipients"));
   assert.deepEqual([...result.capabilities], [
     "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
@@ -90,6 +97,13 @@ test("preflight accepts the exact containment sets and returns an alias-only pla
   ]);
   assert.deepEqual(result.actor, { email: "actor" });
   assert.deepEqual(result.target, { email: "target" });
+  const copy = result.capabilities.toArray();
+  copy.push("unexpected");
+  assert.deepEqual([...result.capabilities], [
+    "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
+    "thread_headers", "raw_mime", "attachment_hashes", "delivery_lifecycle",
+  ]);
+  assert.throws(() => result.capabilities.add("unexpected"), TypeError);
   assert.equal(result.plan.networkSends, false);
   assert.deepEqual(result.plan.timeouts, { maxRetries: 2, maxElapsedMs: 15_000, timeoutMs: 10_000 });
   assert.deepEqual(result.plan.cases, [{
@@ -100,6 +114,18 @@ test("preflight accepts the exact containment sets and returns an alias-only pla
   assert.match(result.protectionDigest, /^[a-f0-9]{64}$/);
   assert.doesNotMatch(JSON.stringify(result), /not-logged|actor@eval\.test|target@eval\.test|probe@eval\.test/);
   assert.deepEqual(client.calls.map(([method]) => method), ["get", "get", "getProtection", "getProtection", "get"]);
+});
+
+test("preflight strips credential-bearing URL components only from the serializable plan", async () => {
+  const configuredEndpoint = "https://e2a-user:e2a-password@api.example.test/evals/v1?token=query-token#fragment-token";
+  const result = await createE2AAdapter({
+    apiKey: "not-logged",
+    baseUrl: configuredEndpoint,
+    client: fakeClient(),
+  }).preflight(resolvedSuite());
+
+  assert.equal(result.plan.baseUrl, "https://api.example.test/evals/v1");
+  assert.doesNotMatch(JSON.stringify(result), /e2a-user|e2a-password|query-token|fragment-token/);
 });
 
 test("protection digest is stable across credential values and allowlist ordering", async () => {
