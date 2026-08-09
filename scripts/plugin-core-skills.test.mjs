@@ -60,3 +60,19 @@ test("e2a-integrate preserves SDK runtime and failure semantics", async () => {
   assert.match(source, /E2AError.*code.*retryable/is);
   assert.match(source, /separate.*accepted.*held.*delivery/is);
 });
+
+test("e2a-doctor is MCP-first, read-first, and repair-capable", async () => {
+  const source = await read("plugins/e2a/skills/e2a-doctor/SKILL.md");
+  assert.match(source, /^name: e2a-doctor$/m);
+  assert.match(source, /MCP-first/i);
+  assert.match(source, /read-only.*diagnos/is);
+  for (const tool of [
+    "whoami", "get_protection", "list_agent_suppressions", "get_domain",
+    "list_webhook_deliveries", "get_message_lifecycle",
+  ]) assert.match(source, new RegExp(tool));
+  assert.match(source, /ranked.*evidence/i);
+  assert.match(source, /confirmation.*each.*state-changing repair/is);
+  assert.match(source, /e2a doctor --json/);
+  assert.match(source, /never.*install.*CLI.*solely/is);
+  assert.match(source, /accepted.*scheduled.*pending_review.*do not retry/is);
+});
