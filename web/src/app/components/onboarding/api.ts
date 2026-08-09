@@ -472,6 +472,50 @@ export function projectMessageDetail(
     : { direction: "inbound", data: projectInbound(w) };
 }
 
+// ── Batches ──────────────────────────────────────────────
+//
+// A batch send (POST /v1/agents/{email}/batches, via API/CLI/MCP) fans one
+// call out to N independent messages. The dashboard doesn't compose batches —
+// it MONITORS them: getBatch returns the header (counts + accept-time
+// suppressions) plus a live per-delivery-status rollup of the batch's child
+// messages, computed on read, so re-fetching shows progress.
+
+/** Per-delivery-status count of a batch's child messages (BatchStatusRollupView). */
+export interface BatchStatusRollup {
+  accepted: number;
+  sending: number;
+  sent: number;
+  delivered: number;
+  deferred: number;
+  bounced: number;
+  complained: number;
+  failed: number;
+}
+
+/** One item dropped by the suppression filter at accept time. */
+export interface BatchSuppressedItem {
+  item_index: number;
+  address: string;
+  reason: string;
+}
+
+/** GET /v1/batches/{id} response (BatchView). */
+export interface BatchDetail {
+  batch_id: string;
+  agent_id: string;
+  requested: number;
+  accepted: number;
+  suppressed: BatchSuppressedItem[];
+  created_at: string;
+  status_rollup: BatchStatusRollup;
+}
+
+// Account-scoped read: GET /v1/batches/{id}. Returns 404 for a batch owned by
+// another account or a bad id (surfaced as ApiError with status 404).
+export async function getBatch(batchId: string): Promise<BatchDetail> {
+  return request<BatchDetail>(`/v1/batches/${encodeURIComponent(batchId)}`);
+}
+
 // ── Message-detail fetchers ──────────────────────────────
 //
 // Both return the RAW wire so every per-message SWR entry holds one
