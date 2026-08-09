@@ -414,11 +414,36 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function aliasCanonical(value, aliases) {
-  if (Array.isArray(value)) return value.map((item) => aliasCanonical(item, aliases));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, aliasCanonical(item, aliases)]));
-  if (typeof value === "string" && aliases.has(value.toLowerCase())) return aliases.get(value.toLowerCase());
-  return value;
+function aliasMailboxCanonical(value, aliases) {
+  if (typeof value === "string") return value; // An unresolved ${NAME} reference.
+  return { ...value, address: aliases.get(value.address) ?? value.address };
+}
+
+function aliasMailboxSetCanonical(values, aliases) {
+  return values.map((value) => aliasMailboxCanonical(value, aliases));
+}
+
+function aliasCaseMailboxCanonical(testCase, aliases) {
+  const expectation = { ...testCase.expect };
+  if (expectation.sender) {
+    expectation.sender = { ...expectation.sender };
+    for (const key of ["exactly", "sentAs"]) {
+      if (expectation.sender[key] !== undefined) expectation.sender[key] = aliasMailboxCanonical(expectation.sender[key], aliases);
+    }
+    if (expectation.sender.replyTo) {
+      expectation.sender.replyTo = { ...expectation.sender.replyTo, exactly: aliasMailboxSetCanonical(expectation.sender.replyTo.exactly, aliases) };
+    }
+  }
+  if (expectation.recipients) {
+    expectation.recipients = { ...expectation.recipients };
+    for (const key of ["to", "cc", "bcc", "envelope"]) {
+      if (expectation.recipients[key]) expectation.recipients[key] = {
+        ...expectation.recipients[key],
+        exactly: aliasMailboxSetCanonical(expectation.recipients[key].exactly, aliases),
+      };
+    }
+  }
+  return { ...testCase, expect: expectation };
 }
 
 export async function loadSuite(suiteFile, { environment = process.env, openFile, beforeRead } = {}) {
@@ -481,15 +506,15 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
 
   const aliases = new Map([[actor.mailbox.address, "actor"], [target.mailbox.address, "target"]]);
   allowedRecipients.addresses.filter((address) => !aliases.has(address)).forEach((address, index) => aliases.set(address, `probe:${index + 1}`));
-  const canonical = aliasCanonical({
+  const canonical = {
     version: 1,
     name: name.source,
-    target: { email: target.canonical },
-    actor: { email: actor.canonical },
-    transport: { adapter: adapter.source, baseUrl: baseUrl.source, allowedEnvelopeRecipients: allowedRecipients.source },
+    target: { email: aliasMailboxCanonical(target.canonical, aliases) },
+    actor: { email: aliasMailboxCanonical(actor.canonical, aliases) },
+    transport: { adapter: adapter.source, baseUrl: baseUrl.source, allowedEnvelopeRecipients: aliasMailboxSetCanonical(allowedRecipients.source, aliases) },
     defaults: { timeout: timeout.source, settle: settle.source, pollInterval: pollInterval.source },
-    cases: canonicalCases,
-  }, aliases);
+    cases: canonicalCases.map((testCase) => aliasCaseMailboxCanonical(testCase, aliases)),
+  };
   const digest = createHash("sha256").update(stableJson(canonical)).digest("hex");
 
   return {

@@ -94,6 +94,20 @@ test("digest aliases literal display-name mailboxes and canonicalizes reordered 
   assert.equal(first.digest, second.digest);
 });
 
+test("digest never aliases ordinary text that happens to equal a typed mailbox", async () => {
+  const firstRoot = await mkdtemp(path.join(tmpdir(), "email-evals-digest-text-"));
+  const secondRoot = await mkdtemp(path.join(tmpdir(), "email-evals-digest-text-"));
+  const caseFor = (literal) => [
+    "id: synthetic-case", "send:", `  subject: ${literal}`, "  text: Synthetic", "expect:", "  action: { kind: none, count: 0 }",
+    "  body:", `    required_facts: [${literal}]`, "  attachments:", "    exactly:", `      - filename: ${literal}`, "",
+  ].join("\n");
+  await writeMinimalSuite(firstRoot, { caseSource: caseFor("actor@eval.test") });
+  await writeMinimalSuite(secondRoot, { caseSource: caseFor("actor") });
+  const first = await loadSuite(path.join(firstRoot, "suite.yaml"), { environment: validEnvironment });
+  const second = await loadSuite(path.join(secondRoot, "suite.yaml"), { environment: validEnvironment });
+  assert.notEqual(first.digest, second.digest);
+});
+
 test("alias expansion and deterministic file swaps are stable configuration errors", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "email-evals-io-"));
   await writeMinimalSuite(root);
