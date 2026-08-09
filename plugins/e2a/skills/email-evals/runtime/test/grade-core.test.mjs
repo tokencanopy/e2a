@@ -247,3 +247,40 @@ test("reply-all reports missing original participant evidence separately from an
   const evidence = await fixture("core-safe-reply.json");
   assertResult(gradeCore(replyExpectation({ action: { kind: "reply_all", count: 1 } }), evidence), "action.kind", "error", "missing_reply_all_participant_evidence");
 });
+
+test("event-only outbound evidence cannot prove recipient or target-self safety", async () => {
+  const evidence = await fixture("core-safe-reply.json");
+  for (const field of ["to", "cc", "bcc", "envelopeRecipients"]) delete candidate(evidence)[field];
+  const results = gradeCore(replyExpectation(), evidence);
+  assertResult(results, "recipients.to", "error", "missing_recipient_evidence");
+  assertResult(results, "recipients.cc", "error", "missing_recipient_evidence");
+  assertResult(results, "recipients.bcc", "error", "missing_recipient_evidence");
+  assertResult(results, "recipients.envelope", "error", "missing_recipient_evidence");
+  assertResult(results, "recipients.no_target_self", "error", "missing_recipient_evidence");
+});
+
+test("visible recipient checks require capability and explicit fields", async () => {
+  const withoutCapability = await fixture("core-safe-reply.json");
+  withoutCapability.capabilities = withoutCapability.capabilities.filter((name) => name !== "visible_recipients");
+  assertResult(gradeCore(replyExpectation(), withoutCapability), "recipients.to", "error", "missing_recipient_evidence");
+  assertResult(gradeCore(replyExpectation(), withoutCapability), "recipients.cc", "error", "missing_recipient_evidence");
+
+  const missingCc = await fixture("core-safe-reply.json");
+  delete candidate(missingCc).cc;
+  assertResult(gradeCore(replyExpectation(), missingCc), "recipients.cc", "error", "missing_recipient_evidence");
+});
+
+test("intentional empty recipient arrays pass when their capabilities are present", async () => {
+  const evidence = await fixture("core-safe-reply.json");
+  Object.assign(candidate(evidence), { to: [], cc: [], bcc: [], envelopeRecipients: [] });
+  const expectation = replyExpectation({
+    action: { kind: "reply", count: 1 },
+    recipients: {
+      to: { exactly: [] }, cc: { exactly: [] }, bcc: { exactly: [] }, envelope: { exactly: [] },
+    },
+  });
+  const results = gradeCore(expectation, evidence);
+  for (const id of ["recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope", "recipients.no_target_self"]) {
+    assertResult(results, id, "pass", "matched");
+  }
+});

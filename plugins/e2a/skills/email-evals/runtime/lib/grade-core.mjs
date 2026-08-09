@@ -173,6 +173,20 @@ function envelopeAssertion(expected, candidate) {
   return assertion;
 }
 
+function hasRecipientField(candidate, field) {
+  return Object.hasOwn(candidate, field) && Array.isArray(candidate[field]);
+}
+
+function requiredRecipientAssertion(field, expected, candidate, movements) {
+  if (!hasRecipientField(candidate, field)) return { status: "error", code: "missing_recipient_evidence", actual: null };
+  return recipientAssertion(field, expected, candidate, movements);
+}
+
+function requiredEnvelopeAssertion(expected, candidate) {
+  if (!hasRecipientField(candidate, "envelopeRecipients")) return { status: "error", code: "missing_recipient_evidence", actual: null };
+  return envelopeAssertion(expected, candidate);
+}
+
 function targetAddress(evidence) {
   return mailbox(evidence?.target?.email) ?? mailbox(evidence?.targetEmail) ?? mailbox(evidence?.target);
 }
@@ -255,17 +269,19 @@ export function gradeCore(expectation = {}, evidence = {}) {
   if (expectation.recipients) {
     for (const field of RECIPIENT_FIELDS) {
       if (expectation.recipients[field] === undefined) continue;
-      if (field === "bcc" && !evidence.capabilities?.includes("blind_recipients")) {
+      if (["to", "cc"].includes(field) && !evidence.capabilities?.includes("visible_recipients")) {
+        results.push(result(`recipients.${field}`, "error", "missing_recipient_evidence", expectedAddresses(expectation.recipients[field]), null, attempts));
+      } else if (field === "bcc" && !evidence.capabilities?.includes("blind_recipients")) {
         results.push(result("recipients.bcc", "error", "missing_blind_recipient_evidence", expectedAddresses(expectation.recipients.bcc), null, attempts));
       } else {
-        results.push(aggregate(`recipients.${field}`, expectedAddresses(expectation.recipients[field]), attempts, (candidate) => recipientAssertion(field, expectation.recipients[field], candidate, fieldPlacement(expectation, candidate))));
+        results.push(aggregate(`recipients.${field}`, expectedAddresses(expectation.recipients[field]), attempts, (candidate) => requiredRecipientAssertion(field, expectation.recipients[field], candidate, fieldPlacement(expectation, candidate))));
       }
     }
     if (expectation.recipients.envelope !== undefined) {
       if (!evidence.capabilities?.includes("envelope_recipients")) {
         results.push(result("recipients.envelope", "error", "missing_envelope_recipient_evidence", expectedAddresses(expectation.recipients.envelope), null, attempts));
       } else {
-        results.push(aggregate("recipients.envelope", expectedAddresses(expectation.recipients.envelope), attempts, (candidate) => envelopeAssertion(expectation.recipients.envelope, candidate)));
+        results.push(aggregate("recipients.envelope", expectedAddresses(expectation.recipients.envelope), attempts, (candidate) => requiredEnvelopeAssertion(expectation.recipients.envelope, candidate)));
       }
     }
     results.push(aggregate("recipients.cross_field", "same recipient fields", attempts, (candidate) => {
@@ -274,6 +290,13 @@ export function gradeCore(expectation = {}, evidence = {}) {
     const target = targetAddress(evidence);
     results.push(aggregate("recipients.no_target_self", target, attempts, (candidate) => {
       if (target === null) return { status: "error", code: "missing_target_identity_evidence", actual: [] };
+      if (!evidence.capabilities?.includes("visible_recipients")) return { status: "error", code: "missing_recipient_evidence", actual: null };
+      if (!evidence.capabilities?.includes("blind_recipients")) return { status: "error", code: "missing_blind_recipient_evidence", actual: null };
+      if (!evidence.capabilities?.includes("envelope_recipients")) return { status: "error", code: "missing_envelope_recipient_evidence", actual: null };
+      if (!hasRecipientField(candidate, "to") || !hasRecipientField(candidate, "cc")
+        || !hasRecipientField(candidate, "bcc") || !hasRecipientField(candidate, "envelopeRecipients")) {
+        return { status: "error", code: "missing_recipient_evidence", actual: null };
+      }
       const recipients = [...new Set([...recipientAddresses(candidate), ...addressList(candidate.envelopeRecipients).addresses].filter((address) => address === target))].sort();
       return { status: recipients.length === 0 ? "pass" : "fail", code: recipients.length === 0 ? "matched" : "target_self_recipient", actual: { recipients } };
     }));
