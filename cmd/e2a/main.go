@@ -735,7 +735,11 @@ func main() {
 	// /readyz — instance-local readiness (DB reachable + migrations applied).
 	// Distinct from /api/health (shallow liveness); operational, not part of the
 	// /v1 contract, so it lives on this mux and never enters api/openapi.yaml.
-	router.HandleFunc("/readyz", readyzHandler(pool, &draining)).Methods(http.MethodGet)
+	// The verdict is refreshed on a background ticker, so this handler never
+	// competes for a pooled connection — see readyz.go for why that matters.
+	readiness := newReadinessMonitor(pool, &draining)
+	defer readiness.Stop()
+	router.HandleFunc("/readyz", readiness.handler()).Methods(http.MethodGet)
 	// /selftest — deep dependency diagnostics (health+json), auth-gated by the
 	// internal API secret. Operational, not part of the /v1 contract. The full
 	// SMTP→webhook round-trip lives in the external e2a-prober, not here.
