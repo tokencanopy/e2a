@@ -1,0 +1,12 @@
+{
+  "runId": "run_20260808T120000_0123abcd",
+  "status": "pass",
+  "startedAt": "2026-08-08T12:00:00.000Z",
+  "completedAt": "2026-08-08T12:00:01.000Z",
+  "counts": { "total": 1, "passed": 1, "failed": 0, "errors": 0 },
+  "durations": { "preflightMs": 0, "executionMs": 1000, "gradingMs": 0, "reportingMs": 0, "totalMs": 1000 },
+  "capabilities": ["message_action"],
+  "versions": { "runner": "0.1.0", "sdk": "5.6.0", "suite": 1, "evidence": 1 },
+  "suite": { "name": "synthetic-suite", "version": 1, "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "cases": [{ "id": "no-action", "status": "pass", "assertions": [], "primaryError": null, "secondaryErrors": [] }]
+}

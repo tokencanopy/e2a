@@ -5,6 +5,9 @@ import { parseDocument } from "yaml";
 import { EvalError } from "./errors.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox, parseDuration } from "./normalize.mjs";
 
+export const RESOLVED_ENVIRONMENT_VALUES = Symbol.for("e2a.email-evals.resolved-environment-values");
+export const RESOLVED_ENVIRONMENT_SOURCES = Symbol.for("e2a.email-evals.resolved-environment-sources");
+
 const environmentReference = /^\$\{([A-Z][A-Z0-9_]*)\}$/;
 const suiteKeys = new Set(["version", "name", "target", "actor", "transport", "defaults", "cases"]);
 const identityKeys = new Set(["email"]);
@@ -140,6 +143,13 @@ function normalizeDuration(value, environment, pointer) {
 function normalizeRegexes(value, environment, pointer) {
   return asArray(value, pointer).map((entry, index) => {
     const resolved = resolveString(entry, environment, `${pointer}/${index}`);
+    if (environmentReference.test(resolved.source)) {
+      throw configurationError(
+        "regex_environment_not_supported",
+        "Regular expressions must be literal so saved evidence can be regraded without environment secrets",
+        `${pointer}/${index}`,
+      );
+    }
     if (resolved.value.length > 512) throw configurationError("invalid_regex", "Regular expression exceeds the maximum length", `${pointer}/${index}`);
     try {
       return { source: resolved.source, value: resolved.value, regex: new RegExp(resolved.value) };
@@ -420,6 +430,33 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function freezeTree(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const entry of Object.values(value)) freezeTree(entry);
+  return Object.freeze(value);
+}
+
+function environmentRedactions(canonical, environment, extraSources = []) {
+  const names = new Set();
+  const visit = (value) => {
+    if (typeof value === "string") {
+      const match = value.match(environmentReference);
+      if (match) names.add(match[1]);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const entry of Object.values(value)) visit(entry);
+    }
+  };
+  visit(canonical);
+  for (const source of extraSources) visit(source);
+  return Object.freeze([...names].sort().map((name) => Object.freeze({ name, value: environment[name] })));
+}
+
 function aliasMailboxCanonical(value, aliases) {
   if (typeof value === "string") return value; // An unresolved ${NAME} reference.
   return { ...value, address: aliases.get(value.address) ?? value.address };
@@ -523,7 +560,7 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
   };
   const digest = createHash("sha256").update(stableJson(canonical)).digest("hex");
 
-  return {
+  const resolvedSuite = {
     version: 1,
     name: name.value,
     suiteFile: resolvedSuiteFile,
@@ -540,4 +577,13 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
     defaults: { timeoutMs: timeout.milliseconds, settleMs: settle.milliseconds, pollIntervalMs: pollInterval.milliseconds },
     cases,
   };
+  Object.defineProperty(resolvedSuite, RESOLVED_ENVIRONMENT_VALUES, {
+    value: environmentRedactions(canonical, environment, [apiKey.source]),
+    enumerable: false,
+  });
+  Object.defineProperty(resolvedSuite, RESOLVED_ENVIRONMENT_SOURCES, {
+    value: freezeTree(canonical),
+    enumerable: false,
+  });
+  return resolvedSuite;
 }

@@ -34,6 +34,34 @@ test("loadSuite resolves complete scalar references and canonicalizes the closed
   assert.doesNotMatch(JSON.stringify(suite.cases[0].expect.body), /forbiddenPatternRegexes/);
 });
 
+test("environment-backed regular expressions are rejected for replay-safe grading", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-env-regex-"));
+  await mkdir(path.join(root, "cases"));
+  await writeFile(path.join(root, "suite.yaml"), `
+version: 1
+name: synthetic
+target: { email: "\${E2A_EVAL_TARGET}" }
+actor: { email: "\${E2A_EVAL_ACTOR}" }
+transport:
+  adapter: e2a
+  api_key: "\${E2A_EVAL_API_KEY}"
+  base_url: https://api.example.test
+  allowed_envelope_recipients: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_TARGET}"]
+cases: [cases/env-regex.yaml]
+`);
+  await writeFile(path.join(root, "cases/env-regex.yaml"), `
+id: env-regex
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: none, count: 0 }
+  body: { forbidden_patterns: ["\${E2A_EVAL_PATTERN}"] }
+`);
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_EVAL_PATTERN: "secret-[0-9]+" } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "regex_environment_not_supported",
+  );
+});
+
 test("digest uses the unresolved alias-safe contract, not an API-key value", async () => {
   const first = await loadSuite(fixture("contracts/valid/suite.yaml"), { environment: validEnvironment });
   const second = await loadSuite(fixture("contracts/valid/suite.yaml"), {
