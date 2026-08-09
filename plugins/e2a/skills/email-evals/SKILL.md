@@ -10,21 +10,21 @@ description: Author and safely run deterministic email-agent evaluation suites w
 Ask one logical question at a time; do not dump a questionnaire. Ask exactly one prompt, wait for the answer, then advance. Conditionally omit a later prompt only when an earlier answer proves its field irrelevant; never bundle prompts.
 
 <!-- email-evals:authoring-prompts:start -->
-1. **use case** — Ask: “What is the synthetic use case?”
-2. **existing target runtime** — Ask: “Does the existing target runtime already run?”
-3. **dedicated actor environment name** — Ask: “What is the dedicated actor environment name?”
-4. **dedicated target environment name** — Ask: “What is the dedicated target environment name?”
-5. **expected action** — Ask: “What is the expected action?”
-6. **exact allowed recipients** — Ask: “Which exact allowed recipients are required?”
-7. **sender** — Ask: “What is the sender?”
-8. **Reply-To** — Ask: “What is the Reply-To expectation?”
-9. **thread** — Ask: “What is the thread expectation?”
-10. **subject** — Ask: “What is the subject expectation?”
-11. **required facts** — Ask: “What required facts apply?”
-12. **forbidden patterns** — Ask: “What forbidden patterns apply?”
-13. **attachments** — Ask: “What attachments are expected?”
-14. **timeout** — Ask: “What timeout applies?”
-15. **lifecycle** — Ask: “What lifecycle outcome is required?”
+1. <!-- email-evals:field=use-case --> **use case** — Ask: “What is the synthetic use case?”
+2. <!-- email-evals:field=existing-target-runtime --> **existing target runtime** — Ask: “Does the existing target runtime already run?”
+3. <!-- email-evals:field=dedicated-actor-environment-name --> **dedicated actor environment name** — Ask: “What is the dedicated actor environment name?”
+4. <!-- email-evals:field=dedicated-target-environment-name --> **dedicated target environment name** — Ask: “What is the dedicated target environment name?”
+5. <!-- email-evals:field=expected-action --> **expected action** — Ask: “What is the expected action?”
+6. <!-- email-evals:field=exact-allowed-recipients --> **exact allowed recipients** — Ask: “Which exact allowed recipients are required?”
+7. <!-- email-evals:field=sender --> **sender** — Ask: “What is the sender?”
+8. <!-- email-evals:field=reply-to --> **Reply-To** — Ask: “What is the Reply-To expectation?”
+9. <!-- email-evals:field=thread --> **thread** — Ask: “What is the thread expectation?”
+10. <!-- email-evals:field=subject --> **subject** — Ask: “What is the subject expectation?”
+11. <!-- email-evals:field=required-facts --> **required facts** — Ask: “What required facts apply?”
+12. <!-- email-evals:field=forbidden-patterns --> **forbidden patterns** — Ask: “What forbidden patterns apply?”
+13. <!-- email-evals:field=attachments --> **attachments** — Ask: “What attachments are expected?”
+14. <!-- email-evals:field=timeout --> **timeout** — Ask: “What timeout applies?”
+15. <!-- email-evals:field=lifecycle --> **lifecycle** — Ask: “What lifecycle outcome is required?”
 <!-- email-evals:authoring-prompts:end -->
 
 This skill does not build or start the target agent runtime.

@@ -12,42 +12,26 @@ const manifestFiles = [
   ".claude-plugin/marketplace.json",
   ".cursor-plugin/marketplace.json",
 ];
-const authoringPromptLabels = [
-  "use case",
-  "existing target runtime",
-  "dedicated actor environment name",
-  "dedicated target environment name",
-  "expected action",
-  "exact allowed recipients",
+const authoringPromptFields = [
+  "use-case",
+  "existing-target-runtime",
+  "dedicated-actor-environment-name",
+  "dedicated-target-environment-name",
+  "expected-action",
+  "exact-allowed-recipients",
   "sender",
-  "Reply-To",
+  "reply-to",
   "thread",
   "subject",
-  "required facts",
-  "forbidden patterns",
+  "required-facts",
+  "forbidden-patterns",
   "attachments",
   "timeout",
   "lifecycle",
 ];
 const authoringPromptsStart = "<!-- email-evals:authoring-prompts:start -->";
 const authoringPromptsEnd = "<!-- email-evals:authoring-prompts:end -->";
-const authoringPromptTokens = [
-  ["use case"],
-  ["target runtime"],
-  ["actor environment"],
-  ["target environment"],
-  ["action"],
-  ["recipient"],
-  ["sender"],
-  ["Reply-To"],
-  ["thread"],
-  ["subject"],
-  ["fact"],
-  ["pattern"],
-  ["attachment"],
-  ["timeout"],
-  ["lifecycle"],
-];
+const fieldMarker = (field) => `<!-- email-evals:field=${field} -->`;
 
 async function emailEvalFiles(directory = templateDirectory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -64,14 +48,6 @@ function assertBefore(source, earlier, later) {
   assert.ok(source.indexOf(earlier) < source.indexOf(later), `${earlier} must precede ${later}`);
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function authoringPromptItem(source) {
-  return /^\s*(?:\d+\.|[-*])\s+(?:\*\*[^*\n]+\*\*\s+—\s+)?(?:Ask:\s*)?.*\?/m.test(source);
-}
-
 /** Parse and validate the sole canonical authoring prompt block without I/O. */
 function parseAuthoringPrompts(source) {
   const startCount = source.split(authoringPromptsStart).length - 1;
@@ -83,48 +59,72 @@ function parseAuthoringPrompts(source) {
   const end = source.indexOf(authoringPromptsEnd);
   assert.ok(start < end, "authoring prompt markers must be in order");
   const outside = `${source.slice(0, start)}${source.slice(end + authoringPromptsEnd.length)}`;
-  assert.equal(authoringPromptItem(outside), false, "authoring question item exists outside canonical block");
+  assert.doesNotMatch(outside, /\?/, "question exists outside canonical authoring block");
 
   const section = source.slice(start + authoringPromptsStart.length, end).trim();
   const prompts = section.split("\n").map((line) => {
-    const item = line.match(/^(\d+)\. \*\*([^*]+)\*\* — (.+)$/);
+    const item = line.match(/^(\d+)\. (<!-- email-evals:field=([a-z0-9-]+) -->) \*\*([^*]+)\*\* — (.+)$/);
     assert.ok(item, `invalid authoring prompt item: ${line}`);
-    return { number: Number(item[1]), label: item[2], prompt: item[3] };
+    return {
+      number: Number(item[1]), marker: item[2], field: item[3], label: item[4], question: item[5], line,
+    };
   });
-  assert.equal(prompts.length, authoringPromptLabels.length);
-  assert.deepEqual(prompts.map(({ label }) => label), authoringPromptLabels);
-  for (const [index, { number, label, prompt }] of prompts.entries()) {
+  assert.equal(prompts.length, authoringPromptFields.length);
+  assert.deepEqual(prompts.map(({ field }) => field), authoringPromptFields);
+  for (const [index, { number, marker, field, question, line }] of prompts.entries()) {
     assert.equal(number, index + 1);
-    assert.match(prompt, new RegExp(escapeRegExp(label), "i"));
-    assert.doesNotMatch(prompt, /\*\*/, `${label} must contain one label`);
-    assert.equal([...prompt.matchAll(/\?/g)].length, 1, `${label} must be one question`);
-    for (const token of authoringPromptTokens.flatMap((tokens, tokenIndex) => tokenIndex === index ? [] : tokens)) {
-      assert.doesNotMatch(prompt, new RegExp(`\\b${escapeRegExp(token)}\\b`, "i"), `${label} mentions ${token}`);
-    }
+    assert.equal(marker, fieldMarker(field));
+    assert.equal([...line.matchAll(/<!-- email-evals:field=[a-z0-9-]+ -->/g)].length, 1, `${field} has one marker`);
+    assert.equal([...question.matchAll(/\?/g)].length, 1, `${field} has one question`);
+    assert.doesNotMatch(line, /email-evals:authoring-prompts:(?:start|end)/, `${field} has no nested block`);
+  }
+  const markers = [...source.matchAll(/<!-- email-evals:field=([a-z0-9-]+) -->/g)];
+  assert.equal(markers.length, authoringPromptFields.length, "field markers appear exactly once globally");
+  assert.deepEqual(markers.map((match) => match[1]), authoringPromptFields);
+  for (const [index, match] of markers.entries()) {
+    assert.ok(match.index > start && match.index < end, `${authoringPromptFields[index]} marker is inside canonical block`);
   }
   return prompts;
 }
 
-test("authoring prompt contract rejects noncanonical blocks and bundled mutations", async () => {
+test("authoring prompt contract rejects noncanonical blocks and field mutations", async () => {
   const source = await readFile(skillFile, "utf8");
-  const senderPrompt = "1. **sender** — Ask: “What is the sender?”";
+  const senderPrompt = `1. ${fieldMarker("sender")} **sender** — Ask: “What is the sender?”`;
+  const reordered = source
+    .replace(fieldMarker("use-case"), "__FIELD_SWAP__")
+    .replace(fieldMarker("existing-target-runtime"), fieldMarker("use-case"))
+    .replace("__FIELD_SWAP__", fieldMarker("existing-target-runtime"));
   const mutations = [
     ["duplicate marker pair", `${source}\n${authoringPromptsStart}\n${authoringPromptsEnd}`],
     ["second bundled marked block", `${source}\n${authoringPromptsStart}\n${senderPrompt}\n${authoringPromptsEnd}`],
-    ["question before canonical block", source.replace(authoringPromptsStart, `${senderPrompt}\n${authoringPromptsStart}`)],
-    ["question after canonical block", source.replace(authoringPromptsEnd, `${authoringPromptsEnd}\n${senderPrompt}`)],
-    ["duplicate label", source.replace("2. **existing target runtime**", "2. **use case**")],
-    ["reordered label", source.replace(
-      "1. **use case** — Ask: “What is the synthetic use case?”\n2. **existing target runtime** — Ask: “Does the existing target runtime already run?”",
-      "1. **existing target runtime** — Ask: “Does the existing target runtime already run?”\n2. **use case** — Ask: “What is the synthetic use case?”",
-    )],
-    ["missing label", source.replace("15. **lifecycle** — Ask: “What lifecycle outcome is required?”\n", "")],
-    ["prompt mentions another field", source.replace("What is the synthetic use case?", "What use case should the sender handle?")],
+    ["duplicate field marker", source.replace(fieldMarker("existing-target-runtime"), fieldMarker("use-case"))],
+    ["reordered field marker", reordered],
+    ["missing field marker", source.replace(`${fieldMarker("lifecycle")} `, "")],
+    ["second field marker", source.replace(fieldMarker("use-case"), `${fieldMarker("use-case")} ${fieldMarker("sender")}`)],
+    ["multiple questions", source.replace("What is the synthetic use case?", "What is the synthetic use case??")],
   ];
 
   for (const [name, mutated] of mutations) {
     assert.throws(() => parseAuthoringPrompts(mutated), undefined, name);
   }
+});
+
+test("authoring prompt contract rejects hidden questions and permits question wording changes", async () => {
+  const source = await readFile(skillFile, "utf8");
+  for (const [name, hidden] of [
+    ["plus item", "+ Hidden authoring question?"],
+    ["HTML item", "<li>Hidden authoring question?</li>"],
+    ["comment", "<!-- Hidden authoring question? -->"],
+    ["fenced code", "```text\nHidden authoring question?\n```"],
+    ["plain text", "Hidden authoring question?"],
+  ]) {
+    assert.throws(() => parseAuthoringPrompts(`${source}\n${hidden}`), undefined, name);
+  }
+  const rewrites = [
+    source.replace("What is the synthetic use case?", "Which fictional scenario should the agent handle?"),
+    source.replace("What is the sender?", "Which mailbox originates this evaluation?"),
+  ];
+  for (const rewritten of rewrites) assert.doesNotThrow(() => parseAuthoringPrompts(rewritten));
 });
 
 test("email-evals skill preserves the safe authoring and run sequence", async () => {
@@ -136,8 +136,8 @@ test("email-evals skill preserves the safe authoring and run sequence", async ()
   assert.match(source, /(?:one prompt|one logical question)[^.]*wait[^.]*answer[^.]*advance/i);
   assert.match(source, /only when an earlier answer proves.*irrelevant/i);
   const prompts = parseAuthoringPrompts(source);
-  assert.equal(prompts.length, authoringPromptLabels.length);
-  assert.deepEqual(prompts.map(({ label }) => label), authoringPromptLabels);
+  assert.equal(prompts.length, authoringPromptFields.length);
+  assert.deepEqual(prompts.map(({ field }) => field), authoringPromptFields);
 
   assert.match(source, /refuse.*(?:customer|production-derived).*?(?:message|identifier|domain|fixture)/is);
   assert.match(source, /synthetic replacement/i);
