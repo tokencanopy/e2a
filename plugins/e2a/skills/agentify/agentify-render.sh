@@ -24,8 +24,33 @@ set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="$BASE/templates"
 
-# _esc: escape a value for safe use in a sed replacement (handles \ & |).
-_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+_yaml_dq_content() {
+  python3 -c 'import json,sys
+s=json.dumps(sys.argv[1], ensure_ascii=False)
+print(s[1:-1])' "$1"
+}
+
+_sed_replacement() {
+  _yaml_dq_content "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
+_single_line() {
+  case "$2" in
+    *$'\n'*|*$'\r'*) echo "agentify: $1 must be one line" >&2; exit 2 ;;
+  esac
+}
+
+_validate_answers() {
+  local name
+  for name in ANS_OWNER ANS_REPO ANS_MARKER ANS_REVIEWER_LOGIN ANS_BOT_LOGIN \
+    ANS_SUPPORT_ADDRESS ANS_FIX_GATE_MODE ANS_APPROVER_ADDRESS ANS_VERIFY_SETUP_SCRIPT; do
+    _single_line "$name" "${!name:-}"
+  done
+  [[ "${ANS_OWNER:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "agentify: invalid owner" >&2; exit 2; }
+  [[ "${ANS_REPO:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "agentify: invalid repo" >&2; exit 2; }
+  [[ "${ANS_MARKER:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "agentify: invalid marker" >&2; exit 2; }
+  [[ "${ANS_FIX_GATE_MODE:-}" =~ ^(auto|hitl)$ ]] || { echo "agentify: fix gate must be auto or hitl" >&2; exit 2; }
+}
 
 render_config() {  # $1 = target root, $2 = force ("1" to overwrite)
   local out="$1/autonomous-repo.config.yml"
@@ -37,16 +62,16 @@ render_config() {  # $1 = target root, $2 = force ("1" to overwrite)
     return 0
   fi
   sed \
-    -e "s|{{PRODUCT_NAME}}|$(_esc "${ANS_PRODUCT_NAME:-}")|g" \
-    -e "s|{{OWNER}}|$(_esc "${ANS_OWNER:-}")|g" \
-    -e "s|{{REPO}}|$(_esc "${ANS_REPO:-}")|g" \
-    -e "s|{{MARKER}}|$(_esc "${ANS_MARKER:-}")|g" \
-    -e "s|{{REVIEWER_LOGIN}}|$(_esc "${ANS_REVIEWER_LOGIN:-}")|g" \
-    -e "s|{{BOT_LOGIN}}|$(_esc "${ANS_BOT_LOGIN:-}")|g" \
-    -e "s|{{SUPPORT_ADDRESS}}|$(_esc "${ANS_SUPPORT_ADDRESS:-}")|g" \
-    -e "s|{{FIX_GATE_MODE}}|$(_esc "${ANS_FIX_GATE_MODE:-hitl}")|g" \
-    -e "s|{{APPROVER_ADDRESS}}|$(_esc "${ANS_APPROVER_ADDRESS:-}")|g" \
-    -e "s|{{VERIFY_SETUP_SCRIPT}}|$(_esc "${ANS_VERIFY_SETUP_SCRIPT:-}")|g" \
+    -e "s|{{PRODUCT_NAME}}|$(_sed_replacement "${ANS_PRODUCT_NAME:-}")|g" \
+    -e "s|{{OWNER}}|$(_sed_replacement "${ANS_OWNER:-}")|g" \
+    -e "s|{{REPO}}|$(_sed_replacement "${ANS_REPO:-}")|g" \
+    -e "s|{{MARKER}}|$(_sed_replacement "${ANS_MARKER:-}")|g" \
+    -e "s|{{REVIEWER_LOGIN}}|$(_sed_replacement "${ANS_REVIEWER_LOGIN:-}")|g" \
+    -e "s|{{BOT_LOGIN}}|$(_sed_replacement "${ANS_BOT_LOGIN:-}")|g" \
+    -e "s|{{SUPPORT_ADDRESS}}|$(_sed_replacement "${ANS_SUPPORT_ADDRESS:-}")|g" \
+    -e "s|{{FIX_GATE_MODE}}|$(_sed_replacement "${ANS_FIX_GATE_MODE:-hitl}")|g" \
+    -e "s|{{APPROVER_ADDRESS}}|$(_sed_replacement "${ANS_APPROVER_ADDRESS:-}")|g" \
+    -e "s|{{VERIFY_SETUP_SCRIPT}}|$(_sed_replacement "${ANS_VERIFY_SETUP_SCRIPT:-}")|g" \
     "$TEMPLATES/autonomous-repo.config.yml.tmpl" > "$out"
   # Only real placeholders ({{UPPERCASE_IDENT}}) — not the literal "{{...}}"
   # in the template's explanatory comment.
@@ -136,6 +161,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TARGET" ] || { echo "agentify-render.sh: --to <target-repo-root> is required" >&2; exit 2; }
 [ -d "$TEMPLATES" ] || { echo "agentify-render.sh: templates not found at $TEMPLATES" >&2; exit 2; }
+_validate_answers
 render_config "$TARGET" "$FORCE"
 scaffold "$TARGET"
 apply_addons "$TARGET"
