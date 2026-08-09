@@ -48,9 +48,9 @@ Remote servers take `url` only — `type`/`transport` are stdio-only in Cursor.
 On first use Cursor registers itself via OAuth Dynamic Client Registration and
 opens your browser; there is no API key to paste and no `auth` block to fill in.
 
-Cursor receives the core MCP configuration and canonical setup documentation,
-but its current plugin path does not deliver the core or Labs skills. The MCP
-tools still work; install Labs only in Claude Code or Codex.
+Cursor lists core and receives its MCP configuration and canonical setup
+documentation. Labs is not listed, so Labs skills are unavailable in Cursor.
+Install Labs only in Claude Code or Codex.
 
 This file used to recommend two things that don't work, so they're worth naming
 before someone re-adds them: a bare `/add-plugin e2a` resolves only against

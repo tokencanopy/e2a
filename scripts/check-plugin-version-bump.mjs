@@ -76,6 +76,11 @@ function main(args) {
   }
 
   const [base] = args;
+  if (base.startsWith("-")) {
+    console.error(`base revision must not start with "-": ${base}`);
+    process.exitCode = 2;
+    return;
+  }
   try {
     const verifiedBase = git([
       "rev-parse", "--verify", "--end-of-options", `${base}^{commit}`,
