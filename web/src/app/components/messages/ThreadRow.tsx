@@ -84,13 +84,15 @@ export function ThreadRow({
         size={26}
       />
 
-      {/* Sender — fixed-ish column so subjects line up like Gmail. */}
+      {/* Sender — fixed-ish column so subjects line up like Gmail. Clamped
+          rather than a hard 170px: on phone widths a fixed column would leave
+          the subject only ~80px. */}
       <span
         style={{
           fontSize: 13,
           fontWeight: fw,
           color: "var(--fg)",
-          width: 170,
+          width: "clamp(96px, 28%, 170px)",
           flexShrink: 0,
           whiteSpace: "nowrap",
           overflow: "hidden",

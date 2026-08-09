@@ -66,7 +66,7 @@ export default function TrashPage() {
       title={<>Trash</>}
       subtitle={
         <>
-          Deleted inboxes are kept for {TRASH_RETENTION_DAYS} days, then
+          Deleted inboxes are kept for {TRASH_RETENTION_DAYS}{" "}days, then
           purged permanently together with their messages. Deleted messages
           live in each inbox&apos;s own{" "}
           <span style={{ color: "var(--fg)" }}>Trash</span> tab.
