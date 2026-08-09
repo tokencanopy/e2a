@@ -75,6 +75,11 @@ describe("sitemap", () => {
     expect(found).toContain("http://localhost:3000/use-cases");
   });
 
+  it("includes the canonical email API category page", () => {
+    delete process.env[ENV_KEY];
+    expect(urls()).toContain("http://localhost:3000/email-api-for-ai-agents");
+  });
+
   it("emits no duplicate URLs", () => {
     process.env[ENV_KEY] = "/pricing";
     const found = urls();
