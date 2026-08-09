@@ -163,3 +163,22 @@ test("scaffold does not publish through a parent swapped before the no-clobber l
   await assert.rejects(scaffoldSuite({ root, ...validOptions }, { linkFile }), /ENOENT/);
   assert.deepEqual(await readdir(outside), []);
 });
+
+test("scaffold rejects a root swapped after README before creating descendant parents", async () => {
+  const root = await createRoot();
+  const movedRoot = `${root}-moved-after-readme`;
+  const outside = `${root}-outside-after-readme`;
+  await mkdir(outside);
+
+  const linkFile = async (temporary, destination) => {
+    const result = await link(temporary, destination);
+    if (path.basename(destination) === "README.md") {
+      await rename(root, movedRoot);
+      await symlink(outside, root);
+    }
+    return result;
+  };
+
+  await assert.rejects(scaffoldSuite({ root, ...validOptions }, { linkFile }), /symlink|outside/i);
+  assert.deepEqual(await readdir(outside), []);
+});

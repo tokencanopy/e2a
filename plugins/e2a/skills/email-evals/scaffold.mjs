@@ -117,12 +117,21 @@ async function inspectSafeParent(root, parent) {
   return { dev: entry.dev, ino: entry.ino };
 }
 
+async function revalidateAncestors(root, ancestors) {
+  for (const ancestor of ancestors) {
+    await inspectSafeParent(root, ancestor);
+  }
+}
+
 async function prepareParent(root, parent) {
   assertContainedPath(root, parent);
   let current = root;
+  const ancestors = [root];
   for (const segment of path.relative(root, parent).split(path.sep).filter(Boolean)) {
+    await revalidateAncestors(root, ancestors);
     current = path.join(current, segment);
     await createSafeDirectory(current);
+    ancestors.push(current);
   }
   return inspectSafeParent(root, parent);
 }
