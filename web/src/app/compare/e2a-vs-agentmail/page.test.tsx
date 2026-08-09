@@ -12,9 +12,10 @@ describe("e2a comparison page", () => {
     render(<E2aVsAgentMailPage />);
 
     expect(screen.getByRole("heading", { level: 1, name: "e2a vs AgentMail vs transactional email APIs." })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 2, name: "Transactional APIs" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 2, name: "Agent inbox platforms" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 2, name: "Gateway infrastructure" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Email infrastructure categories" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Transactional APIs" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Agent inbox platforms" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Gateway infrastructure" })).toBeInTheDocument();
   });
 
   it("names the concrete transactional providers and policy distinction", () => {

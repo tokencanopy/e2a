@@ -75,7 +75,7 @@ export default function EmailApiForAgentsPage() {
           <Link href="/" className="font-mono font-bold text-[17px]">e2a</Link>
           <div className="flex items-center gap-4 text-[13px]">
             <Link href="/use-cases" style={{ color: "var(--fg-muted)" }}>Use cases</Link>
-            <Link href="/compare/e2a-vs-agentmail" style={{ color: "var(--fg-muted)" }}>Compare</Link>
+            <Link href="/compare/e2a-vs-agentmail" className="hidden sm:inline" style={{ color: "var(--fg-muted)" }}>Compare</Link>
             <Link href="/get-started" className="px-3.5 py-1.5 font-medium" style={{ background: "var(--fg)", color: "var(--bg)", borderRadius: "var(--r-md)" }}>
               Start building <span className="font-mono">→</span>
             </Link>

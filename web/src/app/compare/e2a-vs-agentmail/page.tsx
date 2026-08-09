@@ -109,10 +109,11 @@ export default function E2aVsAgentMailPage() {
             e2a adds authenticated inbound and outbound gateway policy around an
             agent’s identity.
           </p>
-          <p className="mt-5 text-[12px] font-mono" style={{ color: "var(--fg-subtle, var(--fg-muted))" }}>Last verified against public product documentation: August 9, 2026.</p>
+          <p className="mt-5 text-[12px]" style={{ color: "var(--fg-subtle, var(--fg-muted))" }}>Feature details are based on the linked public documentation. Re-check provider features and pricing before making a purchasing decision.</p>
         </header>
 
         <section aria-labelledby="categories-heading">
+          <h2 id="categories-heading" className="sr-only">Email infrastructure categories</h2>
           <div className="grid md:grid-cols-3 gap-3">
             {[
               ["01", "Transactional APIs", "Send receipts, alerts, password resets, and other product-triggered messages.", "Resend, Postmark, Mailgun, SendGrid, Amazon SES"],
@@ -121,7 +122,7 @@ export default function E2aVsAgentMailPage() {
             ].map(([number, title, text, examples]) => (
               <div key={number} className="p-6" style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: "var(--r-lg)" }}>
                 <div className="font-mono text-[11px] mb-5" style={{ color: "var(--accent-strong)" }}>{number}</div>
-                <h2 id={number === "01" ? "categories-heading" : undefined} className="text-[18px] font-semibold mb-2" style={{ letterSpacing: "-0.02em" }}>{title}</h2>
+                <h3 className="text-[18px] font-semibold mb-2" style={{ letterSpacing: "-0.02em" }}>{title}</h3>
                 <p className="text-[14px] leading-[1.6] mb-4" style={{ color: "var(--fg-muted)" }}>{text}</p>
                 <p className="font-mono text-[11px] leading-[1.6]" style={{ color: "var(--fg-subtle, var(--fg-muted))" }}>{examples}</p>
               </div>
