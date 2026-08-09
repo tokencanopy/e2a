@@ -1,6 +1,6 @@
 # Email-agent eval factory V0 — design
 
-2026-08-08 · branch `feat/metrics-followups`
+2026-08-08 · branch `docs/email-agent-eval-factory`
 
 ## Problem statement
 
@@ -71,6 +71,27 @@ recipients.
   identifiers in committed examples or generated public artifacts.
 - No attempt to make an LLM judge authoritative for recipients, threading,
   lifecycle, secrets, or other deterministic safety properties.
+
+## Delivery slices
+
+The design is delivered in two independently reviewable slices so the first
+release stays immediately usable:
+
+1. **V0 deterministic launch slice:** skill scaffold, closed YAML contract,
+   dry-run and protection preflight, sequential e2a execution, action and
+   cardinality, sender, exact To/Cc/Bcc/envelope recipients, Reply-To,
+   threading, subject, deterministic body facts/patterns, attachment metadata
+   and hashes, timing, submission/receipt lifecycle, re-grading, redaction, and
+   JSONL/JSON/Markdown reports.
+2. **V0 semantic and deep-MIME extension:** BYOK rubric grading, plain/HTML
+   semantic equivalence, quote/signature/link policies, charset and transfer-
+   encoding diagnostics, scheduled-send timing, and the complete review,
+   suppression, bounce, and complaint matrix.
+
+The first slice is the implementation plan that follows this design. It emits
+the versioned evidence and assertion contracts the second slice consumes; the
+extension adds graders without changing transport, suite identity, or result
+envelopes.
 
 ## Prior art and adopted patterns
 
@@ -164,7 +185,8 @@ keep rate limiting and failure analysis predictable.
 V0 has one adapter. It:
 
 - Sends the synthetic inbound message from a dedicated eval actor.
-- Records the actor inbox cursor and run start instant before the send.
+- Records a bounded actor-inbox message-ID baseline and run start instant before
+  the send.
 - Uses stable idempotency keys derived from suite, run, and case IDs.
 - Polls the durable `/v1/events` log for target-scoped `email.sent`,
   `email.failed`, review, and delivery events after the run start instant. The
@@ -229,8 +251,8 @@ cases. It produces:
 4. Verify dedicated actor/target identities and the outbound recipient allowlist.
 5. Negotiate adapter and grader capabilities.
 6. Render a dry-run plan. `run` proceeds only after the same checks pass.
-7. For each case, record the actor inbox cursor and event-query lower bound,
-   then construct a stable idempotency key.
+7. For each case, record the bounded actor-inbox message-ID baseline and event-
+   query lower bound, then construct a stable idempotency key.
 8. Send exactly once through e2a.
 9. Poll target outbound evidence and actor inbound evidence until the case
    reaches a terminal observation or timeout.
@@ -258,6 +280,14 @@ target:
 
 actor:
   email: ${E2A_EVAL_ACTOR}
+
+transport:
+  adapter: e2a
+  api_key: ${E2A_EVAL_API_KEY}
+  base_url: https://api.e2a.dev
+  allowed_envelope_recipients:
+    - ${E2A_EVAL_TARGET}
+    - ${E2A_EVAL_ACTOR}
 
 defaults:
   timeout: 60s
@@ -325,6 +355,14 @@ expect:
 Environment substitution is allowed only as a complete scalar value. The
 runner does not interpolate `${...}` embedded inside fixture text, avoiding
 accidental secret expansion into email bodies or reports.
+
+`transport.api_key` must remain a complete environment reference. The account-
+scoped key must own both dedicated eval agents and is never written to results.
+`transport.allowed_envelope_recipients` is the single explicit run allowlist;
+it contains the actor, target, and any controlled probe mailbox used by a case.
+The default API base URL is explicit so dry-run output makes the destination
+visible; self-hosted suites may replace it with a complete environment
+reference.
 
 Unknown keys are validation errors. `version` selects a closed schema; future
 additions require a new compatible schema revision or explicitly optional
