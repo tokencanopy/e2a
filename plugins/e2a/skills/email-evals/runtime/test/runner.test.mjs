@@ -201,7 +201,7 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.equal(failed.cases[0].primaryError.class, "assertion_failure");
 
   const hostileExpectation = expectation();
-  Object.defineProperty(hostileExpectation.sender, "exactly", { enumerable: true, get() { throw new Error("synthetic grader crash"); } });
+  hostileExpectation.subject = { requiredFragments: "not-an-array" };
   const thrown = await runSuite({
     suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]),
     adapter: adapter((testCase) => evidence({ ...testCase, expect: expectation() })),
@@ -212,11 +212,84 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.equal(thrown.cases[0].primaryError.origin, "grader");
   assert.ok(thrown.cases[0].evidence);
   assert.deepEqual(thrown.cases[0].assertions, []);
+  const stored = (await readFile(thrown.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  stored[0].primaryError.message = "Untrusted stored grader message";
+  await writeFile(thrown.files.cases, `${stored.map(JSON.stringify).join("\n")}\n`);
   const regraded = await regradeRun({ suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]), runDirectory: path.dirname(thrown.files.cases) });
   assert.equal(regraded.status, thrown.status);
   assert.deepEqual(regraded.cases[0].evidence, thrown.cases[0].evidence);
   assert.deepEqual(regraded.cases[0].assertions, []);
   assert.deepEqual(regraded.cases[0].primaryError, thrown.cases[0].primaryError);
+});
+
+test("regrade rejects a forged grader_threw over clean projected evidence", async () => {
+  const one = suite([{ id: "clean-grader", send: { subject: "Clean", text: "Synthetic" }, expect: expectation() }]);
+  const original = await runSuite({ suite: one, adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+  const records = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  records[0].status = "error";
+  records[0].assertions = [];
+  records[0].primaryError = {
+    class: "grader_error", code: "grader_threw", origin: "grader", message: "Forged grader failure",
+  };
+  await writeFile(original.files.cases, `${records.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+});
+
+test("direct run rejects oversized resolved identifiers before preflight or send", async () => {
+  for (const oversized of [
+    { suiteName: "s".repeat(1_048_577), caseId: "case" },
+    { suiteName: "suite", caseId: "c".repeat(1_048_577) },
+  ]) {
+    const one = suite([{ id: oversized.caseId, send: { subject: "Large", text: "Synthetic" }, expect: expectation("none") }]);
+    one.name = oversized.suiteName;
+    const fake = adapter();
+    await assert.rejects(
+      runSuite({ suite: one, adapter: fake, outputRoot: await root(), runId: RUN_ID }),
+      (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
+        && Object.keys(error.details ?? {}).length === 1,
+    );
+    assert.equal(fake.calls.preflight, 0);
+    assert.equal(fake.calls.execute.length, 0);
+  }
+});
+
+test("identifier boundaries and quoted mailbox evidence survive live grading and regrade", async () => {
+  const actor = '"a b"@example.com';
+  const target = '"a@b"@example.com';
+  const quotedExpectation = expectation();
+  quotedExpectation.sender.exactly = target;
+  quotedExpectation.recipients.to.exactly = [actor];
+  quotedExpectation.recipients.envelope.exactly = [actor];
+  const one = suite([{ id: "c".repeat(128), send: { subject: "Quoted", text: "Synthetic" }, expect: quotedExpectation }]);
+  one.name = "s".repeat(128);
+  one.actor = { email: actor };
+  one.target = { email: target };
+  one.transport.allowedEnvelopeRecipients = [actor, target];
+  const original = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      captured.target.email = target;
+      captured.stimulus.participants = [`Actor Alias <${actor}>`];
+      captured.candidates[0].from = `Target Alias <${target}>`;
+      captured.candidates[0].sentAs = target;
+      captured.candidates[0].to = [`Actor Alias <${actor}>`];
+      captured.candidates[0].envelopeRecipients = [actor];
+      return captured;
+    }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(original.status, "pass");
+  assert.deepEqual(original.cases[0].evidence.candidates[0].from, { address: "target", displayName: "Target Alias" });
+  assert.deepEqual(original.cases[0].evidence.candidates[0].to, [{ address: "actor", displayName: "Actor Alias" }]);
+  assert.doesNotMatch(await readFile(original.files.cases, "utf8"), /"a b"@|"a@b"@/);
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) });
+  assert.equal(regraded.status, "pass");
+  assert.deepEqual(regraded.cases[0].expectation, original.cases[0].expectation);
+  assert.deepEqual(regraded.cases[0].evidence, original.cases[0].evidence);
 });
 
 test("adapter transport error registry covers every literal adapter code and baseline overflow regrades", async () => {

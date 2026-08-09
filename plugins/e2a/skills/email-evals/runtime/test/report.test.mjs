@@ -210,6 +210,33 @@ test("mailbox scanning aliases complete RFC atext spans including apostrophes", 
   assert.equal(record.evidence.candidates[0].mime.text, record.expectation.body.requiredFacts[0]);
 });
 
+test("mailbox scanning aliases complete quoted local parts instead of generic redaction", () => {
+  const configured = suite();
+  configured.actor.email = '"a b"@example.com';
+  configured.target.email = '"a@b"@example.com';
+  configured.transport.allowedEnvelopeRecipients = [
+    configured.actor.email, configured.target.email, '"a\\\"b"@example.com', '"a\\\\b"@example.com',
+  ];
+  const text = 'Known "a b"@example.com; at "a@b"@example.com; quote Escaped <"a\\\"b"@example.com>; slash <"a\\\\b"@example.com>';
+  const record = aliasCaseRecord({
+    id: "quoted-mailboxes",
+    status: "error",
+    expectation: { body: { requiredFacts: [text] } },
+    evidence: { version: 1, capabilities: [], candidates: [{ mime: { text } }] },
+    assertions: [],
+    primaryError: { class: "transport_error", code: "poll_failed", origin: "adapter", message: text },
+    secondaryErrors: [],
+  }, configured);
+
+  for (const value of ['"a b"@example.com', '"a@b"@example.com', '"a\\\"b"@example.com', '"a\\\\b"@example.com']) {
+    assert.doesNotMatch(JSON.stringify(record), new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.equal(record.expectation.body.requiredFacts[0], "Known actor; at target; quote Escaped <probe:1>; slash <probe:2>");
+  assert.equal(record.evidence.candidates[0].mime.text, record.expectation.body.requiredFacts[0]);
+  assert.equal(record.primaryError.message, record.expectation.body.requiredFacts[0]);
+  assert.doesNotMatch(JSON.stringify(record), /\[REDACTED:address\]/);
+});
+
 test("forbidden diagnostic matches and secrets in errors are redacted without RegExp state leaks", () => {
   const configured = suite();
   configured.cases = [{ expect: { body: { forbiddenPatterns: ["token-[0-9]+"] } } }];

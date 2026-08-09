@@ -35,9 +35,18 @@ const subjectPolicies = new Set(["preserve", "forward"]);
 const plainTextPolicies = new Set(["required", "forbidden"]);
 const htmlPolicies = new Set(["required", "forbidden", "equivalent_if_present"]);
 const submissionStates = new Set(["sent", "failed", "pending_review", "scheduled"]);
+export const EVAL_IDENTIFIER_LIMITS = Object.freeze({ suiteNameBytes: 128, caseIdBytes: 128 });
 
 function configurationError(code, message, pointer) {
   return new EvalError("configuration_error", code, message, pointer ? { path: pointer } : undefined);
+}
+
+export function assertEvalIdentifierLength(value, kind, pointer) {
+  const limit = EVAL_IDENTIFIER_LIMITS[kind];
+  if (typeof value === "string" && Number.isSafeInteger(limit) && Buffer.byteLength(value, "utf8") > limit) {
+    throw configurationError("identifier_too_long", "Evaluation identifier exceeds its size limit", pointer);
+  }
+  return value;
 }
 
 function pathOf(parent, key) {
@@ -173,6 +182,7 @@ function normalizeRecipientSet(value, environment, pointer) {
 function normalizeCase(rawCase, environment, casePath) {
   const item = allowedObject(rawCase, caseKeys, "", ["id", "send", "expect"]);
   const id = resolveString(item.id, environment, "/id");
+  assertEvalIdentifierLength(id.value, "caseIdBytes", "/id");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id.value)) throw configurationError("invalid_case_id", "Invalid case identifier", "/id");
   const sendRaw = allowedObject(item.send, sendKeys, "/send", ["subject", "text"]);
   const send = {
@@ -498,6 +508,7 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
   const suite = allowedObject(rawSuite, suiteKeys, "", ["version", "name", "target", "actor", "transport", "cases"]);
   if (suite.version !== 1) throw configurationError("unsupported_version", "Unsupported suite version", "/version");
   const name = resolveString(suite.name, environment, "/name");
+  assertEvalIdentifierLength(name.value, "suiteNameBytes", "/name");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name.value)) throw configurationError("invalid_suite_name", "Invalid suite name", "/name");
   const targetRaw = allowedObject(suite.target, identityKeys, "/target", ["email"]);
   const actorRaw = allowedObject(suite.actor, identityKeys, "/actor", ["email"]);

@@ -216,6 +216,41 @@ test("normalizers preserve display names, reject duplicates before dedupe, and b
   assert.throws(() => parseDuration("999h"), /duration/i);
 });
 
+test("normalizers preserve parser-valid quoted local parts as round-trippable addresses", () => {
+  const mailboxes = [
+    ['"a b"@EXAMPLE.COM', { address: '"a b"@example.com', displayName: undefined }],
+    ['"a@b"@EXAMPLE.COM', { address: '"a@b"@example.com', displayName: undefined }],
+    ['Quoted Person <"a b"@EXAMPLE.COM>', { address: '"a b"@example.com', displayName: "Quoted Person" }],
+    ['Escaped Quote <"a\\\"b"@EXAMPLE.COM>', { address: '"a\\\"b"@example.com', displayName: "Escaped Quote" }],
+    ['Escaped Slash <"a\\\\b"@EXAMPLE.COM>', { address: '"a\\\\b"@example.com', displayName: "Escaped Slash" }],
+  ];
+  for (const [source, expected] of mailboxes) {
+    const normalized = normalizeMailbox(source);
+    assert.deepEqual(normalized, expected);
+    assert.equal(normalizeMailbox(normalized.address).address, normalized.address);
+  }
+  assert.throws(() => normalizeAddressSet(['"A B"@example.com', '"a b"@EXAMPLE.COM']), /duplicate/i);
+});
+
+test("closed contract rejects oversized suite and case identifiers with safe pointers", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-identifiers-"));
+  await writeMinimalSuite(root, { name: "${E2A_SUITE_NAME}" });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_SUITE_NAME: "s".repeat(129) } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
+      && error.details?.path === "/name" && Object.keys(error.details).length === 1,
+  );
+
+  await writeMinimalSuite(root, { caseSource: [
+    "id: ${E2A_CASE_ID}", "send: { subject: Synthetic, text: Synthetic }", "expect: { action: { kind: none, count: 0 } }", "",
+  ].join("\n") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_CASE_ID: "c".repeat(129) } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
+      && error.details?.path === "/id" && Object.keys(error.details).length === 1,
+  );
+});
+
 test("scaffolded synthetic starter templates satisfy the same closed loader", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "email-evals-scaffold-contract-"));
   await scaffoldSuite({

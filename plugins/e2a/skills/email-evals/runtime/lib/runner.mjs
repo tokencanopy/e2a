@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
-import { RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
+import { assertEvalIdentifierLength, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
 import {
   EVAL_ERROR_CODE_REGISTRY,
   EvalError,
@@ -361,12 +361,21 @@ function requiredCapabilities(suite) {
   return [...required].sort();
 }
 
-function validateInputs(suite, adapter) {
+function validateSuite(suite) {
   if (!suite || typeof suite !== "object" || !Array.isArray(suite.cases)
     || typeof suite.digest !== "string" || !/^[a-f0-9]{64}$/.test(suite.digest)
-    || !suite.actor?.email || !suite.target?.email || !suite.defaults) {
+    || typeof suite.name !== "string" || !suite.actor?.email || !suite.target?.email || !suite.defaults
+    || suite.cases.some((testCase) => !testCase || typeof testCase !== "object" || typeof testCase.id !== "string")) {
     throw new EvalError("configuration_error", "invalid_suite", "Resolved evaluation suite is invalid");
   }
+  assertEvalIdentifierLength(suite.name, "suiteNameBytes", "/name");
+  suite.cases.forEach((testCase, index) => {
+    assertEvalIdentifierLength(testCase.id, "caseIdBytes", `/cases/${index}/id`);
+  });
+}
+
+function validateInputs(suite, adapter) {
+  validateSuite(suite);
   if (!adapter || typeof adapter.preflight !== "function" || typeof adapter.executeCase !== "function") {
     throw new EvalError("configuration_error", "invalid_adapter", "Evaluation adapter is invalid");
   }
@@ -1037,6 +1046,10 @@ function validateStoredRecord(record, suite, testCase) {
   const assertions = source.assertions.map(projectStoredAssertion);
   const primaryError = projectStoredError(source.primaryError);
   const secondaryErrors = source.secondaryErrors.map((entry) => projectStoredError(entry, { secondary: true }));
+  const allowedClasses = new Set(Object.keys(EVAL_ERROR_CODE_REGISTRY).filter((entry) => entry !== "configuration_error"));
+  if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
+  if (primaryError && (!isStableEvalErrorCode(primaryError.class, primaryError.code)
+    || !isStableEvalErrorOrigin(primaryError.class, primaryError.code, primaryError.origin))) invalidCaseArtifact();
   const allAssertionsPass = assertions.length > 0 && assertions.every((assertion) => assertion.status === "pass");
   if (evidence === null && assertions.length > 0) invalidCaseArtifact();
   if (primaryError === null) {
@@ -1059,6 +1072,20 @@ function validateStoredRecord(record, suite, testCase) {
     if (evidence === null) invalidCaseArtifact();
     if (primaryError.class === "grader_error") {
       if (source.status !== "error" || assertions.length !== 0) invalidCaseArtifact();
+      // A stored grader failure is only evidence that the historical runner
+      // crossed this boundary. Rebuild exclusively from the trusted suite
+      // expectation and the closed evidence projection, then require the same
+      // deterministic boundary to throw now. The stored message is never used.
+      const rebuiltExpectation = restoreAliasValue(expected);
+      const rebuiltEvidence = restoreAliasValue(evidence);
+      let graderThrew = false;
+      try {
+        gradeCore(rebuiltExpectation, rebuiltEvidence);
+        gradeContent(rebuiltExpectation, rebuiltEvidence);
+      } catch {
+        graderThrew = true;
+      }
+      if (!graderThrew) invalidCaseArtifact();
     } else {
       const classified = classifyAssertions(assertions);
       if (classified.status !== source.status || classified.error?.class !== primaryError.class
@@ -1067,10 +1094,6 @@ function validateStoredRecord(record, suite, testCase) {
   } else {
     invalidCaseArtifact();
   }
-  const allowedClasses = new Set(Object.keys(EVAL_ERROR_CODE_REGISTRY).filter((entry) => entry !== "configuration_error"));
-  if (primaryError && !allowedClasses.has(primaryError.class)) invalidCaseArtifact();
-  if (primaryError && (!isStableEvalErrorCode(primaryError.class, primaryError.code)
-    || !isStableEvalErrorOrigin(primaryError.class, primaryError.code, primaryError.origin))) invalidCaseArtifact();
   for (const secondary of secondaryErrors) {
     if (!SECONDARY_STAGES.has(secondary.stage) || !SECONDARY_CODES.has(secondary.code)) invalidCaseArtifact();
     if (secondary.class && !new Set([...allowedClasses, "configuration_error"]).has(secondary.class)) invalidCaseArtifact();
@@ -1185,7 +1208,7 @@ async function readStoredRun(runDirectory) {
 
 /** Re-run deterministic graders from stored alias-only records; no adapter is accepted or used. */
 export async function regradeRun({ suite, runDirectory } = {}) {
-  if (!suite || typeof suite.digest !== "string") throw new EvalError("configuration_error", "invalid_suite", "Resolved evaluation suite is invalid");
+  validateSuite(suite);
   const stored = await readStoredRun(runDirectory);
   if (stored.records.some((record) => record?.suite?.digest !== suite.digest)) {
     throw new EvalError("configuration_error", "suite_digest_mismatch", "Stored run does not match the resolved suite digest");

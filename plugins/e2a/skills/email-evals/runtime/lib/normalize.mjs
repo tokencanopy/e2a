@@ -78,9 +78,98 @@ export class NormalizationError extends Error {
   }
 }
 
-function normalizedMailbox(entry) {
+function sourceAddressSpec(value) {
+  const source = value.trim();
+  let quoted = false;
+  let escaped = false;
+  let commentDepth = 0;
+  let angleStart = -1;
+  let angleEnd = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted) {
+      if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (commentDepth > 0) {
+      if (character === "\\") escaped = true;
+      else if (character === "(") commentDepth += 1;
+      else if (character === ")") commentDepth -= 1;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "(") commentDepth = 1;
+    else if (character === "<") {
+      if (angleStart !== -1 || angleEnd !== -1) return null;
+      angleStart = index;
+    } else if (character === ">") {
+      if (angleStart === -1 || angleEnd !== -1) return null;
+      angleEnd = index;
+    }
+  }
+  if (quoted || escaped || commentDepth > 0) return null;
+  if (angleStart === -1) return angleEnd === -1 ? source : null;
+  if (angleEnd < angleStart || source.slice(angleEnd + 1).trim().length > 0) return null;
+  return source.slice(angleStart + 1, angleEnd).trim();
+}
+
+function quotedAddressSpec(value) {
+  if (typeof value !== "string" || value[0] !== '"') return null;
+  let decoded = "";
+  let escaped = false;
+  let closing = -1;
+  for (let index = 1; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      decoded += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      closing = index;
+      break;
+    } else {
+      if (character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f) return null;
+      decoded += character;
+    }
+  }
+  if (closing === -1 || escaped || value[closing + 1] !== "@") return null;
+  const domain = value.slice(closing + 2);
+  if (!domain || /[\s@<>,;:]/u.test(domain)) return null;
+  const quotedLocal = value.slice(0, closing + 1).toLowerCase();
+  return {
+    address: `${quotedLocal}@${domain.toLowerCase()}`,
+    semantic: `${decoded.toLowerCase()}@${domain.toLowerCase()}`,
+  };
+}
+
+function parsedAddressSemantic(value) {
+  const quoted = quotedAddressSpec(value);
+  if (quoted) return quoted.semantic;
+  const address = value.trim().toLowerCase();
+  const at = address.lastIndexOf("@");
+  if (at <= 0 || at === address.length - 1 || /[\r\n]/.test(address.slice(at + 1))) return null;
+  return `${address.slice(0, at)}@${address.slice(at + 1)}`;
+}
+
+function normalizedMailbox(entry, source) {
   if (!entry || typeof entry.address !== "string" || !entry.address || /[\r\n]/.test(entry.address)) {
     throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const addressSpec = sourceAddressSpec(source);
+  if (addressSpec === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  const quoted = quotedAddressSpec(addressSpec);
+  if (addressSpec.startsWith('"')) {
+    if (!quoted || parsedAddressSemantic(entry.address) !== quoted.semantic) {
+      throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+    }
+    return { address: quoted.address, displayName: entry.name || undefined };
   }
   const address = entry.address.trim().toLowerCase();
   const at = address.lastIndexOf("@");
@@ -96,7 +185,7 @@ export function normalizeMailbox(value) {
   }
   const parsed = addressParser(value, { flatten: true });
   if (parsed.length !== 1) throw new NormalizationError("invalid_mailbox", "Expected exactly one mailbox");
-  return normalizedMailbox(parsed[0]);
+  return normalizedMailbox(parsed[0], value);
 }
 
 /** Replace parser-valid mailbox tokens in free text without matching address prefixes. */
