@@ -620,7 +620,11 @@ function WebhookRow({
       {/* The URL is the row's entry point into the per-endpoint view. Query
           param, not a route segment — the dashboard is a static export with
           no dynamic segments. */}
-      <td className="px-4 py-3 font-mono text-[12px] break-all">
+      {/* min-w keeps auto layout from crushing this column to its break-all
+          one-character minimum when the table sits at its own min width —
+          without it the actions cell wins the space and URLs shred into
+          few-character line fragments. */}
+      <td className="px-4 py-3 font-mono text-[12px] break-all min-w-[220px]">
         <Link
           href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
           className="hover:underline"

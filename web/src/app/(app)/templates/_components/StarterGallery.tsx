@@ -86,8 +86,10 @@ function StarterCard({
               </code>
               {v.required && <Chip tone="info">required</Chip>}
               {v.raw && <Chip tone="warn">raw</Chip>}
+              {/* Truncate + title only where hover exists; touch screens
+                  can't open the tooltip, so below sm the text wraps instead. */}
               <span
-                className="text-[11px] truncate"
+                className="text-[11px] min-w-0 sm:truncate"
                 style={{ color: "var(--fg-muted)" }}
                 title={v.description}
               >
