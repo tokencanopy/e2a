@@ -101,7 +101,14 @@ because that status can survive a worker crash or span River retry handling.
 - **Delete forever**: `DELETE /v1/agents/{email}?permanent=true&confirm=DELETE`
   hard-deletes from either state (trash UI uses it on trashed inboxes; API
   callers keep a one-shot irreversible delete). A fresh provider-call lease on
-  any attached message returns HTTP 409 `send_in_progress`.
+  any attached message returns HTTP 409 `send_in_progress`. The API contract is
+  the same at every inbox size, but the transaction shape is not: at or below
+  `identity.InlinePurgeMaxMessages` the cascade is one atomic transaction, and
+  above it the same removal runs in the same request as a sequence of bounded,
+  individually committed chunks. Above the threshold the delete is therefore
+  **not atomic** — a mid-flight failure leaves a trashed, partially drained
+  inbox that a re-issued delete finishes (and a restore of would return a
+  gutted mailbox). See `docs/design/2026-08-09-async-agent-purge.md`.
 - Domain deletion still counts trashed agents (`HasAgentsOnDomain` is
   unchanged): the FK requires it, and silently orphaning a restorable inbox
   would be worse. The error message tells the user to check the trash.

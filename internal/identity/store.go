@@ -1857,7 +1857,32 @@ func (s *Store) listAgentsByUser(ctx context.Context, userID string, limit int, 
 // explicitly rather than left to the agent_identities → messages FK cascade.
 // Besides providing the API's deletion receipt, this ensures the storage
 // metering trigger can resolve the owning user while the agent row exists.
+//
+// The inbox is COUNTED first (one index-only read), because the cascade's cost
+// is superlinear in message count and an unbounded one holds a pooled
+// connection for as long as it takes — which is how a bulk cleanup exhausted
+// the pool and took the whole service's readiness with it
+// (docs/design/2026-08-09-async-agent-purge.md). The count only chooses the
+// SHAPE of the delete; it never becomes the receipt.
+//
+//   - At or below InlinePurgeMaxMessages — the overwhelming majority of
+//     deletes — nothing changes: one transaction, same cascade, same
+//     RowsAffected receipt, address freed with the response, and a failure
+//     leaves the inbox exactly as it was.
+//   - Above it the same removal runs in the same request but in bounded
+//     transactions that each commit (purgeAgentChunked). The receipt is the
+//     summed RowsAffected, so messages_deleted still means "rows actually
+//     removed". Atomicity is the price: a mid-flight failure leaves a trashed,
+//     partially drained inbox. That trade is deliberate and documented on
+//     purgeAgentChunked.
 func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error) {
+	count, cerr := s.countAgentMessages(ctx, agentID)
+	if cerr != nil {
+		return 0, cerr
+	}
+	if count > InlinePurgeMaxMessages {
+		return s.purgeAgentChunked(ctx, agentID, userID)
+	}
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
 		var lockedID string
 		queryErr := tx.QueryRow(ctx,
@@ -1869,15 +1894,8 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 		if queryErr != nil {
 			return queryErr
 		}
-		var sending bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (
-				SELECT 1 FROM messages
-				 WHERE agent_id = $1 AND delivery_status = 'sending'
-				   AND send_claimed_at > now() - make_interval(secs => $2)
-			)`,
-			agentID, int64(OutboundSendClaimStaleWindow/time.Second),
-		).Scan(&sending); err != nil {
+		sending, err := agentSendInProgressTx(ctx, tx, agentID)
+		if err != nil {
 			return err
 		}
 		if sending {
