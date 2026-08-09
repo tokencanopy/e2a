@@ -7,10 +7,16 @@ import path from "node:path";
 import { types as utilTypes } from "node:util";
 import { EvalError } from "./errors.mjs";
 import { RESOLVED_ENVIRONMENT_SOURCES, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
-import { NormalizationError, normalizeMailbox } from "./normalize.mjs";
+import {
+  mailboxAddressesInText,
+  NormalizationError,
+  normalizeMailbox,
+  replaceMailboxText,
+} from "./normalize.mjs";
 
 const RUN_ID_PATTERN = /^run_\d{8}T\d{6}_[a-f0-9]{8}$/;
 const SNAPSHOT_LIMITS = Object.freeze({ depth: 64, nodes: 16_384, keys: 512, array: 2_048 });
+export const CASES_ARTIFACT_LIMITS = Object.freeze({ lineBytes: 2 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 });
 const ADDRESS_SCALARS = new Set([
   "address", "email", "mailbox", "from", "headerFrom", "sentAs", "recipient", "actor", "target",
 ]);
@@ -121,8 +127,6 @@ function normalizeKnownMailbox(value) {
   }
 }
 
-const MAILBOX_IN_TEXT = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-
 function aliasMapFor(suite) {
   const actor = normalizeKnownAddress(suite?.actor?.email);
   const target = normalizeKnownAddress(suite?.target?.email);
@@ -142,11 +146,7 @@ function collectTypedAddresses(value, result, parentKey = "", forceAddress = fal
       const normalized = normalizeKnownAddress(value);
       if (normalized) result.add(normalized);
     }
-    MAILBOX_IN_TEXT.lastIndex = 0;
-    for (const match of value.matchAll(MAILBOX_IN_TEXT)) {
-      const normalized = normalizeKnownAddress(match[0]);
-      if (normalized) result.add(normalized);
-    }
+    for (const address of mailboxAddressesInText(value)) result.add(address);
     return;
   }
   if (Array.isArray(value)) {
@@ -179,11 +179,7 @@ function aliasAddress(value, aliases) {
 }
 
 function aliasText(value, aliases) {
-  MAILBOX_IN_TEXT.lastIndex = 0;
-  return value.replace(MAILBOX_IN_TEXT, (candidate) => {
-    const normalized = normalizeKnownAddress(candidate);
-    return normalized && aliases.has(normalized) ? aliases.get(normalized) : "[REDACTED:address]";
-  });
+  return replaceMailboxText(value, (mailbox) => aliases.get(mailbox.address) ?? "[REDACTED:address]");
 }
 
 function transformTypedAddresses(value, aliases, parentKey = "", forceAddress = false) {
@@ -227,7 +223,7 @@ function escapeRegExp(value) {
 
 function sensitiveValues(suite, aliases) {
   const values = [];
-  for (const [address, alias] of aliases) values.push({ value: address, replacement: alias });
+  for (const [address, alias] of aliases) values.push({ value: address, replacement: alias, mailbox: true });
   if (typeof suite?.transport?.apiKey === "string" && suite.transport.apiKey.length > 0) {
     values.push({ value: suite.transport.apiKey, replacement: "[REDACTED:credential]" });
   }
@@ -314,15 +310,17 @@ export function artifactSuiteName(suite) {
 }
 
 function redactString(value, patterns, sensitive) {
-  let result = value;
+  let result = value.replace(/[\u0000-\u001F\u007F]/g, "[REDACTED:control]");
   for (const { index, expression } of patterns) {
     expression.lastIndex = 0;
     result = result.replace(expression, `[REDACTED:${index}]`);
   }
   for (const entry of sensitive) {
-    result = result.replace(new RegExp(escapeRegExp(entry.value), "gi"), entry.replacement);
+    result = entry.mailbox
+      ? replaceMailboxText(result, (mailbox, candidate) => mailbox.address === entry.value ? entry.replacement : candidate)
+      : result.replace(new RegExp(escapeRegExp(entry.value), "g"), entry.replacement);
   }
-  result = result.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED:address]");
+  result = replaceMailboxText(result, () => "[REDACTED:address]");
   result = result.replace(/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/g, "[REDACTED:credential]");
   return result;
 }
@@ -340,6 +338,7 @@ function safeError(value, stage, patterns, sensitive) {
   return redactTree({
     ...(stage ? { stage } : {}),
     ...(typeof source.class === "string" ? { class: source.class } : {}),
+    ...(typeof source.origin === "string" ? { origin: source.origin } : {}),
     code: typeof source.code === "string" ? source.code : "operation_failed",
     message: typeof source.message === "string" ? source.message : "Evaluation operation failed",
     ...(source.details && typeof source.details === "object" ? { details: source.details } : {}),
@@ -585,6 +584,7 @@ export async function createArtifactWriter({ outputRoot, runId }) {
   const identity = await casesHandle.stat();
   const runIdentity = await lstat(canonicalRun);
   let closed = false;
+  let casesBytes = 0;
 
   async function verifyRunAndCases() {
     const directory = await lstat(canonicalRun);
@@ -608,8 +608,16 @@ export async function createArtifactWriter({ outputRoot, runId }) {
       try {
         await verifyRunAndCases();
         const line = `${JSON.stringify(record)}\n`;
+        const lineBytes = Buffer.byteLength(line, "utf8");
+        if (lineBytes > CASES_ARTIFACT_LIMITS.lineBytes) {
+          throw reportError("case_line_too_large", "Evaluation case record exceeds its size limit");
+        }
+        if (casesBytes + lineBytes > CASES_ARTIFACT_LIMITS.totalBytes) {
+          throw reportError("cases_artifact_limit", "Evaluation cases artifact exceeds its cumulative size limit");
+        }
         await casesHandle.writeFile(line, "utf8");
         await casesHandle.sync();
+        casesBytes += lineBytes;
         lineDurable = true;
         await atomicWrite(files.summary, `${JSON.stringify(diskSummary(summary), null, 2)}\n`, verifyRunAndCases);
       } catch (error) {
@@ -670,9 +678,34 @@ export async function rewriteDerivedArtifacts({ runDirectory, summary }) {
       throw reportError("artifact_changed", "Evaluation artifacts changed during regrading");
     }
   };
-  await atomicWrite(files.summary, `${JSON.stringify(diskSummary(withFiles), null, 2)}\n`, guard);
-  await atomicWrite(files.report, renderMarkdown(withFiles), guard);
-  return withFiles;
+  const provisional = { ...withFiles, status: "incomplete", complete: false };
+  // Match live-run publication: once regrading starts, the durable marker is
+  // explicitly incomplete until both derived artifacts are ready.
+  await atomicWrite(files.summary, `${JSON.stringify(diskSummary(provisional), null, 2)}\n`, guard);
+  try {
+    // Regrade uses the same commit marker as a live run: report first, then a
+    // complete summary as the final atomic publication.
+    await atomicWrite(files.report, renderMarkdown(withFiles), guard);
+    await atomicWrite(files.summary, `${JSON.stringify(diskSummary(withFiles), null, 2)}\n`, guard);
+    return withFiles;
+  } catch {
+    const incomplete = {
+      ...withFiles,
+      status: "incomplete",
+      complete: false,
+      secondaryErrors: [
+        ...(Array.isArray(withFiles.secondaryErrors) ? withFiles.secondaryErrors : []),
+        { stage: "reporting", code: "reporting_failed", message: "Evaluation reporting did not complete safely" },
+      ],
+    };
+    try {
+      await atomicWrite(files.summary, `${JSON.stringify(diskSummary(incomplete), null, 2)}\n`, guard);
+    } catch {
+      // The previous incomplete summary remains the only valid commit marker
+      // when even the failure marker cannot be published.
+    }
+    return incomplete;
+  }
 }
 
 export function reportingError(error, stage, suite, record = {}) {

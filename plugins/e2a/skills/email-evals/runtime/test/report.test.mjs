@@ -126,6 +126,31 @@ test("aliasing covers nested normalized address fields and mailbox-like display 
   assert.equal(record.assertions[0].actual.movements[0].address, "probe:1");
 });
 
+test("mailbox scanning follows parser semantics without rewriting address prefixes", () => {
+  const record = aliasCaseRecord({
+    id: "mailbox-boundaries",
+    status: "error",
+    expectation: {
+      body: { requiredFacts: ["Contact a@b, u@example.c, a@[127.0.0.1], ü@b, and actor@eval.test-extra"] },
+    },
+    evidence: { version: 1, capabilities: [], candidates: [{ from: "Short <a@b>" }] },
+    assertions: [],
+    primaryError: {
+      class: "transport_error",
+      code: "poll_failed",
+      origin: "adapter",
+      message: "actor@eval.test-extra\r\nforged-header: value",
+    },
+    secondaryErrors: [],
+  }, suite());
+  const artifact = JSON.stringify(record);
+  assert.doesNotMatch(artifact, /a@b|u@example\.c|a@\[127\.0\.0\.1\]|ü@b|actor@eval\.test-extra|actor-extra/);
+  assert.match(record.expectation.body.requiredFacts[0], /observed:1|observed:2|observed:3/);
+  assert.match(record.evidence.candidates[0].from.address, /^observed:\d+$/);
+  assert.equal(record.evidence.candidates[0].from.displayName, "Short");
+  assert.doesNotMatch(record.primaryError.message, /[\r\n]/);
+});
+
 test("forbidden diagnostic matches and secrets in errors are redacted without RegExp state leaks", () => {
   const configured = suite();
   configured.cases = [{ expect: { body: { forbiddenPatterns: ["token-[0-9]+"] } } }];

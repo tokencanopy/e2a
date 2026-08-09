@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { E2AClient, E2AConnectionError } from "@e2a/sdk/v1";
-import { EvalError } from "./errors.mjs";
+import { EvalError, isStableEvalErrorCode } from "./errors.mjs";
 import { parseMimeEvidence } from "./mime.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox } from "./normalize.mjs";
 
@@ -75,6 +75,9 @@ function configurationError(code, message) {
 }
 
 function transportError(code, message) {
+  if (!isStableEvalErrorCode("transport_error", code)) {
+    throw new TypeError(`Unregistered evaluation transport error code: ${code}`);
+  }
   return new EvalError("transport_error", code, message);
 }
 
@@ -137,7 +140,7 @@ async function readOwnedAgent(client, email) {
   } catch (error) {
     if (error instanceof EvalError) throw error;
     if (isNotFound(error)) throw configurationError("agent_not_found", "A dedicated evaluation agent is unavailable");
-    throw new EvalError("transport_error", "agent_lookup_failed", "Unable to read dedicated evaluation agent");
+    throw transportError("agent_lookup_failed", "Unable to read dedicated evaluation agent");
   }
 }
 

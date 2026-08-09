@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { loadSuite } from "../lib/contract.mjs";
+import * as errorContract from "../lib/errors.mjs";
 import { EvalError } from "../lib/errors.mjs";
 import { regradeRun, runSuite } from "../lib/runner.mjs";
 
@@ -168,6 +169,15 @@ test("a throwing capability iterator is a stable pre-send capability error", asy
   assert.equal(fake.calls.execute.length, 0);
 });
 
+test("capability names reject control characters before every send", async () => {
+  const fake = adapter(null, async () => ({ capabilities: [...CAPABILITIES, "raw_mime\nforged"] }));
+  await assert.rejects(
+    runSuite({ suite: suite(), adapter: fake, outputRoot: await root(), runId: RUN_ID }),
+    (error) => error.errorClass === "capability_error" && error.code === "invalid_capability_set",
+  );
+  assert.equal(fake.calls.execute.length, 0);
+});
+
 test("a response case with zero candidates is target_timeout", async () => {
   const one = suite([{ id: "timeout", send: { subject: "Timeout", text: "Synthetic" }, expect: expectation() }]);
   const summary = await runSuite({
@@ -199,6 +209,46 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   });
   assert.equal(thrown.cases[0].primaryError.class, "grader_error");
   assert.equal(thrown.cases[0].primaryError.code, "grader_threw");
+  assert.equal(thrown.cases[0].primaryError.origin, "grader");
+  assert.ok(thrown.cases[0].evidence);
+  const regraded = await regradeRun({ suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]), runDirectory: path.dirname(thrown.files.cases) });
+  assert.notEqual(regraded.status, "incomplete");
+});
+
+test("adapter transport error registry covers every literal adapter code and baseline overflow regrades", async () => {
+  const registry = errorContract.EVAL_ERROR_CODE_REGISTRY;
+  assert.ok(registry);
+  const source = await readFile(new URL("../lib/e2a-adapter.mjs", import.meta.url), "utf8");
+  const direct = [
+    ...source.matchAll(/transportError\("([a-z][a-z0-9_]+)"/g),
+    ...source.matchAll(/new EvalError\("transport_error",\s*"([a-z][a-z0-9_]+)"/g),
+  ].map((match) => match[1]);
+  for (const code of direct) assert.ok(registry.transport_error.includes(code), `missing adapter transport code ${code}`);
+  for (const code of ["baseline_limit_exceeded", "observation_limit_exceeded", "malformed_message"]) {
+    assert.ok(source.includes(`"${code}"`));
+    assert.ok(registry.transport_error.includes(code), `missing parameterized adapter transport code ${code}`);
+  }
+
+  const one = suite([{ id: "baseline-limit", send: { subject: "Baseline", text: "Synthetic" }, expect: expectation() }]);
+  const original = await runSuite({
+    suite: one,
+    adapter: adapter(async () => { throw new EvalError("transport_error", "baseline_limit_exceeded", "Synthetic baseline overflow"); }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(original.cases[0].primaryError.code, "baseline_limit_exceeded");
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) });
+  assert.equal(regraded.cases[0].primaryError.code, "baseline_limit_exceeded");
+  assert.equal(regraded.status, original.status);
+
+  const boundary = await runSuite({
+    suite: one,
+    adapter: adapter(async () => { throw new EvalError("transport_error", "invalid_evidence", "Forged runner code"); }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(boundary.cases[0].primaryError.code, "adapter_failed");
+  assert.equal(boundary.cases[0].primaryError.origin, "adapter_boundary");
+  const boundaryRegrade = await regradeRun({ suite: one, runDirectory: path.dirname(boundary.files.cases) });
+  assert.equal(boundaryRegrade.cases[0].primaryError.code, "adapter_failed");
 });
 
 test("missing required evidence is capability_error in both run and regrade", async () => {
@@ -530,6 +580,7 @@ test("adapter evidence is a strict projection and unknown nested data never reac
 test("evidence token fields and aggregate CaseRecord size fail closed before append", async () => {
   const scenarios = [
     (captured) => { captured.candidates[0].ref = "outside@example.com"; },
+    (captured) => { captured.candidates[0].ref = "event\nforged"; },
     (captured) => {
       captured.candidates[0].mime.subject = "S".repeat(1_048_000);
       captured.candidates[0].mime.text = "T".repeat(1_048_000);
@@ -626,6 +677,46 @@ test("regrade rejects untrusted CaseRecords before copying any stored fields", a
       record.primaryError = { class: "transport_error", code: "poll_failed", message: "synthetic-credential" };
     },
     (record) => { record.secondaryErrors.push({ stage: "arbitrary", code: "synthetic", message: "Synthetic" }); },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "grader_error", code: "grader_threw", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence.candidates = [];
+      record.assertions = [];
+      record.primaryError = { class: "target_timeout", code: "no_terminal_response", origin: "adapter", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "capability_error", code: "required_evidence_unavailable", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.primaryError = { class: "capability_error", code: "invalid_capability_set", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "configuration_error", code: "invalid_suite", origin: "runner", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "transport_error", code: "poll_failed", origin: "grader", message: "Synthetic" };
+    },
+    (record) => {
+      record.status = "error";
+      record.evidence = null;
+      record.assertions = [];
+      record.primaryError = { class: "transport_error", code: "poll_failed", origin: "adapter", message: "Synthetic\nforged" };
+    },
   ];
   for (const mutate of mutations) {
     const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
@@ -681,6 +772,41 @@ test("regrade rebuilds summary status and counts and projects prior metadata", a
   assert.deepEqual(regraded.capabilities, []);
   assert.deepEqual(regraded.durations, { preflightMs: 0, executionMs: 0, gradingMs: 0, reportingMs: 0, totalMs: 0 });
   assert.doesNotMatch(await readFile(original.files.summary, "utf8"), /secret-summary|outside@example\.com|e2a_secret_summary|secret-duration/);
+});
+
+test("regrade publishes report before the complete summary commit marker", async () => {
+  const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
+  const prior = JSON.parse(await readFile(original.files.summary, "utf8"));
+  await writeFile(original.files.summary, `${JSON.stringify({ ...prior, status: "incomplete", complete: false })}\n`);
+  await unlink(original.files.report);
+  await mkdir(original.files.report);
+  const regraded = await regradeRun({ suite: suite(), runDirectory: path.dirname(original.files.cases) });
+  const stored = JSON.parse(await readFile(original.files.summary, "utf8"));
+  assert.equal(regraded.status, "incomplete");
+  assert.equal(regraded.complete, false);
+  assert.equal(stored.status, "incomplete");
+  assert.equal(stored.complete, false);
+});
+
+test("cumulative cases artifact bounds stop later sends and remain regradable", async () => {
+  const cases = Array.from({ length: 18 }, (_, index) => ({
+    id: `large-${index + 1}`,
+    send: { subject: `Large ${index + 1}`, text: "Synthetic" },
+    expect: expectation(),
+  }));
+  const largeSuite = suite(cases);
+  const fake = adapter((testCase) => {
+    const captured = evidence(testCase);
+    captured.candidates[0].mime.text = `Synthetic answer ${"X".repeat(990_000)}`;
+    return captured;
+  });
+  const original = await runSuite({ suite: largeSuite, adapter: fake, outputRoot: await root(), runId: RUN_ID });
+  assert.ok((await stat(original.files.cases)).size <= 16 * 1024 * 1024);
+  assert.ok(fake.calls.execute.length < cases.length);
+  assert.notEqual(original.status, "pass");
+  const regraded = await regradeRun({ suite: largeSuite, runDirectory: path.dirname(original.files.cases) });
+  assert.equal(regraded.status, original.status);
+  assert.equal(regraded.counts.total, cases.length);
 });
 
 test("a report-only finalize failure durably marks both returned and on-disk summary failed", async () => {

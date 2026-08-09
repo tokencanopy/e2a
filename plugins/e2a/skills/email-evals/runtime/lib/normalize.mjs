@@ -2,6 +2,12 @@ import { addressParser } from "postal-mime";
 
 const MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
 const durationPattern = /^(0|[1-9][0-9]*)(ms|s|m|h)$/;
+// Scan maximal non-delimited tokens, then let the canonical parser decide
+// whether a token containing @ is a mailbox. Tokenizing first keeps this
+// linear for large strings without an @; an unanchored `left+@right+` pattern
+// retries the growing left side at every offset. Maximal capture also prevents
+// replacing a known address only as a prefix of a different accepted address.
+const mailboxTextTokenPattern = /[^\s<>(){},;:"']+/gu;
 
 export class NormalizationError extends Error {
   constructor(code, message = "Invalid normalized value") {
@@ -30,6 +36,30 @@ export function normalizeMailbox(value) {
   const parsed = addressParser(value, { flatten: true });
   if (parsed.length !== 1) throw new NormalizationError("invalid_mailbox", "Expected exactly one mailbox");
   return normalizedMailbox(parsed[0]);
+}
+
+/** Replace parser-valid mailbox tokens in free text without matching address prefixes. */
+export function replaceMailboxText(value, replacer) {
+  if (typeof value !== "string" || typeof replacer !== "function") return value;
+  mailboxTextTokenPattern.lastIndex = 0;
+  return value.replace(mailboxTextTokenPattern, (candidate) => {
+    if (!candidate.includes("@")) return candidate;
+    try {
+      return replacer(normalizeMailbox(candidate), candidate);
+    } catch (error) {
+      if (error instanceof NormalizationError) return candidate;
+      throw error;
+    }
+  });
+}
+
+export function mailboxAddressesInText(value) {
+  const addresses = [];
+  replaceMailboxText(value, (mailbox, candidate) => {
+    addresses.push(mailbox.address);
+    return candidate;
+  });
+  return addresses;
 }
 
 export function normalizeAddressSet(values) {

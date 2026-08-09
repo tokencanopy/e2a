@@ -10,7 +10,7 @@
   "versions": { "runner": "0.1.0", "sdk": "5.6.0", "suite": 1, "evidence": 1 },
   "suite": { "name": "synthetic-suite", "version": 1, "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
   "cases": [
-    { "id": "failed-case", "status": "fail", "assertions": [{ "id": "recipients.to", "status": "fail", "code": "missing_recipient" }], "primaryError": { "code": "assertions_failed" }, "secondaryErrors": [] },
-    { "id": "error-case", "status": "error", "assertions": [{ "id": "body.required_facts", "status": "error", "code": "missing_plain_text_evidence" }], "primaryError": { "code": "required_evidence_unavailable" }, "secondaryErrors": [] }
+    { "id": "failed-case", "status": "fail", "assertions": [{ "id": "recipients.to", "status": "fail", "code": "missing_recipient" }], "primaryError": { "code": "assertions_failed", "origin": "grader" }, "secondaryErrors": [] },
+    { "id": "error-case", "status": "error", "assertions": [{ "id": "body.required_facts", "status": "error", "code": "missing_plain_text_evidence" }], "primaryError": { "code": "required_evidence_unavailable", "origin": "grader" }, "secondaryErrors": [] }
   ]
 }
