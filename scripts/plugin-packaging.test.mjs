@@ -58,3 +58,19 @@ test("Labs pins its Claude dependency to the compatible core release", async () 
   const labs = JSON.parse(await readFile("plugins/e2a-labs/.claude-plugin/plugin.json", "utf8"));
   assert.deepEqual(labs.dependencies, [{ name: "e2a", version: "^0.7.0" }]);
 });
+
+test("migration guidance refreshes core and keeps the Cursor boundary conservative", async () => {
+  const coreReadme = await readFile("plugins/e2a/README.md", "utf8");
+  const labsReadme = await readFile("plugins/e2a-labs/README.md", "utf8");
+
+  assert.match(
+    labsReadme,
+    /codex plugin marketplace upgrade e2a\ncodex plugin add e2a@e2a\ncodex plugin add e2a-labs@e2a/,
+  );
+  assert.match(
+    coreReadme,
+    /Cursor lists core and receives its MCP configuration and canonical setup\s+documentation/,
+  );
+  assert.match(coreReadme, /Labs is not listed, so Labs skills are unavailable in Cursor/);
+  assert.doesNotMatch(coreReadme, /does not deliver the core or Labs skills/);
+});

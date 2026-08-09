@@ -45,6 +45,7 @@ without adding a second marketplace or changing MCP configuration:
 
 ```
 codex plugin marketplace upgrade e2a
+codex plugin add e2a@e2a
 codex plugin add e2a-labs@e2a
 ```
 
