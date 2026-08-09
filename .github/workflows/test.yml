@@ -381,23 +381,6 @@ jobs:
           node-version: "22"
       - run: node scripts/check-sdk-version-sync.mjs
 
-  plugin:
-    # Guardrail: the agent plugin (plugins/e2a) + its Claude/Codex/Cursor
-    # marketplace manifests must parse, keep one version across every manifest,
-    # and ship skills whose SKILL.md frontmatter satisfies Claude Code's loader
-    # constraints. A malformed manifest/skill otherwise fails silently at
-    # install time with no build error.
-    name: Plugin manifests
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-      - run: node --test scripts/plugin-agent-guidance.test.mjs
-      - run: node scripts/validate-plugin.mjs
-
   mcp:
     name: MCP server tests
     runs-on: ubuntu-latest

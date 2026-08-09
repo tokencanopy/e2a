@@ -24,6 +24,10 @@ This guide connects e2a, selects or creates an inbox, and verifies that it is
 ready. Most setups use the shared `agents.e2a.dev` domain and require no DNS
 configuration.
 
+> **Plugin users.** Claude and Codex users with the e2a plugin can invoke
+> `e2a-setup` for a guided OAuth, inbox, and optional-domain flow. Manual MCP
+> clients should continue through this document.
+
 > **Two hosts.** Documentation (`setup.md`, `auth.md`, `sdk.md`,
 > `openapi.yaml`, and `llms.txt`) lives on `e2a.dev`. The REST API and MCP
 > server live on `api.e2a.dev`. Use `https://api.e2a.dev/mcp` for MCP and
@@ -399,6 +403,9 @@ The user revokes API keys in the e2a dashboard. OAuth access tokens are revoked 
 Typed clients for the e2a REST API + webhook verification, for when you're
 driving e2a from your own code (a webhook handler, a worker) rather than over
 MCP. Two SDKs, same surface.
+
+Claude and Codex plugin users can invoke `e2a-integrate` to apply this guide to
+the current repository; this guide also remains usable directly in any client.
 
 - **TypeScript** — `@e2a/sdk` (npm) · [README](https://github.com/tokencanopy/e2a/blob/main/sdks/typescript/README.md)
 - **Python** — `e2a` (PyPI) · [README](https://github.com/tokencanopy/e2a/blob/main/sdks/python/README.md)
