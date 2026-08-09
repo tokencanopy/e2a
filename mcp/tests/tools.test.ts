@@ -85,6 +85,27 @@ function makeStubClient(
     send: vi.fn(async () => ({ messageId: "msg_sent", status: "sent" })),
     reply: vi.fn(async () => ({ messageId: "msg_reply", status: "sent" })),
     forward: vi.fn(async () => ({ messageId: "msg_fwd", status: "sent" })),
+    sendBatch: vi.fn(async () => ({
+      batchId: "bat_stub",
+      accepted: 1,
+      suppressedCount: 1,
+      results: [
+        { status: "accepted", messageId: "msg_b1" },
+        { status: "suppressed", suppressed: { address: "blocked@example.com", reason: "bounce" } },
+      ],
+    })),
+    getBatch: vi.fn(async (batchId: string) => ({
+      batchId,
+      agentId: "bot@example.com",
+      requested: 2,
+      accepted: 1,
+      suppressed: [{ itemIndex: 1, address: "blocked@example.com", reason: "bounce" }],
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      statusRollup: {
+        accepted: 1, sending: 0, sent: 0, delivered: 0,
+        deferred: 0, bounced: 0, complained: 0, failed: 0,
+      },
+    })),
     updateMessageLabels: vi.fn(async () => ({ messageId: "msg_in", labels: ["urgent"] })),
     // Cursor-paginated lists return a Page { items, next_cursor }.
     listConversations: vi.fn(async () => ({ items: [{ conversationId: "conv_1" }], next_cursor: undefined })),
@@ -725,6 +746,58 @@ describe("e2a MCP server", () => {
       "raise@example.com",
       undefined,
     );
+  });
+
+  it("send_batch maps per-item fields and projects the positional results", async () => {
+    const res = await client.callTool({
+      name: "send_batch",
+      arguments: {
+        messages: [
+          { to: ["a@example.com"], subject: "one", text: "hi", conversation_id: "conv_x" },
+          { to: ["blocked@example.com"], subject: "two", text: "yo" },
+        ],
+        reply_to: "ops@example.com",
+        idempotency_key: "idem-batch-1",
+      },
+    });
+    expect(res.isError ?? false).toBe(false);
+
+    // snake_case per-item input is mapped to the SDK's camelCase body.
+    expect(stub.sendBatch).toHaveBeenCalledWith(
+      {
+        messages: [
+          { to: ["a@example.com"], subject: "one", text: "hi", conversationId: "conv_x" },
+          { to: ["blocked@example.com"], subject: "two", text: "yo" },
+        ],
+        replyTo: "ops@example.com",
+      },
+      { idempotencyKey: "idem-batch-1" },
+      undefined,
+    );
+
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    expect(payload.batch_id).toBe("bat_stub");
+    expect(payload.accepted).toBe(1);
+    expect(payload.suppressed).toBe(1);
+    expect(payload.results).toEqual([
+      { status: "accepted", message_id: "msg_b1" },
+      { status: "suppressed", suppressed: { address: "blocked@example.com", reason: "bounce" } },
+    ]);
+  });
+
+  it("get_batch projects the header + delivery rollup by batch id", async () => {
+    const res = await client.callTool({ name: "get_batch", arguments: { batch_id: "bat_stub" } });
+    expect(res.isError ?? false).toBe(false);
+    expect(stub.getBatch).toHaveBeenCalledWith("bat_stub");
+
+    const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    expect(payload.batch_id).toBe("bat_stub");
+    expect(payload.requested).toBe(2);
+    expect(payload.accepted).toBe(1);
+    expect(payload.status_rollup.accepted).toBe(1);
+    expect(payload.suppressed).toEqual([
+      { item_index: 1, address: "blocked@example.com", reason: "bounce" },
+    ]);
   });
 
   it("contact tools reject date-only and offsetless timestamps", async () => {

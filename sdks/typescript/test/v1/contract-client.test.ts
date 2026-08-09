@@ -52,6 +52,43 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 
+  it("messages.sendBatch fans out N items and messages.getBatch returns the header + rollup", async () => {
+    const email = `${slug("sdkc-batch")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      // Two self-send loopback items — deterministic accepts (no suppression),
+      // so results are positionally aligned and every slot is "accepted".
+      const res = await client.messages.sendBatch(email, {
+        messages: [
+          { to: [email], subject: "batch one", text: "self-send loopback 1" },
+          { to: [email], subject: "batch two", text: "self-send loopback 2" },
+        ],
+      });
+      expect(res.batchId).toMatch(/^bat_/);
+      expect(res.accepted).toBe(2);
+      expect(res.suppressedCount).toBe(0);
+      expect(res.results).toHaveLength(2);
+      for (const r of res.results) {
+        expect(r.status).toBe("accepted");
+        expect(r.messageId).toMatch(/^msg_/);
+      }
+
+      // getBatch is account-scoped (no agent email) and reports the header plus
+      // a live rollup; the two child messages exist from the accept-tx, so the
+      // rollup counts sum to 2 whatever lifecycle stage they're in.
+      const view = await client.messages.getBatch(res.batchId);
+      expect(view.batchId).toBe(res.batchId);
+      expect(view.requested).toBe(2);
+      expect(view.accepted).toBe(2);
+      const r = view.statusRollup;
+      const total =
+        r.accepted + r.sending + r.sent + r.delivered + r.deferred + r.bounced + r.complained + r.failed;
+      expect(total).toBe(2);
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
+
   it("messages.getMetrics reports null rates before traffic and counts after", async () => {
     const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
     await client.agents.create({ email });
