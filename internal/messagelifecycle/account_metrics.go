@@ -41,9 +41,20 @@ type AccountMetrics struct {
 // CountByReasonCode (see its doc comment: half-open, anchored on the message's
 // own created_at, feedback still settling for ~72h).
 //
-// Trashed agents and trashed-but-unpurged messages are both included: that
-// mail was still sent, and dropping it would let account housekeeping restate
-// past delivery rates.
+// Trashed-but-unpurged MESSAGES are included: that mail was still sent, and
+// dropping it would let inbox housekeeping restate past delivery rates.
+//
+// Trashed AGENTS are excluded. That mail was also still sent, so this does
+// restate history slightly — the tradeoff is deliberate. A deleted agent is
+// gone from every other account-scoped surface (quota counts, list, get
+// without an explicit opt-in), so counting it only here was the odd one out;
+// and because agent deletion is soft, an account that churns agents keeps
+// every tombstone for the whole 30-day retention window. Past a few thousand
+// of them the planner abandons idx_messages_agent_created and sequentially
+// scans the entire messages/transitions tables: measured on a test account
+// with ~7k trashed agents, the same aggregate went 22ms → 1015ms. Scoping to
+// live agents keeps the cost proportional to what the account currently owns
+// rather than to everything it has ever owned.
 //
 // When groupByAgent is set, the busiest MaxMetricsAgents agents also come back
 // individually. Totals are computed independently of that cap.
@@ -112,6 +123,7 @@ func accountTotalsTx(ctx context.Context, tx pgx.Tx, userID string, start, end t
 		JOIN agent_identities a ON a.id = m.agent_id
 		JOIN message_lifecycle_transitions t ON t.message_id = m.id
 		WHERE a.user_id = $1
+		  AND a.deleted_at IS NULL
 		  AND m.created_at >= $2
 		  AND m.created_at < $3
 		GROUP BY t.reason_code, t.stage, t.outcome, t.retryable
@@ -148,6 +160,7 @@ func accountTotalsTx(ctx context.Context, tx pgx.Tx, userID string, start, end t
 		FROM messages m
 		JOIN agent_identities a ON a.id = m.agent_id
 		WHERE a.user_id = $1
+		  AND a.deleted_at IS NULL
 		  AND m.created_at >= $2
 		  AND m.created_at < $3
 	`, userID, start, end).Scan(&totals.MessagesInWindow, &totals.MessagesWithLifecycle)
@@ -174,6 +187,7 @@ func accountAgentCoverageTx(ctx context.Context, tx pgx.Tx, userID string, start
 		FROM messages m
 		JOIN agent_identities a ON a.id = m.agent_id
 		WHERE a.user_id = $1
+		  AND a.deleted_at IS NULL
 		  AND m.created_at >= $2
 		  AND m.created_at < $3
 		GROUP BY m.agent_id

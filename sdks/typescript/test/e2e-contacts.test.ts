@@ -116,6 +116,12 @@ describe.skipIf(!env)("ts sdk live e2e: contacts", () => {
     recordCovered("contacts.list");
   });
 
+  // Carries an explicit timeout: this test does a multi-contact import and then
+  // a batch delete that reverses it, and both scale with the batch rather than
+  // being a single round trip. It has been running at ~4.9s against staging —
+  // inside vitest's 5s default by ~100ms — so ordinary run-to-run variance
+  // fails it, which is exactly what happened on v1.7.3. Do not "tidy" this back
+  // to the default; it will pass locally and fail the release pipeline.
   it("import records a batch (with an in-batch duplicate) and deleteImport reverses it", async () => {
     const first = contactAddress("imp");
     const second = contactAddress("imp");
@@ -149,7 +155,7 @@ describe.skipIf(!env)("ts sdk live e2e: contacts", () => {
 
     // The reversal removed the contacts — a follow-up read is a typed not-found.
     await expect(client.contacts.get(first)).rejects.toBeInstanceOf(E2ANotFoundError);
-  });
+  }, 30_000);
 
   it("delete removes a contact; a follow-up get is a typed not-found", async () => {
     const address = contactAddress("del");

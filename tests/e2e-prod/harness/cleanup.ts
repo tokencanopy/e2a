@@ -148,9 +148,23 @@ function isRetryableStatus(status: number): boolean {
 function pathFor(t: Tracked): string {
   // Destructive deletes require ?confirm=DELETE (the API's irreversible-op
   // guard). Cleanup is always intentional, so we always confirm.
+  //
+  // Agents additionally need permanent=true. A plain confirmed DELETE only
+  // moves an agent to the trash: messages_deleted is 0, bodies stay stored,
+  // and the row keeps counting against usage.storage_bytes until the janitor
+  // purges it at the end of the trash-retention window (30 days). Fixtures
+  // are throwaway by definition and nothing ever restores them, so leaving
+  // them to age out just accumulates tombstones on the test account — one
+  // suite run at a time, faster than they expire.
+  //
+  // That accumulation is not only untidy: past ~7k agents on one account, the
+  // account-scoped metrics queries stop being able to use their index and
+  // fall back to sequential scans of the whole messages/transitions tables,
+  // which is what made the staging metrics gate time out. Purging here keeps
+  // the test account's agent count proportional to a single run.
   switch (t.kind) {
     case "agent":
-      return `/v1/agents/${encodeURIComponent(t.id)}?confirm=DELETE`;
+      return `/v1/agents/${encodeURIComponent(t.id)}?confirm=DELETE&permanent=true`;
     case "domain":
       return `/v1/domains/${encodeURIComponent(t.id)}?confirm=DELETE`;
   }
