@@ -1,4 +1,4 @@
-import { copyFile, lstat, mkdir, chmod } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -26,8 +26,27 @@ async function pathExists(file) {
   }
 }
 
+async function safeDestinationEntry(destination, expectedType) {
+  const entry = await pathExists(destination);
+  if (!entry) return null;
+  if (entry.isSymbolicLink()) {
+    throw new Error(`Refusing to follow symlink at ${destination}`);
+  }
+  if (expectedType === "directory" && !entry.isDirectory()) {
+    throw new Error(`Runtime path is not a directory: ${destination}`);
+  }
+  if (expectedType === "file" && !entry.isFile()) {
+    throw new Error(`Runtime path is not a regular file: ${destination}`);
+  }
+  return entry;
+}
+
 async function createPrivateDirectory(directory) {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const existing = await safeDestinationEntry(directory, "directory");
+  if (!existing) {
+    await mkdir(directory, { mode: 0o700 });
+  }
+  await safeDestinationEntry(directory, "directory");
   await chmod(directory, 0o700);
 }
 
@@ -37,6 +56,7 @@ async function copyIfPresent(source, destination) {
   if (!entry.isFile() || entry.isSymbolicLink()) {
     throw new Error(`Runtime source entry must be a regular file: ${source}`);
   }
+  await safeDestinationEntry(destination, "file");
   await copyFile(source, destination);
 }
 
@@ -48,7 +68,6 @@ async function copyLibrary(sourceDirectory, destinationDirectory) {
     throw new Error(`Runtime source library must be a directory: ${source}`);
   }
 
-  const { readdir } = await import("node:fs/promises");
   await createPrivateDirectory(destinationDirectory);
   for (const child of await readdir(source, { withFileTypes: true })) {
     const childSource = path.join(source, child.name);
@@ -64,7 +83,6 @@ async function copyLibrary(sourceDirectory, destinationDirectory) {
 }
 
 async function copyLibraryDirectory(sourceDirectory, destinationDirectory) {
-  const { readdir } = await import("node:fs/promises");
   await createPrivateDirectory(destinationDirectory);
   for (const child of await readdir(sourceDirectory, { withFileTypes: true })) {
     const childSource = path.join(sourceDirectory, child.name);
@@ -96,13 +114,11 @@ function runNpmCi(args, options) {
 export async function installRuntime({ suiteRoot, sourceRoot = bundledRuntime, runNpm = runNpmCi }) {
   const paths = runtimePaths(suiteRoot);
   const source = path.resolve(sourceRoot);
-  const existing = await pathExists(paths.root);
-  if (existing?.isSymbolicLink()) {
-    throw new Error(`Refusing to follow symlink at ${paths.root}`);
+  await safeDestinationEntry(paths.root, "directory");
+  for (const file of runtimeFiles) {
+    await safeDestinationEntry(path.join(paths.root, file), "file");
   }
-  if (existing && !existing.isDirectory()) {
-    throw new Error(`Runtime path is not a directory: ${paths.root}`);
-  }
+  await safeDestinationEntry(path.join(paths.root, "lib"), "directory");
 
   await createPrivateDirectory(paths.root);
   for (const file of runtimeFiles) {

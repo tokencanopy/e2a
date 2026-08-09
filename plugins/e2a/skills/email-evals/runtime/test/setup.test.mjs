@@ -47,3 +47,43 @@ test("installRuntime refuses a symlinked .eval-runtime", async () => {
     /Refusing to follow symlink/,
   );
 });
+
+test("installRuntime refuses a symlinked runtime package file without modifying its target", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-"));
+  const sourceRoot = path.join(root, "source");
+  const suiteRoot = path.join(root, "suite");
+  const outsideFile = path.join(root, "outside-package.json");
+  await mkdir(sourceRoot);
+  await mkdir(path.join(suiteRoot, ".eval-runtime"), { recursive: true });
+  await writeFile(path.join(sourceRoot, "package.json"), '{"private":true}\n');
+  await writeFile(path.join(sourceRoot, "package-lock.json"), '{"lockfileVersion":3}\n');
+  await writeFile(outsideFile, "outside package contents\n");
+  await symlink(outsideFile, path.join(suiteRoot, ".eval-runtime", "package.json"));
+
+  await assert.rejects(
+    installRuntime({ suiteRoot, sourceRoot, runNpm: async () => {} }),
+    /Refusing to follow symlink/,
+  );
+  assert.equal(await readFile(outsideFile, "utf8"), "outside package contents\n");
+});
+
+test("installRuntime refuses a symlinked runtime library without modifying its target", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-"));
+  const sourceRoot = path.join(root, "source");
+  const suiteRoot = path.join(root, "suite");
+  const outsideLibrary = path.join(root, "outside-library");
+  await mkdir(path.join(sourceRoot, "lib"), { recursive: true });
+  await mkdir(path.join(suiteRoot, ".eval-runtime"), { recursive: true });
+  await mkdir(outsideLibrary);
+  await writeFile(path.join(sourceRoot, "package.json"), '{"private":true}\n');
+  await writeFile(path.join(sourceRoot, "package-lock.json"), '{"lockfileVersion":3}\n');
+  await writeFile(path.join(sourceRoot, "lib", "errors.mjs"), "export {};\n");
+  await writeFile(path.join(outsideLibrary, "sentinel.txt"), "outside library contents\n");
+  await symlink(outsideLibrary, path.join(suiteRoot, ".eval-runtime", "lib"));
+
+  await assert.rejects(
+    installRuntime({ suiteRoot, sourceRoot, runNpm: async () => {} }),
+    /Refusing to follow symlink/,
+  );
+  assert.equal(await readFile(path.join(outsideLibrary, "sentinel.txt"), "utf8"), "outside library contents\n");
+});
