@@ -32,7 +32,71 @@ const authoringPromptFields = [
 const authoringPromptsStart = "<!-- email-evals:authoring-prompts:start -->";
 const authoringPromptsEnd = "<!-- email-evals:authoring-prompts:end -->";
 const fieldMarker = (field) => `<!-- email-evals:field=${field} -->`;
-const questionCodePoints = new Set([0x3f, 0x37e, 0x61f, 0x2e2e, 0xfe56, 0xff1f]);
+/**
+ * Compact terminal question-punctuation set: Unicode Other Punctuation (Po)
+ * characters whose names identify standalone question marks or question/
+ * exclamation combinations, plus question-specific presentation and ornament
+ * forms used as punctuation.
+ * Math relations, tag characters, and enclosed symbols stay excluded.
+ */
+const questionCodePoints = new Set([
+  0x003f, // QUESTION MARK
+  0x00bf, // INVERTED QUESTION MARK
+  0x037e, // GREEK QUESTION MARK
+  0x055e, // ARMENIAN QUESTION MARK
+  0x061f, // ARABIC QUESTION MARK
+  0x1367, // ETHIOPIC QUESTION MARK
+  0x1945, // LIMBU QUESTION MARK
+  0x203d, // INTERROBANG
+  0x2047, // DOUBLE QUESTION MARK
+  0x2048, // QUESTION EXCLAMATION MARK
+  0x2049, // EXCLAMATION QUESTION MARK
+  0x2753, // BLACK QUESTION MARK ORNAMENT
+  0x2754, // WHITE QUESTION MARK ORNAMENT
+  0x2cfa, // COPTIC OLD NUBIAN DIRECT QUESTION MARK
+  0x2cfb, // COPTIC OLD NUBIAN INDIRECT QUESTION MARK
+  0x2e18, // INVERTED INTERROBANG
+  0x2e2e, // REVERSED QUESTION MARK
+  0xa60f, // VAI QUESTION MARK
+  0xa6f7, // BAMUM QUESTION MARK
+  0xfe16, // PRESENTATION FORM FOR VERTICAL QUESTION MARK
+  0xfe56, // SMALL QUESTION MARK
+  0xff1f, // FULLWIDTH QUESTION MARK
+  0x11143, // CHAKMA QUESTION MARK
+  0x1e95f, // ADLAM INITIAL QUESTION MARK
+  0x1f679, // HEAVY INTERROBANG ORNAMENT
+  0x1f67a, // SANS-SERIF INTERROBANG ORNAMENT
+  0x1f67b, // HEAVY SANS-SERIF INTERROBANG ORNAMENT
+]);
+const documentedQuestionPunctuation = [
+  ["U+003F QUESTION MARK", "\u{003F}", "&#63;", "&#x3F;"],
+  ["U+00BF INVERTED QUESTION MARK", "\u{00BF}", "&#191;", "&#xBF;"],
+  ["U+037E GREEK QUESTION MARK", "\u{037E}", "&#894;", "&#x37E;"],
+  ["U+055E ARMENIAN QUESTION MARK", "\u{055E}", "&#1374;", "&#x55E;"],
+  ["U+061F ARABIC QUESTION MARK", "\u{061F}", "&#1567;", "&#x61F;"],
+  ["U+1367 ETHIOPIC QUESTION MARK", "\u{1367}", "&#4967;", "&#x1367;"],
+  ["U+1945 LIMBU QUESTION MARK", "\u{1945}", "&#6469;", "&#x1945;"],
+  ["U+203D INTERROBANG", "\u{203D}", "&#8253;", "&#x203D;"],
+  ["U+2047 DOUBLE QUESTION MARK", "\u{2047}", "&#8263;", "&#x2047;"],
+  ["U+2048 QUESTION EXCLAMATION MARK", "\u{2048}", "&#8264;", "&#x2048;"],
+  ["U+2049 EXCLAMATION QUESTION MARK", "\u{2049}", "&#8265;", "&#x2049;"],
+  ["U+2753 BLACK QUESTION MARK ORNAMENT", "\u{2753}", "&#10067;", "&#x2753;"],
+  ["U+2754 WHITE QUESTION MARK ORNAMENT", "\u{2754}", "&#10068;", "&#x2754;"],
+  ["U+2CFA COPTIC OLD NUBIAN DIRECT QUESTION MARK", "\u{2CFA}", "&#11514;", "&#x2CFA;"],
+  ["U+2CFB COPTIC OLD NUBIAN INDIRECT QUESTION MARK", "\u{2CFB}", "&#11515;", "&#x2CFB;"],
+  ["U+2E18 INVERTED INTERROBANG", "\u{2E18}", "&#11800;", "&#x2E18;"],
+  ["U+2E2E REVERSED QUESTION MARK", "\u{2E2E}", "&#11822;", "&#x2E2E;"],
+  ["U+A60F VAI QUESTION MARK", "\u{A60F}", "&#42511;", "&#xA60F;"],
+  ["U+A6F7 BAMUM QUESTION MARK", "\u{A6F7}", "&#42743;", "&#xA6F7;"],
+  ["U+FE16 PRESENTATION FORM FOR VERTICAL QUESTION MARK", "\u{FE16}", "&#65046;", "&#xFE16;"],
+  ["U+FE56 SMALL QUESTION MARK", "\u{FE56}", "&#65110;", "&#xFE56;"],
+  ["U+FF1F FULLWIDTH QUESTION MARK", "\u{FF1F}", "&#65311;", "&#xFF1F;"],
+  ["U+11143 CHAKMA QUESTION MARK", "\u{11143}", "&#69955;", "&#x11143;"],
+  ["U+1E95F ADLAM INITIAL QUESTION MARK", "\u{1E95F}", "&#125279;", "&#x1E95F;"],
+  ["U+1F679 HEAVY INTERROBANG ORNAMENT", "\u{1F679}", "&#128633;", "&#x1F679;"],
+  ["U+1F67A SANS-SERIF INTERROBANG ORNAMENT", "\u{1F67A}", "&#128634;", "&#x1F67A;"],
+  ["U+1F67B HEAVY SANS-SERIF INTERROBANG ORNAMENT", "\u{1F67B}", "&#128635;", "&#x1F67B;"],
+];
 
 /** Count literal and HTML-encoded question punctuation in one bounded linear scan. */
 function countQuestionPunctuation(source) {
@@ -45,9 +109,14 @@ function countQuestionPunctuation(source) {
       continue;
     }
 
-    if (source.slice(index, index + 7).toLowerCase() === "&quest;") {
+    if (source.startsWith("&quest;", index)) {
       count += 1;
       index += 7;
+      continue;
+    }
+    if (source.startsWith("&iquest;", index)) {
+      count += 1;
+      index += 8;
       continue;
     }
     if (source.charCodeAt(index + 1) !== 0x23) {
@@ -112,8 +181,10 @@ function parseAuthoringPrompts(source) {
   const start = source.indexOf(authoringPromptsStart);
   const end = source.indexOf(authoringPromptsEnd);
   assert.ok(start < end, "authoring prompt markers must be in order");
-  const outside = `${source.slice(0, start)}${source.slice(end + authoringPromptsEnd.length)}`;
-  assert.equal(countQuestionPunctuation(outside), 0, "question exists outside canonical authoring block");
+  const before = source.slice(0, start);
+  const after = source.slice(end + authoringPromptsEnd.length);
+  assert.equal(countQuestionPunctuation(before), 0, "question exists before canonical authoring block");
+  assert.equal(countQuestionPunctuation(after), 0, "question exists after canonical authoring block");
 
   const section = source.slice(start + authoringPromptsStart.length, end).trim();
   const prompts = section.split("\n").map((line) => {
@@ -184,29 +255,69 @@ test("authoring prompt contract rejects hidden questions and permits question wo
 
 test("authoring prompt contract counts encoded and Unicode question punctuation", async () => {
   const source = await readFile(skillFile, "utf8");
-  const questionSpellings = [
-    ["decimal reference", "&#63;"],
-    ["hex reference", "&#x3f;"],
-    ["named reference", "&quest;"],
-    ["full-width question mark", "？"],
+  for (const [name, raw, decimal, hex] of documentedQuestionPunctuation) {
+    for (const [form, punctuation] of [["raw", raw], ["decimal", decimal], ["hex", hex]]) {
+      assert.throws(
+        () => parseAuthoringPrompts(`${source}\n${punctuation}`),
+        undefined,
+        `${name} ${form} outside block`,
+      );
+      const secondQuestion = source.replace(
+        "What is the synthetic use case?",
+        `First question? Second question${punctuation}`,
+      );
+      assert.throws(
+        () => parseAuthoringPrompts(secondQuestion),
+        undefined,
+        `${name} ${form} as second question`,
+      );
+
+      const soleQuestion = source.replace(
+        "What is the synthetic use case?",
+        `What is the synthetic use case${punctuation}`,
+      );
+      assert.doesNotThrow(() => parseAuthoringPrompts(soleQuestion), `${name} ${form} as sole question`);
+    }
+  }
+
+  for (const [name, punctuation] of [
     ["leading-zero decimal reference", "&#000063;"],
     ["upper-case leading-zero hex reference", "&#X00003F;"],
-    ["mixed-case named reference", "&QuEsT;"],
-    ["small question mark", "﹖"],
-    ["Arabic question mark", "؟"],
-    ["Greek question mark", ";"],
-  ];
+  ]) assert.throws(() => parseAuthoringPrompts(`${source}\n${punctuation}`), undefined, name);
+});
 
-  for (const [name, punctuation] of questionSpellings) {
-    assert.throws(() => parseAuthoringPrompts(`${source}\n${punctuation}`), undefined, `${name} outside block`);
+test("authoring prompt contract counts only exact supported named question references", async () => {
+  const source = await readFile(skillFile, "utf8");
+  for (const entity of ["&quest;", "&iquest;"]) {
+    assert.throws(() => parseAuthoringPrompts(`${source}\n${entity}`), undefined, `${entity} outside block`);
     const secondQuestion = source.replace(
       "What is the synthetic use case?",
-      `First question? Second question${punctuation}`,
+      `First question? Second question${entity}`,
     );
-    assert.throws(() => parseAuthoringPrompts(secondQuestion), undefined, `${name} as second question`);
+    assert.throws(() => parseAuthoringPrompts(secondQuestion), undefined, `${entity} as second question`);
+    const soleQuestion = source.replace("What is the synthetic use case?", `What is the synthetic use case${entity}`);
+    assert.doesNotThrow(() => parseAuthoringPrompts(soleQuestion), `${entity} as sole question`);
+  }
 
-    const soleQuestion = source.replace("What is the synthetic use case?", `What is the synthetic use case${punctuation}`);
-    assert.doesNotThrow(() => parseAuthoringPrompts(soleQuestion), `${name} as sole question`);
+  for (const entity of ["&QuEsT;", "&Iquest;", "&IQUEST;"]) {
+    assert.doesNotThrow(() => parseAuthoringPrompts(`${source}\n${entity}`), `${entity} is case-sensitive`);
+    const noQuestion = source.replace("What is the synthetic use case?", `What is the synthetic use case${entity}`);
+    assert.throws(() => parseAuthoringPrompts(noQuestion), undefined, `${entity} is not a question`);
+    const rawQuestion = source.replace("What is the synthetic use case?", `What is the synthetic use case${entity}?`);
+    assert.doesNotThrow(() => parseAuthoringPrompts(rawQuestion), `${entity} does not mask raw punctuation`);
+  }
+});
+
+test("authoring prompt contract scans pre-block and post-block text independently", async () => {
+  const source = await readFile(skillFile, "utf8");
+  for (const [name, before, after] of [
+    ["split named reference", "&que", "st;"],
+    ["split numeric reference", "&#", "63;"],
+  ]) {
+    const splitEntity = source
+      .replace(authoringPromptsStart, `${before}${authoringPromptsStart}`)
+      .replace(authoringPromptsEnd, `${authoringPromptsEnd}${after}`);
+    assert.doesNotThrow(() => parseAuthoringPrompts(splitEntity), name);
   }
 });
 
@@ -234,6 +345,20 @@ test("authoring prompt question counting handles malformed and entity-heavy inpu
     `&#${"9".repeat(4096)};`,
   ];
   assert.doesNotThrow(() => parseAuthoringPrompts(`${source}\nProse with ${unrelatedEntities.join(" ")}`));
+
+  const excludedNonterminalSymbols = [
+    ["U+2A7B LESS-THAN WITH QUESTION MARK ABOVE", "\u{2A7B}"],
+    ["U+2A7C GREATER-THAN WITH QUESTION MARK ABOVE", "\u{2A7C}"],
+    ["U+1FBC4 NEGATIVE SQUARED QUESTION MARK", "\u{1FBC4}"],
+    ["U+E003F TAG QUESTION MARK", "\u{E003F}"],
+    ["generic emoji", "\u{1F600}"],
+    ["general terminal punctuation", "!"],
+  ];
+  for (const [name, symbol] of excludedNonterminalSymbols) {
+    assert.doesNotThrow(() => parseAuthoringPrompts(`${source}\n${symbol}`), `${name} outside block`);
+    const noQuestion = source.replace("What is the synthetic use case?", `What is the synthetic use case${symbol}`);
+    assert.throws(() => parseAuthoringPrompts(noQuestion), undefined, `${name} does not satisfy the question contract`);
+  }
 
   const entityHeavyProse = `${source}\n${"&amp; &#65; &#x41; &#x110000; &#xD800; ".repeat(10_000)}`;
   assert.doesNotThrow(() => parseAuthoringPrompts(entityHeavyProse));
