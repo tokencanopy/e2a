@@ -291,6 +291,9 @@ function normalizeCase(rawCase, environment, casePath) {
     if (bodyRaw.forbidden_patterns !== undefined) {
       const values = normalizeRegexes(bodyRaw.forbidden_patterns, environment, "/expect/body/forbidden_patterns");
       body.forbiddenPatterns = values.map(({ value }) => value);
+      // Compiled forms are intentionally non-enumerable: grading can reuse the
+      // validation-time bounded regexes while suite artifacts remain JSON-safe.
+      Object.defineProperty(body, "forbiddenPatternRegexes", { value: values.map(({ regex }) => regex) });
       bodyCanonical.forbiddenPatterns = values.map(({ source }) => source);
     }
     if (bodyRaw.plain_text !== undefined) {

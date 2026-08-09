@@ -1,0 +1,21 @@
+From: Target Agent <target@agents.localhost>
+To: Actor Agent <actor@agents.localhost>
+Message-ID: <reply@agents.localhost>
+In-Reply-To: <original@agents.localhost>
+References: <root@agents.localhost>
+ <original@agents.localhost>
+Subject: Re: Synthetic refund policy
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="synthetic-boundary"
+
+--synthetic-boundary
+Content-Type: text/plain; charset=utf-8
+
+Synthetic reply.
+--synthetic-boundary
+Content-Type: text/plain; name="refund-policy.txt"
+Content-Disposition: attachment; filename="refund-policy.txt"
+Content-Transfer-Encoding: base64
+
+cmVmdW5kcyBpbiAzMCBkYXlz
+--synthetic-boundary--

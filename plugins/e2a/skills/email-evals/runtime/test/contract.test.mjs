@@ -30,6 +30,8 @@ test("loadSuite resolves complete scalar references and canonicalizes the closed
   assert.equal(suite.cases.length, 3);
   assert.equal(suite.cases[0].expect.timing.replyWithinMs, 60_000);
   assert.deepEqual(suite.cases[0].expect.recipients.envelope.exactly, ["actor@eval.test"]);
+  assert.equal(suite.cases[0].expect.body.forbiddenPatternRegexes[0] instanceof RegExp, true);
+  assert.doesNotMatch(JSON.stringify(suite.cases[0].expect.body), /forbiddenPatternRegexes/);
 });
 
 test("digest uses the unresolved alias-safe contract, not an API-key value", async () => {
