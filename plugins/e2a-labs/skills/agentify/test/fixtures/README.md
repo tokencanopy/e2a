@@ -27,7 +27,8 @@ the secret is present.
   this guarantees the assertions are real, and runs in the main `test/run.sh`
   suite on every PR.
 - **`run-fixtures.sh`** runs the self-test **and** the model layer (the actual
-  `claude -p` runs) — wired to `.github/workflows/agentify-lane-fixtures.yml`.
+  `claude -p` runs) — wired to the `Agentify live fixtures` job in
+  `.github/workflows/plugin-tests.yml`.
 
 ## Fixtures (triage)
 

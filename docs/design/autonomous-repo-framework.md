@@ -496,19 +496,20 @@ is purely additive (zero loop changes).
 ### §10 addenda (test harness)
 
 `plugins/e2a-labs/skills/agentify/test/run.sh` is the deterministic suite (CI:
-`.github/workflows/agentify-test.yml`): every script `_selftest` + the addon's
+the `Agentify deterministic suite` job in `.github/workflows/plugin-tests.yml`):
+every script `_selftest` + the addon's
 `bridge.test.mjs` + bash/JS syntax + `test/validate.py` (YAML parse, the
 rendered config vs what the workflows read, **e2a MCP/REST URL host
 consistency** — which catches the `mcp.e2a.dev` vs `api.e2a.dev` class, with a
 negative test confirming it fails on the bug — required keys, stray
 placeholders). **Golden-fixture lane tests** (`test/fixtures/`,
-`.github/workflows/agentify-lane-fixtures.yml`) drive each lane's real prompt
-via `claude -p` over a mocked world (stub e2a MCP + fake `gh`/scripts that
-record actions) and assert on what the agent attempted — triage fixtures cover
-the happy path, **injection-as-data resistance**, and the **read-on-fetch
-reply-skip**. The model layer is token-gated; the assertions are
-deterministically self-tested (`assert-selftest.sh`, in the main suite) so a
-broken assertion is caught without the model. Still open: comms/fix fixtures,
+the `Agentify live fixtures` job in `plugin-tests.yml`) drive each lane's real
+prompt via `claude -p` over a mocked world (stub e2a MCP + fake `gh`/scripts
+that record actions) and assert on what the agent attempted — triage fixtures
+cover the happy path, **injection-as-data resistance**, and the
+**read-on-fetch reply-skip**. The model layer is token-gated; the assertions
+are deterministically self-tested (`assert-selftest.sh`, in the main suite) so
+a broken assertion is caught without the model. Still open: comms/fix fixtures,
 and the **live over-the-wire e2e** at go-live.
 
 **Hardened after adversarial review** (relay/spoof/SSRF/key-exfil all refuted —
