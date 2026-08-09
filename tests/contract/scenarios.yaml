@@ -563,6 +563,62 @@ scenarios:
         expect:
           status: 201
 
+  - name: batch_send_accept_and_observe
+    description: >
+      POST /v1/agents/{email}/batches accepts a multi-item batch (202) with a
+      positionally-aligned results[] carrying the status discriminator; GET
+      /v1/batches/{batch_id} returns the header + live status rollup; and
+      listMessages?batch_id filters to the batch's child messages. Exercises the
+      full read/write batch surface end to end (sendBatch, getBatch, and the
+      batch_id message filter).
+    setup:
+      - register_domain: batch.test.dev
+      - verify_domain: batch.test.dev
+      - register_agent:
+          email: bot@batch.test.dev
+    steps:
+      - id: send_batch
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/batches
+        body:
+          messages:
+            - to: ["alice@example.com"]
+              subject: Batch item one
+              text: hello alice
+            - to: ["bob@example.com"]
+              subject: Batch item two
+              text: hello bob
+        expect:
+          status: 202
+          body_contains: [batch_id, results, accepted, suppressed_count]
+          body_match:
+            accepted: 2
+            suppressed_count: 0
+            "results.length": 2
+            "results[0].status": accepted
+            "results[1].status": accepted
+        capture:
+          batch_id: batch_id
+      - id: get_batch
+        action: request
+        method: GET
+        path: /v1/batches/{batch_id}
+        expect:
+          status: 200
+          body_contains: [batch_id, agent_id, status_rollup]
+          body_match:
+            requested: 2
+            accepted: 2
+      - id: list_batch_messages
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages?direction=outbound&batch_id={batch_id}
+        expect:
+          status: 200
+          body_match:
+            "items.length": 2
+
   - name: ws_notification_shape
     description: >
       WebSocket drain-on-reconnect delivers frames in the versioned event
