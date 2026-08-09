@@ -422,6 +422,43 @@ export default function Home() {
               />
             </a>
           </div>
+
+          <div className="mt-9 mx-auto max-w-[760px]" aria-label="Popular AI agent use cases">
+            <div
+              className="font-mono text-[10px] mb-3"
+              style={{ color: "var(--fg-subtle)", letterSpacing: "0.1em" }}
+            >
+              BUILD AN AGENT FOR
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              {[
+                ["Support", "/use-cases/support-agent"],
+                ["Reception", "/use-cases/ai-receptionist"],
+                ["Scheduling", "/use-cases/scheduling-agent"],
+                ["E-commerce", "/use-cases/ecommerce-agent"],
+              ].map(([label, href]) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] transition hover:bg-[var(--bg-panel)]"
+                  style={{
+                    color: "var(--fg-muted)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "999px",
+                  }}
+                >
+                  {label} <span className="font-mono" aria-hidden="true">→</span>
+                </Link>
+              ))}
+              <Link
+                href="/use-cases"
+                className="inline-flex items-center px-3 py-1.5 text-[12px] font-medium"
+                style={{ color: "var(--accent-strong)" }}
+              >
+                See all use cases →
+              </Link>
+            </div>
+          </div>
         </div>
       </section>
 
