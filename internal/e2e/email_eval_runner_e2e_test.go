@@ -1172,8 +1172,9 @@ func authedJSONWithIdempotency(t *testing.T, method, requestURL, apiKey, idempot
 
 type durableEvalState struct {
 	OutboundMessages    int
-	OutboundJobs        outboundJobSnapshot
 	IdempotencyRows     int
+	StimulusMessageID   string
+	StimulusSendJobID   int64
 	ReplyMessageID      string
 	ReplySendJobID      int64
 	ReplyIdemStatus     string
@@ -1181,54 +1182,60 @@ type durableEvalState struct {
 	ReplyResponseBody   string
 }
 
+type outboundJobRecord struct {
+	ID          int64
+	Queue       string
+	State       string
+	Args        string
+	Attempt     int64
+	MaxAttempts int64
+}
+
 type outboundJobSnapshot struct {
-	Count     int
-	Canonical string
+	Jobs map[int64]outboundJobRecord
 }
 
-type outboundJobIdentity struct {
-	ID int64 `json:"id"`
+type outboundJobBaseline struct {
+	IDs      map[int64]struct{}
+	EvalJobs map[int64]outboundJobRecord
 }
 
-func decodeOutboundJobRows(snapshot outboundJobSnapshot) (map[int64]string, error) {
-	var rows []json.RawMessage
-	if err := json.Unmarshal([]byte(snapshot.Canonical), &rows); err != nil || len(rows) != snapshot.Count {
-		return nil, errors.New("invalid outbound job snapshot")
+func cloneOutboundJobSnapshot(snapshot outboundJobSnapshot) outboundJobSnapshot {
+	cloned := outboundJobSnapshot{Jobs: make(map[int64]outboundJobRecord, len(snapshot.Jobs))}
+	for id, job := range snapshot.Jobs {
+		cloned.Jobs[id] = job
 	}
-	byID := make(map[int64]string, len(rows))
-	for _, row := range rows {
-		var identity outboundJobIdentity
-		if json.Unmarshal(row, &identity) != nil || identity.ID <= 0 {
-			return nil, errors.New("invalid outbound job identity")
-		}
-		if _, exists := byID[identity.ID]; exists {
-			return nil, errors.New("duplicate outbound job identity")
-		}
-		byID[identity.ID] = string(row)
-	}
-	return byID, nil
+	return cloned
 }
 
 func readOutboundJobSnapshot(ctx context.Context, pool *pgxpool.Pool) (outboundJobSnapshot, error) {
-	var snapshot outboundJobSnapshot
-	err := pool.QueryRow(ctx,
-		`SELECT count(*),
-		        COALESCE(
-		          jsonb_agg(
-		            jsonb_build_object(
-		              'id', id,
-		              'queue', queue,
-		              'state', state::text,
-		              'args', args,
-		              'attempt', attempt,
-		              'max_attempts', max_attempts
-		            ) ORDER BY id
-		          ),
-		          '[]'::jsonb
-		        )::text
+	rows, err := pool.Query(ctx,
+		`SELECT id, queue, state::text, args::text, attempt, max_attempts
 		   FROM river_job
-		  WHERE kind = 'outbound_send'`).Scan(&snapshot.Count, &snapshot.Canonical)
-	return snapshot, err
+		  WHERE kind = 'outbound_send'
+		  ORDER BY id`)
+	if err != nil {
+		return outboundJobSnapshot{}, err
+	}
+	defer rows.Close()
+	snapshot := outboundJobSnapshot{Jobs: make(map[int64]outboundJobRecord)}
+	for rows.Next() {
+		var job outboundJobRecord
+		if err := rows.Scan(&job.ID, &job.Queue, &job.State, &job.Args, &job.Attempt, &job.MaxAttempts); err != nil {
+			return outboundJobSnapshot{}, err
+		}
+		if job.ID <= 0 {
+			return outboundJobSnapshot{}, errors.New("invalid outbound job identity")
+		}
+		if _, exists := snapshot.Jobs[job.ID]; exists {
+			return outboundJobSnapshot{}, errors.New("duplicate outbound job identity")
+		}
+		snapshot.Jobs[job.ID] = job
+	}
+	if err := rows.Err(); err != nil {
+		return outboundJobSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func terminalRiverJobState(state string) bool {
@@ -1240,14 +1247,106 @@ func terminalRiverJobState(state string) bool {
 	}
 }
 
-func liveOutboundJobs(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	var count int
-	err := pool.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM river_job
-		  WHERE kind = 'outbound_send'
-		    AND state::text NOT IN ('cancelled', 'completed', 'discarded')`).Scan(&count)
-	return count, err
+func liveOutboundJobs(snapshot outboundJobSnapshot) int {
+	live := 0
+	for _, job := range snapshot.Jobs {
+		if !terminalRiverJobState(job.State) {
+			live++
+		}
+	}
+	return live
+}
+
+func waitForOutboundJobsTerminal(
+	ctx context.Context,
+	pollInterval time.Duration,
+	read func(context.Context) (outboundJobSnapshot, error),
+) (outboundJobSnapshot, error) {
+	if pollInterval <= 0 {
+		return outboundJobSnapshot{}, errors.New("invalid outbound job poll interval")
+	}
+	var lastErr error
+	for {
+		snapshot, err := read(ctx)
+		if err == nil && liveOutboundJobs(snapshot) == 0 {
+			return snapshot, nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return outboundJobSnapshot{}, fmt.Errorf("outbound job terminal barrier: %w", lastErr)
+			}
+			return outboundJobSnapshot{}, errors.New("outbound jobs did not become terminal")
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func outboundJobMessageID(job outboundJobRecord) (string, error) {
+	var args map[string]json.RawMessage
+	if json.Unmarshal([]byte(job.Args), &args) != nil || len(args) != 1 {
+		return "", errors.New("invalid outbound job args")
+	}
+	var messageID string
+	if json.Unmarshal(args["message_id"], &messageID) != nil || messageID == "" {
+		return "", errors.New("invalid outbound job message identity")
+	}
+	return messageID, nil
+}
+
+func validateExpectedEvalJob(job outboundJobRecord, jobID int64, messageID string) error {
+	gotMessageID, err := outboundJobMessageID(job)
+	if err != nil || job.ID != jobID || job.Queue != "outbound" || job.State != "completed" || gotMessageID != messageID {
+		return errors.New("eval outbound job identity is incomplete")
+	}
+	return nil
+}
+
+func buildOutboundJobBaseline(pre, post outboundJobSnapshot, durable durableEvalState) (outboundJobBaseline, error) {
+	additions := make(map[int64]outboundJobRecord)
+	for id, job := range post.Jobs {
+		if _, existed := pre.Jobs[id]; !existed {
+			additions[id] = job
+		}
+	}
+	if len(additions) != 2 || durable.StimulusSendJobID <= 0 || durable.ReplySendJobID <= 0 ||
+		durable.StimulusSendJobID == durable.ReplySendJobID {
+		return outboundJobBaseline{}, errors.New("email eval did not add exactly two distinct outbound jobs")
+	}
+	stimulus, stimulusExists := additions[durable.StimulusSendJobID]
+	reply, replyExists := additions[durable.ReplySendJobID]
+	if !stimulusExists || !replyExists {
+		return outboundJobBaseline{}, errors.New("email eval outbound jobs do not match durable send job identities")
+	}
+	if err := validateExpectedEvalJob(stimulus, durable.StimulusSendJobID, durable.StimulusMessageID); err != nil {
+		return outboundJobBaseline{}, err
+	}
+	if err := validateExpectedEvalJob(reply, durable.ReplySendJobID, durable.ReplyMessageID); err != nil {
+		return outboundJobBaseline{}, err
+	}
+	baseline := outboundJobBaseline{
+		IDs:      make(map[int64]struct{}, len(post.Jobs)),
+		EvalJobs: map[int64]outboundJobRecord{stimulus.ID: stimulus, reply.ID: reply},
+	}
+	for id := range post.Jobs {
+		baseline.IDs[id] = struct{}{}
+	}
+	return baseline, nil
+}
+
+func validateOutboundJobBaseline(baseline outboundJobBaseline, current outboundJobSnapshot) error {
+	for id := range current.Jobs {
+		if _, existed := baseline.IDs[id]; !existed {
+			return errors.New("new outbound job appeared after the email eval baseline")
+		}
+	}
+	for id, expected := range baseline.EvalJobs {
+		if current.Jobs[id] != expected || !terminalRiverJobState(expected.State) {
+			return errors.New("email eval outbound job changed or disappeared")
+		}
+	}
+	return nil
 }
 
 func validateInitialResponderRelationship(initial responderResult, durable durableEvalState) error {
@@ -1274,6 +1373,88 @@ func validateResponderReplayRelationship(initial responderResult, durable durabl
 	return nil
 }
 
+func TestOutboundJobOracleSettlesAcrossTransitionAndOldRowDeletion(t *testing.T) {
+	const (
+		stimulusMessageID = "msg_00000000000000000000000000000001"
+		replyMessageID    = "msg_00000000000000000000000000000002"
+	)
+	job := func(id int64, state, messageID string) outboundJobRecord {
+		return outboundJobRecord{
+			ID: id, Queue: "outbound", State: state,
+			Args: `{"message_id":"` + messageID + `"}`, Attempt: 1, MaxAttempts: 3,
+		}
+	}
+	pre := outboundJobSnapshot{Jobs: map[int64]outboundJobRecord{
+		10: job(10, "completed", "msg_00000000000000000000000000000010"),
+		11: job(11, "completed", "msg_00000000000000000000000000000011"),
+	}}
+	mutatedOldJob := job(11, "completed", "msg_00000000000000000000000000000011")
+	mutatedOldJob.Attempt = 2
+	observations := []outboundJobSnapshot{
+		{Jobs: map[int64]outboundJobRecord{
+			10: job(10, "completed", "msg_00000000000000000000000000000010"),
+			11: job(11, "completed", "msg_00000000000000000000000000000011"),
+			21: job(21, "running", stimulusMessageID),
+			22: job(22, "completed", replyMessageID),
+		}},
+		{Jobs: map[int64]outboundJobRecord{
+			11: mutatedOldJob,
+			21: job(21, "completed", stimulusMessageID),
+			22: job(22, "completed", replyMessageID),
+		}},
+	}
+	readIndex := 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	post, err := waitForOutboundJobsTerminal(ctx, time.Nanosecond, func(context.Context) (outboundJobSnapshot, error) {
+		if readIndex >= len(observations) {
+			return observations[len(observations)-1], nil
+		}
+		snapshot := observations[readIndex]
+		readIndex++
+		return snapshot, nil
+	})
+	if err != nil {
+		t.Fatalf("wait for terminal outbound jobs: %v", err)
+	}
+	if readIndex != 2 {
+		t.Fatalf("terminal barrier used %d observations, want transition observation and terminal observation", readIndex)
+	}
+	durable := durableEvalState{
+		StimulusMessageID: stimulusMessageID,
+		StimulusSendJobID: 21,
+		ReplyMessageID:    replyMessageID,
+		ReplySendJobID:    22,
+	}
+	baseline, err := buildOutboundJobBaseline(pre, post, durable)
+	if err != nil {
+		t.Fatalf("build outbound job baseline after old-row deletion: %v", err)
+	}
+	if err := validateOutboundJobBaseline(baseline, post); err != nil {
+		t.Fatalf("unchanged eval jobs failed validation: %v", err)
+	}
+	withOldJobDeleted := cloneOutboundJobSnapshot(post)
+	delete(withOldJobDeleted.Jobs, 11)
+	if err := validateOutboundJobBaseline(baseline, withOldJobDeleted); err != nil {
+		t.Fatalf("unrelated old-job deletion failed validation: %v", err)
+	}
+	withUnexpectedCaptureJob := cloneOutboundJobSnapshot(post)
+	withUnexpectedCaptureJob.Jobs[23] = job(23, "completed", "msg_00000000000000000000000000000023")
+	if _, err := buildOutboundJobBaseline(pre, withUnexpectedCaptureJob, durable); err == nil {
+		t.Fatal("unexpected third eval-round job passed baseline construction")
+	}
+	withWrongBinding := cloneOutboundJobSnapshot(post)
+	withWrongBinding.Jobs[21] = job(21, "completed", replyMessageID)
+	if _, err := buildOutboundJobBaseline(pre, withWrongBinding, durable); err == nil {
+		t.Fatal("wrong stimulus job message binding passed baseline construction")
+	}
+	withNewJob := cloneOutboundJobSnapshot(withOldJobDeleted)
+	withNewJob.Jobs[23] = job(23, "completed", "msg_00000000000000000000000000000023")
+	if err := validateOutboundJobBaseline(baseline, withNewJob); err == nil {
+		t.Fatal("new outbound job ID passed post-baseline validation")
+	}
+}
+
 func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testing.T) {
 	pool := testutil.TestDB(t)
 	ctx := context.Background()
@@ -1282,10 +1463,7 @@ func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testi
 	if err != nil {
 		t.Fatal("read baseline outbound job snapshot")
 	}
-	baselineLive, err := liveOutboundJobs(ctx, pool)
-	if err != nil {
-		t.Fatal("read baseline live outbound jobs")
-	}
+	baselineLive := liveOutboundJobs(baselineSnapshot)
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(),
 			`DELETE FROM river_job WHERE kind = 'outbound_send' AND args->>'message_id' LIKE $1`, marker+"%")
@@ -1293,11 +1471,15 @@ func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testi
 	insert := func(suffix, queue, state string) int64 {
 		t.Helper()
 		var id int64
+		var finalizedAt *time.Time
+		if terminalRiverJobState(state) {
+			now := time.Now()
+			finalizedAt = &now
+		}
 		err := pool.QueryRow(ctx,
 			`INSERT INTO river_job (args, kind, queue, state, max_attempts, finalized_at)
-			 VALUES (jsonb_build_object('message_id', $1::text), 'outbound_send', $2::text, $3::river_job_state, 3,
-			         CASE WHEN $3::text IN ('cancelled', 'completed', 'discarded') THEN now() END)
-			 RETURNING id`, marker+suffix, queue, state).Scan(&id)
+			 VALUES (jsonb_build_object('message_id', $1::text), 'outbound_send', $2::text, $3::river_job_state, 3, $4)
+			 RETURNING id`, marker+suffix, queue, state, finalizedAt).Scan(&id)
 		if err != nil {
 			t.Fatalf("insert synthetic outbound oracle job: %v", err)
 		}
@@ -1311,12 +1493,8 @@ func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testi
 	if err != nil {
 		t.Fatal("read synthetic outbound job snapshot")
 	}
-	if snapshot.Count != baselineSnapshot.Count+3 {
-		t.Fatalf("outbound job snapshot count = %d, want baseline %d + 3", snapshot.Count, baselineSnapshot.Count)
-	}
-	rowsByID, err := decodeOutboundJobRows(snapshot)
-	if err != nil {
-		t.Fatal("decode synthetic outbound job snapshot")
+	if len(snapshot.Jobs) != len(baselineSnapshot.Jobs)+3 {
+		t.Fatalf("outbound job snapshot count = %d, want baseline %d + 3", len(snapshot.Jobs), len(baselineSnapshot.Jobs))
 	}
 	for _, want := range []struct {
 		id, attempt, maxAttempts int64
@@ -1326,43 +1504,41 @@ func TestOutboundJobOracleCapturesWrongQueueOrphansAndPendingFailClosed(t *testi
 		{id: orphanID, queue: "outbound", state: "completed", messageID: marker + "orphan", maxAttempts: 3},
 		{id: pendingID, queue: "outbound", state: "pending", messageID: marker + "pending", maxAttempts: 3},
 	} {
-		row, exists := rowsByID[want.id]
+		got, exists := snapshot.Jobs[want.id]
 		if !exists {
 			t.Fatalf("outbound job snapshot omitted job %d", want.id)
 		}
-		var got struct {
-			Queue       string `json:"queue"`
-			State       string `json:"state"`
-			Attempt     int64  `json:"attempt"`
-			MaxAttempts int64  `json:"max_attempts"`
-			Args        struct {
-				MessageID string `json:"message_id"`
-			} `json:"args"`
-		}
-		if json.Unmarshal([]byte(row), &got) != nil || got.Queue != want.queue || got.State != want.state ||
-			got.Attempt != want.attempt || got.MaxAttempts != want.maxAttempts || got.Args.MessageID != want.messageID {
+		messageID, messageErr := outboundJobMessageID(got)
+		if messageErr != nil || got.Queue != want.queue || got.State != want.state ||
+			got.Attempt != want.attempt || got.MaxAttempts != want.maxAttempts || messageID != want.messageID {
 			t.Fatalf("outbound job snapshot fields diverged for job %d", want.id)
 		}
 	}
-	live, err := liveOutboundJobs(ctx, pool)
-	if err != nil || live != baselineLive+1 {
-		t.Fatalf("live outbound jobs = %d, %v; want baseline %d + pending job", live, err, baselineLive)
+	live := liveOutboundJobs(snapshot)
+	if live != baselineLive+1 {
+		t.Fatalf("live outbound jobs = %d; want baseline %d + pending job", live, baselineLive)
 	}
 	if _, err := pool.Exec(ctx,
 		`UPDATE river_job SET state = 'completed', finalized_at = now() WHERE id = $1`, pendingID); err != nil {
 		t.Fatal("finalize synthetic pending job")
 	}
-	if live, err = liveOutboundJobs(ctx, pool); err != nil || live != baselineLive {
-		t.Fatalf("live outbound jobs after finalize = %d, %v; want baseline %d", live, err, baselineLive)
+	snapshot, err = readOutboundJobSnapshot(ctx, pool)
+	if err != nil {
+		t.Fatal("read finalized outbound job snapshot")
+	}
+	if live = liveOutboundJobs(snapshot); live != baselineLive {
+		t.Fatalf("live outbound jobs after finalize = %d; want baseline %d", live, baselineLive)
 	}
 	for _, state := range []string{"cancelled", "completed", "discarded"} {
-		if !terminalRiverJobState(state) {
-			t.Fatalf("terminal River state %q classified live", state)
+		probe := outboundJobSnapshot{Jobs: map[int64]outboundJobRecord{1: {ID: 1, State: state}}}
+		if liveOutboundJobs(probe) != 0 {
+			t.Fatalf("terminal River state %q counted live", state)
 		}
 	}
 	for _, state := range []string{"available", "pending", "retryable", "running", "scheduled", "future_state"} {
-		if terminalRiverJobState(state) {
-			t.Fatalf("live or unknown River state %q classified terminal", state)
+		probe := outboundJobSnapshot{Jobs: map[int64]outboundJobRecord{1: {ID: 1, State: state}}}
+		if liveOutboundJobs(probe) != 1 {
+			t.Fatalf("live or unknown River state %q was not counted live", state)
 		}
 	}
 }
@@ -1434,13 +1610,17 @@ func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actor
 		actorID, targetID).Scan(&state.OutboundMessages); err != nil {
 		return durableEvalState{}, err
 	}
-	jobs, err := readOutboundJobSnapshot(ctx, pool)
-	if err != nil {
-		return durableEvalState{}, err
-	}
-	state.OutboundJobs = jobs
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM idempotency_keys WHERE user_id = $1`, userID).Scan(&state.IdempotencyRows); err != nil {
+		return durableEvalState{}, err
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT id, COALESCE(send_job_id, 0)
+		   FROM messages
+		  WHERE agent_id = $1
+		    AND direction = 'outbound'
+		    AND subject = $2`, actorID, evalSubject).Scan(
+		&state.StimulusMessageID, &state.StimulusSendJobID); err != nil {
 		return durableEvalState{}, err
 	}
 	if err := pool.QueryRow(ctx,
@@ -1468,7 +1648,13 @@ func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actor
 	return state, nil
 }
 
-func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, targetID string, want durableEvalState) {
+func waitForDurableEvalState(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	userID, actorID, targetID string,
+	want durableEvalState,
+	jobsBaseline outboundJobBaseline,
+) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1481,7 +1667,14 @@ func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, 
 	for {
 		last, lastErr = readDurableEvalState(ctx, pool, userID, actorID, targetID)
 		if lastErr == nil {
-			live, lastErr = liveOutboundJobs(ctx, pool)
+			var snapshot outboundJobSnapshot
+			snapshot, lastErr = readOutboundJobSnapshot(ctx, pool)
+			if lastErr == nil {
+				if err := validateOutboundJobBaseline(jobsBaseline, snapshot); err != nil {
+					t.Fatalf("outbound job safety baseline violated: %v", err)
+				}
+				live = liveOutboundJobs(snapshot)
+			}
 		}
 		if lastErr == nil && live == 0 && last == want {
 			consecutive++
@@ -1496,46 +1689,27 @@ func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, 
 			replyEqual := last.ReplyMessageID == want.ReplyMessageID &&
 				last.ReplySendJobID == want.ReplySendJobID && last.ReplyIdemStatus == want.ReplyIdemStatus &&
 				last.ReplyResponseStatus == want.ReplyResponseStatus && last.ReplyResponseBody == want.ReplyResponseBody
-			t.Fatalf("durable eval state did not settle: live_jobs=%d query_error=%v messages=%d/%d jobs=%d/%d job_snapshot_equal=%t idempotency_rows=%d/%d reply_equal=%t",
+			stimulusEqual := last.StimulusMessageID == want.StimulusMessageID &&
+				last.StimulusSendJobID == want.StimulusSendJobID
+			t.Fatalf("durable eval state did not settle: live_jobs=%d query_error=%v messages=%d/%d idempotency_rows=%d/%d stimulus_equal=%t reply_equal=%t",
 				live, lastErr, last.OutboundMessages, want.OutboundMessages,
-				last.OutboundJobs.Count, want.OutboundJobs.Count, last.OutboundJobs == want.OutboundJobs,
-				last.IdempotencyRows, want.IdempotencyRows, replyEqual)
+				last.IdempotencyRows, want.IdempotencyRows, stimulusEqual, replyEqual)
 		case <-ticker.C:
 		}
 	}
 }
 
-func assertOutboundJobGrowth(t *testing.T, before, after outboundJobSnapshot, growth int) {
-	t.Helper()
-	if after.Count != before.Count+growth {
-		t.Fatalf("outbound job snapshot count = %d, want baseline %d + %d", after.Count, before.Count, growth)
-	}
-	beforeByID, err := decodeOutboundJobRows(before)
-	if err != nil {
-		t.Fatal("decode baseline outbound job snapshot")
-	}
-	afterByID, err := decodeOutboundJobRows(after)
-	if err != nil {
-		t.Fatal("outbound job snapshot was not valid JSON")
-	}
-	for id, row := range beforeByID {
-		if afterByID[id] != row {
-			t.Fatalf("baseline outbound job %d changed or disappeared", id)
-		}
-	}
-}
-
-func assertOriginalDurableBaseline(t *testing.T, initialJobs outboundJobSnapshot, state durableEvalState) {
+func assertOriginalDurableBaseline(t *testing.T, state durableEvalState) {
 	t.Helper()
 	if state.OutboundMessages != 2 {
 		t.Fatalf("initial durable outbound messages = %d, want 2", state.OutboundMessages)
 	}
-	assertOutboundJobGrowth(t, initialJobs, state.OutboundJobs, 2)
 	var replay struct {
 		Status    string `json:"status"`
 		MessageID string `json:"message_id"`
 	}
 	if json.Unmarshal([]byte(state.ReplyResponseBody), &replay) != nil ||
+		state.StimulusMessageID == "" || state.StimulusSendJobID <= 0 ||
 		state.ReplyMessageID == "" || state.ReplySendJobID <= 0 || state.ReplyIdemStatus != "completed" ||
 		state.ReplyResponseStatus != http.StatusAccepted || replay.Status != "accepted" || replay.MessageID != state.ReplyMessageID {
 		t.Fatalf("initial durable reply outcome is incomplete: %+v", state)
@@ -1563,7 +1737,7 @@ func assertUnauthorizedDurableAbsence(t *testing.T, pool *pgxpool.Pool, userID, 
 
 func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	pool := testutil.TestDB(t)
-	initialJobs, err := readOutboundJobSnapshot(context.Background(), pool)
+	preEvalJobs, err := readOutboundJobSnapshot(context.Background(), pool)
 	if err != nil {
 		t.Fatal("read pre-eval outbound job snapshot")
 	}
@@ -1580,6 +1754,7 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 
 	var suite string
 	var durableBaseline durableEvalState
+	var jobsBaseline outboundJobBaseline
 	var initialResponderResult responderResult
 	var actorEgressBaseline, unauthorizedEgressBaseline int
 	t.Run("actor to target reply round trip", func(t *testing.T) {
@@ -1598,16 +1773,27 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		if got := forwarder.countRecipient(actor.EmailAddress()); got != 1 {
 			t.Fatalf("reply SMTP egress count = %d, want 1", got)
 		}
-		var err error
+		barrierCtx, barrierCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		postEvalJobs, err := waitForOutboundJobsTerminal(barrierCtx, 50*time.Millisecond, func(ctx context.Context) (outboundJobSnapshot, error) {
+			return readOutboundJobSnapshot(ctx, pool)
+		})
+		barrierCancel()
+		if err != nil {
+			t.Fatalf("wait for outbound job terminal barrier: %v", err)
+		}
 		durableBaseline, err = readDurableEvalState(context.Background(), pool, actor.UserID, actor.ID, target.ID)
 		if err != nil {
 			t.Fatal("read original durable email-eval baseline")
 		}
-		assertOriginalDurableBaseline(t, initialJobs, durableBaseline)
+		assertOriginalDurableBaseline(t, durableBaseline)
+		jobsBaseline, err = buildOutboundJobBaseline(preEvalJobs, postEvalJobs, durableBaseline)
+		if err != nil {
+			t.Fatalf("bind email-eval outbound jobs: %v", err)
+		}
 		if err := validateInitialResponderRelationship(initialResponderResult, durableBaseline); err != nil {
 			t.Fatal("initial responder result did not match the durable reply")
 		}
-		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline, jobsBaseline)
 		actorEgressBaseline = forwarder.countRecipient(actor.EmailAddress())
 		unauthorizedEgressBaseline = forwarder.countRecipient(evalUnauthorizedAddress)
 	})
@@ -1619,7 +1805,7 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		if status != 403 || !bytes.Contains(body, []byte(`"code":"blocked_by_policy"`)) {
 			t.Fatalf("unauthorized target attempt status = %d, want blocked_by_policy", status)
 		}
-		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline, jobsBaseline)
 		assertUnauthorizedDurableAbsence(t, pool, actor.UserID, target.ID, blockedKey)
 		if after := forwarder.countRecipient(evalUnauthorizedAddress); after != unauthorizedEgressBaseline {
 			t.Fatalf("unauthorized SMTP egress count changed from %d to %d", unauthorizedEgressBaseline, after)
@@ -1632,7 +1818,7 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		if err := validateResponderReplayRelationship(initialResponderResult, durableBaseline, replayResult); err != nil {
 			t.Fatalf("responder replay did not match the original durable outcome: %v", err)
 		}
-		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline, jobsBaseline)
 		if after := forwarder.countRecipient(actor.EmailAddress()); after != actorEgressBaseline {
 			t.Fatalf("idempotent replay changed reply SMTP egress from %d to %d", actorEgressBaseline, after)
 		}
