@@ -184,6 +184,7 @@ describe.skipIf(!live)("cli live parity", () => {
       "listen",
       "login",
       "messages",
+      "metrics",
       "protection",
       "reply",
       "send",
