@@ -7,6 +7,7 @@ import { CliUsageError, parseRuntimeArguments, usage } from "./runtime/lib/cli-a
 
 const launcherDirectory = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME_STDERR_LIMIT = 8192;
+const RUNTIME_STDERR_GRACE_MS = 100;
 const SAFE_RUNTIME_DIAGNOSTICS = new Map([
   ["email-evals: assertion_failure\n", 1],
   ["email-evals: configuration_error\n", 2],
@@ -30,13 +31,65 @@ function runNode(args, options) {
   });
 }
 
-function runRuntimeNode(args, options) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { ...options, stdio: ["inherit", "inherit", "pipe"] });
+export function runRuntimeNode(args, options, dependencies = {}) {
+  const {
+    spawnChild = spawn,
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+    graceMs = RUNTIME_STDERR_GRACE_MS,
+  } = dependencies;
+  return new Promise((resolve) => {
     const chunks = [];
     let size = 0;
     let truncated = false;
+    let settled = false;
+    let exited = false;
+    let finalized = false;
+    let exitCode = 4;
+    let exitSignal = null;
+    let graceTimer = null;
+    let timedOut = false;
+    let child;
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      if (graceTimer !== null) clearTimer(graceTimer);
+      resolve(result);
+    }
+
+    function fixedFailure() {
+      finish({ code: 4, stderr: "", truncated: true, finalized: false });
+    }
+
+    function finishFromExit() {
+      if (!exited || !finalized) return;
+      finish({
+        code: exitSignal || !Number.isInteger(exitCode) ? 4 : exitCode,
+        stderr: Buffer.concat(chunks).toString("utf8"),
+        truncated,
+        finalized: true,
+      });
+    }
+
+    function finalizeStderr() {
+      if (timedOut || finalized || settled) return;
+      finalized = true;
+      finishFromExit();
+    }
+
+    try {
+      child = spawnChild(process.execPath, args, { ...options, stdio: ["inherit", "inherit", "pipe"] });
+    } catch {
+      fixedFailure();
+      return;
+    }
+    if (!child?.stderr || typeof child.stderr.on !== "function" || typeof child.once !== "function") {
+      fixedFailure();
+      return;
+    }
     child.stderr.on("data", (chunk) => {
+      if (settled) return;
       if (size >= RUNTIME_STDERR_LIMIT) {
         truncated = true;
         return;
@@ -47,22 +100,37 @@ function runRuntimeNode(args, options) {
       size += retained.length;
       if (chunk.length > remaining) truncated = true;
     });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({
-      code: code ?? (signal ? 4 : 4),
-      stderr: Buffer.concat(chunks).toString("utf8"),
-      truncated,
-    }));
+    child.stderr.once("end", finalizeStderr);
+    child.stderr.once("close", finalizeStderr);
+    child.once("error", fixedFailure);
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      if (finalized) {
+        finishFromExit();
+        return;
+      }
+      graceTimer = setTimer(() => {
+        if (finalized || settled) return;
+        timedOut = true;
+        truncated = true;
+        try { child.stderr.destroy?.(); } catch {}
+        try { child.unref?.(); } catch {}
+        fixedFailure();
+      }, graceMs);
+    });
   });
 }
 
 function safeRuntimeExit(result, stderr) {
-  const expectedCode = !result.truncated ? SAFE_RUNTIME_DIAGNOSTICS.get(result.stderr) : undefined;
+  const expectedCode = result.finalized === true && !result.truncated ? SAFE_RUNTIME_DIAGNOSTICS.get(result.stderr) : undefined;
   if (expectedCode !== undefined && result.code === expectedCode) {
     stderr.write(result.stderr);
     return result.code;
   }
-  if (!result.truncated && result.stderr === "" && result.code === 0) return 0;
+  if (result.finalized === true && !result.truncated && result.stderr === "" && result.code === 0) return 0;
   stderr.write("email-evals: runtime failure\n");
   return 4;
 }
@@ -121,16 +189,25 @@ async function launchRuntime(argv, parsed, dependencies) {
     await dependencies.beforeExec?.();
     const immediatelyBeforeExec = await regularNoLink(resolvedCli);
     if (!sameIdentity(beforeOpen, immediatelyBeforeExec) || await realpath(resolvedCli) !== resolvedCli) throw new Error("cli changed before execution");
-    const result = await dependencies.spawnRuntime([resolvedCli, ...argv], {
-      cwd: dependencies.cwd,
-      env: dependencies.environment,
-    });
-    return safeRuntimeExit(result, dependencies.stderr);
+    try {
+      const result = await dependencies.spawnRuntime([resolvedCli, ...argv], {
+        cwd: dependencies.cwd,
+        env: dependencies.environment,
+      });
+      return safeRuntimeExit(result, dependencies.stderr);
+    } catch {
+      return runtimeFailure(dependencies.stderr);
+    }
   } catch {
     return unavailable(dependencies.stderr);
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+function runtimeFailure(stderr) {
+  stderr.write("email-evals: runtime failure\n");
+  return 4;
 }
 
 export async function main(argv, supplied = {}) {
@@ -140,9 +217,12 @@ export async function main(argv, supplied = {}) {
     stdout: process.stdout,
     stderr: process.stderr,
     spawnNode: runNode,
-    spawnRuntime: runRuntimeNode,
+    spawnRuntime: null,
     ...supplied,
   };
+  if (dependencies.spawnRuntime === null) {
+    dependencies.spawnRuntime = (args, options) => runRuntimeNode(args, options, dependencies);
+  }
   if (argv[0] === "scaffold" || argv[0] === "setup") return launchLocal(argv[0], argv.slice(1), dependencies);
   let parsed;
   try {

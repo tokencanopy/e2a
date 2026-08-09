@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { chmod, mkdtemp, mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { main as launch } from "../../launcher.mjs";
+import { main as launch, runRuntimeNode } from "../../launcher.mjs";
 
 function shell(command, args) {
   return new Promise((resolve, reject) => {
@@ -29,6 +30,29 @@ async function runtimeFixture() {
   await writeFile(path.join(runtime, "cli.mjs"), `import { writeFile } from "node:fs/promises"; await writeFile(process.env.E2A_EVALS_SENTINEL, "safe");`);
   await chmod(path.join(runtime, "cli.mjs"), 0o700);
   return { root, runtime, suite, marker };
+}
+
+function fakeRuntimeChild() {
+  const child = new EventEmitter();
+  const stderr = new EventEmitter();
+  let destroyed = 0;
+  let unrefed = 0;
+  stderr.destroy = () => { destroyed += 1; };
+  child.stderr = stderr;
+  child.unref = () => { unrefed += 1; };
+  return { child, stderr, destroyed: () => destroyed, unrefed: () => unrefed };
+}
+
+function manualTimers() {
+  const timers = new Set();
+  return {
+    pending: () => [...timers],
+    set: (callback) => {
+      timers.add(callback);
+      return callback;
+    },
+    clear: (callback) => timers.delete(callback),
+  };
 }
 
 test("launcher rejects complete invalid runtime grammar before any suite runtime executes", async () => {
@@ -114,4 +138,69 @@ test("launcher contains runtime stderr while preserving its fixed diagnostic pro
   assert.equal(oversized.code, 4);
   assert.equal(oversized.stderr, "email-evals: runtime failure\n");
   assert.doesNotMatch(oversized.stderr, /e2a_acct_/);
+});
+
+test("runtime launcher waits for stderr finalization and fails closed on event races", async () => {
+  const forwarded = fakeRuntimeChild();
+  const forwardedTimers = manualTimers();
+  const forwardedRun = runRuntimeNode([], {}, {
+    spawnChild: () => forwarded.child,
+    setTimer: forwardedTimers.set,
+    clearTimer: forwardedTimers.clear,
+    graceMs: 1,
+  });
+  forwarded.child.emit("exit", 3, null);
+  assert.equal(forwardedTimers.pending().length, 1);
+  forwarded.stderr.emit("data", Buffer.from("email-evals: transport_error\n"));
+  forwarded.stderr.emit("close");
+  assert.deepEqual(await forwardedRun, { code: 3, stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
+  assert.equal(forwardedTimers.pending().length, 0);
+
+  const held = fakeRuntimeChild();
+  const heldTimers = manualTimers();
+  const heldRun = runRuntimeNode([], {}, {
+    spawnChild: () => held.child,
+    setTimer: heldTimers.set,
+    clearTimer: heldTimers.clear,
+    graceMs: 1,
+  });
+  held.child.emit("exit", 3, null);
+  heldTimers.pending()[0]();
+  assert.deepEqual(await heldRun, { code: 4, stderr: "", truncated: true, finalized: false });
+  assert.equal(held.destroyed(), 1);
+  assert.equal(held.unrefed(), 1);
+
+  const spawnFailure = fakeRuntimeChild();
+  const failedRun = runRuntimeNode([], {}, { spawnChild: () => spawnFailure.child });
+  spawnFailure.child.emit("error", new Error("e2a_acct_synthetic /private/tmp/error"));
+  assert.deepEqual(await failedRun, { code: 4, stderr: "", truncated: true, finalized: false });
+
+  const signaled = fakeRuntimeChild();
+  const signaledRun = runRuntimeNode([], {}, { spawnChild: () => signaled.child });
+  signaled.child.emit("exit", null, "SIGTERM");
+  signaled.stderr.emit("data", Buffer.from("email-evals: transport_error\n"));
+  signaled.stderr.emit("end");
+  const signaledResult = await signaledRun;
+  signaled.child.emit("error", new Error("late error"));
+  signaled.stderr.emit("close");
+  assert.deepEqual(signaledResult, { code: 4, stderr: "email-evals: transport_error\n", truncated: false, finalized: true });
+
+  const fixture = await runtimeFixture();
+  const launcherFailure = fakeRuntimeChild();
+  let spawned;
+  const errors = [];
+  const failureRun = launch(["validate", "--suite", fixture.suite], {
+    cwd: fixture.root,
+    stderr: { write: (line) => errors.push(line) },
+    spawnChild: () => {
+      spawned?.();
+      return launcherFailure.child;
+    },
+  });
+  await new Promise((resolve) => { spawned = resolve; });
+  launcherFailure.child.emit("error", new Error("e2a_acct_synthetic /private/tmp/error"));
+  assert.equal(await failureRun, 4);
+  launcherFailure.child.emit("exit", 3, null);
+  launcherFailure.stderr.emit("close");
+  assert.deepEqual(errors, ["email-evals: runtime failure\n"]);
 });
