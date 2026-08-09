@@ -22,11 +22,20 @@ description: "Use when a user wants to connect or authorize the e2a MCP server, 
 
 1. For agent scope, use the `agent_email` from `whoami`.
 2. For account scope, call `list_agents`: honor an inbox named by the task, use the sole result, or ask the user to choose among several.
-3. If none exists, offer a shared-domain address on `agents.e2a.dev`. Confirm the full address before calling `create_agent`; do not infer it from a local part.
+3. If none exists, defer inbox creation until the user chooses a shared or custom domain below.
 
 ## Choose shared or custom domain
 
-Ask whether the user wants the recommended shared domain or a custom domain. The shared path needs no DNS. For a custom domain, confirm ownership and branded-address intent, then follow [custom-domains.md](references/custom-domains.md).
+Ask whether the user wants the recommended shared domain or a custom domain.
+
+- **Shared:** offer an address on `agents.e2a.dev`, confirm the full address,
+  then call `create_agent`.
+- **Custom:** confirm ownership and branded-address intent, then follow
+  [custom-domains.md](references/custom-domains.md). After verification and one
+  user-driven post-verification `get_domain` capability read show the inbound
+  and outbound state. If ready, ask for and show the complete branded address,
+  obtain confirmation, then call `create_agent`. If not ready, report the
+  precise resume step; do not poll.
 
 Use a Cloudflare API MCP server when available for Cloudflare-hosted DNS. For GoDaddy, use the authenticated `gddy` path; the official GoDaddy MCP is read-only and cannot modify DNS.
 
@@ -34,7 +43,10 @@ Before any provider-assisted DNS write, show the complete proposed DNS diff and 
 
 ## Verify readiness
 
-Call `list_messages` for the selected inbox (pass its email for account scope). This is a harmless read and must succeed before readiness is claimed. Offer a send test only after the user selects a recipient; otherwise do not send one.
+After selecting or creating the inbox, call `list_messages` (pass its email for
+account scope). This harmless read must succeed before readiness is claimed.
+Offer a send test only after the user selects a recipient; otherwise do not send
+one.
 
 ## Completion report
 
