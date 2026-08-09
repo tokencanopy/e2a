@@ -54,6 +54,15 @@ test("client manifests retain only their supported visual fields", async () => {
   assert.equal(cursor.logo, "assets/icon.svg");
 });
 
+test("core Codex description advertises every stable capability", async () => {
+  const codex = JSON.parse(await readFile("plugins/e2a/.codex-plugin/plugin.json", "utf8"));
+  assert.match(codex.description, /\b78 MCP tools\b/);
+  assert.match(codex.interface.longDescription, /setup/i);
+  assert.match(codex.interface.longDescription, /application integration/i);
+  assert.match(codex.interface.longDescription, /inbox operation/i);
+  assert.match(codex.interface.longDescription, /diagnosis/i);
+});
+
 test("Labs pins its Claude dependency to the compatible core release", async () => {
   const labs = JSON.parse(await readFile("plugins/e2a-labs/.claude-plugin/plugin.json", "utf8"));
   assert.deepEqual(labs.dependencies, [{ name: "e2a", version: "^0.7.0" }]);

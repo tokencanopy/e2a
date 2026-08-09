@@ -18,8 +18,11 @@ logging credentials, webhook secrets, or message content.
 
 For a retried write, send an `Idempotency-Key` that is stable for the same
 logical request and body. Reuse that key only for the byte-identical retry;
-give a genuinely new request a new key. Treat an accepted or review-held send
-as an accepted operation, not an instruction to send it again.
+give a genuinely new request a new key. Treat `accepted`, `scheduled`, and
+`pending_review` as durable acceptance states. A send in any of these states
+must not be resent or retried. Durable acceptance is not terminal delivery;
+observe the eventual outcome through the requested webhook, event-log, or
+polling flow.
 
 Generate a client only when the repository already has a compatible generation
 workflow and commit policy. Never hand-edit generated clients; fix the source

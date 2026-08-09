@@ -35,8 +35,11 @@ application. Define server-only credential and webhook-secret configuration;
 never expose either to browser code, client bundles, logs, or test fixtures.
 
 Make retried writes idempotent with a stable key derived from the application's
-logical operation. Handle accepted, held-for-review, and failed outcomes using
-the existing application's error and job conventions.
+logical operation. Treat `accepted`, `scheduled`, and `pending_review` as
+durable acceptance states; a send in any of these states must not be resent or
+retried. Durable acceptance is not terminal delivery. Observe eventual delivery
+through the application's requested webhook, event-log, or polling flow, and
+handle failed outcomes through its existing error and job conventions.
 
 ## Secure inbound webhooks
 

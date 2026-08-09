@@ -27,10 +27,11 @@ also apply the TypeScript `.retryAfterSeconds` or Python
 decide whether a retryable error is retried within its deadline and idempotency
 boundary.
 
-Keep those exceptions separate from accepted, held-for-review, and delivery
-outcomes. An accepted or held result is not a transport/API error and must not
-be resent; observe its eventual delivery through the requested webhook,
-event-log, or polling flow.
+Keep those exceptions separate from the canonical durable send states
+`accepted`, `scheduled`, and `pending_review`. A send in any of these states is
+not a transport/API error and must not be resent or retried. Durable acceptance
+is not terminal delivery; observe eventual delivery through the requested
+webhook, event-log, or polling flow.
 
 Do not write an unofficial SDK, copy generated client internals, or expose the
 client or its API key to browser code. For a TypeScript or Python webhook,
