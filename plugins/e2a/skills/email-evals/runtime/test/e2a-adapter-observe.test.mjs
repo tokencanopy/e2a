@@ -268,7 +268,15 @@ test("poll reads retry without resending, preserve duplicate same-conversation c
   duplicate.data.message_id = duplicate.messageId;
   duplicate.createdAt = "2026-08-08T12:00:04.250Z";
   const messages = successfulMessages();
-  messages[duplicate.messageId] = { ...messages.msg_synthetic_target_out, id: duplicate.messageId };
+  messages[duplicate.messageId] = {
+    ...messages.msg_synthetic_target_out,
+    id: duplicate.messageId,
+    rawMessage: rawMessage({
+      messageId: "reply-duplicate@agents.localhost", from: TARGET, to: ACTOR,
+      subject: `Re: ${SUBJECT}`, inReplyTo: "original@agents.localhost",
+      references: ["original@agents.localhost"], text: "A second synthetic reply.",
+    }),
+  };
   let eventReads = 0;
   let partialGet = true;
   const client = fakeClient({
@@ -316,6 +324,78 @@ test("none observes the full timeout, while a missing expected action returns em
   assert.equal(missing.actorReceipt, null);
 });
 
+test("none still requires a correlated target receipt", async () => {
+  const time = clock();
+  await assert.rejects(
+    adapter(fakeClient(), time).adapter.executeCase(
+      caseSpec({ expect: { ...caseSpec().expect, action: { kind: "none", count: 0 } } }),
+      caseContext({ timeoutMs: 1_000, settleMs: 100, pollIntervalMs: 250 }),
+    ),
+    (error) => error.errorClass === "transport_error" && error.code === "stimulus_not_observed",
+  );
+  assert.equal(time.elapsed(), 1_000);
+});
+
+test("conflicting event message and conversation identities fail closed", async () => {
+  const base = await fixture("events-success.json");
+  const messageConflict = structuredClone(base);
+  messageConflict[1].messageId = "msg_spoofed_envelope";
+  await assert.rejects(
+    adapter(fakeClient({ events: messageConflict })).adapter.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+  );
+
+  const conversationConflict = structuredClone(base);
+  conversationConflict[1].data.conversation_id = "conv_spoofed";
+  await assert.rejects(
+    adapter(fakeClient({ events: conversationConflict })).adapter.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+  );
+});
+
+test("candidate terminal events before the durable target receipt are excluded", async () => {
+  const events = await fixture("events-success.json");
+  events[1].createdAt = "2026-08-08T12:00:00.500Z";
+  const time = clock();
+  const evidence = await adapter(fakeClient({ events }), time).adapter.executeCase(
+    caseSpec(), caseContext({ timeoutMs: 1_500, settleMs: 100, pollIntervalMs: 250 }),
+  );
+  assert.equal(time.elapsed(), 1_500);
+  assert.deepEqual(evidence.candidates, []);
+});
+
+test("beta review and block events do not fabricate omitted MIME or recipient evidence", async () => {
+  const successful = await fixture("events-success.json");
+  const review = structuredClone(successful[1]);
+  review.id = "evt_synthetic_target_review";
+  review.type = "email.review_requested";
+  delete review.data.cc;
+  delete review.data.bcc;
+  const reviewMessages = successfulMessages();
+  delete reviewMessages.msg_synthetic_target_out.rawMessage;
+  const reviewEvidence = await adapter(fakeClient({ events: [successful[0], review], messages: reviewMessages })).adapter.executeCase(caseSpec(), caseContext());
+  for (const field of ["replyTo", "cc", "bcc", "envelopeRecipients"]) {
+    assert.equal(Object.hasOwn(reviewEvidence.candidates[0], field), false, `review ${field}`);
+  }
+  const reviewResults = gradeCore(caseSpec().expect, reviewEvidence);
+  assert.equal(reviewResults.find(({ id }) => id === "sender.reply_to").code, "missing_reply_to_evidence");
+  for (const id of ["recipients.cc", "recipients.bcc", "recipients.envelope"]) {
+    assert.equal(reviewResults.find((result) => result.id === id).status, "error", id);
+  }
+
+  const blocked = await fixture("events-blocked.json");
+  delete blocked[1].data.cc;
+  delete blocked[1].data.bcc;
+  const blockedEvidence = await adapter(fakeClient({ events: blocked })).adapter.executeCase(caseSpec(), caseContext());
+  for (const field of ["replyTo", "cc", "bcc", "envelopeRecipients"]) {
+    assert.equal(Object.hasOwn(blockedEvidence.candidates[0], field), false, `blocked ${field}`);
+  }
+  const blockedResults = gradeCore(caseSpec().expect, blockedEvidence);
+  for (const id of ["sender.reply_to", "recipients.cc", "recipients.bcc", "recipients.envelope"]) {
+    assert.equal(blockedResults.find((result) => result.id === id).status, "error", id);
+  }
+});
+
 test("actor receipt falls back to one baseline-absent inbound row", async () => {
   const events = await fixture("events-success.json");
   const withoutActorEvent = events.filter((event) => event.agentEmail !== ACTOR);
@@ -335,6 +415,43 @@ test("actor receipt falls back to one baseline-absent inbound row", async () => 
   const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
   assert.equal(evidence.actorReceipt.ref, "message:msg_synthetic_actor_in");
   assert.equal(evidence.actorReceipt.messageId, "msg_synthetic_target_out");
+});
+
+test("actor inbox fallback deduplicates identical rows and rejects conflicting rows", async () => {
+  const events = (await fixture("events-success.json")).filter((event) => event.agentEmail !== ACTOR);
+  const receipt = { id: "msg_synthetic_actor_in", direction: "inbound", headerFrom: TARGET, subject: `Re: ${SUBJECT}` };
+  const duplicateClient = fakeClient({
+    events,
+    listMessages(_email, _params, invocation) { return pager(invocation === 1 ? [] : [receipt, { ...receipt }]); },
+  });
+  const duplicateEvidence = await adapter(duplicateClient).adapter.executeCase(caseSpec(), caseContext());
+  assert.equal(duplicateEvidence.actorReceipt.ref, "message:msg_synthetic_actor_in");
+
+  const conflictClient = fakeClient({
+    events,
+    listMessages(_email, _params, invocation) {
+      return pager(invocation === 1 ? [] : [receipt, { ...receipt, subject: "Conflicting synthetic subject" }]);
+    },
+  });
+  await assert.rejects(
+    adapter(conflictClient).adapter.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+  );
+});
+
+test("one receipt MIME Message-ID matching two candidates is ambiguous", async () => {
+  const events = await fixture("events-success.json");
+  const duplicate = structuredClone(events[1]);
+  duplicate.id = "evt_synthetic_target_sent_other";
+  duplicate.messageId = "msg_synthetic_target_out_other";
+  duplicate.data.message_id = duplicate.messageId;
+  duplicate.createdAt = "2026-08-08T12:00:04.250Z";
+  const messages = successfulMessages();
+  messages[duplicate.messageId] = { ...messages.msg_synthetic_target_out, id: duplicate.messageId };
+  await assert.rejects(
+    adapter(fakeClient({ events: [events[0], events[1], duplicate, events[2]], messages })).adapter.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "ambiguous_correlation",
+  );
 });
 
 for (const [status, code] of [
@@ -358,7 +475,23 @@ test("only a connection error gets one byte-identical explicit recovery", async 
   await assert.rejects(adapter(serverClient).adapter.executeCase(caseSpec(), caseContext()), (error) =>
     error.errorClass === "transport_error" && error.code === "stimulus_send_failed");
   assert.equal(serverClient.calls.send.length, 1);
+
+  const lookalikeClient = fakeClient({ send: async () => { throw Object.assign(new Error("lookalike"), { code: "connection_error", status: 0 }); } });
+  await assert.rejects(adapter(lookalikeClient).adapter.executeCase(caseSpec(), caseContext()), (error) =>
+    error.errorClass === "transport_error" && error.code === "stimulus_send_failed");
+  assert.equal(lookalikeClient.calls.send.length, 1);
 });
+
+for (const status of ["accepted", "sent"]) {
+  test(`${status} stimulus without a nonempty message ID fails closed`, async () => {
+    for (const messageId of [undefined, ""]) {
+      const client = fakeClient({ send: async () => ({ messageId, status, method: "smtp" }) });
+      await assert.rejects(adapter(client).adapter.executeCase(caseSpec(), caseContext()), (error) =>
+        error.errorClass === "transport_error" && error.code === "stimulus_not_delivered");
+      assert.equal(client.calls.send.length, 1);
+    }
+  });
+}
 
 test("accepted stimulus status polls without retrying the send", async () => {
   const events = await fixture("events-success.json");

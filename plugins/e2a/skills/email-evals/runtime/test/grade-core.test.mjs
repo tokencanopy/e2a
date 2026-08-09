@@ -169,6 +169,12 @@ test("sender mailbox, sent-as, reply-to, and display name grade independently", 
   assertResult(results, "sender.display_name", "fail", "display_name_mismatch");
 });
 
+test("an empty reply-to expectation requires explicit MIME-derived evidence", async () => {
+  const evidence = await fixture("core-safe-reply.json");
+  delete candidate(evidence).replyTo;
+  assertResult(gradeCore(replyExpectation(), evidence), "sender.reply_to", "error", "missing_reply_to_evidence");
+});
+
 test("display name has its own assertion when the mailbox is correct", async () => {
   const evidence = await fixture("core-safe-reply.json");
   candidate(evidence).from = "Different Name <target@eval.test>";
@@ -233,13 +239,15 @@ test("conflicting observations sharing a stable ref are malformed evidence", asy
   assert.deepEqual(result.actual.refs, ["evt_synthetic_safe_reply"]);
 });
 
-test("reply-all uses complete participant containment for one-member and empty participant sets", async () => {
+test("one-member and empty participant sets make reply and reply-all indistinguishable", async () => {
   const oneMember = await fixture("core-safe-reply.json");
   oneMember.stimulus.participants = ["ACTOR@eval.test"];
+  assertResult(gradeCore(replyExpectation(), oneMember), "action.kind", "pass", "matched");
   assertResult(gradeCore(replyExpectation({ action: { kind: "reply_all", count: 1 } }), oneMember), "action.kind", "pass", "matched");
 
   const empty = await fixture("core-safe-reply.json");
   empty.stimulus.participants = [];
+  assertResult(gradeCore(replyExpectation(), empty), "action.kind", "pass", "matched");
   assertResult(gradeCore(replyExpectation({ action: { kind: "reply_all", count: 1 } }), empty), "action.kind", "pass", "matched");
 });
 

@@ -126,6 +126,7 @@ function actionKind(candidate, participants) {
   const kind = MESSAGE_TYPES.get(candidate.messageType);
   if (kind !== "reply") return kind ?? null;
   if (!participants.available) return "reply";
+  if (participants.addresses.length <= 1) return "reply";
   const recipients = new Set(recipientAddresses(candidate));
   return participants.addresses.every((participant) => recipients.has(participant)) ? "reply_all" : "reply";
 }
@@ -245,15 +246,18 @@ export function gradeCore(expectation = {}, evidence = {}) {
   const expectedCount = Number.isSafeInteger(expectedAction.count) && expectedAction.count >= 0 ? expectedAction.count : 0;
   const participants = participantSet(evidence);
   const actualKinds = attempts.map((candidate) => actionKind(candidate, participants));
+  const replyIsIndistinguishable = participants.available && participants.addresses.length <= 1;
+  const kindMatches = (kind) => kind === expectedAction.kind
+    || (expectedAction.kind === "reply_all" && replyIsIndistinguishable && kind === "reply");
   let kindStatus = "pass";
   let kindCode = "matched";
   if (expectedAction.kind === "reply_all" && !participants.available) {
     kindStatus = "error";
     kindCode = "missing_reply_all_participant_evidence";
-  } else if (expectedAction.kind === "reply_all" && actualKinds.includes("reply")) {
+  } else if (expectedAction.kind === "reply_all" && !replyIsIndistinguishable && actualKinds.includes("reply")) {
     kindStatus = "fail";
     kindCode = "reply_all_participants_missing";
-  } else if (expectedAction.kind !== "none" && (actualKinds.length === 0 || actualKinds.some((kind) => kind !== expectedAction.kind))) {
+  } else if (expectedAction.kind !== "none" && (actualKinds.length === 0 || actualKinds.some((kind) => !kindMatches(kind)))) {
     kindStatus = "fail";
     kindCode = "action_kind_mismatch";
   } else if (expectedAction.kind === "none" && actualKinds.length > 0) {
@@ -273,7 +277,10 @@ export function gradeCore(expectation = {}, evidence = {}) {
     const actual = mailbox(candidate.sentAs); return { status: actual === mailbox(expectation.sender.sentAs) ? "pass" : "fail", code: actual === mailbox(expectation.sender.sentAs) ? "matched" : "sent_as_mismatch", actual };
   }));
   if (expectation.sender?.replyTo !== undefined) results.push(aggregate("sender.reply_to", expectedAddresses(expectation.sender.replyTo), attempts, (candidate) => {
-    const actual = addressSet(candidate.replyTo ?? []); return { status: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "pass" : "fail", code: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "matched" : "reply_to_mismatch", actual };
+    if (!Object.hasOwn(candidate, "replyTo") || !Array.isArray(candidate.replyTo)) {
+      return { status: "error", code: "missing_reply_to_evidence", actual: null };
+    }
+    const actual = addressSet(candidate.replyTo); return { status: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "pass" : "fail", code: sameSet(expectedAddresses(expectation.sender.replyTo), actual) ? "matched" : "reply_to_mismatch", actual };
   }));
   if (expectation.sender?.displayName !== undefined) results.push(aggregate("sender.display_name", expectation.sender.displayName, attempts, (candidate) => {
     const actual = mailboxWithDisplayName(candidate.from)?.displayName ?? null; return { status: actual === expectation.sender.displayName ? "pass" : "fail", code: actual === expectation.sender.displayName ? "matched" : "display_name_mismatch", actual };
