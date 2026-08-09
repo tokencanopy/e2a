@@ -36,13 +36,29 @@ cat > "$SBX/mcp.json" <<JSON
   "env": { "FIXTURE_DIR": "$FIXTURE", "ACTION_LOG": "$ACTION_LOG" } } } }
 JSON
 
+MODEL_LOG="$SBX/claude.log"; model_rc=0
 ( cd "$SBX" && PATH="$SBX/bin:$PATH" claude -p "$(cat "$HARNESS/prompts/$LANE.txt")" \
     --mcp-config "$SBX/mcp.json" \
-    --permission-mode bypassPermissions \
-    --allowedTools "Bash(scripts/ticket_card.sh:*)" "Bash(gh issue:*)" "Read" \
-      "mcp__e2a__list_messages" "mcp__e2a__get_message" "mcp__e2a__get_conversation" \
-    --max-turns 40 >/dev/null 2>&1 ) || true
+    --strict-mcp-config \
+    --permission-mode dontAsk \
+    --tools "Bash,Read" \
+    --allowedTools \
+      "Bash(scripts/ticket_card.sh:*)" "Bash(gh issue:*)" \
+      "Bash(gh pr list:*)" "Bash(gh pr view:*)" "Read" \
+      "mcp__e2a__list_messages" "mcp__e2a__get_message" \
+      "mcp__e2a__get_conversation" "mcp__e2a__list_conversations" \
+      "mcp__e2a__get_attachment" "mcp__e2a__whoami" \
+    --disallowedTools \
+      "Bash(gh auth:*)" "Bash(gh api:*)" "Bash(gh secret:*)" "Bash(gh gist:*)" \
+      "Bash(gh pr merge:*)" \
+      "mcp__e2a__send_message" "mcp__e2a__reply_to_message" "mcp__e2a__forward_message" \
+    --max-turns 40 ) >"$MODEL_LOG" 2>&1 || model_rc=$?
 
 echo "--- $NAME action log ---"; cat "$ACTION_LOG"
 echo "--- asserting ---"
-bash "$FIXTURE/assert.sh" "$ACTION_LOG"
+assert_rc=0; bash "$FIXTURE/assert.sh" "$ACTION_LOG" || assert_rc=$?
+if [ "$model_rc" -ne 0 ]; then
+  echo "--- $NAME model failed (exit $model_rc; last 80 log lines) ---"
+  tail -80 "$MODEL_LOG"
+fi
+[ "$model_rc" -eq 0 ] && [ "$assert_rc" -eq 0 ]

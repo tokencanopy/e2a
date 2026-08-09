@@ -6,6 +6,14 @@ const workflow = (name) => readFile(
   new URL(`../templates/workflows/${name}`, import.meta.url),
   "utf8",
 );
+const fixtureRunner = () => readFile(
+  new URL("./fixtures/harness/runner.sh", import.meta.url),
+  "utf8",
+);
+const runtimeProcedure = (name) => readFile(
+  new URL(`../templates/runtime-skill/${name}`, import.meta.url),
+  "utf8",
+);
 
 const toolSet = (source, flag, nextFlag) => {
   const match = source.match(new RegExp(
@@ -94,4 +102,40 @@ test("the fix lane exposes only its documented built-ins", async () => {
   assert.match(source, /--permission-mode\s+dontAsk/);
   assert.match(source, /--tools\s+"Bash,Edit,Write,Read,Glob,Grep"/);
   assert.match(source, /--strict-mcp-config/);
+  const disallowed = source.match(/--disallowedTools\s+([^\n]+)/);
+  assert.ok(disallowed, "fix lane must declare --disallowedTools");
+  assert.deepEqual(
+    [...disallowed[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]).sort(),
+    [
+      "Bash(gcloud:*)",
+      "Bash(kubectl:*)",
+      "Bash(aws:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh pr merge:*)",
+    ].sort(),
+  );
+});
+
+test("the live triage fixture uses the shipped permission envelope", async () => {
+  const source = await fixtureRunner();
+  assert.doesNotMatch(source, /\)\s*\|\|\s*true/, "fixture must not swallow the model exit status");
+  assert.match(source, /claude\.log/);
+  assert.doesNotMatch(source, /--permission-mode\s+bypassPermissions/);
+  assert.match(source, /--permission-mode\s+dontAsk/);
+  assert.match(source, /--tools\s+"Bash,Read"/);
+  assert.match(source, /--strict-mcp-config/);
+  assert.deepEqual(
+    toolSet(source, "--allowedTools", "--disallowedTools"),
+    expected["feedback-triage.yml.tmpl"].allowed,
+  );
+  assert.deepEqual(
+    toolSet(source, "--disallowedTools", "--max-turns"),
+    expected["feedback-triage.yml.tmpl"].disallowed,
+  );
+});
+
+test("triage requires a correlation lookup before classifying every summary", async () => {
+  const source = await runtimeProcedure("triage.md");
+  assert.match(source, /for every summary.*find-by-comms.*before.*skip.*fetch/is);
+  assert.match(source, /subject prefixes.*not evidence.*existing ticket/is);
 });

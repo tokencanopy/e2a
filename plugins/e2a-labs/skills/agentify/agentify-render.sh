@@ -48,6 +48,10 @@ _single_line() {
   esac
 }
 
+_required() {
+  [ -n "$2" ] || { echo "agentify: $1 is required" >&2; exit 2; }
+}
+
 _validate_answers() {
   local name
   for name in ANS_OWNER ANS_REPO ANS_MARKER ANS_REVIEWER_LOGIN ANS_BOT_LOGIN \
@@ -58,6 +62,9 @@ _validate_answers() {
   [[ "${ANS_REPO:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "agentify: invalid repo" >&2; exit 2; }
   [[ "${ANS_MARKER:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "agentify: invalid marker" >&2; exit 2; }
   [[ "${ANS_FIX_GATE_MODE:-}" =~ ^(auto|hitl)$ ]] || { echo "agentify: fix gate must be auto or hitl" >&2; exit 2; }
+  for name in ANS_PRODUCT_NAME ANS_SUPPORT_ADDRESS ANS_APPROVER_ADDRESS ANS_VERIFY_SETUP_SCRIPT; do
+    _required "$name" "${!name:-}"
+  done
 }
 
 render_config() {  # $1 = target root, $2 = force ("1" to overwrite)

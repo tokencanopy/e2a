@@ -26,6 +26,11 @@ first and fetch ONLY true new feedback.
 `sort=asc`, limit `budgets.triage_items_per_run`) — summaries carry
 `conversation_id`. For each summary:
 
+**Mandatory correlation gate:** for every summary, call `ticket_card.sh
+find-by-comms <conversation_id>` exactly once before deciding to skip or fetch
+the message. Subject prefixes such as `Re:` and `Fwd:` are not evidence of an
+existing ticket; only a successful correlation lookup establishes that.
+
 - **A reply to an existing ticket** — `ticket_card.sh find-by-comms
   <conversation_id>` returns an issue (it matches the bot-authored
   exact last nonblank `<!-- {marker} comms:<conversation_id> -->` footer, trusted
