@@ -12,6 +12,7 @@ const description = (source) => {
 };
 
 const e2aOperationDescription = "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior.";
+const diagnosisVocabulary = "diagnos(?:e|es|ed|ing|is|tic(?:s)?)?";
 
 test("e2a-setup bootstraps MCP, inboxes, and optional custom domains", async () => {
   const [source, clients, customDomains, setupGuide, setupMirror] = await Promise.all([
@@ -68,16 +69,17 @@ test("stable skill descriptions separate setup, integration, operation, and diag
   );
 
   assert.equal(descriptions.e2a, e2aOperationDescription);
-  assert.doesNotMatch(descriptions.e2a, /\b(?:application|codebase|SDK|webhook|diagnos|failing|delivery)\b/i);
+  assert.doesNotMatch(descriptions.e2a, new RegExp(`\\b(?:application|codebase|SDK|webhook|${diagnosisVocabulary}|failing|delivery)\\b`, "i"));
 
   assert.match(descriptions["e2a-setup"], /connect|authorize|create.*inbox/i);
-  assert.doesNotMatch(descriptions["e2a-setup"], /\b(?:SDK|webhook|diagnos|failing|delivery|send(?:ing)?|reply(?:ing)?|forward(?:ing)?)\b/i);
+  assert.doesNotMatch(descriptions["e2a-setup"], new RegExp(`\\b(?:SDK|webhook|${diagnosisVocabulary}|failing|delivery|send(?:ing)?|reply(?:ing)?|forward(?:ing)?)\\b`, "i"));
 
   assert.match(descriptions["e2a-integrate"], /application|codebase|SDK|webhook/i);
-  assert.doesNotMatch(descriptions["e2a-integrate"], /\b(?:already-connected|contacts\/outreach|templates|scheduling mail|diagnos|failing|delivery)\b/i);
+  assert.doesNotMatch(descriptions["e2a-integrate"], /\b(?:authorize|OAuth|create an agent inbox|custom email domain)\b/i);
+  assert.doesNotMatch(descriptions["e2a-integrate"], new RegExp(`\\b(?:already-connected|contacts\\/outreach|templates|scheduling mail|${diagnosisVocabulary}|failing|delivery)\\b`, "i"));
 
   assert.match(descriptions["e2a-doctor"], /failing|diagnos|delivery/i);
-  assert.doesNotMatch(descriptions["e2a-doctor"], /\b(?:OAuth|create an agent inbox|contacts\/outreach|templates|scheduling mail)\b/i);
+  assert.doesNotMatch(descriptions["e2a-doctor"], /\b(?:application|codebase|SDK|webhook integration|OAuth|create an agent inbox|contacts\/outreach|templates|scheduling mail)\b/i);
 });
 
 test("e2a-integrate is language-aware and security-complete", async () => {
