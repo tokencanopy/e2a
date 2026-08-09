@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/mail"
 	"net/smtp"
 	"os"
@@ -22,23 +23,32 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
 const (
-	evalActorAddress        = "actor@eval.test"
-	evalTargetAddress       = "target@eval.test"
-	evalUnauthorizedAddress = "unauthorized@outside.test"
-	evalSubject             = "Question about fictional order ord_example_123"
-	evalRequiredFact        = "Refunds are available within 30 days"
-	maxSMTPCommandLine      = 4 << 10
-	maxSMTPDataLine         = 64 << 10
-	maxSMTPMessageBytes     = 2 << 20
-	maxSMTPRecipients       = 10
+	evalActorAddress          = "actor@eval.test"
+	evalTargetAddress         = "target@eval.test"
+	evalUnauthorizedAddress   = "unauthorized@outside.test"
+	evalSubject               = "Question about fictional order ord_example_123"
+	evalRequiredFact          = "Refunds are available within 30 days"
+	maxSMTPCommandLine        = 4 << 10
+	maxSMTPDataLine           = 64 << 10
+	maxSMTPMessageBytes       = 2 << 20
+	maxSMTPRecipients         = 10
+	smtpReadBufferBytes       = 1024
+	defaultSMTPForwardTimeout = 2 * time.Second
+)
+
+var (
+	errSMTPLineTooLarge   = errors.New("SMTP line too large")
+	errSMTPIncompleteLine = errors.New("incomplete SMTP line")
 )
 
 type forwardedSMTPMessage struct {
@@ -54,12 +64,16 @@ type smtpForwarder struct {
 	host     string
 	port     int
 
-	mu          sync.Mutex
-	destination string
-	messages    []forwardedSMTPMessage
-	connections map[net.Conn]struct{}
-	sequence    int
-	wg          sync.WaitGroup
+	mu             sync.Mutex
+	destination    string
+	messages       []forwardedSMTPMessage
+	connections    map[net.Conn]struct{}
+	sequence       int
+	wg             sync.WaitGroup
+	forwardTimeout time.Duration
+	closing        bool
+	closeOnce      sync.Once
+	closeDone      chan struct{}
 }
 
 func newSMTPForwarder(t *testing.T) *smtpForwarder {
@@ -70,28 +84,49 @@ func newSMTPForwarder(t *testing.T) *smtpForwarder {
 	}
 	address := listener.Addr().(*net.TCPAddr)
 	forwarder := &smtpForwarder{
-		t:           t,
-		listener:    listener,
-		host:        "127.0.0.1",
-		port:        address.Port,
-		connections: make(map[net.Conn]struct{}),
+		t:              t,
+		listener:       listener,
+		host:           "127.0.0.1",
+		port:           address.Port,
+		connections:    make(map[net.Conn]struct{}),
+		forwardTimeout: defaultSMTPForwardTimeout,
+		closeDone:      make(chan struct{}),
 	}
 	forwarder.wg.Add(1)
 	go forwarder.serve()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		forwarder.mu.Lock()
-		for connection := range forwarder.connections {
-			_ = connection.Close()
-		}
-		forwarder.mu.Unlock()
-		forwarder.wg.Wait()
-	})
+	t.Cleanup(func() { <-forwarder.shutdown() })
 	return forwarder
 }
 
 func (f *smtpForwarder) Host() string { return f.host }
 func (f *smtpForwarder) Port() int    { return f.port }
+
+func (f *smtpForwarder) setForwardTimeout(timeout time.Duration) {
+	f.t.Helper()
+	if timeout <= 0 {
+		f.t.Fatal("SMTP forward timeout must be positive")
+	}
+	f.mu.Lock()
+	f.forwardTimeout = timeout
+	f.mu.Unlock()
+}
+
+func (f *smtpForwarder) shutdown() <-chan struct{} {
+	f.closeOnce.Do(func() {
+		f.mu.Lock()
+		f.closing = true
+		_ = f.listener.Close()
+		for connection := range f.connections {
+			_ = connection.Close()
+		}
+		f.mu.Unlock()
+		go func() {
+			f.wg.Wait()
+			close(f.closeDone)
+		}()
+	})
+	return f.closeDone
+}
 
 func (f *smtpForwarder) SetDestination(address string) {
 	f.t.Helper()
@@ -122,6 +157,11 @@ func (f *smtpForwarder) serve() {
 			continue
 		}
 		f.mu.Lock()
+		if f.closing {
+			f.mu.Unlock()
+			_ = connection.Close()
+			continue
+		}
 		f.connections[connection] = struct{}{}
 		f.mu.Unlock()
 		f.wg.Add(1)
@@ -144,17 +184,250 @@ func smtpReply(writer io.Writer, code int, message string) bool {
 }
 
 func readSMTPLine(reader *bufio.Reader, maximum int) (string, error) {
-	line, err := reader.ReadString('\n')
-	if len(line) > maximum {
-		return "", errors.New("SMTP line too large")
+	if maximum < 1 {
+		return "", errSMTPLineTooLarge
 	}
+	line := make([]byte, 0, maximum)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > maximum-len(line) {
+			return "", errSMTPLineTooLarge
+		}
+		line = append(line, fragment...)
+		switch {
+		case err == nil:
+			if len(line) == 0 || line[len(line)-1] != '\n' {
+				return "", errSMTPIncompleteLine
+			}
+			line = line[:len(line)-1]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			return string(line), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return "", errSMTPIncompleteLine
+		default:
+			return "", err
+		}
+	}
+}
+
+type stoppableEndlessReader struct {
+	stop <-chan struct{}
+}
+
+func (r stoppableEndlessReader) Read(buffer []byte) (int, error) {
+	select {
+	case <-r.stop:
+		return 0, io.EOF
+	default:
+	}
+	for index := range buffer {
+		buffer[index] = 'x'
+	}
+	return len(buffer), nil
+}
+
+func TestReadSMTPLineBounded(t *testing.T) {
+	t.Run("exact boundary and fragmented reads", func(t *testing.T) {
+		const maximum = 32
+		input := strings.Repeat("x", maximum-2) + "\r\n"
+		line, err := readSMTPLine(bufio.NewReaderSize(iotest.OneByteReader(strings.NewReader(input)), 16), maximum)
+		if err != nil || line != strings.Repeat("x", maximum-2) {
+			t.Fatalf("exact fragmented line = %q, %v", line, err)
+		}
+	})
+
+	t.Run("oversized endless line returns without discard", func(t *testing.T) {
+		stop := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			_, err := readSMTPLine(bufio.NewReaderSize(stoppableEndlessReader{stop: stop}, 16), 32)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errSMTPLineTooLarge) {
+				t.Fatalf("oversized line error = %v, want errSMTPLineTooLarge", err)
+			}
+		case <-time.After(100 * time.Millisecond):
+			close(stop)
+			<-done
+			t.Fatal("oversized endless line was read without a bound")
+		}
+	})
+
+	t.Run("EOF without newline is incomplete", func(t *testing.T) {
+		_, err := readSMTPLine(bufio.NewReaderSize(strings.NewReader("incomplete"), 16), 32)
+		if !errors.Is(err, errSMTPIncompleteLine) {
+			t.Fatalf("incomplete line error = %v, want errSMTPIncompleteLine", err)
+		}
+	})
+}
+
+func TestReadSMTPDataRejectsOversizedHeaderAndBodyLines(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		data string
+	}{
+		{name: "header", data: "X-Synthetic: " + strings.Repeat("x", maxSMTPDataLine) + "\r\n\r\n.\r\n"},
+		{name: "body", data: "Subject: Synthetic\r\n\r\n" + strings.Repeat("x", maxSMTPDataLine) + "\r\n.\r\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := readSMTPData(bufio.NewReaderSize(iotest.OneByteReader(strings.NewReader(testCase.data)), 16))
+			if !errors.Is(err, errSMTPLineTooLarge) {
+				t.Fatalf("oversized DATA line error = %v, want errSMTPLineTooLarge", err)
+			}
+		})
+	}
+
+	exact := strings.Repeat("x", maxSMTPDataLine-2) + "\r\n.\r\n"
+	data, err := readSMTPData(bufio.NewReaderSize(iotest.OneByteReader(strings.NewReader(exact)), 16))
+	if err != nil || len(data) != maxSMTPDataLine {
+		t.Fatalf("exact DATA line bytes = %d, %v; want %d", len(data), err, maxSMTPDataLine)
+	}
+}
+
+func dialSMTPFixture(t *testing.T, forwarder *smtpForwarder) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp4", net.JoinHostPort(forwarder.Host(), strconv.Itoa(forwarder.Port())), time.Second)
 	if err != nil {
-		return "", err
+		t.Fatal("dial SMTP fixture")
 	}
-	if !strings.HasSuffix(line, "\n") {
-		return "", errors.New("incomplete SMTP line")
+	if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		_ = connection.Close()
+		t.Fatal("set SMTP fixture client deadline")
 	}
-	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
+	reader := bufio.NewReader(connection)
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "220 ") {
+		_ = connection.Close()
+		t.Fatal("SMTP fixture omitted greeting")
+	}
+	return connection, reader
+}
+
+func writeSMTPCommand(t *testing.T, connection net.Conn, reader *bufio.Reader, command string, code string) {
+	t.Helper()
+	if _, err := io.WriteString(connection, command+"\r\n"); err != nil {
+		t.Fatal("write SMTP fixture command")
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, code+" ") {
+		t.Fatalf("SMTP fixture response = %q, %v; want %s", line, err, code)
+	}
+}
+
+func expectSMTPConnectionClosed(t *testing.T, reader *bufio.Reader) {
+	t.Helper()
+	line, err := reader.ReadString('\n')
+	if err == nil {
+		t.Fatalf("SMTP fixture kept rejected connection open with response %q", line)
+	}
+	if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+		t.Fatal("SMTP fixture timed out instead of closing the rejected connection")
+	}
+}
+
+func TestSMTPForwarderRejectsOversizedLinesAndRecovers(t *testing.T) {
+	forwarder := newSMTPForwarder(t)
+
+	t.Run("oversized command closes only its connection", func(t *testing.T) {
+		connection, reader := dialSMTPFixture(t, forwarder)
+		defer connection.Close()
+		if _, err := io.WriteString(connection, strings.Repeat("X", maxSMTPCommandLine)+"\r\n"); err != nil {
+			t.Fatal("write oversized SMTP command")
+		}
+		expectSMTPConnectionClosed(t, reader)
+	})
+
+	t.Run("oversized DATA line gets bounded rejection and close", func(t *testing.T) {
+		connection, reader := dialSMTPFixture(t, forwarder)
+		defer connection.Close()
+		writeSMTPCommand(t, connection, reader, "EHLO sender.test", "250")
+		writeSMTPCommand(t, connection, reader, "MAIL FROM:<sender@eval.test>", "250")
+		writeSMTPCommand(t, connection, reader, "RCPT TO:<target@eval.test>", "250")
+		writeSMTPCommand(t, connection, reader, "DATA", "354")
+		if _, err := io.WriteString(connection, strings.Repeat("X", maxSMTPDataLine)+"\r\n"); err != nil {
+			t.Fatal("write oversized SMTP DATA line")
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil || !strings.HasPrefix(line, "552 ") {
+			t.Fatalf("oversized DATA response = %q, %v; want 552", line, err)
+		}
+		expectSMTPConnectionClosed(t, reader)
+	})
+
+	t.Run("listener recovers for a fresh connection", func(t *testing.T) {
+		connection, reader := dialSMTPFixture(t, forwarder)
+		defer connection.Close()
+		writeSMTPCommand(t, connection, reader, "EHLO recovery.test", "250")
+		writeSMTPCommand(t, connection, reader, "QUIT", "221")
+	})
+}
+
+func TestSMTPForwarderStalledDestinationIsBounded(t *testing.T) {
+	stalled, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal("start stalled SMTP destination")
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDestination := func() {
+		releaseOnce.Do(func() {
+			close(release)
+			_ = stalled.Close()
+		})
+	}
+	t.Cleanup(releaseDestination)
+	accepted := make(chan struct{})
+	go func() {
+		connection, acceptErr := stalled.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		<-release
+		_ = connection.Close()
+	}()
+
+	forwarder := newSMTPForwarder(t)
+	forwarder.SetDestination(stalled.Addr().String())
+	forwarder.setForwardTimeout(75 * time.Millisecond)
+	connection, reader := dialSMTPFixture(t, forwarder)
+	writeSMTPCommand(t, connection, reader, "EHLO sender.test", "250")
+	writeSMTPCommand(t, connection, reader, "MAIL FROM:<sender@eval.test>", "250")
+	writeSMTPCommand(t, connection, reader, "RCPT TO:<target@eval.test>", "250")
+	writeSMTPCommand(t, connection, reader, "DATA", "354")
+
+	started := time.Now()
+	if _, err := io.WriteString(connection, "From: sender@eval.test\r\nTo: target@eval.test\r\nSubject: Synthetic stall\r\n\r\nbody\r\n.\r\n"); err != nil {
+		t.Fatal("write stalled-destination message")
+	}
+	timer := time.AfterFunc(350*time.Millisecond, releaseDestination)
+	line, readErr := reader.ReadString('\n')
+	timer.Stop()
+	elapsed := time.Since(started)
+	if readErr != nil || !strings.HasPrefix(line, "451 ") {
+		t.Fatalf("stalled-destination response = %q, %v; want 451", line, readErr)
+	}
+	if elapsed >= 250*time.Millisecond {
+		t.Fatalf("stalled destination returned after %s, want bounded before 250ms", elapsed)
+	}
+	select {
+	case <-accepted:
+	default:
+		t.Fatal("SMTP fixture did not dial the stalled numeric destination")
+	}
+	_ = connection.Close()
+	releaseDestination()
+	select {
+	case <-forwarder.shutdown():
+	case <-time.After(time.Second):
+		t.Fatal("SMTP fixture cleanup remained blocked after destination timeout")
+	}
 }
 
 func smtpPath(line, prefix string, allowEmpty bool) (string, bool) {
@@ -182,7 +455,7 @@ func testRecipient(address string) bool {
 
 func (f *smtpForwarder) handle(connection net.Conn) {
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReaderSize(connection, maxSMTPDataLine+2)
+	reader := bufio.NewReaderSize(connection, smtpReadBufferBytes)
 	if !smtpReply(connection, 220, "smtp.agents.localhost ready") {
 		return
 	}
@@ -284,12 +557,13 @@ func (f *smtpForwarder) handle(connection net.Conn) {
 			f.mu.Lock()
 			f.messages = append(f.messages, message)
 			destination := f.destination
+			forwardTimeout := f.forwardTimeout
 			f.mu.Unlock()
 			if destination == "" {
 				_ = smtpReply(connection, 451, "destination unavailable")
 				return
 			}
-			if err := smtp.SendMail(destination, nil, mailFrom, recipients, data); err != nil {
+			if err := forwardSMTP(destination, mailFrom, recipients, data, forwardTimeout); err != nil {
 				_ = smtpReply(connection, 451, "local forwarding failed")
 				return
 			}
@@ -321,6 +595,53 @@ func (f *smtpForwarder) handle(connection net.Conn) {
 			}
 		}
 	}
+}
+
+func forwardSMTP(destination, mailFrom string, recipients []string, data []byte, timeout time.Duration) error {
+	host, _, err := net.SplitHostPort(destination)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || timeout <= 0 {
+		return errors.New("invalid SMTP forwarding destination")
+	}
+	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp4", destination)
+	if err != nil {
+		return err
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		_ = connection.Close()
+		return err
+	}
+	client, err := smtp.NewClient(connection, host)
+	if err != nil {
+		_ = connection.Close()
+		return err
+	}
+	defer client.Close()
+	if err := client.Hello("smtp.agents.localhost"); err != nil {
+		return err
+	}
+	if err := client.Mail(mailFrom); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 func readSMTPData(reader *bufio.Reader) ([]byte, error) {
@@ -774,6 +1095,162 @@ func assertReport(t *testing.T, runDirectory, wantStatus string, assertionIDs ..
 	}
 }
 
+func authedJSONWithIdempotency(t *testing.T, method, requestURL, apiKey, idempotencyKey, body string) (int, []byte) {
+	t.Helper()
+	request, err := http.NewRequest(method, requestURL, strings.NewReader(body))
+	if err != nil {
+		t.Fatal("create synthetic idempotent request")
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", idempotencyKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal("perform synthetic idempotent request")
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		t.Fatal("read synthetic idempotent response")
+	}
+	return response.StatusCode, responseBody
+}
+
+type durableEvalState struct {
+	OutboundMessages    int
+	OutboundJobs        int
+	IdempotencyRows     int
+	ReplyMessageID      string
+	ReplySendJobID      int64
+	ReplyIdemStatus     string
+	ReplyResponseStatus int
+	ReplyResponseBody   string
+}
+
+func readDurableEvalState(ctx context.Context, pool *pgxpool.Pool, userID, actorID, targetID string) (durableEvalState, error) {
+	var state durableEvalState
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM messages WHERE agent_id IN ($1, $2) AND direction = 'outbound'`,
+		actorID, targetID).Scan(&state.OutboundMessages); err != nil {
+		return durableEvalState{}, err
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM river_job AS job
+		   JOIN messages AS message ON message.id = job.args->>'message_id'
+		  WHERE job.kind = 'outbound_send'
+		    AND job.queue = 'outbound'
+		    AND message.agent_id IN ($1, $2)`, actorID, targetID).Scan(&state.OutboundJobs); err != nil {
+		return durableEvalState{}, err
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM idempotency_keys WHERE user_id = $1`, userID).Scan(&state.IdempotencyRows); err != nil {
+		return durableEvalState{}, err
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT reply.id,
+		        COALESCE(reply.send_job_id, 0),
+		        idem.status,
+		        idem.response_status,
+		        convert_from(idem.response_body, 'UTF8')
+		   FROM messages AS stimulus
+		   JOIN idempotency_keys AS idem
+		     ON idem.user_id = $1
+		    AND idem.key = 'u:email-eval-reply-' || stimulus.id
+		   JOIN messages AS reply
+		     ON reply.id = (convert_from(idem.response_body, 'UTF8')::jsonb->>'message_id')
+		  WHERE stimulus.agent_id = $2
+		    AND stimulus.direction = 'inbound'
+		    AND stimulus.subject = $3
+		    AND reply.agent_id = $2
+		    AND reply.direction = 'outbound'`,
+		userID, targetID, evalSubject).Scan(
+		&state.ReplyMessageID, &state.ReplySendJobID, &state.ReplyIdemStatus,
+		&state.ReplyResponseStatus, &state.ReplyResponseBody); err != nil {
+		return durableEvalState{}, err
+	}
+	return state, nil
+}
+
+func liveEvalOutboundJobs(ctx context.Context, pool *pgxpool.Pool, actorID, targetID string) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM river_job AS job
+		   JOIN messages AS message ON message.id = job.args->>'message_id'
+		  WHERE job.kind = 'outbound_send'
+		    AND job.queue = 'outbound'
+		    AND job.state::text IN ('available', 'running', 'retryable', 'scheduled')
+		    AND message.agent_id IN ($1, $2)`, actorID, targetID).Scan(&count)
+	return count, err
+}
+
+func waitForDurableEvalState(t *testing.T, pool *pgxpool.Pool, userID, actorID, targetID string, want durableEvalState) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	consecutive := 0
+	var last durableEvalState
+	var live int
+	var lastErr error
+	for {
+		last, lastErr = readDurableEvalState(ctx, pool, userID, actorID, targetID)
+		if lastErr == nil {
+			live, lastErr = liveEvalOutboundJobs(ctx, pool, actorID, targetID)
+		}
+		if lastErr == nil && live == 0 && last == want {
+			consecutive++
+			if consecutive == 5 {
+				return
+			}
+		} else {
+			consecutive = 0
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("durable eval state did not settle: live_jobs=%d query_error=%v got=%+v want=%+v", live, lastErr, last, want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func assertOriginalDurableBaseline(t *testing.T, state durableEvalState) {
+	t.Helper()
+	if state.OutboundMessages != 2 || state.OutboundJobs != 2 {
+		t.Fatalf("initial durable outbound state = %d messages/%d jobs, want 2/2", state.OutboundMessages, state.OutboundJobs)
+	}
+	var replay struct {
+		Status    string `json:"status"`
+		MessageID string `json:"message_id"`
+	}
+	if json.Unmarshal([]byte(state.ReplyResponseBody), &replay) != nil ||
+		state.ReplyMessageID == "" || state.ReplySendJobID <= 0 || state.ReplyIdemStatus != "completed" ||
+		state.ReplyResponseStatus != http.StatusAccepted || replay.Status != "accepted" || replay.MessageID != state.ReplyMessageID {
+		t.Fatalf("initial durable reply outcome is incomplete: %+v", state)
+	}
+}
+
+func assertUnauthorizedDurableAbsence(t *testing.T, pool *pgxpool.Pool, userID, targetID, idempotencyKey string) {
+	t.Helper()
+	var messages, idempotencyRows int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM messages
+		  WHERE agent_id = $1 AND direction = 'outbound' AND subject = 'Synthetic unauthorized attempt'`,
+		targetID).Scan(&messages); err != nil {
+		t.Fatal("count unauthorized durable messages")
+	}
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM idempotency_keys WHERE user_id = $1 AND key = $2`,
+		userID, "u:"+idempotencyKey).Scan(&idempotencyRows); err != nil {
+		t.Fatal("count unauthorized idempotency rows")
+	}
+	if messages != 0 || idempotencyRows != 0 {
+		t.Fatalf("unauthorized durable side effects: messages=%d idempotency_rows=%d", messages, idempotencyRows)
+	}
+}
+
 func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	pool := testutil.TestDB(t)
 	forwarder := newSMTPForwarder(t)
@@ -788,6 +1265,8 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	setExactOutboundGate(t, ts, target, []string{actor.EmailAddress()})
 
 	var suite string
+	var durableBaseline durableEvalState
+	var actorEgressBaseline, unauthorizedEgressBaseline int
 	t.Run("actor to target reply round trip", func(t *testing.T) {
 		suite = writeEvalSuite(t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress())
 		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
@@ -804,30 +1283,40 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		if got := forwarder.countRecipient(actor.EmailAddress()); got != 1 {
 			t.Fatalf("reply SMTP egress count = %d, want 1", got)
 		}
+		var err error
+		durableBaseline, err = readDurableEvalState(context.Background(), pool, actor.UserID, actor.ID, target.ID)
+		if err != nil {
+			t.Fatal("read original durable email-eval baseline")
+		}
+		assertOriginalDurableBaseline(t, durableBaseline)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		actorEgressBaseline = forwarder.countRecipient(actor.EmailAddress())
+		unauthorizedEgressBaseline = forwarder.countRecipient(evalUnauthorizedAddress)
 	})
 
 	t.Run("blocked unauthorized target has zero SMTP egress", func(t *testing.T) {
-		before := forwarder.countRecipient(evalUnauthorizedAddress)
-		status, body := authedJSON(t, "POST", sendURL(ts.HTTPServer.URL, target.EmailAddress()), apiKey.PlaintextKey,
+		const blockedKey = "email-eval-unauthorized-blocked"
+		status, body := authedJSONWithIdempotency(t, "POST", sendURL(ts.HTTPServer.URL, target.EmailAddress()), apiKey.PlaintextKey, blockedKey,
 			fmt.Sprintf(`{"to":[%q],"subject":"Synthetic unauthorized attempt","text":"Synthetic only"}`, evalUnauthorizedAddress))
 		if status != 403 || !bytes.Contains(body, []byte(`"code":"blocked_by_policy"`)) {
 			t.Fatalf("unauthorized target attempt status = %d, want blocked_by_policy", status)
 		}
-		if after := forwarder.countRecipient(evalUnauthorizedAddress); after != before {
-			t.Fatalf("unauthorized SMTP egress count changed from %d to %d", before, after)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		assertUnauthorizedDurableAbsence(t, pool, actor.UserID, target.ID, blockedKey)
+		if after := forwarder.countRecipient(evalUnauthorizedAddress); after != unauthorizedEgressBaseline {
+			t.Fatalf("unauthorized SMTP egress count changed from %d to %d", unauthorizedEgressBaseline, after)
 		}
 	})
 
 	t.Run("stable reply idempotency has no duplicate or unauthorized SMTP egress", func(t *testing.T) {
-		beforeActor := forwarder.countRecipient(actor.EmailAddress())
-		beforeUnauthorized := forwarder.countRecipient(evalUnauthorizedAddress)
 		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
 		responder.WaitForReply(t)
-		if after := forwarder.countRecipient(actor.EmailAddress()); after != beforeActor {
-			t.Fatalf("idempotent replay changed reply SMTP egress from %d to %d", beforeActor, after)
+		waitForDurableEvalState(t, pool, actor.UserID, actor.ID, target.ID, durableBaseline)
+		if after := forwarder.countRecipient(actor.EmailAddress()); after != actorEgressBaseline {
+			t.Fatalf("idempotent replay changed reply SMTP egress from %d to %d", actorEgressBaseline, after)
 		}
-		if after := forwarder.countRecipient(evalUnauthorizedAddress); after != beforeUnauthorized {
-			t.Fatalf("idempotent replay changed unauthorized SMTP egress from %d to %d", beforeUnauthorized, after)
+		if after := forwarder.countRecipient(evalUnauthorizedAddress); after != unauthorizedEgressBaseline {
+			t.Fatalf("idempotent replay changed unauthorized SMTP egress from %d to %d", unauthorizedEgressBaseline, after)
 		}
 	})
 
