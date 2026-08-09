@@ -1,6 +1,6 @@
 ---
 name: e2a
-description: "Use when operating e2a (email for AI agents) over its MCP tools — composing, sending, receiving, or replying to email; managing agents and custom domains; or working with attachments — OR when integrating e2a into software with API keys, SDKs, and webhooks. With e2a YOU are the agent and the inbox IS the agent, not a human reading their mail. Covers concise plain-text and HTML composition, send_message vs reply_to_message threading, multi-agent disambiguation, programmatic integration, and common gotchas."
+description: "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior."
 version: 26
 ---
 
@@ -12,12 +12,12 @@ e2a is an authenticated email gateway for AI agents. It gives an agent a real em
 
 ## How this fits
 
-This file is the **operate-well manual** — the mental model and gotchas. It assumes you're already connected over MCP (the tools appear as `mcp__e2a__*`). For the things this file deliberately doesn't duplicate:
+This file is the **operate-well manual** — the mental model and gotchas. It assumes you're already connected over MCP (the tools appear as `mcp__e2a__*`).
 
-- **Connect / pick a client / first inbox** → https://e2a.dev/setup.md
-- **Auth (OAuth 2.1 DCR + PKCE, API keys, scopes)** → https://e2a.dev/auth.md
-- **Webhook + SDK code (TypeScript / Python, signature verification)** → https://e2a.dev/sdk.md
-- **Exact, current tool signatures** → call `tools/list` (authoritative), or the OpenAPI contract at https://e2a.dev/v1/openapi.yaml
+- **Connect, authorize, select/create an inbox, or configure a custom domain** → use `e2a-setup`.
+- **Add e2a sending, receiving, SDK, REST, or webhook code to an application** → use `e2a-integrate`.
+- **Investigate a failing connection, inbox, domain, webhook, or delivery** → use `e2a-doctor`.
+- **Exact, current tool signatures** → call `tools/list` (authoritative).
 
 The mental model below holds regardless of surface. Tool descriptions teach the precise per-tool contract; this file teaches the model the descriptions assume.
 
@@ -47,23 +47,6 @@ clearly identifies an inbox.
 6. **Custom domains are a two-step async dance.** `register_domain` returns DNS records (MX + TXT) to publish — it does NOT make the domain live. The user (or a DNS-provider MCP, such as [Cloudflare MCP](https://github.com/cloudflare/mcp), if one is loaded) must add those records out-of-band, wait for DNS propagation (minutes to hours), then `verify_domain`. Verification is idempotent and safe to retry. Until verification succeeds, the domain cannot send or receive mail. Don't promise the user their domain works the moment registration returns.
 
 ## Common workflows
-
-### First run: connect and verify e2a
-
-Before the first e2a operation in a task, inspect the current client's available e2a MCP tools. This is a tool-registry check, not a shell command.
-
-1. **Tools available:** call the e2a MCP `whoami` tool (often exposed as `mcp__e2a__whoami`). Never run the Unix or shell `whoami` command.
-2. **Tools absent:** identify the client and guide the user through its shortest setup path. Do not silently edit their configuration.
-   - **Claude Code:** run `claude mcp add --transport http --scope user e2a https://api.e2a.dev/mcp`, then have the user run `/mcp` and authorize in the browser.
-   - **Codex:** add `[mcp_servers.e2a]` with `url = "https://api.e2a.dev/mcp"` to the Codex config, then have the user run `codex mcp login e2a`.
-   - **Cursor / Windsurf:** add `{ "mcpServers": { "e2a": { "url": "https://api.e2a.dev/mcp" } } }` to the client's MCP configuration and complete its OAuth prompt.
-   - **Other remote-MCP clients:** configure the Streamable HTTP endpoint `https://api.e2a.dev/mcp` and complete OAuth 2.1 authorization. See https://e2a.dev/setup.md for client-specific details.
-
-   These interactive paths use OAuth. Never ask the user to paste an API key.
-3. After the user completes authorization, inspect the tool registry again and call the e2a MCP `whoami` tool.
-4. **Classify failures:** an authentication failure means the user should reauthorize through the current client's MCP flow. A network, timeout, or server failure is operational: report it and preserve known-good configuration and credentials.
-5. **Select the inbox:** for agent scope, use the returned `agent_email`. For account scope, call `list_agents`. Honor an inbox identified by the task; use the sole result when there is one; ask the user to choose when there are several. If there are none, offer to create `name@agents.e2a.dev` after they choose the local part—no custom domain or DNS is required.
-6. Verify readiness with `list_messages`, passing the selected `email` for account scope. This read is harmless and does not mark messages read. Once it succeeds, resume the user's original e2a task.
 
 ### Optional: require human review for every outbound email
 
@@ -225,50 +208,6 @@ Syntax is a small Mustache-like subset: `{{var}}` (HTML-escaped in the HTML part
 
 Templates are beta: shapes may change before they're declared stable. Only `send_message` takes template references — reply and forward don't.
 
-### Add a custom domain (e.g. `mail.acme.com`)
-
-**First: does the user actually own this domain?** If they just want to get started and don't own a domain, skip this entirely — create the agent on the shared `agents.e2a.dev` (mental-model fact #5), which is live with no DNS. Only run the flow below when the user owns the domain and wants branded addresses.
-
-1. `register_domain` with the FQDN — returns MX + TXT records and an unverified domain row.
-2. Hand the records to the user (or to a DNS-provider MCP — Cloudflare, Route 53, etc. — if one is loaded; suggest adding [Cloudflare MCP](https://github.com/cloudflare/mcp) if the domain is managed by Cloudflare so the agent can set up records automatically).
-3. Wait. DNS propagation is asynchronous — minutes typically, occasionally hours.
-4. `verify_domain` with the same FQDN. If it returns `verified: true`, the domain can RECEIVE mail. If still false, the response shows what DNS state was resolved so the user can debug. Retry as needed.
-5. Once verified, agents can be created on (or moved to) that domain.
-6. Sending as your own address is a **separate axis** that verifies asynchronously afterwards. Poll `get_domain` until `capabilities.outbound` is `verified` before promising the user mail will send from `@their-domain` — until then outbound still goes out as "… via e2a". `capabilities.inbound` is the receive axis (it restates `verified`); the two are independent, so don't infer one from the other.
-
-### Receive mail in your own backend (webhooks)
-
-If the user is building a service that handles inbound mail in their own code, that's an SDK/webhook job, not an MCP one. Subscribe a webhook (`create_webhook`, a separate `/v1/webhooks` resource — NOT a per-agent "mode") and verify deliveries with the per-webhook `whsec_…` secret returned once at creation. The full handler code (FastAPI / Express, `construct_event` / `constructEvent`) is at https://e2a.dev/sdk.md — defer to it rather than reconstructing it here.
-
-## Integrating e2a into software
-
-Everything above assumes **you** are the agent operating an inbox over MCP. But e2a is also a plain email API any software can build on — the "send and receive email from code" use case, except every address is an authenticated *agent* identity. When a user asks you to **integrate e2a into their app, service, or agent framework**, you're helping them write code against the REST API with an API key — not driving these MCP tools. Make the pivot explicit:
-
-- **MCP** (these tools) — interactive; the agent itself reads/sends mail; auth is OAuth; no integration code. This is you, right now.
-- **SDK / REST API** — programmatic; the user's software sends/receives mail; auth is an **API key**. This is what an integration uses.
-
-The mental model in this skill carries over unchanged: the REST/SDK responses use the same `status`, `message_id`, and reply-threading semantics the MCP tools do — only the transport and auth differ.
-
-### Set it up
-
-1. **Issue an API key and choose its scope.** Programmatic access authenticates with a key sent as `Authorization: Bearer e2a_…` (not the OAuth flow MCP uses). Scope is the load-bearing decision:
-   - **account** — workspace admin: provision agents, domains, webhooks, and API keys. Use for a backend that manages inboxes.
-   - **agent** — bound to one inbox (`agent` email at creation): send / read / reply for that identity only. Use for a service that *is* a single sender.
-
-   The secret is returned **once** at creation — store it in the app's secret manager, never in source. (Keys + scopes: https://e2a.dev/auth.md.) An account-scoped MCP session can mint **agent**-scoped keys directly with `create_api_key`; **account**-scoped keys can only be issued from the dashboard or the raw API.
-
-2. **Have an agent identity to send as.** Mail goes out FROM an agent address — `name@agents.e2a.dev` out of the box, or `name@their-domain.com` after the custom-domain verify dance (see "Add a custom domain" above). Create it once (`create_agent` / `POST /v1/agents`) or reuse an existing one.
-
-3. **Send from code.** `POST /v1/agents/{email}/messages` to send, `…/messages/{id}/reply` to reply in-thread — or the equivalent helper in the TypeScript (`@e2a/sdk`) or Python SDK. If a response has `status: "pending_review"`, surface the status and message ID and do not retry.
-
-4. **Receive from code (optional).** To handle inbound mail or delivery *events* in their backend, subscribe a webhook (`create_webhook` / `POST /v1/webhooks`) and verify every POST with the per-webhook `whsec_…` secret — see "Receive mail in your own backend" above. Don't poll the API for new mail.
-
-The full, current integration code — SDK install, send / reply / parse, webhook handlers with signature verification — lives in the docs, not here. Point the user at:
-
-- SDK + webhook code (TypeScript / Python): https://e2a.dev/sdk.md
-- Auth (API keys, scopes, OAuth): https://e2a.dev/auth.md
-- REST contract: https://e2a.dev/v1/openapi.yaml
-
 ## Gotchas
 
 - **Don't encode raw text as base64 yourself for attachments.** The `data` field expects base64 produced by another tool (a file reader, a doc generator, `get_attachment`). If you have plain text and want to attach it, write it to a file first and read it back, or generate the encoding via a Bash call — don't construct base64 from a Markdown string in your head.
@@ -286,10 +225,9 @@ The full, current integration code — SDK install, send / reply / parse, webhoo
 
 ## Reference
 
-- Connect / clients / first inbox: https://e2a.dev/setup.md
-- Auth (OAuth 2.1 DCR + PKCE, API keys, scopes): https://e2a.dev/auth.md
-- Webhook + SDK code: https://e2a.dev/sdk.md
+- Setup, OAuth, inbox creation, and custom domains: `e2a-setup`.
+- Application SDK, REST, and webhook integration: `e2a-integrate`.
+- Connection, inbox, domain, webhook, and delivery diagnosis: `e2a-doctor`.
 - Exact tool signatures: call `tools/list` (authoritative).
-- OpenAPI contract: https://e2a.dev/v1/openapi.yaml
 - The MCP surface is **78 tools** (21 runtime/inbox + 57 admin/setup) spanning agents, messages, attachments, delivery metrics, contacts and outreach, suppressions, domains, events, webhooks, API keys, and templates (beta). The set you see depends on your credential's scope: an agent-scoped credential sees the 21 runtime tools; an account-scoped credential sees all 78. Tool descriptions teach behavior; this skill teaches the mental model. (`create_api_key` mints **agent-scoped** keys only — account-scoped keys come from the dashboard or raw API.)
 - Plugin homepage / docs index: https://e2a.dev (machine-readable index: https://e2a.dev/llms.txt)

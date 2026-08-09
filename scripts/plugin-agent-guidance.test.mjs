@@ -46,29 +46,6 @@ test("the e2a skill teaches concise multipart email composition", async () => {
   assert.match(source, /message can be understood in ten seconds/i);
 });
 
-test("the e2a skill bootstraps and verifies an MCP connection", async () => {
-  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
-  const bootstrap = source.match(
-    /### First run:[\s\S]*?(?=\n### |\n## )/,
-  )?.[0] ?? "";
-
-  assert.match(bootstrap, /available e2a MCP tools/i);
-  assert.match(bootstrap, /e2a MCP [`\"]?whoami/i);
-  assert.match(bootstrap, /(?:never|not).*(?:Unix|shell).*whoami/i);
-  assert.match(
-    bootstrap,
-    /claude mcp add --transport http --scope user e2a https:\/\/api\.e2a\.dev\/mcp/,
-  );
-  assert.match(bootstrap, /codex mcp login e2a/);
-  assert.match(bootstrap, /mcpServers/);
-  assert.match(bootstrap, /Streamable HTTP/i);
-  assert.match(bootstrap, /authentication failure/i);
-  assert.match(bootstrap, /network, timeout, or server/i);
-  assert.match(bootstrap, /list_messages/);
-  assert.match(bootstrap, /resume.*original/i);
-  assert.match(bootstrap, /never ask.*API key/i);
-});
-
 test("the e2a skill teaches the contacts and outreach loop without overclaiming wake-up", async () => {
   const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
   const outreach = source.match(
