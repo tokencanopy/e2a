@@ -1433,6 +1433,25 @@ test("regrade publishes report before the complete summary commit marker", async
   assert.equal(stored.complete, false);
 });
 
+test("runSuite leaves no run directory behind when the compact reservation preflight exceeds its bounds", async () => {
+  const cases = Array.from({ length: 25_000 }, (_, index) => ({
+    id: `case-${String(index).padStart(5, "0")}-${"x".repeat(110)}`,
+  }));
+  const outputRoot = await root();
+  const attempt = () => runSuite({ suite: suite(cases), adapter: adapter(), outputRoot, runId: RUN_ID });
+  await assert.rejects(
+    attempt,
+    (error) => error.errorClass === "configuration_error" && error.code === "cases_artifact_limit",
+  );
+  await assert.rejects(stat(path.join(outputRoot, RUN_ID)), { code: "ENOENT" });
+  // A retry with the same explicit run id must fail with the limit again, not
+  // with run_directory_exists from a leftover of the rejected attempt.
+  await assert.rejects(
+    attempt,
+    (error) => error.errorClass === "configuration_error" && error.code === "cases_artifact_limit",
+  );
+});
+
 test("cumulative cases artifact bounds stop later sends and remain regradable", async () => {
   const cases = Array.from({ length: 18 }, (_, index) => ({
     id: `large-${index + 1}`,

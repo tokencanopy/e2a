@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
 import { assertEvalIdentifier, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
@@ -701,17 +701,30 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
   // leave an unreported mail send behind.
   const writer = await createArtifactWriter({ outputRoot, runId: resolvedRunId });
 
-  const artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase, writer.artifactAuthKey));
-  const artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
-  const artifactLimitSuffixBytes = new Array(artifactLimitRecords.length + 1).fill(0);
-  for (let index = artifactLimitRecords.length - 1; index >= 0; index -= 1) {
-    if (artifactLimitLineBytes[index] > CASES_ARTIFACT_LIMITS.lineBytes) {
-      throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case identifiers cannot fit bounded artifact records");
+  // The compact-record reservation preflight runs after the run directory and
+  // its append handle exist. If the reservation itself exceeds the bounds, the
+  // output root must be left exactly as the preflight found it: close the
+  // handle and remove the fresh, still-empty run directory so a corrected
+  // retry with the same run id is not blocked by the leftover.
+  let artifactLimitRecords;
+  let artifactLimitSuffixBytes;
+  try {
+    artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase, writer.artifactAuthKey));
+    const artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
+    artifactLimitSuffixBytes = new Array(artifactLimitRecords.length + 1).fill(0);
+    for (let index = artifactLimitRecords.length - 1; index >= 0; index -= 1) {
+      if (artifactLimitLineBytes[index] > CASES_ARTIFACT_LIMITS.lineBytes) {
+        throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case identifiers cannot fit bounded artifact records");
+      }
+      artifactLimitSuffixBytes[index] = artifactLimitLineBytes[index] + artifactLimitSuffixBytes[index + 1];
     }
-    artifactLimitSuffixBytes[index] = artifactLimitLineBytes[index] + artifactLimitSuffixBytes[index + 1];
-  }
-  if (artifactLimitSuffixBytes[0] > CASES_ARTIFACT_LIMITS.totalBytes) {
-    throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case set cannot fit bounded artifact records");
+    if (artifactLimitSuffixBytes[0] > CASES_ARTIFACT_LIMITS.totalBytes) {
+      throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case set cannot fit bounded artifact records");
+    }
+  } catch (error) {
+    await writer.close().catch(() => {});
+    await rm(writer.runDirectory, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 
   const cases = [];
