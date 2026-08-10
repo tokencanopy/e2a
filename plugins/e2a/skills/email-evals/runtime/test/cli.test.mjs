@@ -428,7 +428,7 @@ function run(command, args, options = {}) {
 }
 
 test("launcher routes scaffold locally without depending on a suite runtime", async () => {
-  const root = await mkdtemp(path.join("/private/tmp", "email-evals-cli-"));
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-cli-"));
   const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
   const scaffoldRoot = path.join(root, "scaffolded");
   const scaffolded = await run("bash", [
