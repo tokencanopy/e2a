@@ -66,12 +66,17 @@ the two directions use different mechanisms:
 
 ### Fast path (recommended): `tether.sh setup`
 
+`tether.sh`, `install.sh`, and `tether.env.example` all sit in this skill's own
+directory, next to this `SKILL.md`. Substitute its absolute path for
+`$TETHER_DIR` in every command below; the scripts resolve their own resources,
+so any working directory works.
+
 If the e2a CLI is logged in (`e2a login` in a browser, or a key persisted with
 `e2a config set api_key <key>` on a headless box), one command does the whole
 bootstrap:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/tether/tether.sh" setup
+"$TETHER_DIR/tether.sh" setup
 ```
 
 It verifies the credential (`e2a whoami`), ensures a tether inbox (reusing an
@@ -91,12 +96,12 @@ you@yourdomain` to use/create a specific inbox, `--new` to force a fresh one.
    (`e2a agents create name@agents.e2a.dev` — live immediately, no DNS).
 2. **Save the credentials:**
    ```bash
-   cp "${CLAUDE_PLUGIN_ROOT}/skills/tether/tether.env.example" ~/.e2a-tether.env
+   cp "$TETHER_DIR/tether.env.example" ~/.e2a-tether.env
    chmod 600 ~/.e2a-tether.env   # fill E2A_API_KEY (e2a_agt_…) + E2A_AGENT_EMAIL
    ```
 3. **(Optional) blocked-alert hook:**
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/skills/tether/install.sh" --to <repo-root>
+   "$TETHER_DIR/install.sh" --to <repo-root>
    ```
 
 Credentials resolve in order: explicit env vars → `~/.e2a-tether.env` →
@@ -146,7 +151,7 @@ Don't put a configured user through onboarding.
 
 ## Runtime flow (what the agent does when `/tether` is invoked)
 
-Let `T="${CLAUDE_PLUGIN_ROOT}/skills/tether/tether.sh"`.
+Let `T="$TETHER_DIR/tether.sh"`.
 
 0. **Preflight.** Run `"$T" status`. If `config: MISSING`, do **First run (new
    user)** above before continuing — don't call `start` and let it error out.

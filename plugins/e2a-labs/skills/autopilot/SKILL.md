@@ -46,21 +46,23 @@ The interview must establish:
    implemented in this release; use an explicitly reviewed custom wrapper.
 10. launchd, systemd, or foreground operation.
 
-Use the plugin-local entrypoint for the authoritative interview and policy:
+Use the plugin-local entrypoint for the authoritative interview and policy.
+`autopilot.sh` sits in this skill's own directory, next to this `SKILL.md`.
+Substitute its absolute path for `$AUTOPILOT` in every command below; the script
+resolves its own resources, so any working directory works.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" interview
+"$AUTOPILOT" interview
 ```
 
-It saves after every answer and can resume. When this skill is installed outside
-Claude Code, replace `${CLAUDE_PLUGIN_ROOT}` with the plugin root.
+It saves after every answer and can resume.
 
 ## Confirmation is a hard boundary
 
 Render the deterministic plan after onboarding:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" plan
+"$AUTOPILOT" plan
 ```
 
 Show the complete output, limitations, and 64-character plan digest to the user.
@@ -70,7 +72,7 @@ of the design, or permission to continue polishing is not installation approval.
 Only after the user confirms the displayed digest may you run:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" install --confirm <digest>
+"$AUTOPILOT" install --confirm <digest>
 ```
 
 `install` is visibly mutating. It uses the operator's current account-scoped e2a
@@ -84,7 +86,7 @@ Installation deliberately does **not** start the service. Starting an always-on
 agent is a second intentional action. Ask before running:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" start --agent support@example.com
+"$AUTOPILOT" start --agent support@example.com
 ```
 
 Never start Autopilot merely because install succeeded.
@@ -145,19 +147,19 @@ describe it as one.
 
 ```bash
 # Foreground debugging
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" run --agent support@example.com
+"$AUTOPILOT" run --agent support@example.com
 
 # Service lifecycle
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" start --agent support@example.com
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" stop --agent support@example.com
+"$AUTOPILOT" start --agent support@example.com
+"$AUTOPILOT" stop --agent support@example.com
 
 # Local status; --verify temporarily uses the current account CLI session to
 # compare observable e2a protection fields with the installed policy.
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" status --agent support@example.com
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" status --agent support@example.com --verify
+"$AUTOPILOT" status --agent support@example.com
+"$AUTOPILOT" status --agent support@example.com --verify
 
 # Paths only by default; add --follow to tail
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" logs --agent support@example.com --follow
+"$AUTOPILOT" logs --agent support@example.com --follow
 ```
 
 After starting, verify all of these before declaring success:
@@ -179,7 +181,7 @@ Use only synthetic addresses and content in repository fixtures and public logs.
 Show the uninstall plan and require the literal confirmation `DELETE`:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/autopilot/autopilot.sh" uninstall \
+"$AUTOPILOT" uninstall \
   --agent support@example.com --confirm DELETE
 ```
 

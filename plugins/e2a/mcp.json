@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "e2a": {
+      "type": "streamable-http",
+      "url": "https://api.e2a.dev/mcp"
+    }
+  }
+}

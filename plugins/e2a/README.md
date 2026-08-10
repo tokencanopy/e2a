@@ -81,10 +81,13 @@ in [`clients/`](./clients); the full per-client guide is at
 
 ```
 plugins/e2a/
-├── .claude-plugin/plugin.json   # Claude Code manifest
-├── .codex-plugin/plugin.json    # Codex manifest (skills + mcpServers + interface)
-├── .cursor-plugin/plugin.json   # Cursor manifest
-├── .mcp.json                    # the hosted MCP server (single source of truth)
+├── plugin.meta.json             # SOURCE OF TRUTH — every manifest below is generated from it
+├── plugin.json                  # Agent Plugins v1 portable manifest (generated)
+├── mcp.json                     # Agent Plugins v1 portable MCP config (generated)
+├── .claude-plugin/plugin.json   # Claude Code manifest (generated)
+├── .codex-plugin/plugin.json    # Codex manifest, skills + mcpServers + interface (generated)
+├── .cursor-plugin/plugin.json   # Cursor manifest (generated)
+├── .mcp.json                    # the hosted MCP server, legacy clients (generated)
 ├── assets/icon.svg
 ├── docs/                        # canonical agent docs mirrored at e2a.dev
 │   ├── setup.md                 # connect guide + first-inbox workflow
@@ -135,8 +138,14 @@ version: 12
 manifests** CI job)
 validates both plugin packages independently: their exact client manifest sets,
 per-package manifest versions, marketplace `source` paths, sole core ownership
-of the MCP server, and every `SKILL.md` frontmatter. A change that wouldn't load
-fails CI.
+of the MCP server, and every `SKILL.md` frontmatter. It also regenerates every
+manifest and fails if one drifted from the per-package `plugin.meta.json`,
+checks each package's Agent Plugins v1 portable manifest against the closed v1
+schemas, and rejects any skill file interpolating a client-specific path
+variable such as `${CLAUDE_PLUGIN_ROOT}` (those expand on one client and land
+as literal text everywhere else).
+`node --test scripts/validate-plugin.test.mjs` covers those guards against
+fixture trees. A change that wouldn't load fails CI.
 
 Agent-facing Markdown is authored in `docs/`. Run
 `node ../../scripts/sync-agent-docs.mjs` from this directory (or
@@ -145,10 +154,19 @@ committed `web/public/` mirrors. The repository-integrity CI job runs the same
 script with `--check` and fails if a hosted mirror drifts from its canonical
 source.
 
-When bumping a plugin version, update its `.claude-plugin/plugin.json` (the
-source of truth) **and** its other client manifests to match. Core e2a's
-marketplace metadata must match the core version too; Labs is independently
-versioned.
+**Never hand-edit a manifest.** The portable pair, the client manifests,
+`.mcp.json`, and the three root `marketplace.json` files are all generated.
+Edit the package's `plugin.meta.json` (`plugins/e2a/plugin.meta.json` or
+`plugins/e2a-labs/plugin.meta.json`), then run:
+
+```bash
+node scripts/generate-plugin-manifests.mjs
+```
+
+and commit the source together with whatever it regenerated. Editing a generated
+file directly fails CI, naming the file to fix. That includes version bumps:
+change `version` in the package's `plugin.meta.json` and regenerate. Marketplace
+metadata always follows the core version; Labs is independently versioned.
 
 ## Reference
 

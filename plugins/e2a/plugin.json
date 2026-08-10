@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "e2a",
+  "version": "0.9.0",
+  "description": "Authenticated email gateway for AI agents — per-agent inboxes, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+  "author": {
+    "name": "TokenCanopy",
+    "url": "https://e2a.dev"
+  },
+  "homepage": "https://e2a.dev",
+  "repository": "https://github.com/tokencanopy/e2a",
+  "license": "Apache-2.0",
+  "keywords": [
+    "email",
+    "smtp",
+    "agents",
+    "spf",
+    "dkim",
+    "inbox",
+    "mcp",
+    "oauth"
+  ]
+}
