@@ -112,7 +112,7 @@ func TestAccountMetricsExcludesTrashedAgents(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_accttrashlive",
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, false)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
