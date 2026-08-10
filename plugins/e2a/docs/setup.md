@@ -8,6 +8,10 @@ This guide connects e2a, selects or creates an inbox, and verifies that it is
 ready. Most setups use the shared `agents.e2a.dev` domain and require no DNS
 configuration.
 
+> **Plugin users.** Claude and Codex users with the e2a plugin can invoke
+> `e2a-setup` for a guided OAuth, inbox, and optional-domain flow. Manual MCP
+> clients should continue through this document.
+
 > **Two hosts.** Documentation (`setup.md`, `auth.md`, `sdk.md`,
 > `openapi.yaml`, and `llms.txt`) lives on `e2a.dev`. The REST API and MCP
 > server live on `api.e2a.dev`. Use `https://api.e2a.dev/mcp` for MCP and

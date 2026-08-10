@@ -7,14 +7,21 @@
   },
   "metadata": {
     "description": "e2a plugins for Claude Code — authenticated email for AI agents",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "plugins": [
     {
       "name": "e2a",
-      "description": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log. 76 MCP tools over hosted streamable HTTP with OAuth.",
+      "description": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
       "category": "productivity",
       "source": "./plugins/e2a",
+      "homepage": "https://e2a.dev"
+    },
+    {
+      "name": "e2a-labs",
+      "description": "Experimental Agentify, Autopilot, and Tether workflows for e2a. Requires the core e2a plugin for MCP tools and authentication.",
+      "category": "productivity",
+      "source": "./plugins/e2a-labs",
       "homepage": "https://e2a.dev"
     }
   ]

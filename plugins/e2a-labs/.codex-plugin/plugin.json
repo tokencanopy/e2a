@@ -1,0 +1,28 @@
+{
+  "name": "e2a-labs",
+  "displayName": "e2a Labs",
+  "version": "0.1.0",
+  "description": "Experimental autonomous workflows for e2a. Install the core e2a plugin first; it supplies the MCP connection and authentication.",
+  "author": {
+    "name": "TokenCanopy"
+  },
+  "homepage": "https://e2a.dev",
+  "repository": "https://github.com/tokencanopy/e2a",
+  "license": "Apache-2.0",
+  "keywords": [
+    "email",
+    "agents",
+    "automation",
+    "experimental"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "e2a Labs",
+    "shortDescription": "Experimental e2a autonomous workflows",
+    "longDescription": "Experimental Agentify, Autopilot, and Tether workflows. Requires the core e2a plugin, which supplies the hosted MCP connection and authentication.",
+    "developerName": "TokenCanopy",
+    "category": "Productivity",
+    "websiteURL": "https://e2a.dev",
+    "composerIcon": "./assets/icon.svg"
+  }
+}
