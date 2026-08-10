@@ -7,6 +7,7 @@ import test from "node:test";
 import { loadSuite } from "../lib/contract.mjs";
 import * as errorContract from "../lib/errors.mjs";
 import { EvalError } from "../lib/errors.mjs";
+import { artifactRedactionLossDigest } from "../lib/report.mjs";
 import { regradeRun, runSuite } from "../lib/runner.mjs";
 
 const ACTOR = "actor@eval.test";
@@ -117,6 +118,20 @@ async function root() {
   return mkdtemp(path.join(tmpdir(), "email-evals-runner-"));
 }
 
+async function writeAuthenticatedRecords(casesFile, records, resolvedSuite) {
+  const artifactAuthKey = (await readFile(
+    path.join(path.dirname(path.dirname(casesFile)), ".email-evals-artifact-auth-key"), "utf8",
+  )).trim();
+  for (const record of records) {
+    const entries = record.redactionLoss.entries;
+    const envelope = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "redactionLoss"));
+    record.redactionLoss.envelopeDigest = artifactRedactionLossDigest(
+      envelope, entries, resolvedSuite, artifactAuthKey,
+    );
+  }
+  await writeFile(casesFile, `${records.map(JSON.stringify).join("\n")}\n`);
+}
+
 test("runSuite executes cases with a plain sequential boundary and persists every outcome", async () => {
   let active = 0;
   const observed = [];
@@ -204,8 +219,9 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
 
   const hostileExpectation = expectation();
   hostileExpectation.subject = { requiredFragments: "not-an-array" };
+  const hostileSuite = suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]);
   const thrown = await runSuite({
-    suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]),
+    suite: hostileSuite,
     adapter: adapter((testCase) => evidence({ ...testCase, expect: expectation() })),
     outputRoot: await root(), runId: RUN_ID,
   });
@@ -217,8 +233,8 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.deepEqual(thrown.cases[0].assertions, []);
   const stored = (await readFile(thrown.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
   stored[0].primaryError.message = "Untrusted stored grader message";
-  await writeFile(thrown.files.cases, `${stored.map(JSON.stringify).join("\n")}\n`);
-  const regraded = await regradeRun({ suite: suite([{ id: "grader", send: { subject: "Grader", text: "Synthetic" }, expect: hostileExpectation }]), runDirectory: path.dirname(thrown.files.cases) });
+  await writeAuthenticatedRecords(thrown.files.cases, stored, hostileSuite);
+  const regraded = await regradeRun({ suite: hostileSuite, runDirectory: path.dirname(thrown.files.cases) });
   assert.equal(regraded.status, thrown.status);
   assert.deepEqual(regraded.cases[0].evidence, thrown.cases[0].evidence);
   assert.deepEqual(regraded.cases[0].assertions, []);
@@ -234,7 +250,7 @@ test("regrade ignores historical grader outcomes and applies current trusted ass
   records[0].primaryError = {
     class: "grader_error", code: "grader_threw", origin: "grader", boundary: "content", message: "Forged grader failure",
   };
-  await writeFile(original.files.cases, `${records.map(JSON.stringify).join("\n")}\n`);
+  await writeAuthenticatedRecords(original.files.cases, records, one);
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) });
   assert.equal(regraded.status, "pass");
   assert.equal(regraded.cases[0].primaryError, null);
@@ -291,7 +307,7 @@ expect:
 
   const forgedBoundary = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
   forgedBoundary[0].primaryError.boundary = "core";
-  await writeFile(original.files.cases, `${forgedBoundary.map(JSON.stringify).join("\n")}\n`);
+  await writeAuthenticatedRecords(original.files.cases, forgedBoundary, loaded);
   const boundaryRegraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) });
   assert.equal(boundaryRegraded.cases[0].primaryError.boundary, "content");
 });
@@ -773,6 +789,16 @@ test("relay logical and physical sender evidence survives artifacts and regrade 
         physicalFrom: "Synthetic Target via e2a <agent@agents.localhost>",
         sentAs: "relay",
       });
+      Object.assign(captured.stimulus, {
+        from: `Synthetic Actor <${ACTOR}>`,
+        physicalFrom: "Synthetic Actor via e2a <agent@agents.localhost>",
+        sentAs: "relay",
+      });
+      Object.assign(captured.actorReceipt, {
+        from: `Synthetic Target <${TARGET}>`,
+        physicalFrom: "Synthetic Target via e2a <agent@agents.localhost>",
+        sentAs: "relay",
+      });
       captured.candidates[0].mime = {
         ...captured.candidates[0].mime,
         from: "Synthetic Target via e2a <agent@agents.localhost>",
@@ -789,9 +815,25 @@ test("relay logical and physical sender evidence survives artifacts and regrade 
   assert.deepEqual(summary.cases[0].evidence.candidates[0].physicalFrom, {
     address: "observed:1", displayName: "Synthetic Target via e2a",
   });
+  assert.deepEqual(summary.cases[0].evidence.stimulus.from, {
+    address: "actor", displayName: "Synthetic Actor",
+  });
+  assert.deepEqual(summary.cases[0].evidence.stimulus.physicalFrom, {
+    address: "observed:1", displayName: "Synthetic Actor via e2a",
+  });
+  assert.equal(summary.cases[0].evidence.stimulus.sentAs, "relay");
+  assert.deepEqual(summary.cases[0].evidence.actorReceipt.from, {
+    address: "target", displayName: "Synthetic Target",
+  });
+  assert.deepEqual(summary.cases[0].evidence.actorReceipt.physicalFrom, {
+    address: "observed:1", displayName: "Synthetic Target via e2a",
+  });
+  assert.equal(summary.cases[0].evidence.actorReceipt.sentAs, "relay");
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
   assert.equal(regraded.cases[0].assertions.find(({ id }) => id === "sender.sent_as").status, "pass");
+  assert.deepEqual(regraded.cases[0].evidence.stimulus, summary.cases[0].evidence.stimulus);
+  assert.deepEqual(regraded.cases[0].evidence.actorReceipt, summary.cases[0].evidence.actorReceipt);
 });
 
 test("authenticated path losses preserve safe regrades and reject unknowable assertion edits", async () => {
@@ -859,6 +901,102 @@ test("authenticated path losses preserve safe regrades and reject unknowable ass
   );
 });
 
+test("changed erased values and redaction-auth downgrade attempts fail closed", async () => {
+  const expected = expectation();
+  expected.body.requiredFacts = ["e2a_old"];
+  const one = suite([{
+    id: "redaction-value-identity",
+    send: { subject: "Synthetic", text: "Synthetic question" },
+    expect: expected,
+  }]);
+  const outputRoot = await root();
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      captured.candidates[0].mime.text = "Synthetic answer e2a_old";
+      return captured;
+    }),
+    outputRoot,
+    runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass", JSON.stringify(summary.cases));
+  const originalSource = await readFile(summary.files.cases, "utf8");
+  const original = JSON.parse(originalSource);
+  const artifactAuthPath = path.join(outputRoot, ".email-evals-artifact-auth-key");
+  const artifactAuthSource = await readFile(artifactAuthPath);
+  assert.doesNotMatch(originalSource, /e2a_old/);
+  assert.ok(original.redactionLoss.entries.length > 0);
+  for (const entry of original.redactionLoss.entries) {
+    assert.match(entry.valueDigest, /^[a-f0-9]{64}$/, entry.path);
+  }
+
+  one.cases[0].expect.body.requiredFacts = ["e2a_new"];
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error"
+      && error.code === "redacted_evidence_assertion_change",
+    "distinct erased credentials must not collapse to one replay identity",
+  );
+  one.cases[0].expect.body.requiredFacts = ["e2a_old"];
+
+  const tamperedDigest = structuredClone(original);
+  tamperedDigest.redactionLoss.entries[0].valueDigest = "0".repeat(64);
+  await writeFile(summary.files.cases, `${JSON.stringify(tamperedDigest)}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    "mutating an erased-value identity must invalidate the authenticated envelope",
+  );
+
+  const withoutMetadata = structuredClone(original);
+  delete withoutMetadata.redactionLoss;
+  await writeFile(summary.files.cases, `${JSON.stringify(withoutMetadata)}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    "removing authenticated loss metadata must not enter a legacy replay path",
+  );
+
+  await writeFile(summary.files.cases, originalSource);
+  await unlink(artifactAuthPath);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error"
+      && ["invalid_artifact_auth", "invalid_case_artifact"].includes(error.code),
+    "an intact authenticated record must not replay without its private root",
+  );
+  await writeFile(artifactAuthPath, artifactAuthSource, { mode: 0o600 });
+
+  const otherOutputRoot = await root();
+  await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      captured.candidates[0].mime.text = "Synthetic answer e2a_old";
+      return captured;
+    }),
+    outputRoot: otherOutputRoot,
+    runId: RUN_ID,
+  });
+  await cp(path.join(otherOutputRoot, ".email-evals-artifact-auth-key"), artifactAuthPath);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+    "a sidecar copied from another output root must not authenticate this record",
+  );
+  await writeFile(artifactAuthPath, artifactAuthSource, { mode: 0o600 });
+
+  await writeFile(summary.files.cases, `${JSON.stringify(withoutMetadata)}\n`);
+  await unlink(artifactAuthPath);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error"
+      && ["invalid_artifact_auth", "invalid_case_artifact"].includes(error.code),
+    "removing both metadata and its sidecar must still fail closed",
+  );
+});
+
 test("redaction-loss authentication survives API-key rotation without replay egress", async () => {
   const keyA = "synthetic-key-a";
   const keyB = "synthetic-key-b";
@@ -919,7 +1057,9 @@ test("literal user-authored environment markers carry no redaction authority", a
   });
   assert.equal(summary.status, "pass");
   const stored = JSON.parse(await readFile(summary.files.cases, "utf8"));
-  assert.equal(stored.redactionLoss, undefined);
+  assert.equal(stored.redactionLoss.version, 2);
+  assert.deepEqual(stored.redactionLoss.entries, []);
+  assert.match(stored.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
   one.cases[0].expect.body.requiredFacts = ["reply"];
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "fail");
@@ -1360,6 +1500,16 @@ test("regradeRun deterministically regrades the committed alias-only pass golden
   const runDirectory = path.join(outputRoot, RUN_ID);
   await cp(new URL("../testdata/reports/pass/", import.meta.url), runDirectory, { recursive: true });
   const goldenSuite = suite([{ id: "no-action", send: { subject: "Synthetic", text: "Synthetic" }, expect: expectation("none") }]);
+  const artifactAuthKey = "d".repeat(64);
+  await writeFile(path.join(outputRoot, ".email-evals-artifact-auth-key"), `${artifactAuthKey}\n`, { mode: 0o600 });
+  const goldenCaseFile = path.join(runDirectory, "cases.jsonl");
+  const goldenRecord = JSON.parse(await readFile(goldenCaseFile, "utf8"));
+  goldenRecord.redactionLoss = {
+    version: 2,
+    entries: [],
+    envelopeDigest: artifactRedactionLossDigest(goldenRecord, [], goldenSuite, artifactAuthKey),
+  };
+  await writeFile(goldenCaseFile, `${JSON.stringify(goldenRecord)}\n`);
   const before = await readFile(path.join(runDirectory, "cases.jsonl"));
   const summary = await regradeRun({ suite: goldenSuite, runDirectory });
   assert.equal(summary.status, "pass");

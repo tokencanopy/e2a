@@ -708,28 +708,88 @@ function normalizedRelayPhysicalFrom(value) {
   return { source: value.replace(/^[ \t]+|[ \t]+$/g, ""), address: mailbox.address, displayName };
 }
 
-function reconcileRelaySender(data, message, mime, logicalFrom) {
-  const logicalAddress = normalizedAgent(logicalFrom);
-  const physical = [];
-  for (const value of [message?.headerFrom, mime?.from]) {
-    if (value === undefined || value === null) continue;
-    if (normalizedAgent(value) === logicalAddress) continue;
-    physical.push(normalizedRelayPhysicalFrom(value));
+function relayEnvelopeAddress(value) {
+  const address = normalizedAgent(value);
+  const separator = address.lastIndexOf("@");
+  const localPart = address.slice(0, separator);
+  const domain = address.slice(separator + 1);
+  if (localPart !== "agent" || !RELAY_DOMAIN.test(domain)) {
+    throw transportError("malformed_message", "Evaluation relay envelope sender evidence is malformed");
   }
-  if (mime && normalizedAgent(mime.from) === logicalAddress) {
-    throw transportError("conflicting_evidence", "Evaluation relay sender representations conflict");
+  return address;
+}
+
+function reconcileRelayDelivery(kind, {
+  logicalFrom, method, physicalFroms, mimeFroms, envelopeFroms, replyTos, expectedPhysicalFrom = null,
+}) {
+  const from = reconcileMailbox(`${kind} logical sender`, [logicalFrom], { required: true, preferred: logicalFrom });
+  if (method !== "smtp") {
+    throw transportError("conflicting_evidence", `Evaluation ${kind} relay sender provenance is inconsistent`);
   }
-  if (mime && physical.length === 0) {
-    throw transportError("malformed_message", "Evaluation relay sender evidence is missing");
-  }
-  if (!mime && physical.length === 0) return null;
-  if (data.method !== "smtp") {
-    throw transportError("conflicting_evidence", "Evaluation relay sender provenance is inconsistent");
+  const physical = mimeFroms
+    .filter((value) => value !== undefined && value !== null)
+    .map(normalizedRelayPhysicalFrom);
+  if (physical.length === 0) {
+    throw transportError("malformed_message", `Evaluation ${kind} relay sender evidence is missing`);
   }
   if (new Set(physical.map(({ address, displayName }) => `${displayName}\n${address}`)).size > 1) {
-    throw transportError("conflicting_evidence", "Evaluation relay sender representations conflict");
+    throw transportError("conflicting_evidence", `Evaluation ${kind} relay sender representations conflict`);
   }
-  return physical[0]?.source ?? null;
+  const envelopes = envelopeFroms
+    .filter((value) => value !== undefined && value !== null)
+    .map(relayEnvelopeAddress);
+  if (envelopes.length === 0) {
+    throw transportError("malformed_message", `Evaluation ${kind} relay envelope sender evidence is missing`);
+  }
+  if (new Set(envelopes).size > 1 || physical.some(({ address }) => address !== envelopes[0])) {
+    throw transportError("conflicting_evidence", `Evaluation ${kind} relay envelope sender representations conflict`);
+  }
+  const headerAddresses = physicalFroms
+    .filter((value) => value !== undefined && value !== null)
+    .map(normalizedAgent);
+  if (headerAddresses.some((address) => address !== envelopes[0])) {
+    throw transportError("conflicting_evidence", `Evaluation ${kind} relay sender representations conflict`);
+  }
+  const logicalAddress = normalizedAgent(from);
+  let replyToObserved = false;
+  for (const value of replyTos) {
+    if (value === undefined || value === null) continue;
+    const addresses = normalizedEvidenceAddresses(`${kind} Reply-To`, value);
+    replyToObserved = true;
+    if (!sameSet(addresses, [logicalAddress])) {
+      throw transportError("conflicting_evidence", `Evaluation ${kind} relay Reply-To representations conflict`);
+    }
+  }
+  if (!replyToObserved) {
+    throw transportError("malformed_message", `Evaluation ${kind} relay Reply-To evidence is missing`);
+  }
+  if (expectedPhysicalFrom !== null) {
+    const expected = normalizedRelayPhysicalFrom(expectedPhysicalFrom);
+    if (expected.address !== physical[0].address || expected.displayName !== physical[0].displayName) {
+      throw transportError("conflicting_evidence", `Evaluation ${kind} relay sender representations conflict`);
+    }
+  }
+  return { from, physicalFrom: physical[0].source, sentAs: "relay" };
+}
+
+function reconcileDeliveredSender(kind, {
+  logicalFrom, sentAs, method, message, mime, physicalFroms = [], envelopeFroms = [], replyTos = [],
+  expectedPhysicalFrom = null,
+}) {
+  const from = reconcileMailbox(`${kind} logical sender`, [logicalFrom], { required: true, preferred: logicalFrom });
+  if (sentAs === "relay") {
+    return reconcileRelayDelivery(kind, {
+      logicalFrom: from,
+      method,
+      physicalFroms,
+      mimeFroms: [mime?.from],
+      envelopeFroms: [...envelopeFroms, message?.envelopeFrom],
+      replyTos: [...replyTos, mime?.replyTo],
+      expectedPhysicalFrom,
+    });
+  }
+  reconcileMailbox(`${kind} sender`, [from, ...physicalFroms, message?.headerFrom, mime?.from], { required: true });
+  return { from, ...(sentAs === null ? {} : { sentAs }) };
 }
 
 async function mimeFromMessage(message, {
@@ -759,9 +819,46 @@ async function mimeFromMessage(message, {
   }
 }
 
-async function normalizeStimulus(sdk, event, actor, target, budget) {
+async function relayStimulusSenderContract(sdk, actor, sendResult, budget) {
+  const fetched = await sdk.messages.get(actor, sendResult.messageId);
+  const message = validateMessage(fetched, sendResult.messageId, "outbound");
+  const sentAs = reconcileSentAs([sendResult.sentAs, message.sentAs]);
+  if (sentAs !== "relay") {
+    throw transportError("conflicting_evidence", "Evaluation stimulus relay mode changed after submission");
+  }
+  const from = reconcileMailbox("stimulus outbound logical sender", [actor, message.headerFrom], {
+    required: true,
+    preferred: actor,
+  });
+  const mime = await mimeFromMessage(message, {
+    required: true, budget, label: "stimulus outbound", requireMessageId: false,
+  });
+  const providerIdentityAbsent = sendResult.providerMessageId === undefined
+    || sendResult.providerMessageId === null || sendResult.providerMessageId === "";
+  const providerMessageId = providerIdentityAbsent ? null : normalizeMessageIdToken(sendResult.providerMessageId);
+  if (!providerIdentityAbsent && providerMessageId === null) {
+    throw transportError("malformed_event", "Evaluation stimulus carried a malformed provider message identity");
+  }
+  if (mime.messageId !== null && providerMessageId !== null && mime.messageId !== providerMessageId) {
+    throw transportError("conflicting_evidence", "Evaluation stimulus MIME and provider message identities conflict");
+  }
+  const rfcMessageId = mime.messageId ?? providerMessageId;
+  if (rfcMessageId === null) {
+    throw transportError("malformed_event", "Evaluation stimulus omitted its provider message identity");
+  }
+  const sender = reconcileDeliveredSender("stimulus outbound", {
+    logicalFrom: from,
+    sentAs,
+    method: sendResult.method,
+    message,
+    mime,
+  });
+  return { ...sender, rfcMessageId };
+}
+
+async function normalizeStimulus(sdk, event, actor, target, sendResult, senderContract, budget) {
   const data = dataOf(event);
-  if (event.type !== "email.received" || !eventIsFor(event, target, "inbound") || normalizedAgent(data.header_from) !== actor) {
+  if (event.type !== "email.received" || !eventIsFor(event, target, "inbound")) {
     throw transportError("stimulus_identity_mismatch", "Target stimulus identity could not be verified");
   }
   const eventMessageId = messageIdOf(event, data, null, { required: true });
@@ -770,7 +867,24 @@ async function normalizeStimulus(sdk, event, actor, target, budget) {
   const message = validateMessage(fetchedMessage, messageId, "inbound");
   const conversationId = conversationIdOf(event, data, message);
   const mime = await mimeFromMessage(message, { required: true, budget, label: "stimulus" });
-  reconcileMailbox("stimulus sender", [data.header_from, message.headerFrom, mime.from], { required: true });
+  const sentAs = reconcileSentAs([sendResult?.sentAs, message?.sentAs]);
+  const sender = reconcileDeliveredSender("stimulus", {
+    logicalFrom: actor,
+    sentAs,
+    method: sentAs === "relay" ? "smtp" : sendResult?.method,
+    message,
+    mime,
+    physicalFroms: [data.header_from, message.headerFrom],
+    envelopeFroms: [data.envelope_from],
+    replyTos: [data.reply_to, message.replyTo],
+    expectedPhysicalFrom: senderContract?.physicalFrom ?? null,
+  });
+  if (sentAs === "relay") {
+    if (!senderContract || senderContract.sentAs !== "relay") {
+      throw transportError("conflicting_evidence", "Evaluation stimulus relay contract is unavailable");
+    }
+    reconcileText("stimulus RFC message", [senderContract.rfcMessageId, mime.messageId], { required: true });
+  }
   const subject = reconcileText("stimulus subject", [data.subject, message.subject, mime.subject], { required: true });
   const to = strings(data.to);
   const cc = strings(data.cc, { optional: true });
@@ -778,7 +892,7 @@ async function normalizeStimulus(sdk, event, actor, target, budget) {
   reconcileAddressSources("stimulus To", to, mime.to);
   reconcileAddressSources("stimulus Cc", cc, message.cc ?? mime.cc);
   reconcileAddressSources("stimulus Cc", cc, mime.cc);
-  const participants = stableEnvelopeRecipients([data.header_from], to, cc).filter((address) => address !== target);
+  const participants = stableEnvelopeRecipients([actor], to, cc).filter((address) => address !== target);
   const receivedAt = instant(data.received_at ?? message.createdAt ?? event.createdAt, "malformed_event").iso;
   const normalized = {
     ref: event.id,
@@ -787,6 +901,7 @@ async function normalizeStimulus(sdk, event, actor, target, budget) {
     rfcMessageId: mime.messageId,
     subject,
     receivedAt,
+    ...sender,
   };
   normalized.participants = participants;
   return normalized;
@@ -809,15 +924,19 @@ function bindCorrelatedConversation(stimulus, candidates) {
   return conversations.length === 1 ? { ...stimulus, conversationId: conversations[0] } : stimulus;
 }
 
-function stimulusEvents(events, actor, target, subject, lowerBound, upperBound) {
+function stimulusEvents(events, actor, target, subject, lowerBound, upperBound, senderContract) {
   return uniqueEvents(events).filter((event) => {
     if (event.type !== "email.received") return false;
     const observed = eventInstant(event).milliseconds;
     if (observed < lowerBound || observed > upperBound) return false;
     const data = dataOf(event);
-    return eventIsFor(event, target, "inbound")
-      && normalizedAgent(data.header_from) === actor
-      && data.subject === subject;
+    if (!eventIsFor(event, target, "inbound") || data.subject !== subject) return false;
+    if (senderContract?.sentAs !== "relay") return normalizedAgent(data.header_from) === actor;
+    const expected = normalizedRelayPhysicalFrom(senderContract.physicalFrom);
+    const physicalAddress = normalizedAgent(data.header_from);
+    const envelope = relayEnvelopeAddress(data.envelope_from);
+    const replyTo = normalizedEvidenceAddresses("stimulus Reply-To", data.reply_to);
+    return physicalAddress === expected.address && envelope === expected.address && sameSet(replyTo, [actor]);
   });
 }
 
@@ -922,16 +1041,17 @@ async function normalizeCandidate(sdk, target, metadata, budget) {
     transitions = await readLifecycle(sdk, target, messageId);
   }
   const sentAs = reconcileSentAs([data.sent_as, message?.sentAs]);
-  const from = reconcileMailbox("candidate sender", [data.from, data.agent_email], {
+  const from = reconcileMailbox("candidate sender", [data.from, data.agent_email, message?.headerFrom], {
     required: true,
     preferred: data.from ?? data.agent_email,
   });
-  let physicalFrom = null;
-  if (sentAs === "relay") {
-    physicalFrom = reconcileRelaySender(data, message, mime, from);
-  } else {
-    reconcileMailbox("candidate sender", [from, message?.headerFrom, mime?.from], { required: true });
-  }
+  const sender = reconcileDeliveredSender("candidate", {
+    logicalFrom: from,
+    sentAs,
+    method: data.method,
+    message,
+    mime,
+  });
   const subject = reconcileText("candidate subject", [data.subject, message?.subject, mime?.subject], {
     required: event.type !== "email.review_requested",
   });
@@ -954,9 +1074,8 @@ async function normalizeCandidate(sdk, target, metadata, budget) {
     direction: "outbound",
     provenance: "target_outbound",
     messageType: typeof data.message_type === "string" ? data.message_type : null,
-    from,
-    ...(physicalFrom === null ? {} : { physicalFrom }),
-    sentAs,
+    ...sender,
+    ...(sentAs === null ? { sentAs: null } : {}),
     ...(mime ? { replyTo: mime.replyTo } : {}),
     ...recipients,
     conversationId: metadata.conversationId,
@@ -1064,12 +1183,14 @@ function uniqueMessageSummaries(summaries) {
 async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candidates, actor, target, lowerBound, upperBound, budget) {
   const receipts = [];
   const candidateSubjects = new Set(candidates.map((candidate) => candidate.mime?.subject).filter((subject) => typeof subject === "string"));
+  const relayCandidatePresent = candidates.some((candidate) => candidate.sentAs === "relay");
   for (const event of uniqueEvents(actorEvents)) {
     if (event.type !== "email.received") continue;
     const observed = eventInstant(event).milliseconds;
     if (observed < lowerBound || observed > upperBound) continue;
     const data = dataOf(event);
-    if (!eventIsFor(event, actor, "inbound") || normalizedAgent(data.header_from) !== target) continue;
+    if (!eventIsFor(event, actor, "inbound")) continue;
+    if (!relayCandidatePresent && normalizedAgent(data.header_from) !== target) continue;
     if (candidateSubjects.size > 0 && !candidateSubjects.has(data.subject)) continue;
     const eventMessageId = messageIdOf(event, data, null, { required: true });
     const message = await sdk.messages.get(actor, eventMessageId);
@@ -1077,35 +1198,58 @@ async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candi
     validateMessage(message, receivedMessageId, "inbound");
     conversationIdOf(event, data, message);
     const mime = await mimeFromMessage(message, { required: true, budget, label: "actor receipt" });
-    reconcileMailbox("actor receipt sender", [data.header_from, message.headerFrom, mime.from], { required: true });
-    reconcileText("actor receipt subject", [data.subject, message.subject, mime.subject], { required: true });
     const candidate = candidateForMime(candidates, mime);
-    if (candidate) receipts.push({
+    if (candidate) {
+      const sender = reconcileDeliveredSender("actor receipt", {
+        logicalFrom: candidate.from,
+        sentAs: candidate.sentAs,
+        method: candidate.sentAs === "relay" ? "smtp" : null,
+        message,
+        mime,
+        physicalFroms: [data.header_from, message.headerFrom],
+        envelopeFroms: [data.envelope_from],
+        replyTos: [data.reply_to, message.replyTo],
+        expectedPhysicalFrom: candidate.physicalFrom ?? null,
+      });
+      reconcileText("actor receipt subject", [data.subject, message.subject, mime.subject], { required: true });
+      receipts.push({
       ref: event.id,
       messageId: candidate.messageId,
       receiptMessageId: receivedMessageId,
       observedAt: instant(data.received_at ?? event.createdAt, "malformed_event").iso,
-    });
+        ...sender,
+      });
+    }
   }
   if (receipts.length > 1) throw transportError("ambiguous_correlation", "Multiple actor receipts matched the evaluation case");
   if (receipts.length === 1) return receipts[0];
 
   for (const summary of uniqueMessageSummaries(actorMessages)) {
     if (!summary || typeof summary.id !== "string" || baseline.has(summary.id)) continue;
-    if (normalizedAgent(summary.headerFrom) !== target) continue;
+    if (!relayCandidatePresent && normalizedAgent(summary.headerFrom) !== target) continue;
     if (candidateSubjects.size > 0 && !candidateSubjects.has(summary.subject)) continue;
     const message = validateMessage(await sdk.messages.get(actor, summary.id), summary.id, "inbound");
-    if (normalizedAgent(message.headerFrom) !== target) continue;
     const mime = await mimeFromMessage(message, { required: true, budget, label: "actor receipt" });
-    reconcileMailbox("actor receipt sender", [summary.headerFrom, message.headerFrom, mime.from], { required: true });
-    reconcileText("actor receipt subject", [summary.subject, message.subject, mime.subject], { required: true });
     const candidate = candidateForMime(candidates, mime);
     if (!candidate) continue;
+    const sender = reconcileDeliveredSender("actor receipt", {
+      logicalFrom: candidate.from,
+      sentAs: candidate.sentAs,
+      method: candidate.sentAs === "relay" ? "smtp" : null,
+      message,
+      mime,
+      physicalFroms: [summary.headerFrom, message.headerFrom],
+      envelopeFroms: [summary.envelopeFrom],
+      replyTos: [summary.replyTo, message.replyTo],
+      expectedPhysicalFrom: candidate.physicalFrom ?? null,
+    });
+    reconcileText("actor receipt subject", [summary.subject, message.subject, mime.subject], { required: true });
     receipts.push({
       ref: `message:${summary.id}`,
       messageId: candidate.messageId,
       receiptMessageId: summary.id,
       observedAt: instant(message.createdAt, "malformed_message").iso,
+      ...sender,
     });
   }
   if (receipts.length > 1) throw transportError("ambiguous_correlation", "Multiple actor receipts matched the evaluation case");
@@ -1423,6 +1567,10 @@ export function createE2AAdapter({
         throw transportError("stimulus_not_delivered", "Evaluation stimulus did not enter an observable delivery state");
       }
       const sendAcceptedAt = clockInstant(now).iso;
+      const submittedSentAs = reconcileSentAs([sendResult.sentAs]);
+      const stimulusSenderContract = submittedSentAs === "relay"
+        ? await relayStimulusSenderContract(caseSdk, actor, sendResult, mimeBudget)
+        : null;
 
       let logicalElapsed = Math.max(0, clockInstant(now).milliseconds - caseStart.milliseconds);
       let lastEvidence = { stimulus: null, candidates: [], actorReceipt: null };
@@ -1477,10 +1625,17 @@ export function createE2AAdapter({
 
           let stimulus = lastEvidence.stimulus;
           if (!stimulus) {
-            const matches = stimulusEvents(targetEvents, actor, target, resolvedCase.send.subject, caseStart.milliseconds, deadline);
+            const matches = stimulusEvents(
+              targetEvents, actor, target, resolvedCase.send.subject,
+              caseStart.milliseconds, deadline, stimulusSenderContract,
+            );
             const messageRefs = [...new Set(matches.map((event) => messageIdOf(event, dataOf(event), null, { required: true })))];
             if (messageRefs.length > 1) throw transportError("ambiguous_correlation", "Multiple target messages matched the evaluation stimulus");
-            if (matches.length > 0) stimulus = await normalizeStimulus(caseSdk, matches[0], actor, target, mimeBudget);
+            if (matches.length > 0) {
+              stimulus = await normalizeStimulus(
+                caseSdk, matches[0], actor, target, sendResult, stimulusSenderContract, mimeBudget,
+              );
+            }
           }
 
           let candidates = [];

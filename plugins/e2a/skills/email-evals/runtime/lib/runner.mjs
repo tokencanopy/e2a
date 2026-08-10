@@ -241,6 +241,7 @@ function projectCandidate(value, stored) {
 function projectStimulus(value, stored) {
   const source = exactObject(value, new Set([
     "ref", "messageId", "outboundMessageId", "conversationId", "rfcMessageId", "subject", "receivedAt", "participants",
+    "from", "physicalFrom", "sentAs",
   ]));
   const result = {};
   for (const key of ["ref", "messageId", "outboundMessageId", "conversationId", "receivedAt"]) {
@@ -248,15 +249,23 @@ function projectStimulus(value, stored) {
   }
   copyOptional(source, result, "rfcMessageId", (entry) => headerTokenValue(entry, { nullable: true }));
   copyOptional(source, result, "subject", (entry) => textValue(entry, { nullable: true }));
+  copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "physicalFrom", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "sentAs", (entry) => tokenValue(entry, { nullable: true }));
   copyOptional(source, result, "participants", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
   return result;
 }
 
-function projectActorReceipt(value) {
+function projectActorReceipt(value, stored) {
   if (value === null) return null;
-  const source = exactObject(value, new Set(["ref", "messageId", "receiptMessageId", "observedAt"]));
+  const source = exactObject(value, new Set([
+    "ref", "messageId", "receiptMessageId", "observedAt", "from", "physicalFrom", "sentAs",
+  ]));
   const result = {};
   for (const key of ["ref", "messageId", "receiptMessageId", "observedAt"]) copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
+  copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "physicalFrom", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "sentAs", (entry) => tokenValue(entry, { nullable: true }));
   return result;
 }
 
@@ -325,7 +334,7 @@ function projectEvidence(value, { stored = false } = {}) {
     return { email: mailboxValue(item.email, stored) };
   });
   copyOptional(source, result, "stimulus", (entry) => projectStimulus(entry, stored));
-  copyOptional(source, result, "actorReceipt", projectActorReceipt);
+  copyOptional(source, result, "actorReceipt", (entry) => projectActorReceipt(entry, stored));
   copyOptional(source, result, "lifecycle", (entry) => projectEvidenceLifecycle(entry, stored));
   copyOptional(source, result, "timings", projectTimings);
   copyOptional(source, result, "refs", projectRefs);
@@ -955,33 +964,34 @@ function exactCaseObject(value, allowed) {
 }
 
 function validateStoredRedactionLoss(record, suite, artifactAuthKey) {
-  if (!Object.hasOwn(record, "redactionLoss")) return null;
+  if (!Object.hasOwn(record, "redactionLoss")) invalidCaseArtifact();
   if (typeof artifactAuthKey !== "string" || !/^[a-f0-9]{64}$/.test(artifactAuthKey)) invalidCaseArtifact();
   const metadata = exactCaseObject(record.redactionLoss, new Set(["version", "entries", "envelopeDigest"]));
-  if (metadata.version !== 1 || !Array.isArray(metadata.entries)
-    || metadata.entries.length < 1 || metadata.entries.length > 512
+  if (metadata.version !== 2 || !Array.isArray(metadata.entries)
+    || metadata.entries.length > 512
     || typeof metadata.envelopeDigest !== "string" || !/^[a-f0-9]{64}$/.test(metadata.envelopeDigest)) {
     invalidCaseArtifact();
   }
   let previous = null;
   const entries = metadata.entries.map((entry) => {
-    const source = exactCaseObject(entry, new Set(["path", "kind"]));
+    const source = exactCaseObject(entry, new Set(["path", "kind", "valueDigest"]));
     const validPointer = typeof source.path === "string" && source.path.startsWith("/")
       && source.path.split("/").slice(1).every((segment) => (
         !/[\u0000-\u001F\u007F]/.test(segment) && !/~(?![01])/u.test(segment)
       ));
     if (source.kind !== "redacted_text" || typeof source.path !== "string"
+      || typeof source.valueDigest !== "string" || !/^[a-f0-9]{64}$/.test(source.valueDigest)
       || source.path.length < 1 || source.path.length > 512
       || !validPointer
       || (source.path !== "/" && !/^\/(?:expectation|evidence|assertions|primaryError|secondaryErrors)(?:\/|$)/.test(source.path))
       || (previous !== null && previous.localeCompare(source.path) >= 0)) invalidCaseArtifact();
     previous = source.path;
-    return { path: source.path, kind: source.kind };
+    return { path: source.path, kind: source.kind, valueDigest: source.valueDigest };
   });
   const envelope = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "redactionLoss"));
   const expected = artifactRedactionLossDigest(envelope, entries, suite, artifactAuthKey);
   if (!timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(metadata.envelopeDigest, "hex"))) invalidCaseArtifact();
-  return { version: 1, entries, envelopeDigest: metadata.envelopeDigest };
+  return { version: 2, entries, envelopeDigest: metadata.envelopeDigest };
 }
 
 function safeStoredString(value, { nullable = false, allowSentAs = false } = {}) {
@@ -1108,7 +1118,7 @@ function projectStoredAssertion(value) {
   };
 }
 
-function expectedArtifactRecord(suite, testCase) {
+function expectedArtifactRecord(suite, testCase, artifactAuthKey) {
   return aliasCaseRecord({
     id: testCase.id,
     status: "pass",
@@ -1119,7 +1129,7 @@ function expectedArtifactRecord(suite, testCase) {
     assertions: [],
     primaryError: null,
     secondaryErrors: [],
-  }, suite);
+  }, suite, { artifactAuthKey });
 }
 
 const SUBJECT_ASSERTION_IDS = Object.freeze([
@@ -1224,15 +1234,24 @@ function assertionExpectationValue(expectation, id) {
 }
 
 function assertRedactionBoundaryUnchanged(storedRecord, currentArtifact) {
-  if (!storedRecord.redactionLoss) return new Set();
-  const currentLossPaths = new Set(currentArtifact.redactionLoss?.entries.map((entry) => entry.path) ?? []);
-  for (const entry of storedRecord.redactionLoss.entries) {
-    if (entry.path.startsWith("/expectation/") && !currentLossPaths.has(entry.path)) {
-      throw new EvalError(
-        "configuration_error", "redacted_evidence_assertion_change",
-        "Assertions depending on redacted evidence cannot change during regrade",
-      );
-    }
+  const expectationEntries = (record) => new Map(
+    record.redactionLoss.entries
+      .filter((entry) => entry.path === "/" || entry.path.startsWith("/expectation/"))
+      .map((entry) => [entry.path, entry.valueDigest]),
+  );
+  const storedExpectationLoss = expectationEntries(storedRecord);
+  const currentExpectationLoss = expectationEntries(currentArtifact);
+  const identitiesMatch = storedExpectationLoss.size === currentExpectationLoss.size
+    && [...storedExpectationLoss].every(([pathValue, digest]) => {
+      const current = currentExpectationLoss.get(pathValue);
+      return typeof current === "string"
+        && timingSafeEqual(Buffer.from(digest, "hex"), Buffer.from(current, "hex"));
+    });
+  if (!identitiesMatch) {
+    throw new EvalError(
+      "configuration_error", "redacted_evidence_assertion_change",
+      "Assertions depending on redacted evidence cannot change during regrade",
+    );
   }
   const affected = redactionAffectedAssertions(storedRecord);
   const mismatch = affected.has("*")
@@ -1257,11 +1276,12 @@ function remapInheritedAssertionLoss(entries, previousAssertions, nextAssertions
     if (segments[0] !== "assertions" || !/^\d+$/.test(segments[1] ?? "")) return entry;
     const id = previousAssertions[Number(segments[1])]?.id;
     const nextIndex = nextIndexById.get(id);
-    if (nextIndex === undefined) return { path: "/", kind: "redacted_text" };
+    if (nextIndex === undefined) return { ...entry, path: "/" };
     segments[1] = String(nextIndex);
     return {
       path: `/${segments.map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`,
       kind: "redacted_text",
+      valueDigest: entry.valueDigest,
     };
   });
 }
@@ -1312,12 +1332,12 @@ function validateStoredArtifactLimitRecord(record, suite) {
 }
 
 function validateStoredRecord(record, suite, testCase, artifactAuthKey) {
-  const redactionLoss = validateStoredRedactionLoss(record, suite, artifactAuthKey);
   if (storedArtifactContainsSecret(record, suite)) invalidCaseArtifact();
   if (record?.primaryError?.class === "transport_error"
     && record?.primaryError?.code === "cases_artifact_limit") {
     return validateStoredArtifactLimitRecord(record, suite);
   }
+  const redactionLoss = validateStoredRedactionLoss(record, suite, artifactAuthKey);
   const source = exactCaseObject(record, new Set([
     "id", "status", "startedAt", "completedAt", "durations", "versions", "suite", "expectation", "evidence",
     "assertions", "primaryError", "secondaryErrors", "redactionLoss",
@@ -1456,6 +1476,9 @@ async function readStoredRun(runDirectory) {
   const canonical = await realpath(runDirectory);
   if (path.basename(canonical) !== path.basename(runDirectory)) throw new EvalError("configuration_error", "invalid_run_directory", "Invalid evaluation run directory");
   const artifactAuthKey = await artifactAuthKeyForOutputRoot(path.dirname(canonical));
+  if (artifactAuthKey === null) {
+    throw new EvalError("configuration_error", "invalid_artifact_auth", "Evaluation artifact authentication root is missing");
+  }
   const casesFile = path.join(canonical, "cases.jsonl");
   const casesState = await lstat(casesFile);
   if (casesState.isSymbolicLink() || !casesState.isFile()) throw new EvalError("configuration_error", "invalid_cases_artifact", "Invalid evaluation cases artifact");
@@ -1512,9 +1535,13 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   const validatedRecords = stored.records.map((record, index) => (
     validateStoredRecord(record, suite, suite.cases[index], stored.artifactAuthKey)
   ));
-  const currentArtifacts = suite.cases.map((testCase) => expectedArtifactRecord(suite, testCase));
+  const currentArtifacts = suite.cases.map((testCase) => (
+    expectedArtifactRecord(suite, testCase, stored.artifactAuthKey)
+  ));
   const affectedAssertions = validatedRecords.map((record, index) => (
-    assertRedactionBoundaryUnchanged(record, currentArtifacts[index])
+    record.primaryError?.code === "cases_artifact_limit"
+      ? new Set()
+      : assertRedactionBoundaryUnchanged(record, currentArtifacts[index])
   ));
   for (const [index, record] of validatedRecords.entries()) {
     if (evidenceRedactionDigests(record.evidence).length === 0) continue;

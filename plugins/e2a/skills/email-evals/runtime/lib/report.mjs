@@ -29,7 +29,7 @@ const UNSAFE_ARTIFACT_KEYS = new Set([
   "apikey", "api_key", "environment", "env", "raw", "rawmime", "raw_mime", "rawmessage", "raw_message",
   "bytes", "contentbytes", "content_bytes", "attachmentbytes", "attachment_bytes",
 ]);
-const REDACTION_LOSS_VERSION = 1;
+const REDACTION_LOSS_VERSION = 2;
 const REDACTION_LOSS_LIMIT = 512;
 const REDACTION_LOSS_KIND = "redacted_text";
 const ARTIFACT_AUTH_FILE = ".email-evals-artifact-auth-key";
@@ -117,39 +117,88 @@ function pointerPath(parent, key) {
   return `${parent}/${encoded}`;
 }
 
-function redactionLossCollector(initialEntries = []) {
-  const paths = new Set();
+function redactionValueDigest(valueIdentity, artifactAuthKey) {
+  if (typeof artifactAuthKey !== "string" || !/^[a-f0-9]{64}$/.test(artifactAuthKey)) {
+    throw reportError("invalid_artifact_auth", "Evaluation artifact authentication root is invalid");
+  }
+  const identity = typeof valueIdentity === "string" ? valueIdentity : JSON.stringify(valueIdentity);
+  const hmac = createHmac("sha256", Buffer.from(artifactAuthKey, "hex"));
+  hmac.update("e2a-email-evals:redaction-value:v2\0", "utf8");
+  hmac.update(identity, "utf8");
+  return hmac.digest("hex");
+}
+
+function collapsedRedactionDigest(entries, nextDigest, artifactAuthKey) {
+  const hmac = createHmac("sha256", Buffer.from(artifactAuthKey, "hex"));
+  hmac.update("e2a-email-evals:redaction-collapse:v2\0", "utf8");
+  hmac.update(JSON.stringify(entries), "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(nextDigest, "utf8");
+  return hmac.digest("hex");
+}
+
+function redactionLossCollector(artifactAuthKey, initialEntries = []) {
+  if (typeof artifactAuthKey !== "string" || !/^[a-f0-9]{64}$/.test(artifactAuthKey)) {
+    throw reportError("invalid_artifact_auth", "Evaluation artifact authentication root is invalid");
+  }
+  const paths = new Map();
   let collapsed = false;
-  const add = (pathValue) => {
-    if (collapsed) return;
-    if (typeof pathValue !== "string" || !pathValue.startsWith("/") || pathValue.length > 512) {
-      paths.clear();
-      paths.add("/");
+  let collapsedDigest = null;
+  const collapse = (nextDigest) => {
+    const prior = collapsed
+      ? [{ path: "/", kind: REDACTION_LOSS_KIND, valueDigest: collapsedDigest }]
+      : [...paths.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([pathValue, valueDigest]) => ({
+        path: pathValue, kind: REDACTION_LOSS_KIND, valueDigest,
+      }));
+    collapsedDigest = collapsedRedactionDigest(prior, nextDigest, artifactAuthKey);
+    paths.clear();
+    collapsed = true;
+  };
+  for (const entry of initialEntries) {
+    if (entry?.path === "/" && typeof entry.valueDigest === "string") {
       collapsed = true;
+      collapsedDigest = entry.valueDigest;
+      continue;
+    }
+    if (!collapsed && typeof entry?.path === "string" && typeof entry.valueDigest === "string") {
+      paths.set(entry.path, entry.valueDigest);
+    }
+  }
+  const add = (pathValue, valueIdentity) => {
+    const valueDigest = redactionValueDigest(valueIdentity, artifactAuthKey);
+    if (collapsed) {
+      collapse(valueDigest);
       return;
     }
-    paths.add(pathValue);
-    if (paths.size > REDACTION_LOSS_LIMIT) {
-      paths.clear();
-      paths.add("/");
-      collapsed = true;
+    if (typeof pathValue !== "string" || !pathValue.startsWith("/") || pathValue.length > 512) {
+      collapse(valueDigest);
+      return;
     }
+    if (paths.has(pathValue)) return;
+    if (paths.size >= REDACTION_LOSS_LIMIT) {
+      collapse(valueDigest);
+      return;
+    }
+    paths.set(pathValue, valueDigest);
   };
-  for (const entry of initialEntries) add(entry?.path);
   return {
     add,
-    entries: () => [...paths].sort().map((pathValue) => ({ path: pathValue, kind: REDACTION_LOSS_KIND })),
+    entries: () => collapsed
+      ? [{ path: "/", kind: REDACTION_LOSS_KIND, valueDigest: collapsedDigest }]
+      : [...paths.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([pathValue, valueDigest]) => ({
+        path: pathValue, kind: REDACTION_LOSS_KIND, valueDigest,
+      })),
   };
 }
 
 /** Bind redaction-loss paths to the exact artifact envelope using a non-published authentication root. */
 export function artifactRedactionLossDigest(record, entries, suite, artifactAuthKey) {
-  const credential = typeof artifactAuthKey === "string" && artifactAuthKey.length > 0 ? artifactAuthKey
-    : typeof suite?.transport?.apiKey === "string" && suite.transport.apiKey.length > 0
-      ? suite.transport.apiKey : "missing-evaluation-credential";
+  if (typeof artifactAuthKey !== "string" || !/^[a-f0-9]{64}$/.test(artifactAuthKey)) {
+    throw reportError("invalid_artifact_auth", "Evaluation artifact authentication root is invalid");
+  }
   const executionDigest = typeof suite?.executionDigest === "string" ? suite.executionDigest : "";
-  const hmac = createHmac("sha256", credential);
-  hmac.update("e2a-email-evals:redaction-loss:v1\0", "utf8");
+  const hmac = createHmac("sha256", Buffer.from(artifactAuthKey, "hex"));
+  hmac.update("e2a-email-evals:redaction-loss:v2\0", "utf8");
   hmac.update(executionDigest, "utf8");
   hmac.update("\0", "utf8");
   hmac.update(JSON.stringify(entries), "utf8");
@@ -257,11 +306,11 @@ function gradingFreeTextPath(pointer) {
 function transformTypedAddresses(value, aliases, parentKey = "", forceAddress = false, loss = null, pointer = "") {
   if (typeof value === "string") {
     const transformed = forceAddress ? aliasAddress(value, aliases) : aliasText(value, aliases);
-    if (!forceAddress && transformed !== value && gradingFreeTextPath(pointer)) loss?.add(pointer || "/");
+    if (!forceAddress && transformed !== value && gradingFreeTextPath(pointer)) loss?.add(pointer || "/", value);
     if (forceAddress && transformed && typeof transformed === "object") {
       const original = normalizeKnownMailbox(value);
       if (original?.displayName && transformed.displayName !== original.displayName) {
-        loss?.add(pointerPath(pointer, "displayName"));
+        loss?.add(pointerPath(pointer, "displayName"), original.displayName);
       }
     }
     return transformed;
@@ -384,7 +433,7 @@ function tokenizeObservedEnvironment(
       const replacement = environmentMarker(entry, entry.value);
       result = result.replace(new RegExp(escapeRegExp(entry.value), "g"), replacement);
     }
-    if (result !== value) loss?.add(pointer || "/");
+    if (result !== value) loss?.add(pointer || "/", value);
     return result;
   }
   if (Array.isArray(value)) {
@@ -428,7 +477,7 @@ function tokenizeResolvedSource(value, source, environment, parentKey = "", forc
       const named = environment.find((candidate) => candidate.replacement === `[ENV:${match[1]}]`);
       const entry = environment.find((candidate) => candidate.value === named?.value) ?? named;
       const transformed = entry ? environmentMarker(entry, value) : `[ENV:${match[1]}]`;
-      if (transformed !== value) loss?.add(pointer || "/");
+      if (transformed !== value) loss?.add(pointer || "/", value);
       return transformed;
     }
     return value;
@@ -486,7 +535,7 @@ function redactTree(
       || (semanticKind === "sentAs" && (STRUCTURAL_STRING_VALUES.has(value) || safeSentAsToken(value, sensitive)))
       || preserveStructuralString(value, parentKey, sensitive, forceAddress)) return value;
     const transformed = redactString(value, patterns, sensitive);
-    if (transformed !== value) loss?.add(pointer || "/");
+    if (transformed !== value) loss?.add(pointer || "/", value);
     return transformed;
   }
   if (Array.isArray(value)) {
@@ -518,7 +567,7 @@ function redactEvidenceBodyText(value, patterns, parentKey = "", loss = null, po
       if (pattern.expression.test(value.text)) digests.push(pattern.digest);
     }
     result.text = redactString(value.text, patterns, []);
-    if (result.text !== value.text) loss?.add(pointerPath(pointer, "text"));
+    if (result.text !== value.text) loss?.add(pointerPath(pointer, "text"), value.text);
     if (digests.length > 0) {
       result.textRedactions = { forbiddenPatternDigests: [...new Set(digests)].sort() };
     }
@@ -595,7 +644,7 @@ export function aliasCaseRecord(record, suite, { inheritedRedactionLoss = [], ar
   const sensitive = sensitiveValues(suite, aliases);
   const environment = environmentValues(suite);
   const caseSource = canonicalCase(suite, record?.id);
-  const loss = redactionLossCollector(inheritedRedactionLoss);
+  const loss = redactionLossCollector(artifactAuthKey, inheritedRedactionLoss);
   const source = {};
   if (record && typeof record === "object" && !utilTypes.isProxy(record)) {
     for (const key of [
@@ -693,7 +742,6 @@ export function aliasCaseRecord(record, suite, { inheritedRedactionLoss = [], ar
     secondaryErrors: secondary,
   };
   const entries = loss.entries();
-  if (entries.length === 0) return base;
   return {
     ...base,
     redactionLoss: {

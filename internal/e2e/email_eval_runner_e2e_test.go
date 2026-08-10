@@ -37,6 +37,7 @@ const (
 	evalTargetAddress         = "target@eval.test"
 	evalUnauthorizedAddress   = "unauthorized@outside.test"
 	evalSubject               = "Question about fictional order ord_example_123"
+	evalRelaySubject          = "Question about fictional relay order ord_example_456"
 	evalRequiredFact          = "Refunds are available within 30 days"
 	maxSMTPCommandLine        = 4 << 10
 	maxSMTPDataLine           = 64 << 10
@@ -810,7 +811,7 @@ func setExactOutboundGate(t *testing.T, ts *testutil.E2ATestServer, agent *ident
 	}
 }
 
-func writeEvalSuite(t *testing.T, baseURL, actorAddress, targetAddress string) string {
+func writeEvalSuite(t *testing.T, baseURL, actorAddress, targetAddress, sentAs, subject string) string {
 	t.Helper()
 	directory := t.TempDir()
 	suite := fmt.Sprintf(`version: 1
@@ -836,7 +837,7 @@ expect:
   action: { kind: reply, count: 1 }
   sender:
     exactly: %q
-    sent_as: own_address
+    sent_as: %q
     reply_to: { exactly: [%q] }
   recipients:
     to: { exactly: [%q] }
@@ -857,7 +858,7 @@ expect:
   lifecycle:
     submission: sent
     actor_received: true
-`, evalSubject, targetAddress, targetAddress, actorAddress, actorAddress, evalRequiredFact)
+`, subject, targetAddress, sentAs, targetAddress, actorAddress, actorAddress, evalRequiredFact)
 	if err := os.WriteFile(filepath.Join(directory, "suite.yaml"), []byte(suite), 0o600); err != nil {
 		t.Fatal("write synthetic eval suite")
 	}
@@ -964,7 +965,7 @@ func parseResponderResult(output string) (responderResult, error) {
 	return result, nil
 }
 
-func startDeterministicResponder(t *testing.T, baseURL, apiKey, targetAddress string) *deterministicResponder {
+func startDeterministicResponder(t *testing.T, baseURL, apiKey, targetAddress, subject string) *deterministicResponder {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -979,6 +980,7 @@ func startDeterministicResponder(t *testing.T, baseURL, apiKey, targetAddress st
 		"E2A_EVAL_BASE_URL=" + baseURL,
 		"E2A_EVAL_ACTOR=" + evalActorAddress,
 		"E2A_EVAL_TARGET=" + targetAddress,
+		"E2A_EVAL_SUBJECT=" + subject,
 	}
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -1308,6 +1310,47 @@ func assertReport(t *testing.T, runDirectory, wantStatus string, assertionIDs ..
 	}
 	if report, err := os.ReadFile(filepath.Join(runDirectory, "report.md")); err != nil || !bytes.Contains(report, []byte("- Status: **pass**")) {
 		t.Fatal("email eval Markdown report is not a pass")
+	}
+}
+
+func assertRelayEvidence(t *testing.T, runDirectory string) {
+	t.Helper()
+	casesData, err := os.ReadFile(filepath.Join(runDirectory, "cases.jsonl"))
+	if err != nil {
+		t.Fatal("read relay email eval case artifact")
+	}
+	var record map[string]any
+	if json.Unmarshal(bytes.TrimSpace(casesData), &record) != nil {
+		t.Fatal("decode relay email eval case artifact")
+	}
+	evidence, ok := record["evidence"].(map[string]any)
+	if !ok {
+		t.Fatal("relay email eval evidence is missing")
+	}
+	stimulus, stimulusOK := evidence["stimulus"].(map[string]any)
+	candidates, candidatesOK := evidence["candidates"].([]any)
+	actorReceipt, receiptOK := evidence["actorReceipt"].(map[string]any)
+	if !stimulusOK || !candidatesOK || len(candidates) != 1 || !receiptOK {
+		t.Fatal("relay email eval sender chain is incomplete")
+	}
+	candidate, candidateOK := candidates[0].(map[string]any)
+	if !candidateOK {
+		t.Fatal("relay email eval candidate is malformed")
+	}
+	for label, sender := range map[string]map[string]any{
+		"stimulus": stimulus, "candidate": candidate, "actor receipt": actorReceipt,
+	} {
+		logical, logicalOK := sender["from"]
+		physical, physicalOK := sender["physicalFrom"]
+		logicalJSON, _ := json.Marshal(logical)
+		physicalJSON, _ := json.Marshal(physical)
+		if sender["sentAs"] != "relay" || !logicalOK || !physicalOK || bytes.Equal(logicalJSON, physicalJSON) {
+			t.Fatalf("relay email eval %s did not preserve distinct logical and physical senders", label)
+		}
+	}
+	lifecycle, lifecycleOK := evidence["lifecycle"].(map[string]any)
+	if !lifecycleOK || lifecycle["actorReceived"] != true {
+		t.Fatal("relay email eval actor receipt lifecycle is incomplete")
 	}
 }
 
@@ -1920,9 +1963,9 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	var initialResponderResult responderResult
 	var actorEgressBaseline, unauthorizedEgressBaseline int
 	t.Run("actor to target reply round trip", func(t *testing.T) {
-		suite = writeEvalSuite(t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress())
+		suite = writeEvalSuite(t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress(), "own_address", evalSubject)
 		approvalDigest := assertEmailEvalValidation(t, suite, apiKey.PlaintextKey, ts.HTTPServer.URL)
-		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
+		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress(), evalSubject)
 		result := runEmailEvalCLI(t, suite, apiKey.PlaintextKey, ts.HTTPServer.URL, approvalDigest)
 		initialResponderResult = responder.WaitForReply(t)
 		if result.ExitCode != 0 {
@@ -1997,7 +2040,7 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	})
 
 	t.Run("stable reply idempotency has no duplicate or unauthorized SMTP egress", func(t *testing.T) {
-		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
+		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress(), evalSubject)
 		replayResult := responder.WaitForReply(t)
 		if err := validateResponderReplayRelationship(initialResponderResult, durableBaseline, replayResult); err != nil {
 			t.Fatalf("responder replay did not match the original durable outcome: %v", err)
@@ -2011,20 +2054,49 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 		}
 	})
 
-	t.Run("unverified sending status retains relay identity fallback", func(t *testing.T) {
+	t.Run("relay identity survives validate run artifact and regrade", func(t *testing.T) {
 		if err := ts.Store.SetSendingStatus(context.Background(), "eval.test", "pending", "", "", "", nil); err != nil {
 			t.Fatal("set synthetic sending identity pending")
 		}
-		before := forwarder.countRecipient(target.EmailAddress())
-		status, body := authedJSON(t, "POST", sendURL(ts.HTTPServer.URL, actor.EmailAddress()), apiKey.PlaintextKey,
-			fmt.Sprintf(`{"to":[%q],"subject":"Synthetic relay fallback","text":"Synthetic only"}`, target.EmailAddress()))
-		if status != 200 || !bytes.Contains(body, []byte(`"status":"sent"`)) {
-			t.Fatalf("relay fallback send status = %d, want sent", status)
+		relaySuite := writeEvalSuite(
+			t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress(), "relay", evalRelaySubject,
+		)
+		approvalDigest := assertEmailEvalValidation(t, relaySuite, apiKey.PlaintextKey, ts.HTTPServer.URL)
+		targetBefore := forwarder.countRecipient(target.EmailAddress())
+		actorBefore := forwarder.countRecipient(actor.EmailAddress())
+		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress(), evalRelaySubject)
+		result := runEmailEvalCLI(t, relaySuite, apiKey.PlaintextKey, ts.HTTPServer.URL, approvalDigest)
+		responder.WaitForReply(t)
+		if result.ExitCode != 0 {
+			t.Fatalf("relay email eval failed: %s", result.Stderr)
 		}
-		if after := forwarder.countRecipient(target.EmailAddress()); after != before+1 {
-			t.Fatalf("relay fallback SMTP egress count = %d, want %d", after, before+1)
+		assertReport(t, result.RunDirectory, "pass",
+			"action.kind", "action.count", "action.no_duplicates",
+			"sender.from", "sender.sent_as", "sender.reply_to",
+			"recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope",
+			"recipients.cross_field", "recipients.no_target_self",
+			"thread.message_id", "thread.in_reply_to", "thread.references", "thread.conversation",
+			"subject.policy", "subject.no_header_injection",
+			"body.required_facts", "body.plain_text", "attachments.exactly",
+			"timing.reply_within", "lifecycle.submission", "lifecycle.actor_received")
+		assertRelayEvidence(t, result.RunDirectory)
+		if after := forwarder.countRecipient(target.EmailAddress()); after != targetBefore+1 {
+			t.Fatalf("relay stimulus SMTP egress count = %d, want %d", after, targetBefore+1)
+		}
+		if after := forwarder.countRecipient(actor.EmailAddress()); after != actorBefore+1 {
+			t.Fatalf("relay reply SMTP egress count = %d, want %d", after, actorBefore+1)
 		}
 		assertOutboundIdentity(t, forwarder.latestMessageFor(t, target.EmailAddress()),
 			"agent@agents.localhost", "agent@agents.localhost", "Eval Actor via e2a", actor.EmailAddress())
+		assertOutboundIdentity(t, forwarder.latestMessageFor(t, actor.EmailAddress()),
+			"agent@agents.localhost", "agent@agents.localhost", "Eval Target via e2a", target.EmailAddress())
+		assertEmailEvalRegrade(t, relaySuite, apiKey.PlaintextKey, ts.HTTPServer.URL, result.RunDirectory)
+		assertRelayEvidence(t, result.RunDirectory)
+		if after := forwarder.countRecipient(target.EmailAddress()); after != targetBefore+1 {
+			t.Fatalf("relay regrade changed stimulus SMTP egress count to %d", after)
+		}
+		if after := forwarder.countRecipient(actor.EmailAddress()); after != actorBefore+1 {
+			t.Fatalf("relay regrade changed reply SMTP egress count to %d", after)
+		}
 	})
 }

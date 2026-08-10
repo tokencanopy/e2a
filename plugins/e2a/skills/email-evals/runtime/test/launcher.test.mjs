@@ -299,3 +299,124 @@ test("wall timeout remains bounded across kill-false and kill-error close races"
     });
   }
 });
+
+test("wall timeout final watchdog settles when the child and inherited pipes never close", async () => {
+  const child = fakeChild();
+  child.pid = 4321;
+  const signals = [];
+  child.kill = (signal) => { signals.push(signal); return false; };
+  const timers = [];
+  const running = runRuntimeNode([], {}, {
+    platform: "linux",
+    spawnChild: () => child,
+    killProcess: (_pid, signal) => { signals.push(signal); return false; },
+    setTimer: (callback) => { timers.push(callback); return callback; },
+    clearTimer: () => {},
+    wallTimeoutMs: 1,
+    terminationGraceMs: 1,
+    finalReapMs: 1,
+  });
+
+  timers[0]();
+  timers[1]();
+  assert.equal(timers.length, 3, "SIGKILL escalation must arm a final bounded watchdog");
+  timers[2]();
+  assert.deepEqual(await running, {
+    code: 4,
+    stdout: "",
+    stderr: "",
+    truncated: true,
+    finalized: false,
+    termination: "wall_timeout_unreaped",
+  });
+  assert.equal(signals.includes("SIGTERM"), true);
+  assert.equal(signals.includes("SIGKILL"), true);
+});
+
+test("Windows wall timeout uses bounded taskkill tree termination before settling", async () => {
+  const child = fakeChild();
+  child.pid = 5432;
+  const directSignals = [];
+  child.kill = (signal) => { directSignals.push(signal); return true; };
+  const taskkiller = new EventEmitter();
+  taskkiller.kill = () => true;
+  const taskkillCalls = [];
+  const timers = [];
+  const running = runRuntimeNode([], {}, {
+    platform: "win32",
+    spawnChild: () => child,
+    spawnTreeKiller: (command, args, options) => {
+      taskkillCalls.push({ command, args, options });
+      return taskkiller;
+    },
+    setTimer: (callback) => { timers.push(callback); return callback; },
+    clearTimer: () => {},
+    wallTimeoutMs: 1,
+    terminationGraceMs: 1,
+    finalReapMs: 1,
+  });
+
+  timers[0]();
+  assert.deepEqual(taskkillCalls, [{
+    command: "taskkill.exe",
+    args: ["/PID", "5432", "/T", "/F"],
+    options: { stdio: "ignore", windowsHide: true },
+  }]);
+  assert.deepEqual(directSignals, [], "tree termination owns the first Windows kill attempt");
+
+  child.emit("exit", null, "SIGKILL");
+  child.stdout.emit("end");
+  child.stderr.emit("end");
+  child.emit("close", null, "SIGKILL");
+  let resolved = false;
+  running.then(() => { resolved = true; });
+  await Promise.resolve();
+  assert.equal(resolved, false, "the launcher must await the process-tree terminator");
+
+  taskkiller.emit("exit", 0, null);
+  taskkiller.emit("close", 0, null);
+  assert.deepEqual(await running, {
+    code: 4,
+    stdout: "",
+    stderr: "",
+    truncated: true,
+    finalized: true,
+    termination: "wall_timeout",
+  });
+});
+
+test("Windows taskkill failure falls back to a bounded fail-closed result", async () => {
+  const child = fakeChild();
+  child.pid = 6543;
+  const directSignals = [];
+  child.kill = (signal) => { directSignals.push(signal); return false; };
+  const taskkiller = new EventEmitter();
+  taskkiller.kill = () => true;
+  taskkiller.unref = () => {};
+  const timers = [];
+  const running = runRuntimeNode([], {}, {
+    platform: "win32",
+    spawnChild: () => child,
+    spawnTreeKiller: () => taskkiller,
+    setTimer: (callback) => { timers.push(callback); return callback; },
+    clearTimer: () => {},
+    wallTimeoutMs: 1,
+    terminationGraceMs: 1,
+    finalReapMs: 1,
+  });
+
+  timers[0]();
+  taskkiller.emit("exit", 1, null);
+  taskkiller.emit("close", 1, null);
+  assert.deepEqual(directSignals, ["SIGKILL"]);
+  assert.equal(timers.length, 3, "tree-kill failure must retain a final bounded watchdog");
+  timers[2]();
+  assert.deepEqual(await running, {
+    code: 4,
+    stdout: "",
+    stderr: "",
+    truncated: true,
+    finalized: false,
+    termination: "wall_timeout_tree_unavailable",
+  });
+});

@@ -56,11 +56,14 @@ function runNode(args, options) {
 export function runRuntimeNode(args, options, dependencies = {}) {
   const {
     spawnChild = spawn,
+    spawnTreeKiller = spawn,
     killProcess = process.kill,
+    platform = process.platform,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     graceMs = RUNTIME_STDERR_GRACE_MS,
     terminationGraceMs = RUNTIME_STDERR_GRACE_MS,
+    finalReapMs = RUNTIME_STDERR_GRACE_MS,
     wallTimeoutMs = RUNTIME_WALL_TIMEOUT_MS,
   } = dependencies;
   return new Promise((resolve) => {
@@ -75,9 +78,14 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     let exitSignal = null;
     let streamTimer = null;
     let terminationTimer = null;
+    let finalTimer = null;
     let wallTimer = null;
     let forcedTermination = null;
     let escalated = false;
+    let treeKiller = null;
+    let treeKillerFinalized = false;
+    let treeKillSucceeded = false;
+    let treeKillFailed = false;
     let child;
 
     function finish(result) {
@@ -85,6 +93,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       settled = true;
       if (streamTimer !== null) clearTimer(streamTimer);
       if (terminationTimer !== null) clearTimer(terminationTimer);
+      if (finalTimer !== null) clearTimer(finalTimer);
       if (wallTimer !== null) clearTimer(wallTimer);
       resolve(result);
     }
@@ -94,7 +103,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     }
 
     function processGroupAlive() {
-      if (process.platform === "win32" || !Number.isInteger(child?.pid) || child.pid <= 0) return null;
+      if (platform === "win32" || !Number.isInteger(child?.pid) || child.pid <= 0) return null;
       try {
         killProcess(-child.pid, 0);
         return true;
@@ -104,7 +113,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     }
 
     function signalRuntime(signal) {
-      if (process.platform !== "win32" && Number.isInteger(child?.pid) && child.pid > 0) {
+      if (platform !== "win32" && Number.isInteger(child?.pid) && child.pid > 0) {
         try {
           killProcess(-child.pid, signal);
           return true;
@@ -119,13 +128,49 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       }
     }
 
+    function signalDirectChild(signal) {
+      try {
+        return child?.kill?.(signal) !== false;
+      } catch {
+        return false;
+      }
+    }
+
+    function releaseTerminationHandles() {
+      try { child?.stdout?.destroy?.(); } catch { /* best-effort release */ }
+      try { child?.stderr?.destroy?.(); } catch { /* best-effort release */ }
+      try { child?.unref?.(); } catch { /* best-effort release */ }
+      try { treeKiller?.kill?.("SIGKILL"); } catch { /* best-effort release */ }
+      try { treeKiller?.unref?.(); } catch { /* best-effort release */ }
+    }
+
+    function armFinalWatchdog() {
+      if (settled || finalTimer !== null) return;
+      finalTimer = setTimer(() => {
+        if (settled) return;
+        if (platform === "win32") signalDirectChild("SIGKILL");
+        else signalRuntime("SIGKILL");
+        releaseTerminationHandles();
+        fixedFailure(treeKillFailed ? "wall_timeout_tree_unavailable" : "wall_timeout_unreaped");
+      }, finalReapMs);
+    }
+
     function finishFromExit() {
       if (!exited || !closed || !stdoutCapture.finalized || !stderrCapture.finalized) return;
       if (forcedTermination !== null) {
+        if (platform === "win32") {
+          if (treeKillFailed) {
+            fixedFailure("wall_timeout_tree_unavailable");
+            return;
+          }
+          if (!treeKillerFinalized || !treeKillSucceeded) return;
+        } else if (Number.isInteger(child?.pid) && child.pid > 0 && processGroupAlive() !== false) {
+          return;
+        }
         // Before the grace deadline, only finish early when the whole POSIX
         // process group is demonstrably gone. Unknown/fake groups wait for the
         // escalation attempt so descendants cannot outlive the launcher.
-        if (!escalated && processGroupAlive() !== false) return;
+        if (platform !== "win32" && !escalated && processGroupAlive() !== false) return;
         finish({
           code: 4,
           stdout: "",
@@ -146,6 +191,50 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       });
     }
 
+    function completeWindowsTreeKill(success) {
+      if (settled || treeKillerFinalized) return;
+      treeKillerFinalized = true;
+      treeKillSucceeded = success;
+      treeKillFailed = !success;
+      escalated = true;
+      if (terminationTimer !== null) clearTimer(terminationTimer);
+      if (!success) signalDirectChild("SIGKILL");
+      armFinalWatchdog();
+      finishFromExit();
+    }
+
+    function beginWindowsTreeKill() {
+      if (!Number.isInteger(child?.pid) || child.pid <= 0) {
+        treeKillFailed = true;
+        treeKillerFinalized = true;
+        signalDirectChild("SIGKILL");
+        armFinalWatchdog();
+        return;
+      }
+      try {
+        treeKiller = spawnTreeKiller("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      } catch {
+        completeWindowsTreeKill(false);
+        return;
+      }
+      if (!treeKiller || typeof treeKiller.once !== "function") {
+        completeWindowsTreeKill(false);
+        return;
+      }
+      let taskkillExitCode = null;
+      treeKiller.once("error", () => completeWindowsTreeKill(false));
+      treeKiller.once("exit", (code) => { taskkillExitCode = code; });
+      treeKiller.once("close", (code) => completeWindowsTreeKill((code ?? taskkillExitCode) === 0));
+      terminationTimer = setTimer(() => {
+        if (settled || treeKillerFinalized) return;
+        try { treeKiller.kill?.("SIGKILL"); } catch { /* bounded fallback below */ }
+        completeWindowsTreeKill(false);
+      }, terminationGraceMs);
+    }
+
     function beginTermination(termination) {
       if (settled || forcedTermination !== null) return;
       forcedTermination = termination;
@@ -157,11 +246,17 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       stderrCapture.size = 0;
       if (streamTimer !== null) clearTimer(streamTimer);
       if (wallTimer !== null) clearTimer(wallTimer);
+      if (platform === "win32") {
+        beginWindowsTreeKill();
+        finishFromExit();
+        return;
+      }
       signalRuntime("SIGTERM");
       terminationTimer = setTimer(() => {
         if (settled) return;
         escalated = true;
         signalRuntime("SIGKILL");
+        armFinalWatchdog();
         finishFromExit();
       }, terminationGraceMs);
       finishFromExit();
@@ -200,7 +295,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       child = spawnChild(process.execPath, args, {
         ...options,
         stdio: ["ignore", "pipe", "pipe"],
-        ...(process.platform === "win32" ? {} : { detached: true }),
+        ...(platform === "win32" ? {} : { detached: true }),
       });
     } catch {
       fixedFailure("spawn_error");

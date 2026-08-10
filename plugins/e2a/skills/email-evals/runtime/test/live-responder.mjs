@@ -5,8 +5,8 @@ const REQUIRED_ENVIRONMENT = [
   "E2A_EVAL_BASE_URL",
   "E2A_EVAL_ACTOR",
   "E2A_EVAL_TARGET",
+  "E2A_EVAL_SUBJECT",
 ];
-const SUBJECT = "Question about fictional order ord_example_123";
 const RESPONSE = "Refunds are available within 30 days. This is a synthetic policy answer.";
 const DEADLINE_MS = 20_000;
 const POLL_MS = 1_000;
@@ -38,12 +38,15 @@ async function main() {
     const page = client.messages.list(environment.E2A_EVAL_TARGET, {
       direction: "inbound",
       readStatus: "all",
-      from_: environment.E2A_EVAL_ACTOR,
-      subjectContains: SUBJECT,
+      subjectContains: environment.E2A_EVAL_SUBJECT,
       limit: 20,
     });
     const messages = await page.toArray({ limit: 20 });
-    const stimulus = messages.find((message) => message.subject === SUBJECT);
+    const stimulus = messages
+      .filter((message) => message.subject === environment.E2A_EVAL_SUBJECT
+        && (message.headerFrom === environment.E2A_EVAL_ACTOR
+          || message.replyTo?.includes(environment.E2A_EVAL_ACTOR)))
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
     if (!stimulus) {
       await sleep(POLL_MS);
       continue;

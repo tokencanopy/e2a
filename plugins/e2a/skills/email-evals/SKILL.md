@@ -107,8 +107,10 @@ to sending, correlation, timing, containment, actor, target, or origin inputs.
 The output root also contains the private mode-`0600`
 `.email-evals-artifact-auth-key`, which authenticates redaction-loss metadata
 independently of the rotatable API key. Keep that hidden file with its run
-directories; never publish it or place it inside a suite. Regrade fails closed
-for redacted runs if this authentication root is missing or replaced.
+directories; never publish it or place it inside a suite. Every ordinary case
+record carries authenticated redaction state, including an explicit empty
+declaration when no text was erased. Regrade fails closed if this authentication
+root or a case's authenticated redaction state is missing, replaced, or altered.
 If body evidence required configured-pattern redaction, the forbidden-pattern
 set must remain identical (reordering is allowed); changing that set fails
 closed because arbitrary new regexes cannot be evaluated against erased text.

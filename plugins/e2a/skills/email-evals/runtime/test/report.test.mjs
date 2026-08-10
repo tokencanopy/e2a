@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { loadSuite } from "../lib/contract.mjs";
 import {
-  aliasCaseRecord,
+  aliasCaseRecord as aliasCaseRecordWithAuth,
   CASES_ARTIFACT_LIMITS,
   createArtifactWriter,
   renderMarkdown,
@@ -15,6 +15,14 @@ import {
 const ACTOR = "actor@eval.test";
 const TARGET = "target@eval.test";
 const RUN_ID = "run_20260808T120000_0123abcd";
+const ARTIFACT_AUTH_KEY = "c".repeat(64);
+
+function aliasCaseRecord(record, configured, options = {}) {
+  return aliasCaseRecordWithAuth(record, configured, {
+    artifactAuthKey: ARTIFACT_AUTH_KEY,
+    ...options,
+  });
+}
 
 function suite() {
   return {
@@ -375,6 +383,9 @@ test("redaction loss metadata is bounded, semantic-path-specific, and secret-fre
   assert.doesNotMatch(serialized, new RegExp(secret));
   assert.match(record.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
   assert.ok(record.redactionLoss.entries.length <= 512);
+  for (const entry of record.redactionLoss.entries) {
+    assert.match(entry.valueDigest, /^[a-f0-9]{64}$/, entry.path);
+  }
   assert.deepEqual(new Set(record.redactionLoss.entries.map(({ path: lossPath }) => lossPath)), new Set([
     "/expectation/body/requiredFacts/0",
     "/evidence/candidates/0/from/displayName",

@@ -753,12 +753,17 @@ test("structured message and MIME representations must agree exactly", async () 
 test("relay mode keeps authoritative logical From separate from provider-safe physical From", async () => {
   const events = await fixture("events-success.json");
   const messages = successfulMessages();
+  const targetPhysical = "Target Agent via e2a <agent@agents.localhost>";
   events[1].data.sent_as = "relay";
+  events[2].data.header_from = targetPhysical;
+  events[2].data.envelope_from = "agent@agents.localhost";
+  events[2].data.reply_to = [TARGET];
   messages.msg_synthetic_target_out.sentAs = "relay";
-  messages.msg_synthetic_target_out.headerFrom = "Target Agent via e2a <agent@agents.localhost>";
+  messages.msg_synthetic_target_out.headerFrom = TARGET;
+  messages.msg_synthetic_target_out.envelopeFrom = "agent@agents.localhost";
   messages.msg_synthetic_target_out.rawMessage = rawMessage({
     messageId: "reply@agents.localhost",
-    from: `Target Agent via e2a <agent@agents.localhost>`,
+    from: targetPhysical,
     to: ACTOR,
     replyTo: TARGET,
     subject: `Re: ${SUBJECT}`,
@@ -766,6 +771,10 @@ test("relay mode keeps authoritative logical From separate from provider-safe ph
     references: ["original@agents.localhost"],
     text: "Refunds are available within 30 days.",
   });
+  messages.msg_synthetic_actor_in.headerFrom = targetPhysical;
+  messages.msg_synthetic_actor_in.envelopeFrom = "agent@agents.localhost";
+  messages.msg_synthetic_actor_in.replyTo = [TARGET];
+  messages.msg_synthetic_actor_in.rawMessage = messages.msg_synthetic_target_out.rawMessage;
   const relayCase = caseSpec({ expect: {
     ...caseSpec().expect,
     sender: { exactly: TARGET, sentAs: "relay", replyTo: { exactly: [TARGET] } },
@@ -775,6 +784,185 @@ test("relay mode keeps authoritative logical From separate from provider-safe ph
   assert.equal(evidence.candidates[0].physicalFrom, "Target Agent via e2a <agent@agents.localhost>");
   for (const result of gradeCore(relayCase.expect, evidence)) {
     assert.equal(result.status, "pass", `${result.id}: ${result.code}`);
+  }
+
+  for (const mutate of [
+    (_events, copies) => { copies.msg_synthetic_target_out.envelopeFrom = "agent@unrelated.invalid"; },
+    (_events, copies) => {
+      copies.msg_synthetic_target_out.rawMessage = rawMessage({
+        messageId: "reply@agents.localhost", from: "Target Agent via e2a <agent@unrelated.invalid>",
+        to: ACTOR, replyTo: TARGET, subject: `Re: ${SUBJECT}`,
+        inReplyTo: "original@agents.localhost", references: ["original@agents.localhost"],
+        text: "Refunds are available within 30 days.",
+      });
+    },
+    (_events, copies) => {
+      copies.msg_synthetic_target_out.rawMessage = rawMessage({
+        messageId: "reply@agents.localhost", from: targetPhysical,
+        to: ACTOR, replyTo: ACTOR, subject: `Re: ${SUBJECT}`,
+        inReplyTo: "original@agents.localhost", references: ["original@agents.localhost"],
+        text: "Refunds are available within 30 days.",
+      });
+    },
+    (copies) => { copies[2].data.envelope_from = "agent@unrelated.invalid"; },
+  ]) {
+    const eventCopies = structuredClone(events);
+    const messageCopies = structuredClone(messages);
+    mutate(eventCopies, messageCopies);
+    await assert.rejects(
+      adapter(fakeClient({ events: eventCopies, messages: messageCopies })).adapter.executeCase(relayCase, caseContext()),
+      (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+      "relay authority must stay bound to the configured envelope and logical Reply-To",
+    );
+  }
+});
+
+test("relay stimulus, reply, and actor receipt keep logical and physical senders separate", async () => {
+  const events = await fixture("events-success.json");
+  const messages = successfulMessages();
+  const actorPhysical = "Eval Actor via e2a <agent@agents.localhost>";
+  const targetPhysical = "Target Agent via e2a <agent@agents.localhost>";
+
+  const actorOutbound = rawMessage({
+    from: actorPhysical, to: TARGET, replyTo: ACTOR,
+    subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
+  });
+  const actorDelivered = rawMessage({
+    messageId: "original@agents.localhost", from: actorPhysical, to: TARGET, replyTo: ACTOR,
+    subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
+  });
+  messages.msg_synthetic_actor_out = {
+    id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
+    createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR,
+    envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [],
+    sentAs: "relay", subject: SUBJECT, rawMessage: actorOutbound,
+  };
+  events[0].data.header_from = actorPhysical;
+  events[0].data.envelope_from = "agent@agents.localhost";
+  events[0].data.reply_to = [ACTOR];
+  messages.msg_synthetic_target_in.headerFrom = actorPhysical;
+  messages.msg_synthetic_target_in.envelopeFrom = "agent@agents.localhost";
+  messages.msg_synthetic_target_in.replyTo = [ACTOR];
+  messages.msg_synthetic_target_in.rawMessage = actorDelivered;
+  events[1].data.sent_as = "relay";
+  messages.msg_synthetic_target_out.sentAs = "relay";
+  messages.msg_synthetic_target_out.headerFrom = TARGET;
+  messages.msg_synthetic_target_out.envelopeFrom = "agent@agents.localhost";
+  messages.msg_synthetic_target_out.rawMessage = rawMessage({
+    messageId: "reply@agents.localhost", from: targetPhysical, to: ACTOR, replyTo: TARGET,
+    subject: `Re: ${SUBJECT}`, inReplyTo: "original@agents.localhost",
+    references: ["original@agents.localhost"], text: "Refunds are available within 30 days.",
+  });
+  events[2].data.header_from = targetPhysical;
+  events[2].data.envelope_from = "agent@agents.localhost";
+  events[2].data.reply_to = [TARGET];
+  messages.msg_synthetic_actor_in.headerFrom = targetPhysical;
+  messages.msg_synthetic_actor_in.envelopeFrom = "agent@agents.localhost";
+  messages.msg_synthetic_actor_in.replyTo = [TARGET];
+  messages.msg_synthetic_actor_in.rawMessage = messages.msg_synthetic_target_out.rawMessage;
+
+  const relayCase = caseSpec({ expect: {
+    ...caseSpec().expect,
+    sender: { exactly: TARGET, sentAs: "relay", replyTo: { exactly: [TARGET] } },
+  } });
+  const client = fakeClient({
+    events,
+    messages,
+    send: async () => ({
+      messageId: "msg_synthetic_actor_out", status: "sent", method: "smtp", sentAs: "relay",
+      providerMessageId: "<original@agents.localhost>",
+    }),
+  });
+  const captured = await adapter(client).adapter.executeCase(relayCase, caseContext());
+
+  assert.deepEqual({
+    from: captured.stimulus.from,
+    physicalFrom: captured.stimulus.physicalFrom,
+    sentAs: captured.stimulus.sentAs,
+  }, { from: ACTOR, physicalFrom: actorPhysical, sentAs: "relay" });
+  assert.deepEqual({
+    from: captured.candidates[0].from,
+    physicalFrom: captured.candidates[0].physicalFrom,
+    sentAs: captured.candidates[0].sentAs,
+  }, { from: `Target Agent <${TARGET}>`, physicalFrom: targetPhysical, sentAs: "relay" });
+  assert.deepEqual({
+    from: captured.actorReceipt.from,
+    physicalFrom: captured.actorReceipt.physicalFrom,
+    sentAs: captured.actorReceipt.sentAs,
+  }, { from: `Target Agent <${TARGET}>`, physicalFrom: targetPhysical, sentAs: "relay" });
+  assert.equal(captured.lifecycle.actorReceived, true);
+  for (const result of [...gradeCore(relayCase.expect, captured), ...gradeContent(relayCase.expect, captured)]) {
+    assert.equal(result.status, "pass", `${result.id}: ${result.code}`);
+  }
+});
+
+test("relay stimulus and actor receipt reject malformed physical senders", async () => {
+  for (const pathName of ["stimulus", "actor receipt"]) {
+    const events = await fixture("events-success.json");
+    const messages = successfulMessages();
+    const actorPhysical = "Eval Actor via e2a <agent@agents.localhost>";
+    const targetPhysical = "Target Agent via e2a <agent@agents.localhost>";
+    const actorOutbound = rawMessage({
+      messageId: "original@agents.localhost", from: actorPhysical, to: TARGET, replyTo: ACTOR,
+      subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
+    });
+    messages.msg_synthetic_actor_out = {
+      id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
+      createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR,
+      envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [],
+      sentAs: "relay", subject: SUBJECT, rawMessage: actorOutbound,
+    };
+    events[0].data.header_from = actorPhysical;
+    events[0].data.envelope_from = "agent@agents.localhost";
+    events[0].data.reply_to = [ACTOR];
+    messages.msg_synthetic_target_in.headerFrom = actorPhysical;
+    messages.msg_synthetic_target_in.envelopeFrom = "agent@agents.localhost";
+    messages.msg_synthetic_target_in.replyTo = [ACTOR];
+    messages.msg_synthetic_target_in.rawMessage = actorOutbound;
+    events[1].data.sent_as = "relay";
+    messages.msg_synthetic_target_out.sentAs = "relay";
+    messages.msg_synthetic_target_out.headerFrom = TARGET;
+    messages.msg_synthetic_target_out.envelopeFrom = "agent@agents.localhost";
+    messages.msg_synthetic_target_out.rawMessage = rawMessage({
+      messageId: "reply@agents.localhost", from: targetPhysical, to: ACTOR, replyTo: TARGET,
+      subject: `Re: ${SUBJECT}`, inReplyTo: "original@agents.localhost",
+      references: ["original@agents.localhost"], text: "Refunds are available within 30 days.",
+    });
+    events[2].data.header_from = targetPhysical;
+    events[2].data.envelope_from = "agent@agents.localhost";
+    events[2].data.reply_to = [TARGET];
+    messages.msg_synthetic_actor_in.headerFrom = targetPhysical;
+    messages.msg_synthetic_actor_in.envelopeFrom = "agent@agents.localhost";
+    messages.msg_synthetic_actor_in.replyTo = [TARGET];
+    messages.msg_synthetic_actor_in.rawMessage = messages.msg_synthetic_target_out.rawMessage;
+    if (pathName === "stimulus") {
+      messages.msg_synthetic_target_in.headerFrom = "Eval Actor <agent@agents.localhost>";
+      messages.msg_synthetic_target_in.rawMessage = rawMessage({
+        messageId: "original@agents.localhost", from: "Eval Actor <agent@agents.localhost>", to: TARGET,
+        subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
+      });
+    } else {
+      messages.msg_synthetic_actor_in.headerFrom = "Target Agent <agent@agents.localhost>";
+      messages.msg_synthetic_actor_in.rawMessage = rawMessage({
+        messageId: "reply@agents.localhost", from: "Target Agent <agent@agents.localhost>", to: ACTOR,
+        subject: `Re: ${SUBJECT}`, inReplyTo: "original@agents.localhost",
+        references: ["original@agents.localhost"], text: "Refunds are available within 30 days.",
+      });
+    }
+    await assert.rejects(
+      adapter(fakeClient({
+        events,
+        messages,
+        send: async () => ({
+          messageId: "msg_synthetic_actor_out", status: "sent", method: "smtp", sentAs: "relay",
+        }),
+      })).adapter.executeCase(caseSpec({ expect: {
+        ...caseSpec().expect,
+        sender: { exactly: TARGET, sentAs: "relay", replyTo: { exactly: [TARGET] } },
+      } }), caseContext()),
+      (error) => error.errorClass === "transport_error" && error.code === "malformed_message",
+      pathName,
+    );
   }
 });
 
