@@ -55,7 +55,7 @@ func withTrashDeps(c *trashCalls) func(*Deps) {
 			c.lastAgentID = agentID
 			return nil
 		}
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string) (int64, error) {
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
 			c.hardAgent++
 			c.lastAgentID = agentID
 			return 4, nil
@@ -444,7 +444,7 @@ func TestDeleteAgentPermanentFromTrash(t *testing.T) {
 
 func TestDeleteAgentPermanentSendInProgress(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string) (int64, error) {
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
 			return 0, identity.ErrSendInProgress
 		}
 	})
@@ -494,6 +494,22 @@ func TestRestoreAgentNotInTrash(t *testing.T) {
 	code, body := sendJSON(t, "POST", srv.URL+"/v1/agents/support%40acme.com/restore", "good", nil)
 	if code != 409 || errCode(body) != "not_in_trash" {
 		t.Fatalf("want 409 not_in_trash, got %d %v", code, body)
+	}
+}
+
+func TestRestoreAgentPurgeInProgress(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.RestoreAgent = func(ctx context.Context, agentID, userID string) (*identity.AgentIdentity, error) {
+			return nil, identity.ErrPurgeInProgress
+		}
+		d.GetAgentAnyState = func(ctx context.Context, address string) (*identity.AgentIdentity, error) {
+			a := trashedSampleAgent()
+			return &a, nil
+		}
+	})
+	code, body := sendJSON(t, "POST", srv.URL+"/v1/agents/support%40acme.com/restore", "good", nil)
+	if code != 409 || errCode(body) != "purge_in_progress" {
+		t.Fatalf("want 409 purge_in_progress, got %d %v", code, body)
 	}
 }
 

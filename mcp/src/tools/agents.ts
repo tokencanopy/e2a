@@ -237,7 +237,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
       title: "Restore an agent from trash",
       annotations: { destructiveHint: false, idempotentHint: false },
       description:
-        "Restore an agent that was soft-deleted within the 30-day trash window, including its messages and configuration. Scheduled messages restored before `scheduled_at` re-arm; at/after `scheduled_at` they return live as failed with submission canceled. Account scope only. Returns the restored agent; a live agent returns `not_in_trash`.",
+        "Restore an agent that was soft-deleted within the 30-day trash window, including its messages and configuration. Scheduled messages restored before `scheduled_at` re-arm; at/after `scheduled_at` they return live as failed with submission canceled. Account scope only. Returns the restored agent; a live agent returns `not_in_trash`, while an agent already claimed by permanent deletion returns `purge_in_progress` and cannot be restored.",
       inputSchema: strictInputSchema({
         email: z.string().email().describe("Full email address of the trashed agent to restore."),
       }),

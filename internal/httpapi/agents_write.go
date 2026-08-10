@@ -126,7 +126,7 @@ func (s *Server) registerAgentWrites() {
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/{email}/restore",
 		Summary:     "Restore an agent from the trash",
-		Description: "Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.",
+		Description: "Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. Returns 409 not_in_trash when the agent is not in the trash, or 409 purge_in_progress after irreversible permanent deletion has begun.",
 		Tags:        []string{"agents"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleRestoreAgent)
@@ -213,7 +213,7 @@ func (s *Server) handleDeleteAgent(ctx context.Context, in *deleteAgentInput) (*
 		if s.deps.PermanentDeleteAgent == nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")
 		}
-		messagesDeleted, err = s.deps.PermanentDeleteAgent(ctx, ag.ID, ag.UserID)
+		messagesDeleted, err = s.deps.PermanentDeleteAgent(ctx, ag.ID, ag.UserID, ag.CreatedAt)
 	} else if ag.DeletedAt != nil {
 		return nil, NewError(http.StatusNotFound, "not_found", "agent not found")
 	} else {
@@ -264,6 +264,10 @@ func (s *Server) handleRestoreAgent(ctx context.Context, in *AddressParam) (*age
 	// the gap answered with the wrong name, or 500 on a committed restore).
 	restored, err := s.deps.RestoreAgent(ctx, ag.ID, ag.UserID)
 	if err != nil {
+		if errors.Is(err, identity.ErrPurgeInProgress) {
+			return nil, NewError(http.StatusConflict, "purge_in_progress",
+				"agent permanent deletion is already in progress and cannot be restored")
+		}
 		if errors.Is(err, identity.ErrNotInTrash) {
 			return nil, NewError(http.StatusConflict, "not_in_trash", "agent is not in the trash")
 		}

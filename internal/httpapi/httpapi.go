@@ -102,7 +102,7 @@ type AgentCreateEnforcer func(ctx context.Context, userID string) error
 type (
 	// AgentDeleter deletes an agent, returning the number of message rows
 	// removed by the cascade (surfaced in the DeleteAgentResult receipt).
-	AgentDeleter func(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error)
+	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
 	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the

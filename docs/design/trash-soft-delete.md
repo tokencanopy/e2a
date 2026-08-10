@@ -87,21 +87,31 @@ because that status can survive a worker crash or span River retry handling.
   `approval_expires_at` forward by the time spent in trash, so no held draft
   auto-resolves because its review TTL lapsed while the inbox was invisible.
 - **Purge**: janitor `PurgeDeletedAgents` hard-deletes agents with
-  `deleted_at <= now() - TrashRetention`, one agent per transaction, its
-  messages deleted explicitly BEFORE the agent row (not via `ON DELETE
-  CASCADE`) — the storage-metering trigger resolves the owning user through
-  the agent row, so a cascade would leak the bytes in
-  `account_usage.storage_bytes` forever. `DeleteAgent` (the permanent
-  delete) drains the same way. Every irreversible message/agent/account
-  deletion cancels linked River send jobs in the same transaction; a failed
-  cancellation rolls the delete back. Reversible soft deletion intentionally
-  retains the job so restore before `scheduled_at` can re-arm a scheduled
-  send. Restore at/after `scheduled_at` cancels the past-due job and restores
-  only the message/inbox.
+  `deleted_at <= now() - TrashRetention`. Permanent deletion first installs a
+  durable purge token and resets `deleted_at` to begin a rollback quarantine;
+  from that point restore returns 409
+  `purge_in_progress`. Messages, River cancellations, and outreach state are
+  drained in bounded transactions that match the exact token, then a final
+  transaction holds the agent lock from its zero checks through parent
+  deletion. Messages are deleted explicitly BEFORE the agent row (not via
+  `ON DELETE CASCADE`) — the storage-metering trigger resolves the owning user
+  through the agent row, so a cascade would leak the bytes in
+  `account_usage.storage_bytes` forever. The janitor resumes the same state
+  machine after interruption. Reversible soft deletion intentionally retains
+  the job so restore before `scheduled_at` can re-arm a scheduled send.
+  Restore at/after `scheduled_at` cancels the past-due job and restores only
+  the message/inbox.
 - **Delete forever**: `DELETE /v1/agents/{email}?permanent=true&confirm=DELETE`
   hard-deletes from either state (trash UI uses it on trashed inboxes; API
   callers keep a one-shot irreversible delete). A fresh provider-call lease on
-  any attached message returns HTTP 409 `send_in_progress`.
+  any attached message returns HTTP 409 `send_in_progress`. The API contract is
+  the same at every inbox size, but the transaction shape is not. The delete
+  stays atomic only while messages, cancellable jobs, and engagements are all
+  within their bounds; otherwise it runs in the same request as individually
+  committed chunks. After the durable claim, a mid-flight failure leaves a
+  partially drained purge that a re-issued delete or the janitor resumes;
+  restore is refused with `409 purge_in_progress` so a gutted inbox can never
+  return to service. See `docs/design/2026-08-09-async-agent-purge.md`.
 - Domain deletion still counts trashed agents (`HasAgentsOnDomain` is
   unchanged): the FK requires it, and silently orphaning a restorable inbox
   would be worse. The error message tells the user to check the trash.
