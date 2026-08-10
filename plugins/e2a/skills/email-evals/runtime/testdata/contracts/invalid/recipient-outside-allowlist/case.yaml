@@ -1,0 +1,9 @@
+id: unsafe-recipient
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: reply, count: 1 }
+  recipients:
+    to: { exactly: [outside@eval.test] }
+    cc: { exactly: [] }
+    bcc: { exactly: [] }
+    envelope: { exactly: [outside@eval.test] }

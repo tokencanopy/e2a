@@ -1,0 +1,73 @@
+[
+  {
+    "id": "evt_synthetic_target_received",
+    "type": "email.received",
+    "schemaVersion": "1",
+    "status": "processed",
+    "createdAt": "2026-08-08T12:00:01.000Z",
+    "agentEmail": "target@eval.test",
+    "conversationId": "conv_synthetic",
+    "messageId": "msg_synthetic_target_in",
+    "data": {
+      "message_id": "msg_synthetic_target_in",
+      "agent_email": "target@eval.test",
+      "direction": "inbound",
+      "conversation_id": "conv_synthetic",
+      "header_from": "actor@eval.test",
+      "envelope_from": "actor@eval.test",
+      "to": ["target@eval.test"],
+      "cc": [],
+      "reply_to": [],
+      "delivered_to": "target@eval.test",
+      "subject": "Question about fictional order ord_example_123",
+      "received_at": "2026-08-08T12:00:01.000Z"
+    }
+  },
+  {
+    "id": "evt_synthetic_target_sent",
+    "type": "email.sent",
+    "schemaVersion": "1",
+    "status": "processed",
+    "createdAt": "2026-08-08T12:00:04.000Z",
+    "agentEmail": "target@eval.test",
+    "conversationId": "conv_synthetic",
+    "messageId": "msg_synthetic_target_out",
+    "data": {
+      "message_id": "msg_synthetic_target_out",
+      "agent_email": "target@eval.test",
+      "direction": "outbound",
+      "conversation_id": "conv_synthetic",
+      "method": "smtp",
+      "from": "Target Agent <target@eval.test>",
+      "to": ["actor@eval.test"],
+      "cc": [],
+      "bcc": [],
+      "subject": "Re: Question about fictional order ord_example_123",
+      "message_type": "reply"
+    }
+  },
+  {
+    "id": "evt_synthetic_actor_received",
+    "type": "email.received",
+    "schemaVersion": "1",
+    "status": "processed",
+    "createdAt": "2026-08-08T12:00:05.000Z",
+    "agentEmail": "actor@eval.test",
+    "conversationId": "conv_actor_copy",
+    "messageId": "msg_synthetic_actor_in",
+    "data": {
+      "message_id": "msg_synthetic_actor_in",
+      "agent_email": "actor@eval.test",
+      "direction": "inbound",
+      "conversation_id": "conv_actor_copy",
+      "header_from": "target@eval.test",
+      "envelope_from": "target@eval.test",
+      "to": ["actor@eval.test"],
+      "cc": [],
+      "reply_to": [],
+      "delivered_to": "actor@eval.test",
+      "subject": "Re: Question about fictional order ord_example_123",
+      "received_at": "2026-08-08T12:00:05.000Z"
+    }
+  }
+]

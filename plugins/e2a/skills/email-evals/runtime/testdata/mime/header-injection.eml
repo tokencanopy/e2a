@@ -1,0 +1,11 @@
+From: Target Agent <target@agents.localhost>
+To: Actor Agent <actor@agents.localhost>
+Message-ID: <reply@agents.localhost> <injected@agents.localhost>
+In-Reply-To: <first@agents.localhost> <injected@agents.localhost>
+References: <root@agents.localhost> <first@agents.localhost> bare-token
+References: <second@agents.localhost>
+Subject: Synthetic update
+Bcc: injected@agents.localhost
+Content-Type: text/plain; charset=utf-8
+
+Synthetic body.

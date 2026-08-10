@@ -1,0 +1,17 @@
+id: missing-information
+send:
+  subject: Help with fictional order ord_example_123
+  text: I need help but have not supplied the detail.
+expect:
+  action:
+    kind: reply
+    count: 1
+  recipients:
+    to: { exactly: ["${E2A_EVAL_ACTOR}"] }
+    cc: { exactly: [] }
+    bcc: { exactly: [] }
+    envelope: { exactly: ["${E2A_EVAL_ACTOR}"] }
+  body:
+    required_facts: [Please provide the missing detail]
+  timing:
+    reply_within: 30s

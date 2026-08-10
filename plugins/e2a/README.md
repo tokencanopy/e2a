@@ -2,8 +2,8 @@
 
 Gives an AI coding agent a real, authenticated email inbox. Installing this
 plugin registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
-Streamable HTTP + OAuth 2.1) and four stable skills for setup, application
-integration, diagnosis, and everyday inbox operation. Installing core supplies
+Streamable HTTP + OAuth 2.1) and five stable skills for setup, application
+integration, diagnosis, evaluation, and everyday inbox operation. Installing core supplies
 the MCP connection used by both core and the optional Labs workflows.
 
 After installation, authorize e2a through your client's MCP flow (Claude Code:
@@ -92,13 +92,17 @@ plugins/e2a/
 │   ├── sdk.md                   # SDK + webhook integration guide
 │   ├── templates.md             # email-template guide
 │   └── llms.txt                 # machine-readable hosted docs index
-├── skills/                      # four stable skills
+├── skills/                      # five stable skills
 │   ├── e2a/SKILL.md             # everyday inbox operation
 │   ├── e2a-setup/SKILL.md       # MCP, OAuth, inbox, and domain readiness
 │   ├── e2a-integrate/SKILL.md   # SDK or REST application integration
-│   └── e2a-doctor/SKILL.md      # evidence-backed diagnosis and repair
+│   ├── e2a-doctor/SKILL.md      # evidence-backed diagnosis and repair
+│   └── email-evals/SKILL.md     # deterministic synthetic email-agent evaluation (/email-evals)
 └── clients/                     # manual paste-in configs for non-plugin clients
 ```
+
+`/email-evals` guides synthetic, deterministic email-agent cases through
+contained validation, explicit approval, and report-driven iteration.
 
 Experimental autonomous workflows (`/agentify`, `/autopilot`, and `/tether`)
 live in the separate [`e2a-labs`](../e2a-labs/) package. Install core e2a
