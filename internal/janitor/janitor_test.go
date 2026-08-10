@@ -232,6 +232,25 @@ func TestSweep_EmitsMetricsForCorrectTables(t *testing.T) {
 	}
 }
 
+func TestSweep_EmitsAgentMetricForProgressAlongsideError(t *testing.T) {
+	f := &fakePruner{agentsErr: errors.New("one claimed agent is busy")}
+	j, m := newJanitorM(f, f)
+	if err := j.Sweep(context.Background()); !errors.Is(err, f.agentsErr) {
+		t.Fatalf("Sweep error = %v, want joined agent error", err)
+	}
+
+	var found bool
+	for _, call := range m.calls {
+		if call == (metricCall{"agent_identities", 2}) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("metrics = %+v, want committed agent purge count despite sibling error", m.calls)
+	}
+}
+
 // TestSweep_ContinuesPastErrors: an early prune failing does NOT prevent the
 // subsequent prunes from running (continue-on-error preserved), and Sweep
 // returns a joined error carrying every failure.

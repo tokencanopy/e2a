@@ -1890,6 +1890,9 @@ describe("e2a MCP server", () => {
   });
 
   it("restore_agent restores the requested trashed agent", async () => {
+    const restoreTool = (await client.listTools()).tools.find((tool) => tool.name === "restore_agent");
+    expect(restoreTool?.description).toContain("purge_in_progress");
+
     const res = await client.callTool({
       name: "restore_agent",
       arguments: { email: "bot@example.com" },
