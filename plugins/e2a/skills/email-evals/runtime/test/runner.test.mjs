@@ -1129,45 +1129,94 @@ test("body mailbox text is artifact-safe and replay-equivalent", async () => {
   assert.equal(regraded.status, "pass");
 });
 
-test("configured forbidden evidence is redacted and remains a replayed failure", async () => {
+test("self-redacted forbidden patterns retain authenticated identity across unchanged regrade", async () => {
   const expected = expectation();
   expected.subject = { policy: "preserve" };
   expected.body.requiredFacts = ["answer"];
-  expected.body.forbiddenPatterns = ["token-[0-9]+", "never-match"];
+  expected.body.forbiddenPatterns = ["e2a_forbidden_[0-9]+", "never-match"];
   const one = suite([{
-    id: "redacted-forbidden", send: { subject: "Question token-123", text: "Synthetic" }, expect: expected,
+    id: "redacted-forbidden", send: { subject: "Synthetic question", text: "Synthetic" }, expect: expected,
   }]);
+  const outputRoot = await root();
   const summary = await runSuite({
     suite: one,
     adapter: adapter((testCase) => evidence(testCase, {
       candidates: [{
         ...evidence(testCase).candidates[0],
-        mime: { ...evidence(testCase).candidates[0].mime, text: "Synthetic answer token-123" },
+        mime: { ...evidence(testCase).candidates[0].mime, text: "Synthetic answer e2a_forbidden_123" },
       }],
     })),
-    outputRoot: await root(), runId: RUN_ID,
+    outputRoot, runId: RUN_ID,
   });
   assert.equal(summary.status, "fail");
   const artifact = await readFile(summary.files.cases, "utf8");
   const stored = JSON.parse(artifact);
-  assert.doesNotMatch(stored.evidence.candidates[0].mime.text, /token-123/);
+  assert.doesNotMatch(artifact, /e2a_forbidden/);
   assert.match(stored.evidence.candidates[0].mime.text, /\[REDACTED:0\]/);
-  assert.match(stored.evidence.candidates[0].mime.subject, /token-123/);
+  assert.match(stored.expectation.body.forbiddenPatterns[0], /\[REDACTED:credential\]/);
+  const patternLoss = stored.redactionLoss.entries.find(({ path: lossPath }) => (
+    lossPath === "/expectation/body/forbiddenPatterns/0"
+  ));
+  assert.match(patternLoss?.valueDigest ?? "", /^[a-f0-9]{64}$/);
   assert.deepEqual(stored.evidence.candidates[0].mime.textRedactions.forbiddenPatternDigests, [
-    createHash("sha256").update("token-[0-9]+").digest("hex"),
+    createHash("sha256").update("e2a_forbidden_[0-9]+").digest("hex"),
   ]);
-  one.cases[0].expect.body.forbiddenPatterns.reverse();
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "fail");
   assert.equal(
     regraded.cases[0].assertions.find(({ id }) => id === "body.forbidden_patterns").code,
     "forbidden_pattern_matched",
   );
-  one.cases[0].expect.body.forbiddenPatterns = ["different-pattern"];
+  one.cases[0].expect.body.forbiddenPatterns = ["e2a_changed_[0-9]+", "never-match"];
   await assert.rejects(
     regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
     (error) => error.errorClass === "configuration_error" && error.code === "redacted_evidence_assertion_change",
   );
+
+  one.cases[0].expect.body.forbiddenPatterns = ["e2a_forbidden_[0-9]+", "never-match"];
+  one.transport.apiKey = "rotated-synthetic-credential";
+  assert.equal((await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) })).status, "fail");
+
+  const withoutMetadata = structuredClone(stored);
+  delete withoutMetadata.redactionLoss;
+  await writeFile(summary.files.cases, `${JSON.stringify(withoutMetadata)}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+
+  const tampered = structuredClone(stored);
+  tampered.redactionLoss.entries.find(({ path: lossPath }) => (
+    lossPath === "/expectation/body/forbiddenPatterns/0"
+  )).valueDigest = "0".repeat(64);
+  await writeFile(summary.files.cases, `${JSON.stringify(tampered)}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+
+  await writeFile(summary.files.cases, artifact);
+  const artifactAuthPath = path.join(outputRoot, ".email-evals-artifact-auth-key");
+  const authenticKey = await readFile(artifactAuthPath);
+  const copiedRoot = await root();
+  const copied = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => evidence(testCase, {
+      candidates: [{
+        ...evidence(testCase).candidates[0],
+        mime: { ...evidence(testCase).candidates[0].mime, text: "Synthetic answer e2a_forbidden_123" },
+      }],
+    })),
+    outputRoot: copiedRoot,
+    runId: RUN_ID,
+  });
+  await cp(path.join(copiedRoot, ".email-evals-artifact-auth-key"), artifactAuthPath);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+  assert.equal(copied.status, "fail");
+  await writeFile(artifactAuthPath, authenticKey, { mode: 0o600 });
 });
 
 test("nonthrowing malformed observations are transport errors while thrown graders remain grader errors", async () => {

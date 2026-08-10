@@ -342,8 +342,12 @@ test("Windows wall timeout uses bounded taskkill tree termination before settlin
   taskkiller.kill = () => true;
   const taskkillCalls = [];
   const timers = [];
-  const running = runRuntimeNode([], {}, {
+  const running = runRuntimeNode([], {
+    cwd: "C:\\untrusted-suite",
+    env: { PATH: "C:\\untrusted-suite", ComSpec: "C:\\untrusted-suite\\cmd.exe" },
+  }, {
     platform: "win32",
+    windowsSystemRoot: "C:\\Windows",
     spawnChild: () => child,
     spawnTreeKiller: (command, args, options) => {
       taskkillCalls.push({ command, args, options });
@@ -358,9 +362,15 @@ test("Windows wall timeout uses bounded taskkill tree termination before settlin
 
   timers[0]();
   assert.deepEqual(taskkillCalls, [{
-    command: "taskkill.exe",
+    command: "C:\\Windows\\System32\\taskkill.exe",
     args: ["/PID", "5432", "/T", "/F"],
-    options: { stdio: "ignore", windowsHide: true },
+    options: {
+      cwd: "C:\\Windows\\System32",
+      env: { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows" },
+      shell: false,
+      stdio: "ignore",
+      windowsHide: true,
+    },
   }]);
   assert.deepEqual(directSignals, [], "tree termination owns the first Windows kill attempt");
 
@@ -396,6 +406,7 @@ test("Windows taskkill failure falls back to a bounded fail-closed result", asyn
   const timers = [];
   const running = runRuntimeNode([], {}, {
     platform: "win32",
+    windowsSystemRoot: "C:\\Windows",
     spawnChild: () => child,
     spawnTreeKiller: () => taskkiller,
     setTimer: (callback) => { timers.push(callback); return callback; },
@@ -417,6 +428,60 @@ test("Windows taskkill failure falls back to a bounded fail-closed result", asyn
     stderr: "",
     truncated: true,
     finalized: false,
+    termination: "wall_timeout_tree_unavailable",
+  });
+});
+
+test("Windows rejects an untrusted system-root search path and bounds a hung tree killer", async () => {
+  for (const windowsSystemRoot of ["C:\\suite\\Windows", ".\\Windows"]) {
+    const child = fakeChild();
+    child.pid = 7654;
+    child.kill = () => false;
+    const timers = [];
+    let treeKillerCalls = 0;
+    const running = runRuntimeNode([], {}, {
+      platform: "win32",
+      windowsSystemRoot,
+      spawnChild: () => child,
+      spawnTreeKiller: () => { treeKillerCalls += 1; return fakeChild(); },
+      setTimer: (callback) => { timers.push(callback); return callback; },
+      clearTimer: () => {},
+      wallTimeoutMs: 1,
+      terminationGraceMs: 1,
+      finalReapMs: 1,
+    });
+    timers[0]();
+    assert.equal(treeKillerCalls, 0, "untrusted roots must never be executed");
+    timers.at(-1)();
+    assert.deepEqual(await running, {
+      code: 4, stdout: "", stderr: "", truncated: true, finalized: false,
+      termination: "wall_timeout_tree_unavailable",
+    });
+  }
+
+  const child = fakeChild();
+  child.pid = 8765;
+  child.kill = () => false;
+  const taskkiller = new EventEmitter();
+  taskkiller.kill = () => false;
+  taskkiller.unref = () => {};
+  const timers = [];
+  const running = runRuntimeNode([], {}, {
+    platform: "win32",
+    windowsSystemRoot: "D:\\Windows",
+    spawnChild: () => child,
+    spawnTreeKiller: () => taskkiller,
+    setTimer: (callback) => { timers.push(callback); return callback; },
+    clearTimer: () => {},
+    wallTimeoutMs: 1,
+    terminationGraceMs: 1,
+    finalReapMs: 1,
+  });
+  timers[0]();
+  timers[1]();
+  timers[2]();
+  assert.deepEqual(await running, {
+    code: 4, stdout: "", stderr: "", truncated: true, finalized: false,
     termination: "wall_timeout_tree_unavailable",
   });
 });

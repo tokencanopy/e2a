@@ -819,12 +819,59 @@ async function mimeFromMessage(message, {
   }
 }
 
-async function relayStimulusSenderContract(sdk, actor, sendResult, budget) {
-  const fetched = await sdk.messages.get(actor, sendResult.messageId);
+function providerMessageIdentity(values) {
+  const observed = [];
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    const normalized = normalizeMessageIdToken(value);
+    if (normalized === null) {
+      throw transportError("malformed_event", "Evaluation stimulus carried a malformed provider message identity");
+    }
+    observed.push(normalized);
+  }
+  if (new Set(observed).size > 1) {
+    throw transportError("conflicting_evidence", "Evaluation stimulus provider message identities conflict");
+  }
+  return observed[0] ?? null;
+}
+
+function reconcileStimulusSenderContracts(prior, current) {
+  if (prior === null) return current;
+  if (current === null) return prior;
+  const from = reconcileMailbox("stimulus outbound logical sender", [prior.from, current.from], {
+    required: true, preferred: prior.from,
+  });
+  const sentAs = reconcileSentAs([prior.sentAs, current.sentAs]);
+  if (sentAs !== "relay") {
+    throw transportError("conflicting_evidence", "Evaluation stimulus relay mode changed after submission");
+  }
+  const physicalFrom = reconcileText(
+    "stimulus outbound physical sender", [prior.physicalFrom, current.physicalFrom], { required: true },
+  );
+  const rfcMessageId = reconcileText(
+    "stimulus outbound RFC message", [prior.rfcMessageId, current.rfcMessageId],
+  );
+  return { from, physicalFrom, sentAs, rfcMessageId };
+}
+
+async function relayStimulusSenderContract(sdk, actor, sendResult, budget, { relayObserved = false } = {}) {
+  let fetched;
+  try {
+    fetched = await sdk.messages.get(actor, sendResult.messageId);
+  } catch (error) {
+    // Async acceptance can briefly precede visibility through the read model.
+    // Keep observing; all other read failures retain the ordinary bounded
+    // observation error path.
+    if (isNotFound(error)) return null;
+    throw error;
+  }
   const message = validateMessage(fetched, sendResult.messageId, "outbound");
   const sentAs = reconcileSentAs([sendResult.sentAs, message.sentAs]);
   if (sentAs !== "relay") {
-    throw transportError("conflicting_evidence", "Evaluation stimulus relay mode changed after submission");
+    if (relayObserved && sentAs !== null) {
+      throw transportError("conflicting_evidence", "Evaluation stimulus delivery conflicts with its durable sender mode");
+    }
+    return null;
   }
   const from = reconcileMailbox("stimulus outbound logical sender", [actor, message.headerFrom], {
     required: true,
@@ -833,19 +880,11 @@ async function relayStimulusSenderContract(sdk, actor, sendResult, budget) {
   const mime = await mimeFromMessage(message, {
     required: true, budget, label: "stimulus outbound", requireMessageId: false,
   });
-  const providerIdentityAbsent = sendResult.providerMessageId === undefined
-    || sendResult.providerMessageId === null || sendResult.providerMessageId === "";
-  const providerMessageId = providerIdentityAbsent ? null : normalizeMessageIdToken(sendResult.providerMessageId);
-  if (!providerIdentityAbsent && providerMessageId === null) {
-    throw transportError("malformed_event", "Evaluation stimulus carried a malformed provider message identity");
-  }
+  const providerMessageId = providerMessageIdentity([sendResult.providerMessageId, message.providerMessageId]);
   if (mime.messageId !== null && providerMessageId !== null && mime.messageId !== providerMessageId) {
     throw transportError("conflicting_evidence", "Evaluation stimulus MIME and provider message identities conflict");
   }
   const rfcMessageId = mime.messageId ?? providerMessageId;
-  if (rfcMessageId === null) {
-    throw transportError("malformed_event", "Evaluation stimulus omitted its provider message identity");
-  }
   const sender = reconcileDeliveredSender("stimulus outbound", {
     logicalFrom: from,
     sentAs,
@@ -867,7 +906,7 @@ async function normalizeStimulus(sdk, event, actor, target, sendResult, senderCo
   const message = validateMessage(fetchedMessage, messageId, "inbound");
   const conversationId = conversationIdOf(event, data, message);
   const mime = await mimeFromMessage(message, { required: true, budget, label: "stimulus" });
-  const sentAs = reconcileSentAs([sendResult?.sentAs, message?.sentAs]);
+  const sentAs = reconcileSentAs([sendResult?.sentAs, senderContract?.sentAs, message?.sentAs]);
   const sender = reconcileDeliveredSender("stimulus", {
     logicalFrom: actor,
     sentAs,
@@ -924,13 +963,19 @@ function bindCorrelatedConversation(stimulus, candidates) {
   return conversations.length === 1 ? { ...stimulus, conversationId: conversations[0] } : stimulus;
 }
 
-function stimulusEvents(events, actor, target, subject, lowerBound, upperBound, senderContract) {
+function potentialStimulusEvents(events, target, subject, lowerBound, upperBound) {
   return uniqueEvents(events).filter((event) => {
     if (event.type !== "email.received") return false;
     const observed = eventInstant(event).milliseconds;
     if (observed < lowerBound || observed > upperBound) return false;
     const data = dataOf(event);
-    if (!eventIsFor(event, target, "inbound") || data.subject !== subject) return false;
+    return eventIsFor(event, target, "inbound") && data.subject === subject;
+  });
+}
+
+function stimulusEvents(events, actor, target, subject, lowerBound, upperBound, senderContract) {
+  return potentialStimulusEvents(events, target, subject, lowerBound, upperBound).filter((event) => {
+    const data = dataOf(event);
     if (senderContract?.sentAs !== "relay") return normalizedAgent(data.header_from) === actor;
     const expected = normalizedRelayPhysicalFrom(senderContract.physicalFrom);
     const physicalAddress = normalizedAgent(data.header_from);
@@ -1568,9 +1613,7 @@ export function createE2AAdapter({
       }
       const sendAcceptedAt = clockInstant(now).iso;
       const submittedSentAs = reconcileSentAs([sendResult.sentAs]);
-      const stimulusSenderContract = submittedSentAs === "relay"
-        ? await relayStimulusSenderContract(caseSdk, actor, sendResult, mimeBudget)
-        : null;
+      let stimulusSenderContract = null;
 
       let logicalElapsed = Math.max(0, clockInstant(now).milliseconds - caseStart.milliseconds);
       let lastEvidence = { stimulus: null, candidates: [], actorReceipt: null };
@@ -1623,6 +1666,18 @@ export function createE2AAdapter({
             "observation_limit_exceeded",
           );
 
+          const relayStimulusPossible = potentialStimulusEvents(
+            targetEvents, target, resolvedCase.send.subject, caseStart.milliseconds, deadline,
+          ).some((event) => normalizedAgent(dataOf(event).header_from) !== actor);
+          if (submittedSentAs === "relay" || stimulusSenderContract !== null || relayStimulusPossible) {
+            const durableSenderContract = await relayStimulusSenderContract(
+              caseSdk, actor, sendResult, mimeBudget, { relayObserved: relayStimulusPossible },
+            );
+            stimulusSenderContract = reconcileStimulusSenderContracts(
+              stimulusSenderContract, durableSenderContract,
+            );
+          }
+
           let stimulus = lastEvidence.stimulus;
           if (!stimulus) {
             const matches = stimulusEvents(
@@ -1635,6 +1690,12 @@ export function createE2AAdapter({
               stimulus = await normalizeStimulus(
                 caseSdk, matches[0], actor, target, sendResult, stimulusSenderContract, mimeBudget,
               );
+              if (stimulusSenderContract?.sentAs === "relay") {
+                stimulusSenderContract = reconcileStimulusSenderContracts(stimulusSenderContract, {
+                  ...stimulusSenderContract,
+                  rfcMessageId: stimulus.rfcMessageId,
+                });
+              }
             }
           }
 

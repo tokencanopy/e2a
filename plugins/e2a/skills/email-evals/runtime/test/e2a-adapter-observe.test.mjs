@@ -817,7 +817,7 @@ test("relay mode keeps authoritative logical From separate from provider-safe ph
   }
 });
 
-test("relay stimulus, reply, and actor receipt keep logical and physical senders separate", async () => {
+test("documented accepted response binds relay and provider identity from durable evidence end to end", async () => {
   const events = await fixture("events-success.json");
   const messages = successfulMessages();
   const actorPhysical = "Eval Actor via e2a <agent@agents.localhost>";
@@ -835,7 +835,8 @@ test("relay stimulus, reply, and actor receipt keep logical and physical senders
     id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
     createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR,
     envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [],
-    sentAs: "relay", subject: SUBJECT, rawMessage: actorOutbound,
+    sentAs: "relay", providerMessageId: "<original@agents.localhost>",
+    subject: SUBJECT, rawMessage: actorOutbound,
   };
   events[0].data.header_from = actorPhysical;
   events[0].data.envelope_from = "agent@agents.localhost";
@@ -865,15 +866,24 @@ test("relay stimulus, reply, and actor receipt keep logical and physical senders
     ...caseSpec().expect,
     sender: { exactly: TARGET, sentAs: "relay", replyTo: { exactly: [TARGET] } },
   } });
+  let outboundReads = 0;
   const client = fakeClient({
     events,
     messages,
-    send: async () => ({
-      messageId: "msg_synthetic_actor_out", status: "sent", method: "smtp", sentAs: "relay",
-      providerMessageId: "<original@agents.localhost>",
-    }),
+    // This is the documented async-accept shape: sent_as and provider identity
+    // are deliberately absent until the durable outbound row is observed.
+    send: async () => ({ messageId: "msg_synthetic_actor_out", status: "accepted", method: "smtp" }),
+    getMessage: (_email, messageId) => {
+      const message = structuredClone(messages[messageId]);
+      if (messageId === "msg_synthetic_actor_out" && ++outboundReads === 1) {
+        delete message.sentAs;
+        delete message.providerMessageId;
+      }
+      return message;
+    },
   });
   const captured = await adapter(client).adapter.executeCase(relayCase, caseContext());
+  assert.ok(outboundReads >= 2, "relay binding must wait for the durable sender/provider fields");
 
   assert.deepEqual({
     from: captured.stimulus.from,
@@ -894,6 +904,17 @@ test("relay stimulus, reply, and actor receipt keep logical and physical senders
   for (const result of [...gradeCore(relayCase.expect, captured), ...gradeContent(relayCase.expect, captured)]) {
     assert.equal(result.status, "pass", `${result.id}: ${result.code}`);
   }
+
+  const conflictingMessages = structuredClone(messages);
+  conflictingMessages.msg_synthetic_actor_out.sentAs = "own_address";
+  await assert.rejects(
+    adapter(fakeClient({
+      events,
+      messages: conflictingMessages,
+      send: async () => ({ messageId: "msg_synthetic_actor_out", status: "accepted", method: "smtp" }),
+    })).adapter.executeCase(relayCase, caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+  );
 });
 
 test("relay stimulus and actor receipt reject malformed physical senders", async () => {

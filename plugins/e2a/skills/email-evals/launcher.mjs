@@ -35,6 +35,29 @@ const SAFE_RUNTIME_DIAGNOSTICS = new Map([
   ["email-evals: unexpected runner failure\n", 4],
 ]);
 
+function trustedWindowsTreeKiller(systemRoot) {
+  if (typeof systemRoot !== "string" || /[\u0000-\u001f\u007f]/.test(systemRoot)
+    || !path.win32.isAbsolute(systemRoot)) return null;
+  const normalizedRoot = path.win32.normalize(systemRoot);
+  const parsed = path.win32.parse(normalizedRoot);
+  // Modern supported Windows installations expose SystemRoot as a drive-root
+  // Windows directory. Refuse UNC, relative, nested, or renamed locations
+  // instead of turning an inherited search path into executable authority.
+  if (!/^[A-Za-z]:\\$/.test(parsed.root)
+    || path.win32.relative(parsed.root, normalizedRoot).toLowerCase() !== "windows") return null;
+  const systemDirectory = path.win32.join(normalizedRoot, "System32");
+  return {
+    command: path.win32.join(systemDirectory, "taskkill.exe"),
+    options: {
+      cwd: systemDirectory,
+      env: { SystemRoot: normalizedRoot, WINDIR: normalizedRoot },
+      shell: false,
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  };
+}
+
 function unavailable(stderr) {
   stderr.write("email-evals: runtime unavailable\n");
   return 2;
@@ -59,6 +82,7 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     spawnTreeKiller = spawn,
     killProcess = process.kill,
     platform = process.platform,
+    windowsSystemRoot = process.env.SystemRoot,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     graceMs = RUNTIME_STDERR_GRACE_MS,
@@ -211,11 +235,17 @@ export function runRuntimeNode(args, options, dependencies = {}) {
         armFinalWatchdog();
         return;
       }
+      const trustedTreeKiller = trustedWindowsTreeKiller(windowsSystemRoot);
+      if (trustedTreeKiller === null) {
+        completeWindowsTreeKill(false);
+        return;
+      }
       try {
-        treeKiller = spawnTreeKiller("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-          stdio: "ignore",
-          windowsHide: true,
-        });
+        treeKiller = spawnTreeKiller(
+          trustedTreeKiller.command,
+          ["/PID", String(child.pid), "/T", "/F"],
+          trustedTreeKiller.options,
+        );
       } catch {
         completeWindowsTreeKill(false);
         return;

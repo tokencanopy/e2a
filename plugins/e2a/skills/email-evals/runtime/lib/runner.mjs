@@ -1355,8 +1355,6 @@ function validateStoredRecord(record, suite, testCase, artifactAuthKey) {
   if (source.evidence !== null) {
     try { evidence = projectEvidence(source.evidence, { stored: true }); } catch { invalidCaseArtifact(); }
   }
-  const allowedRedactions = new Set(forbiddenPatternDigests(source.expectation));
-  if (evidenceRedactionDigests(evidence).some((digest) => !allowedRedactions.has(digest))) invalidCaseArtifact();
   const assertions = source.assertions.map(projectStoredAssertion);
   const primaryError = projectStoredError(source.primaryError);
   const secondaryErrors = source.secondaryErrors.map((entry) => projectStoredError(entry, { secondary: true }));
@@ -1546,7 +1544,11 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   for (const [index, record] of validatedRecords.entries()) {
     if (evidenceRedactionDigests(record.evidence).length === 0) continue;
     const storedPatterns = forbiddenPatternDigests(record.expectation);
-    const currentPatterns = forbiddenPatternDigests(suite.cases[index].expect);
+    // Compare the authenticated artifact projections here. A forbidden
+    // expression can itself be replaced by a credential/environment marker in
+    // the stored expectation; assertRedactionBoundaryUnchanged has already
+    // compared the keyed pre-redaction value identities for those paths.
+    const currentPatterns = forbiddenPatternDigests(currentArtifacts[index].expectation);
     if (storedPatterns.length !== currentPatterns.length
       || storedPatterns.some((digest, patternIndex) => digest !== currentPatterns[patternIndex])) {
       throw new EvalError(
@@ -1554,6 +1556,10 @@ export async function regradeRun({ suite, runDirectory } = {}) {
         "redacted_evidence_assertion_change",
         "Forbidden-pattern assertions cannot change when stored body evidence required redaction",
       );
+    }
+    const allowedRedactions = new Set(forbiddenPatternDigests(suite.cases[index].expect));
+    if (evidenceRedactionDigests(record.evidence).some((digest) => !allowedRedactions.has(digest))) {
+      invalidCaseArtifact();
     }
   }
   let artifactLimitSuffix = false;
