@@ -52,7 +52,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 
-  it("messages.getMetrics reports null rates before traffic and counts after", async () => {
+  it("messages.getMetrics keeps rates null without outward traffic and numeric with it", async () => {
     const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
     await client.agents.create({ email });
     try {
@@ -81,8 +81,25 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
       expect(after.messagesWithLifecycle).toBeGreaterThan(0);
       expect(after.summary.accepted).toBeGreaterThan(0);
       expect(after.counters ?? []).not.toHaveLength(0);
-      // Now that a denominator exists the rate is a real number, not null.
-      expect(typeof after.rates.deliveredRate).toBe("number");
+      // Loopback traffic remains visible, but it never reaches a recipient
+      // server and therefore creates no outward-delivery denominator.
+      expect(after.summary.loopback).toBe(1);
+      expect(after.rates.deliveredRate).toBeNull();
+
+      // The contract server intentionally does not start its outbound worker.
+      // A queued external send is therefore deterministic while still creating
+      // the outward denominator needed to prove numeric SDK decoding.
+      const queued = await client.messages.send(email, {
+        to: ["recipient@example.net"],
+        subject: "metrics outward contract",
+        text: "queued external send",
+      });
+      expect(queued.status).toBe("accepted");
+
+      const afterOutward = await client.messages.getMetrics(email);
+      expect(afterOutward.summary.accepted).toBe(2);
+      expect(afterOutward.summary.loopback).toBe(1);
+      expect(afterOutward.rates.deliveredRate).toBe(0);
 
       // An explicit window is echoed back verbatim, so a caller can tell which
       // cohort a number describes rather than inferring it from wall clock.

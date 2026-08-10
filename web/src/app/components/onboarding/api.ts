@@ -840,6 +840,7 @@ export type MetricsSummary = {
   complained: number;
   suppressed: number;
   send_failed: number;
+  loopback: number;
   received: number;
   dmarc_pass: number;
   dmarc_fail: number;
@@ -908,6 +909,12 @@ export type WebhookMetrics = {
   endpoints_truncated: boolean;
 };
 
+export type MetricsBucket = {
+  day: string;
+  summary: MetricsSummary;
+  rates: MetricsRates;
+};
+
 export type AccountMetrics = {
   start: string;
   end: string;
@@ -920,6 +927,7 @@ export type AccountMetrics = {
   agents: AgentMetricsGroup[] | null;
   agents_truncated: boolean;
   webhooks: WebhookMetrics;
+  buckets: MetricsBucket[] | null;
 };
 
 // GET /v1/metrics. `groupByAgent` adds the per-inbox breakdown, which is what
@@ -928,11 +936,13 @@ export async function getAccountMetrics(opts: {
   start?: Date;
   end?: Date;
   groupByAgent?: boolean;
+  bucketByDay?: boolean;
 } = {}): Promise<AccountMetrics> {
   const params = new URLSearchParams();
   if (opts.start) params.set("start", opts.start.toISOString());
   if (opts.end) params.set("end", opts.end.toISOString());
   if (opts.groupByAgent) params.set("group_by", "agent");
+  if (opts.bucketByDay) params.set("bucket", "day");
   const qs = params.toString();
   return request<AccountMetrics>("/v1/metrics" + (qs ? "?" + qs : ""));
 }

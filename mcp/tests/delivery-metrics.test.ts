@@ -66,12 +66,19 @@ describe("MCP delivery-metrics tools", () => {
     expect(Object.keys(schema.properties).sort()).toEqual(["email", "end", "start"]);
   });
 
-  it("get_account_metrics accepts only group_by:'agent'", async () => {
+  it("get_account_metrics pins its enumerated options", async () => {
     const tool = (await client.listTools()).tools.find((t) => t.name === "get_account_metrics")!;
     const schema = tool.inputSchema as { properties: Record<string, { const?: string; enum?: string[] }> };
-    expect(Object.keys(schema.properties).sort()).toEqual(["end", "group_by", "start"]);
+    expect(Object.keys(schema.properties).sort()).toEqual(["bucket", "end", "group_by", "start"]);
     const groupBy = schema.properties.group_by;
     expect(groupBy.const ?? groupBy.enum?.[0]).toBe("agent");
+    const bucket = schema.properties.bucket;
+    expect(bucket.const ?? bucket.enum?.[0]).toBe("day");
+  });
+
+  it("forwards bucket=day to the account rollup", async () => {
+    await client.callTool({ name: "get_account_metrics", arguments: { bucket: "day" } });
+    expect(stub.getAccountMetrics).toHaveBeenCalledWith({ bucket: "day" });
   });
 
   // These descriptions carry caveats a model cannot infer from the numbers: a

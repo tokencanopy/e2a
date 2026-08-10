@@ -120,6 +120,7 @@ __all__ = [
     "MessageParsedView",
     "MessageSummaryView",
     "MessageView",
+    "MetricsBucketView",
     "MetricsCounterView",
     "MetricsRatesView",
     "MetricsSummaryView",
@@ -313,6 +314,7 @@ from e2a.v1.generated.models.message_lifecycle_transition import MessageLifecycl
 from e2a.v1.generated.models.message_parsed_view import MessageParsedView as MessageParsedView
 from e2a.v1.generated.models.message_summary_view import MessageSummaryView as MessageSummaryView
 from e2a.v1.generated.models.message_view import MessageView as MessageView
+from e2a.v1.generated.models.metrics_bucket_view import MetricsBucketView as MetricsBucketView
 from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView as MetricsCounterView
 from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView as MetricsRatesView
 from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView as MetricsSummaryView

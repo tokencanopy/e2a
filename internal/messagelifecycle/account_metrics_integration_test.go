@@ -64,7 +64,7 @@ func TestAccountMetricsSumsEveryAgentAndExcludesOtherAccounts(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_acctfirst",
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), false)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), false, false)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestAccountMetricsExcludesTrashedAgents(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_accttrashlive",
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, false)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestAccountMetricsGroupByAgentOrdersByVolume(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_grpquiet",
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, false)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestAccountMetricsTruncatesBreakdownButNotTotals(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, userID,
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, false)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
@@ -236,11 +236,129 @@ func TestAccountMetricsRejectsInvalidWindows(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := store.CountByReasonCodeForAccount(ctx, tc.userID, tc.start, tc.end, false); err == nil {
+			if _, err := store.CountByReasonCodeForAccount(ctx, tc.userID, tc.start, tc.end, false, false); err == nil {
 				t.Fatal("expected an error")
 			} else if !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("error = %v, want it to mention %q", err, tc.wantSubstr)
 			}
 		})
+	}
+}
+
+// TestCountByDayGapFillsQuietDays: a day with no traffic must come back with
+// zeroes, not vanish. A missing day lets a chart draw a straight line across
+// it, which reads as steady volume rather than none.
+func TestCountByDayGapFillsQuietDays(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	agentID := seedMetricsAgent(t, pool, "bucketgap")
+	ctx := context.Background()
+
+	start := metricsBaseTime.Truncate(24 * time.Hour)
+	// Traffic on day 0 and day 3 only; days 1 and 2 are silent.
+	for _, offset := range []int{0, 3} {
+		id := fmt.Sprintf("msg_bucket_%d", offset)
+		seedMetricsMessage(t, pool, id, agentID, "outbound", start.AddDate(0, 0, offset).Add(6*time.Hour))
+		appendMetricsObservation(t, pool, id, "outbound", "accept",
+			messagelifecycle.ReasonAcceptanceOutboundAPI, start.AddDate(0, 0, offset).Add(6*time.Hour))
+	}
+
+	result, err := store.CountByReasonCodeForAccount(ctx, "usr_bucketgap", start, start.AddDate(0, 0, 4), false, true)
+	if err != nil {
+		t.Fatalf("CountByReasonCodeForAccount: %v", err)
+	}
+	buckets := result.Days
+	if len(buckets) != 4 {
+		t.Fatalf("buckets = %d, want 4 contiguous days", len(buckets))
+	}
+	for i, b := range buckets {
+		wantDay := start.AddDate(0, 0, i)
+		if !b.Day.Equal(wantDay) {
+			t.Errorf("bucket %d day = %s, want %s", i, b.Day, wantDay)
+		}
+		hasTraffic := len(b.Counts) > 0
+		if wantTraffic := i == 0 || i == 3; hasTraffic != wantTraffic {
+			t.Errorf("bucket %d traffic = %v, want %v", i, hasTraffic, wantTraffic)
+		}
+	}
+}
+
+// TestCountByDayBucketsSumToTheWindowTotal: the per-day slices must reconcile
+// with the totals shown above them, or the chart and the tiles disagree.
+func TestCountByDayBucketsSumToTheWindowTotal(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	agentID := seedMetricsAgent(t, pool, "bucketsum")
+	ctx := context.Background()
+
+	start := metricsBaseTime.Truncate(24 * time.Hour)
+	for i := 0; i < 9; i++ {
+		id := fmt.Sprintf("msg_bsum_%d", i)
+		at := start.AddDate(0, 0, i%3).Add(time.Duration(i) * time.Hour)
+		seedMetricsMessage(t, pool, id, agentID, "outbound", at)
+		appendMetricsObservation(t, pool, id, "outbound", "accept", messagelifecycle.ReasonAcceptanceOutboundAPI, at)
+	}
+	end := start.AddDate(0, 0, 3)
+
+	// One call, one snapshot: buckets and totals cannot straddle a write.
+	result, err := store.CountByReasonCodeForAccount(ctx, "usr_bucketsum", start, end, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buckets := result.Days
+	var summed int64
+	for _, b := range buckets {
+		for _, c := range b.Counts {
+			if c.ReasonCode == messagelifecycle.ReasonAcceptanceOutboundAPI {
+				summed += c.Messages
+			}
+		}
+	}
+	want := accountCountsByCode(result.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages
+	if summed != want {
+		t.Errorf("buckets sum to %d, window total is %d — the chart would contradict the tiles", summed, want)
+	}
+	if want != 9 {
+		t.Errorf("window total = %d, want 9", want)
+	}
+}
+
+// Buckets and totals must come from ONE snapshot: two independent reads let a
+// concurrent write make the chart contradict the tiles above it, which the API
+// documents as impossible.
+func TestCountByDayIsReadInTheSameSnapshotAsTotals(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := messagelifecycle.NewStore(pool)
+	agentID := seedMetricsAgent(t, pool, "bucketsnap")
+	ctx := context.Background()
+	start := metricsBaseTime.Truncate(24 * time.Hour)
+
+	seedMetricsMessage(t, pool, "msg_snap_1", agentID, "outbound", start.Add(time.Hour))
+	appendMetricsObservation(t, pool, "msg_snap_1", "outbound", "accept",
+		messagelifecycle.ReasonAcceptanceOutboundAPI, start.Add(time.Hour))
+
+	result, err := store.CountByReasonCodeForAccount(ctx, "usr_bucketsnap", start, start.AddDate(0, 0, 2), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bucketed int64
+	for _, b := range result.Days {
+		for _, c := range b.Counts {
+			if c.ReasonCode == messagelifecycle.ReasonAcceptanceOutboundAPI {
+				bucketed += c.Messages
+			}
+		}
+	}
+	total := accountCountsByCode(result.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages
+	if bucketed != total || total != 1 {
+		t.Errorf("buckets summed to %d, totals %d, want both 1", bucketed, total)
+	}
+	// Not asked for: no buckets, and no second query fired.
+	plain, err := store.CountByReasonCodeForAccount(ctx, "usr_bucketsnap", start, start.AddDate(0, 0, 2), false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Days) != 0 {
+		t.Errorf("days = %d, want none when buckets were not requested", len(plain.Days))
 	}
 }

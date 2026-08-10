@@ -99,6 +99,7 @@ models/MessageLifecycleTransition.ts
 models/MessageParsedView.ts
 models/MessageSummaryView.ts
 models/MessageView.ts
+models/MetricsBucketView.ts
 models/MetricsCounterView.ts
 models/MetricsRatesView.ts
 models/MetricsSummaryView.ts

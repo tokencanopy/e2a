@@ -10,25 +10,20 @@
  * Do not edit the class manually.
  */
 
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { HttpFile } from '../http/http.js';
 
-export class MetricsRatesView {
+export class MetricsBucketView {
     /**
-    * (bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.
+    * Midnight UTC starting this bucket. Buckets are contiguous and gap-filled: a day with no traffic is present with zeroes rather than omitted, so a chart cannot draw a straight line across a quiet day and imply steady volume.
     */
-    'bounceRate': number | null;
+    'day': Date;
     /**
-    * complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs.
+    * Rates for this day alone, on the same fixed denominators as the window totals. Null members mean that day had no denominator, which is common on low-volume days and is NOT a zero.
     */
-    'complaintRate': number | null;
-    /**
-    * delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.
-    */
-    'deliveredRate': number | null;
-    /**
-    * suppressed / (accepted − loopback). The share of outward sends that never left e2a.
-    */
-    'suppressionBlockRate': number | null;
+    'rates': MetricsRatesView;
+    'summary': MetricsSummaryView;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -36,32 +31,26 @@ export class MetricsRatesView {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "bounceRate",
-            "baseName": "bounce_rate",
-            "type": "number",
-            "format": "double"
+            "name": "day",
+            "baseName": "day",
+            "type": "Date",
+            "format": "date-time"
         },
         {
-            "name": "complaintRate",
-            "baseName": "complaint_rate",
-            "type": "number",
-            "format": "double"
+            "name": "rates",
+            "baseName": "rates",
+            "type": "MetricsRatesView",
+            "format": ""
         },
         {
-            "name": "deliveredRate",
-            "baseName": "delivered_rate",
-            "type": "number",
-            "format": "double"
-        },
-        {
-            "name": "suppressionBlockRate",
-            "baseName": "suppression_block_rate",
-            "type": "number",
-            "format": "double"
+            "name": "summary",
+            "baseName": "summary",
+            "type": "MetricsSummaryView",
+            "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return MetricsRatesView.attributeTypeMap;
+        return MetricsBucketView.attributeTypeMap;
     }
 
     public constructor() {

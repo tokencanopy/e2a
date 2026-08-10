@@ -101,6 +101,13 @@ components:
         agents_truncated:
           description: "True when the account has more agents with traffic than the breakdown returned (cap: 200). The account-wide totals above stay complete — only the breakdown is cut."
           type: boolean
+        buckets:
+          description: Per-day breakdown, oldest first. Empty unless bucket=day was requested. Each bucket's counters sum to the window totals above; its rates do not average to the window rate, because a rate of rates is not the rate.
+          items:
+            $ref: "#/components/schemas/MetricsBucketView"
+          type:
+            - array
+            - "null"
         counters:
           description: Every reason code observed across the account in the window, ordered by code.
           items:
@@ -148,6 +155,7 @@ components:
         - agents
         - agents_truncated
         - webhooks
+        - buckets
       type: object
       x-stability-level: beta
     AccountUserView:
@@ -3176,6 +3184,24 @@ components:
         - raw_message
         - attachments
       type: object
+    MetricsBucketView:
+      additionalProperties: true
+      properties:
+        day:
+          description: "Midnight UTC starting this bucket. Buckets are contiguous and gap-filled: a day with no traffic is present with zeroes rather than omitted, so a chart cannot draw a straight line across a quiet day and imply steady volume."
+          format: date-time
+          type: string
+        rates:
+          $ref: "#/components/schemas/MetricsRatesView"
+          description: Rates for this day alone, on the same fixed denominators as the window totals. Null members mean that day had no denominator, which is common on low-volume days and is NOT a zero.
+        summary:
+          $ref: "#/components/schemas/MetricsSummaryView"
+      required:
+        - day
+        - summary
+        - rates
+      type: object
+      x-stability-level: beta
     MetricsCounterView:
       additionalProperties: true
       properties:
@@ -3212,7 +3238,7 @@ components:
       additionalProperties: true
       properties:
         bounce_rate:
-          description: (bounced_hard + bounced_soft + bounced_undetermined) / submitted. Denominated on submitted, not accepted, so it is directly comparable to the provider thresholds that trigger account review.
+          description: (bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.
           format: double
           type:
             - number
@@ -3224,13 +3250,13 @@ components:
             - number
             - "null"
         delivered_rate:
-          description: delivered / accepted. Everything the agent asked to send, including what suppression or review stopped — the honest 'did my mail arrive' number.
+          description: delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.
           format: double
           type:
             - number
             - "null"
         suppression_block_rate:
-          description: suppressed / accepted. The share of requested sends that never left e2a.
+          description: suppressed / (accepted − loopback). The share of outward sends that never left e2a.
           format: double
           type:
             - number
@@ -3285,6 +3311,10 @@ components:
           description: Inbound messages with an aligned DMARC pass.
           format: int64
           type: integer
+        loopback:
+          description: "Messages delivered agent-to-agent without leaving this deployment. EXCLUDED from every rate: there is no recipient server to accept them, so counting them as delivered would overstate delivery while counting them as failures would understate it. Counts mail that REACHED local submission — a self-send stopped earlier by review has no loopback observation and is not counted here. They remain in accepted and submitted, which count what was asked for and what went out."
+          format: int64
+          type: integer
         received:
           description: "Inbound messages accepted: arrivals over SMTP plus the delivered copy of agent-to-agent mail that never left this deployment (the local loopback path)."
           format: int64
@@ -3330,6 +3360,7 @@ components:
         - bounced_undetermined
         - complained
         - suppressed
+        - loopback
         - send_failed
         - received
         - dmarc_pass
@@ -8111,6 +8142,15 @@ paths:
           schema:
             description: Exclusive end of the cohort window (RFC 3339). Defaults to now.
             format: date-time
+            type: string
+        - description: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+          explode: false
+          in: query
+          name: bucket
+          schema:
+            description: Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers.
+            enum:
+              - day
             type: string
         - description: Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
           explode: false

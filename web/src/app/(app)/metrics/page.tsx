@@ -16,6 +16,7 @@ import { PageShell } from "../../components/loft/PageShell";
 import { Chip } from "../../components/loft/Chip";
 import { InfoTip } from "../../components/loft/InfoTip";
 import { metricsKey } from "../../../lib/swrKeys";
+import { TrendChart, type TrendPoint } from "./_components/TrendChart";
 import { METRIC_HELP } from "../../../lib/metricDefinitions";
 import {
   getAccountMetrics,
@@ -189,7 +190,7 @@ export default function MetricsPage() {
   const [days, setDays] = useState<number>(30);
 
   const { data, error, isLoading } = useSWR(metricsKey(days, true), () =>
-    getAccountMetrics({ groupByAgent: true, start: startOf(days), end: new Date() }),
+    getAccountMetrics({ groupByAgent: true, bucketByDay: true, start: startOf(days), end: new Date() }),
   );
   // Comparison window: the equal-length period immediately before this one.
   const { data: prior } = useSWR(["metrics-prior", days], () =>
@@ -198,6 +199,17 @@ export default function MetricsPage() {
 
   const summary = data?.summary;
   const rates = data?.rates;
+  const trend: TrendPoint[] = useMemo(
+    () =>
+      (data?.buckets ?? []).map((b) => ({
+        day: b.day,
+        deliveredRate: b.rates.delivered_rate,
+        accepted: b.summary.accepted,
+        delivered: b.summary.delivered,
+        bounced: b.summary.bounced_hard + b.summary.bounced_soft + b.summary.bounced_undetermined,
+      })),
+    [data],
+  );
   const agents = useMemo(
     () => (data?.agents ?? []).slice().sort((a, b) => b.messages_in_window - a.messages_in_window),
     [data],
@@ -301,6 +313,15 @@ export default function MetricsPage() {
             withLifecycle={data.messages_with_lifecycle}
           />
 
+          {trend.length > 1 && (
+            <Panel
+              title="Delivery rate over time"
+              help="One point per UTC day. A day with no sends has no rate to plot, so the line breaks rather than dropping to zero — a gap means nothing was sent, not that everything failed. The bars below are daily volume, on their own scale."
+            >
+              <TrendChart points={trend} />
+            </Panel>
+          )}
+
           <Panel title="Where mail went">
             {summary.accepted === 0 && (
               <p className="mb-2 text-[12px]" style={{ color: "var(--fg-subtle)" }}>
@@ -326,6 +347,7 @@ export default function MetricsPage() {
               lost={[
                 summary.suppressed > 0 ? `${num(summary.suppressed)} suppressed` : null,
                 summary.send_failed > 0 ? `${num(summary.send_failed)} failed` : null,
+                summary.loopback > 0 ? `${num(summary.loopback)} agent-to-agent` : null,
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -356,11 +378,11 @@ export default function MetricsPage() {
                   <thead>
                     <tr style={{ color: "var(--fg-muted)" }}>
                       <th className="py-1.5 text-left font-normal">Inbox</th>
-                      <th className="py-1.5 text-right font-normal">Messages</th>
-                      <th className="py-1.5 text-right font-normal">Accepted</th>
-                      <th className="py-1.5 text-right font-normal">Delivered</th>
-                      <th className="py-1.5 text-right font-normal">Rate</th>
-                      <th className="py-1.5 text-right font-normal">Bounced</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Messages</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Accepted</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Delivered</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Rate</th>
+                      <th className="py-1.5 pl-3 text-right font-normal">Bounced</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -368,17 +390,17 @@ export default function MetricsPage() {
                       <tr key={a.agent_email} style={{ borderTop: "1px solid var(--border-sub)" }}>
                         <td className="py-1.5">
                           <Link
-                            href={`/inboxes/messages?agent=${encodeURIComponent(a.agent_email)}`}
+                            href={`/inboxes/messages?email=${encodeURIComponent(a.agent_email)}`}
                             style={{ color: "var(--accent)" }}
                           >
                             {a.agent_email}
                           </Link>
                         </td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.messages_in_window)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.summary.accepted)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(a.summary.delivered)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{pct(a.rates.delivered_rate)}</td>
-                        <td className="py-1.5 text-right tabular-nums">{num(bounced(a.summary))}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.messages_in_window)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.summary.accepted)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(a.summary.delivered)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{pct(a.rates.delivered_rate)}</td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums">{num(bounced(a.summary))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -560,28 +582,28 @@ function WebhookPanel({ webhooks: w }: { webhooks?: WebhookMetrics }) {
             <thead>
               <tr style={{ color: "var(--fg-muted)" }}>
                 <th className="py-1.5 text-left font-normal">Endpoint</th>
-                <th className="py-1.5 text-right font-normal">
+                <th className="py-1.5 pl-3 text-right font-normal">
                   <span className="inline-flex items-center">
                     Deliveries
                     <InfoTip label="the delivery grain" text={METRIC_HELP.webhookGrain} />
                   </span>
                 </th>
-                <th className="py-1.5 text-right font-normal">Success</th>
-                <th className="py-1.5 text-right font-normal">Last status</th>
-                <th className="py-1.5 text-right font-normal">State</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Success</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Last status</th>
+                <th className="py-1.5 pl-3 text-right font-normal">State</th>
               </tr>
             </thead>
             <tbody>
               {endpoints.map((e) => (
                 <tr key={e.webhook_id} style={{ borderTop: "1px solid var(--border-sub)" }}>
                   <td className="py-1.5">{e.url_host || e.webhook_id}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(e.deliveries)}</td>
-                  <td className="py-1.5 text-right tabular-nums">{pct(e.success_rate)}</td>
-                  <td className="py-1.5 text-right tabular-nums">
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(e.deliveries)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{pct(e.success_rate)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">
                     {e.last_status_code ?? "—"}
                   </td>
                   <td
-                    className="py-1.5 text-right"
+                    className="py-1.5 pl-3 text-right"
                     style={{
                       color: e.auto_disabled_at
                         ? "var(--danger)"
@@ -646,25 +668,25 @@ function ReasonCodeDetail({ counters }: { counters: { reason_code: string; stage
             <thead>
               <tr style={{ color: "var(--fg-muted)" }}>
                 <th className="py-1.5 text-left font-normal">Reason code</th>
-                <th className="py-1.5 text-left font-normal">Stage</th>
-                <th className="py-1.5 text-left font-normal">Outcome</th>
-                <th className="py-1.5 text-right font-normal">
+                <th className="py-1.5 pl-3 text-left font-normal">Stage</th>
+                <th className="py-1.5 pl-3 text-left font-normal">Outcome</th>
+                <th className="py-1.5 pl-3 text-right font-normal">
                   <span className="inline-flex items-center">
                     Observations
                     <InfoTip label="observations" text={METRIC_HELP.observations} />
                   </span>
                 </th>
-                <th className="py-1.5 text-right font-normal">Messages</th>
+                <th className="py-1.5 pl-3 text-right font-normal">Messages</th>
               </tr>
             </thead>
             <tbody>
               {counters.map((c) => (
                 <tr key={c.reason_code} style={{ borderTop: "1px solid var(--border-sub)" }}>
                   <td className="py-1.5 font-mono text-[11px]">{c.reason_code}</td>
-                  <td className="py-1.5">{c.stage}</td>
-                  <td className="py-1.5">{c.outcome}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(c.observations)}</td>
-                  <td className="py-1.5 text-right tabular-nums">{num(c.messages)}</td>
+                  <td className="py-1.5 pl-3">{c.stage}</td>
+                  <td className="py-1.5 pl-3">{c.outcome}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(c.observations)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums">{num(c.messages)}</td>
                 </tr>
               ))}
             </tbody>

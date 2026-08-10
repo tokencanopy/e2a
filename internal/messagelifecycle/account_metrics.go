@@ -34,6 +34,16 @@ type AccountMetrics struct {
 	// AgentsTruncated reports that the account owns more agents with traffic
 	// than Agents contains. Totals remain accurate; only the breakdown is cut.
 	AgentsTruncated bool
+
+	// Days is the optional per-day breakdown, oldest first. Empty when the
+	// caller did not ask for it.
+	//
+	// It is produced inside the SAME transaction as Totals, not by a separate
+	// read. The API promises that bucket counters sum to the window totals, and
+	// two independent reads cannot honour that: a write landing between them
+	// makes the chart contradict the tiles it sits under, which is precisely
+	// the failure a documented sum-to-totals contract must not have.
+	Days []DayBucket
 }
 
 // CountByReasonCodeForAccount aggregates persisted lifecycle observations
@@ -58,7 +68,7 @@ type AccountMetrics struct {
 //
 // When groupByAgent is set, the busiest MaxMetricsAgents agents also come back
 // individually. Totals are computed independently of that cap.
-func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, start, end time.Time, groupByAgent bool) (AccountMetrics, error) {
+func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, start, end time.Time, groupByAgent, bucketByDay bool) (AccountMetrics, error) {
 	var metrics AccountMetrics
 	if userID == "" {
 		return metrics, fmt.Errorf("message lifecycle account metrics: user id required")
@@ -81,6 +91,15 @@ func (s *Store) CountByReasonCodeForAccount(ctx context.Context, userID string, 
 		return metrics, err
 	}
 	metrics.Totals = totals
+
+	if bucketByDay {
+		days, err := accountDaysTx(ctx, tx, userID, start, end)
+		if err != nil {
+			return metrics, err
+		}
+		metrics.Days = days
+	}
+
 	if !groupByAgent {
 		return metrics, nil
 	}
@@ -258,4 +277,80 @@ func accountAgentCountsTx(ctx context.Context, tx pgx.Tx, agentIDs []string, sta
 		return nil, fmt.Errorf("iterate per-agent lifecycle metrics: %w", err)
 	}
 	return byAgent, nil
+}
+
+// MaxMetricsBuckets bounds a bucketed read. The widest window (92 days) at
+// daily granularity is 92 buckets; the cap is the guard against a future
+// finer granularity turning one request into an unbounded row count.
+const MaxMetricsBuckets = 128
+
+// DayBucket is one calendar day's tally, in UTC.
+type DayBucket struct {
+	// Day is midnight UTC starting the bucket. Buckets are contiguous and
+	// gap-filled by the caller, because a day with no traffic must render as
+	// a zero on a chart rather than vanish and distort the line's slope.
+	Day    time.Time
+	Counts []ReasonCodeCount
+}
+
+// accountDaysTx returns per-day reason-code tallies for one account, on the
+// same cohort-window contract as its caller: a message lands in the bucket of
+// its own creation day, in UTC.
+//
+// It takes the caller's transaction rather than the pool so the buckets and
+// the window totals are read from one snapshot — see AccountMetrics.Days.
+//
+// UTC rather than a caller timezone is deliberate. A bucket boundary that
+// moves with the reader would make two people comparing the same chart see
+// different daily numbers, and the endpoint has no timezone input to make
+// that choice explicit.
+func accountDaysTx(ctx context.Context, tx pgx.Tx, userID string, start, end time.Time) ([]DayBucket, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT date_trunc('day', m.created_at AT TIME ZONE 'UTC') AS day,
+		       t.reason_code, t.stage, t.outcome, t.retryable,
+		       count(*)::bigint,
+		       count(DISTINCT t.message_id)::bigint
+		FROM messages m
+		JOIN agent_identities a ON a.id = m.agent_id
+		JOIN message_lifecycle_transitions t ON t.message_id = m.id
+		WHERE a.user_id = $1
+		  AND m.created_at >= $2
+		  AND m.created_at < $3
+		GROUP BY day, t.reason_code, t.stage, t.outcome, t.retryable
+		ORDER BY day, t.reason_code
+	`, userID, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate daily lifecycle metrics: %w", err)
+	}
+	defer rows.Close()
+
+	byDay := make(map[time.Time][]ReasonCodeCount)
+	for rows.Next() {
+		var day time.Time
+		var count ReasonCodeCount
+		if err := rows.Scan(&day, &count.ReasonCode, &count.Stage, &count.Outcome,
+			&count.Retryable, &count.Observations, &count.Messages); err != nil {
+			return nil, fmt.Errorf("scan daily lifecycle metrics: %w", err)
+		}
+		key := day.UTC()
+		byDay[key] = append(byDay[key], count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate daily lifecycle metrics: %w", err)
+	}
+
+	// Gap-fill every day in the window. A quiet day that simply disappears
+	// would let a chart draw a straight line across it, which reads as steady
+	// traffic rather than none.
+	// The first bucket is the UTC day CONTAINING start, so it may cover only
+	// part of that day — the same partial-bucket convention every time series
+	// uses, and preferable to silently shifting the window to a day boundary.
+	buckets := make([]DayBucket, 0, len(byDay)+1)
+	for day := start.UTC().Truncate(24 * time.Hour); day.Before(end.UTC()); day = day.AddDate(0, 0, 1) {
+		buckets = append(buckets, DayBucket{Day: day, Counts: byDay[day]})
+		if len(buckets) >= MaxMetricsBuckets {
+			break
+		}
+	}
+	return buckets, nil
 }

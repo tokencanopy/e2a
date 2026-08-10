@@ -95,6 +95,7 @@ from e2a.v1.generated.models.message_lifecycle_transition import MessageLifecycl
 from e2a.v1.generated.models.message_parsed_view import MessageParsedView
 from e2a.v1.generated.models.message_summary_view import MessageSummaryView
 from e2a.v1.generated.models.message_view import MessageView
+from e2a.v1.generated.models.metrics_bucket_view import MetricsBucketView
 from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView
 from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView
 from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView

@@ -407,7 +407,7 @@ export class McpClient {
 
   /** Beta: delivery counters across every agent on the account. */
   getAccountMetrics(
-    params: { start?: Date; end?: Date; groupBy?: "agent" } = {},
+    params: { start?: Date; end?: Date; groupBy?: "agent"; bucket?: "day" } = {},
   ): Promise<AccountMetricsView> {
     return this.sdk.account.metrics(params);
   }

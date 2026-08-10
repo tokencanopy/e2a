@@ -17,21 +17,23 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, ClassVar, Dict, List
+from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView
+from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView
 from typing import Optional, Set
 from typing_extensions import Self
 
-class MetricsRatesView(BaseModel):
+class MetricsBucketView(BaseModel):
     """
-    MetricsRatesView
+    MetricsBucketView
     """ # noqa: E501
-    bounce_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="(bounced_hard + bounced_soft + bounced_undetermined) / (submitted − loopback). Denominated on what actually went to a provider, so it is directly comparable to the provider thresholds that trigger account review.")
-    complaint_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="complained / delivered. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs.")
-    delivered_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="delivered / (accepted − loopback). Everything the agent asked to send OUTWARD, including what suppression or review stopped. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped BEFORE it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.")
-    suppression_block_rate: Optional[Union[StrictFloat, StrictInt]] = Field(description="suppressed / (accepted − loopback). The share of outward sends that never left e2a.")
+    day: datetime = Field(description="Midnight UTC starting this bucket. Buckets are contiguous and gap-filled: a day with no traffic is present with zeroes rather than omitted, so a chart cannot draw a straight line across a quiet day and imply steady volume.")
+    rates: MetricsRatesView = Field(description="Rates for this day alone, on the same fixed denominators as the window totals. Null members mean that day had no denominator, which is common on low-volume days and is NOT a zero.")
+    summary: MetricsSummaryView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["bounce_rate", "complaint_rate", "delivered_rate", "suppression_block_rate"]
+    __properties: ClassVar[List[str]] = ["day", "rates", "summary"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -51,7 +53,7 @@ class MetricsRatesView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of MetricsRatesView from a JSON string"""
+        """Create an instance of MetricsBucketView from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -74,36 +76,22 @@ class MetricsRatesView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of rates
+        if self.rates:
+            _dict['rates'] = self.rates.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of summary
+        if self.summary:
+            _dict['summary'] = self.summary.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
                 _dict[_key] = _value
 
-        # set to None if bounce_rate (nullable) is None
-        # and model_fields_set contains the field
-        if self.bounce_rate is None and "bounce_rate" in self.model_fields_set:
-            _dict['bounce_rate'] = None
-
-        # set to None if complaint_rate (nullable) is None
-        # and model_fields_set contains the field
-        if self.complaint_rate is None and "complaint_rate" in self.model_fields_set:
-            _dict['complaint_rate'] = None
-
-        # set to None if delivered_rate (nullable) is None
-        # and model_fields_set contains the field
-        if self.delivered_rate is None and "delivered_rate" in self.model_fields_set:
-            _dict['delivered_rate'] = None
-
-        # set to None if suppression_block_rate (nullable) is None
-        # and model_fields_set contains the field
-        if self.suppression_block_rate is None and "suppression_block_rate" in self.model_fields_set:
-            _dict['suppression_block_rate'] = None
-
         return _dict
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of MetricsRatesView from a dict"""
+        """Create an instance of MetricsBucketView from a dict"""
         if obj is None:
             return None
 
@@ -111,10 +99,9 @@ class MetricsRatesView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "bounce_rate": obj.get("bounce_rate"),
-            "complaint_rate": obj.get("complaint_rate"),
-            "delivered_rate": obj.get("delivered_rate"),
-            "suppression_block_rate": obj.get("suppression_block_rate")
+            "day": obj.get("day"),
+            "rates": MetricsRatesView.from_dict(obj["rates"]) if obj.get("rates") is not None else None,
+            "summary": MetricsSummaryView.from_dict(obj["summary"]) if obj.get("summary") is not None else None
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

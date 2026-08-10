@@ -3050,6 +3050,37 @@ scenarios:
             agents:
               agent_email: bot@acctmetrics-contract.test.dev
 
+      - id: account_daily_buckets
+        action: request
+        method: GET
+        path: /v1/metrics?bucket=day
+        expect:
+          status: 200
+          body_contains:
+            - buckets
+          # Buckets are gap-filled across the default 30-day window, so the
+          # count does not depend on how much traffic the account has. It is 31
+          # because a 30-day window starting mid-day spans 31 UTC days; only a
+          # request landing exactly on UTC midnight would see 30.
+          body_match:
+            "buckets.length": 31
+
+      - id: buckets_absent_without_the_param
+        action: request
+        method: GET
+        path: /v1/metrics
+        expect:
+          status: 200
+          body_match:
+            "buckets.length": 0
+
+      - id: reject_unknown_bucket
+        action: request
+        method: GET
+        path: /v1/metrics?bucket=hour
+        expect:
+          status: 422
+
       - id: reject_window_wider_than_the_cap
         action: request
         method: GET

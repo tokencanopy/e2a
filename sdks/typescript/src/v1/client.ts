@@ -917,10 +917,10 @@ class AccountResource {
    * through `messages.getMetrics()` instead.
    */
   metrics(
-    params: { start?: Date; end?: Date; groupBy?: "agent" } = {},
+    params: { start?: Date; end?: Date; groupBy?: "agent"; bucket?: "day" } = {},
   ): Promise<AccountMetricsView> {
     return call(() =>
-      this.api.getAccountMetrics(params.start, params.end, params.groupBy),
+      this.api.getAccountMetrics(params.start, params.end, params.bucket, params.groupBy),
     );
   }
   delete(): Promise<DeleteUserDataResult> {

@@ -285,10 +285,12 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
      * Get account-wide delivery metrics (beta)
      * @param start Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
      * @param end Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param bucket Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
      * @param groupBy Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
      */
-    public async getAccountMetrics(start?: Date, end?: Date, groupBy?: 'agent', _options?: Configuration): Promise<RequestContext> {
+    public async getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
+
 
 
 
@@ -308,6 +310,11 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
         // Query Params
         if (end !== undefined) {
             requestContext.setQueryParam("end", ObjectSerializer.serialize(end, "Date", "date-time"));
+        }
+
+        // Query Params
+        if (bucket !== undefined) {
+            requestContext.setQueryParam("bucket", ObjectSerializer.serialize(bucket, "'day'", ""));
         }
 
         // Query Params

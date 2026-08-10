@@ -14,7 +14,14 @@ const accountMetricsBetaDoc = "Beta: account metrics may change before it is dec
 
 // AccountMetricsCounter aggregates persisted lifecycle observations across an
 // account. Mirrors messagelifecycle.Store.CountByReasonCodeForAccount.
-type AccountMetricsCounter func(ctx context.Context, userID string, start, end time.Time, groupByAgent bool) (messagelifecycle.AccountMetrics, error)
+type AccountMetricsCounter func(ctx context.Context, userID string, start, end time.Time, groupByAgent, bucketByDay bool) (messagelifecycle.AccountMetrics, error)
+
+// MetricsBucketView is one day's slice of the window.
+type MetricsBucketView struct {
+	Day     time.Time          `json:"day" doc:"Midnight UTC starting this bucket. Buckets are contiguous and gap-filled: a day with no traffic is present with zeroes rather than omitted, so a chart cannot draw a straight line across a quiet day and imply steady volume."`
+	Summary MetricsSummaryView `json:"summary"`
+	Rates   MetricsRatesView   `json:"rates" doc:"Rates for this day alone, on the same fixed denominators as the window totals. Null members mean that day had no denominator, which is common on low-volume days and is NOT a zero."`
+}
 
 // WebhookDeliveryCounter aggregates subscriber-delivery outcomes for an
 // account. Mirrors webhook.SubscriberStore.CountDeliveriesForAccount.
@@ -91,11 +98,14 @@ type AccountMetricsView struct {
 	// grain and a shorter retention. It is deliberately its own block rather
 	// than more fields on summary, so neither can be mistaken for the other.
 	Webhooks WebhookMetricsView `json:"webhooks"`
+
+	Buckets []MetricsBucketView `json:"buckets" doc:"Per-day breakdown, oldest first. Empty unless bucket=day was requested. Each bucket's counters sum to the window totals above; its rates do not average to the window rate, because a rate of rates is not the rate."`
 }
 
 type accountMetricsInput struct {
 	Start   time.Time `query:"start" doc:"Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end."`
 	End     time.Time `query:"end" doc:"Exclusive end of the cohort window (RFC 3339). Defaults to now."`
+	Bucket  string    `query:"bucket" enum:"day" doc:"Set to 'day' to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader's timezone would make two people comparing the same chart see different daily numbers."`
 	GroupBy string    `query:"group_by" enum:"agent" doc:"Set to 'agent' to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read."`
 }
 
@@ -148,7 +158,7 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 			"window must not exceed 92 days; request a narrower range")
 	}
 
-	metrics, err := s.deps.CountAccountMetrics(ctx, user.ID, start.UTC(), end.UTC(), in.GroupBy == "agent")
+	metrics, err := s.deps.CountAccountMetrics(ctx, user.ID, start.UTC(), end.UTC(), in.GroupBy == "agent", in.Bucket == "day")
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to aggregate account metrics")
 	}
@@ -164,6 +174,14 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		}
 	}
 
+	// Buckets arrive with the totals from one snapshot, so the documented
+	// "buckets sum to the window totals" contract holds under concurrent writes.
+	buckets := make([]MetricsBucketView, 0, len(metrics.Days))
+	for _, day := range metrics.Days {
+		_, daySummary, dayRates := deriveMetrics(messagelifecycle.AgentMetrics{Counts: day.Counts})
+		buckets = append(buckets, MetricsBucketView{Day: day.Day, Summary: daySummary, Rates: dayRates})
+	}
+
 	counters, summary, rates := deriveMetrics(metrics.Totals)
 	view := AccountMetricsView{
 		Start:                     start.UTC(),
@@ -177,6 +195,7 @@ func (s *Server) handleAccountMetrics(ctx context.Context, in *accountMetricsInp
 		AgentsTruncated:           metrics.AgentsTruncated,
 		Agents:                    make([]AgentMetricsGroupView, 0, len(metrics.Agents)),
 		Webhooks:                  webhookMetricsView(deliveries),
+		Buckets:                   buckets,
 	}
 	for _, group := range metrics.Agents {
 		groupCounters, groupSummary, groupRates := deriveMetrics(group.Metrics)
@@ -213,13 +232,13 @@ func webhookMetricsView(m webhook.AccountDeliveryMetrics) WebhookMetricsView {
 	}
 	for _, e := range m.Endpoints {
 		view.Endpoints = append(view.Endpoints, WebhookEndpointMetricsView{
-			WebhookID:        e.WebhookID,
-			URLHost:          e.URLHost,
-			Deliveries:       e.Counts.Total,
-			Delivered:        e.Counts.Delivered,
-			Pending:          e.Counts.Pending,
-			EndpointRejected: e.Counts.EndpointRejected,
-			NoResponse:       e.Counts.NoResponse,
+			WebhookID:         e.WebhookID,
+			URLHost:           e.URLHost,
+			Deliveries:        e.Counts.Total,
+			Delivered:         e.Counts.Delivered,
+			Pending:           e.Counts.Pending,
+			EndpointRejected:  e.Counts.EndpointRejected,
+			NoResponse:        e.Counts.NoResponse,
 			SuccessRate:       ratio(e.Counts.Delivered, e.Counts.Delivered+e.Counts.Failed()),
 			LastStatusCode:    e.LastStatusCode,
 			Enabled:           e.Enabled,

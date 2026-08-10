@@ -10,11 +10,12 @@ export interface MetricsOptions {
   start?: string;
   end?: string;
   byAgent?: boolean;
+  byDay?: boolean;
   json?: boolean;
 }
 
 export const METRICS_USAGE =
-  "usage: e2a metrics [<agent-email>] [--start <rfc3339>] [--end <rfc3339>] [--by-agent] [--json]";
+  "usage: e2a metrics [<agent-email>] [--start <rfc3339>] [--end <rfc3339>] [--by-agent] [--by-day] [--json]";
 
 /**
  * Render a rate as a percentage, or "n/a" when the server sent null.
@@ -41,7 +42,8 @@ function summaryLines(s: MetricsSummaryView): string {
     `  outbound  accepted ${s.accepted}  submitted ${s.submitted}  delivered ${s.delivered}\n` +
     `            bounced ${bounced} (hard ${s.bouncedHard}/soft ${s.bouncedSoft}/undetermined ${s.bouncedUndetermined})  ` +
     `complained ${s.complained}\n` +
-    `            suppressed ${s.suppressed}  failed ${s.sendFailed}\n` +
+    `            suppressed ${s.suppressed}  failed ${s.sendFailed}` +
+    (s.loopback > 0 ? `  loopback ${s.loopback} (excluded from rates)` : "") + `\n` +
     `  inbound   received ${s.received}  dmarc pass ${s.dmarcPass}/fail ${s.dmarcFail}/none ${s.dmarcNone}/error ${s.dmarcError}\n` +
     `  review    held ${s.reviewHeld}  approved ${s.reviewApproved}  rejected ${s.reviewRejected}  ` +
     `expired ${s.reviewExpiredApproved + s.reviewExpiredRejected}\n`
@@ -123,6 +125,15 @@ function renderAccount(view: AccountMetricsView): string {
         `rate ${pct(a.rates.deliveredRate)}\n`;
     }
   }
+  const buckets = view.buckets ?? [];
+  if (buckets.length > 0) {
+    out += `\nby day (UTC)\n`;
+    for (const b of buckets) {
+      const day = b.day.toISOString().slice(0, 10);
+      // A day with no sends has no rate; "n/a" keeps that distinct from 0%.
+      out += `  ${day}  accepted ${String(b.summary.accepted).padStart(6)}  delivered ${String(b.summary.delivered).padStart(6)}  rate ${pct(b.rates.deliveredRate)}\n`;
+    }
+  }
   out += webhookLines(view.webhooks);
   if (view.agentsTruncated) {
     out +=
@@ -136,6 +147,12 @@ export async function metrics(email: string | undefined, opts: MetricsOptions): 
   // --by-agent breaks down an ACCOUNT rollup. Silently ignoring it on a
   // single-agent read would let a script believe it asked for a breakdown and
   // got one, so it is a usage error instead.
+  if (email && opts.byDay) {
+    fail(
+      EXIT.USAGE,
+      `--by-day applies to the account rollup, not a single inbox; drop the agent argument\n${METRICS_USAGE}`,
+    );
+  }
   if (email && opts.byAgent) {
     fail(
       EXIT.USAGE,
@@ -159,6 +176,7 @@ export async function metrics(email: string | undefined, opts: MetricsOptions): 
     start,
     end,
     groupBy: opts.byAgent ? "agent" : undefined,
+    bucket: opts.byDay ? "day" : undefined,
   });
   process.stdout.write(opts.json ? JSON.stringify(view) + "\n" : renderAccount(view));
 }
