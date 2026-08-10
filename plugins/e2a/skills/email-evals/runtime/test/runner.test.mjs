@@ -1452,6 +1452,36 @@ test("runSuite leaves no run directory behind when the compact reservation prefl
   );
 });
 
+test("mid-run artifact limit with a record larger than the projection degrades to a compact record", async () => {
+  const cases = Array.from({ length: 33 }, (_, index) => ({
+    id: `sized-${index + 1}`,
+    send: { subject: `Sized ${index + 1}`, text: "Synthetic" },
+    expect: expectation(),
+  }));
+  const sizedSuite = suite(cases);
+  const fake = adapter((testCase) => {
+    const captured = evidence(testCase);
+    // Uniform small records keep the running projection below the reservation
+    // check; the final record is larger than that projection, so the actual
+    // cumulative check is what trips the compact fallback.
+    const textBytes = testCase.id === "sized-33" ? 1_040_000 : 500_000;
+    captured.candidates[0].mime.text = `Synthetic answer ${"X".repeat(textBytes)}`;
+    return captured;
+  });
+  const original = await runSuite({ suite: sizedSuite, adapter: fake, outputRoot: await root(), runId: RUN_ID });
+  assert.equal(fake.calls.execute.length, cases.length);
+  assert.equal(original.cases.length, cases.length);
+  assert.equal(original.cases.slice(0, -1).every((record) => record.status === "pass"), true);
+  const last = original.cases.at(-1);
+  assert.equal(last.status, "error");
+  assert.equal(last.primaryError.code, "cases_artifact_limit");
+  assert.equal(last.primaryError.origin, "runner");
+  assert.equal(last.evidence, null);
+  assert.match(last.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
+  const regraded = await regradeRun({ suite: sizedSuite, runDirectory: path.dirname(original.files.cases) });
+  assert.deepEqual(regraded.cases, original.cases);
+});
+
 test("cumulative cases artifact bounds stop later sends and remain regradable", async () => {
   const cases = Array.from({ length: 18 }, (_, index) => ({
     id: `large-${index + 1}`,

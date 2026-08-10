@@ -707,10 +707,11 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
   // handle and remove the fresh, still-empty run directory so a corrected
   // retry with the same run id is not blocked by the leftover.
   let artifactLimitRecords;
+  let artifactLimitLineBytes;
   let artifactLimitSuffixBytes;
   try {
     artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase, writer.artifactAuthKey));
-    const artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
+    artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
     artifactLimitSuffixBytes = new Array(artifactLimitRecords.length + 1).fill(0);
     for (let index = artifactLimitRecords.length - 1; index >= 0; index -= 1) {
       if (artifactLimitLineBytes[index] > CASES_ARTIFACT_LIMITS.lineBytes) {
