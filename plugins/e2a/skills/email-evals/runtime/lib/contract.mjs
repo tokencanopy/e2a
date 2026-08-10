@@ -456,6 +456,19 @@ function contained(root, candidate) {
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 }
 
+const FILE_SNAPSHOT_FIELDS = Object.freeze([
+  "dev", "ino", "mode", "nlink", "uid", "gid", "rdev", "size", "mtimeNs", "ctimeNs",
+]);
+
+function sameFileSnapshot(left, right) {
+  return FILE_SNAPSHOT_FIELDS.every((field) => left[field] === right[field]);
+}
+
+function stableFileSnapshots(...snapshots) {
+  return snapshots.every((snapshot) => snapshot.isFile())
+    && snapshots.slice(1).every((snapshot) => sameFileSnapshot(snapshots[0], snapshot));
+}
+
 // The optional hooks are internal test seams: callers never receive file handles.
 async function readYaml(file, label, {
   root, pointer, openFile = open, beforeRead, byteBudget = { remaining: MAX_YAML_TOTAL_BYTES },
@@ -463,24 +476,37 @@ async function readYaml(file, label, {
   let handle;
   try {
     handle = await openFile(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-    const handleStat = await handle.stat();
-    if (!handleStat.isFile()) throw configurationError("unsafe_file_type", "Configuration path is not a regular file", pointer);
-    if (handleStat.size > MAX_YAML_FILE_BYTES || handleStat.size > byteBudget.remaining) {
+    const handleBefore = await handle.stat({ bigint: true });
+    if (!handleBefore.isFile()) throw configurationError("unsafe_file_type", "Configuration path is not a regular file", pointer);
+    if (handleBefore.size > BigInt(MAX_YAML_FILE_BYTES) || handleBefore.size > BigInt(byteBudget.remaining)) {
       throw configurationError("yaml_too_large", "Configuration YAML exceeds its size limit", pointer);
     }
     const resolved = await realpath(file);
     if (root && !contained(root, resolved)) throw configurationError("path_outside_suite", "Case path is outside the suite root", pointer);
-    await beforeRead?.({ file, label, resolved });
-    const pathStat = await stat(resolved);
-    if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
+    const pathBefore = await stat(resolved, { bigint: true });
+    if (!stableFileSnapshots(handleBefore, pathBefore)) {
       throw configurationError("file_changed_during_load", "Configuration file changed while loading", pointer);
     }
+    await beforeRead?.({ file, label, resolved });
     const buffer = Buffer.allocUnsafe(Math.min(MAX_YAML_FILE_BYTES, byteBudget.remaining) + 1);
     let length = 0;
     while (length < buffer.length) {
       const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
       if (bytesRead === 0) break;
       length += bytesRead;
+    }
+    let handleAfter;
+    let resolvedAfter;
+    let pathAfter;
+    try {
+      handleAfter = await handle.stat({ bigint: true });
+      resolvedAfter = await realpath(file);
+      pathAfter = await stat(resolvedAfter, { bigint: true });
+    } catch {
+      throw configurationError("file_changed_during_load", "Configuration file changed while loading", pointer);
+    }
+    if (resolvedAfter !== resolved || !stableFileSnapshots(handleBefore, pathBefore, handleAfter, pathAfter)) {
+      throw configurationError("file_changed_during_load", "Configuration file changed while loading", pointer);
     }
     if (length > MAX_YAML_FILE_BYTES || length > byteBudget.remaining) {
       throw configurationError("yaml_too_large", "Configuration YAML exceeds its size limit", pointer);

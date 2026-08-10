@@ -297,8 +297,8 @@ test("runtime child ignores stdin and is killed at its hard wall deadline", asyn
   child.stdout.destroy = () => {};
   child.stderr.destroy = () => {};
   let spawnOptions;
-  let killed = 0;
-  child.kill = () => { killed += 1; return true; };
+  const signals = [];
+  child.kill = (signal) => { signals.push(signal); return true; };
   const timers = [];
   const running = runRuntimeNode([], {}, {
     spawnChild: (_node, _args, options) => { spawnOptions = options; return child; },
@@ -307,7 +307,49 @@ test("runtime child ignores stdin and is killed at its hard wall deadline", asyn
     wallTimeoutMs: 1,
   });
   assert.equal(spawnOptions.stdio[0], "ignore");
+  if (process.platform !== "win32") assert.equal(spawnOptions.detached, true);
   timers[0]();
-  assert.equal(killed, 1);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  timers[1]();
+  child.emit("exit", null, "SIGKILL");
+  child.stdout.emit("end");
+  child.stderr.emit("end");
+  child.emit("close", null, "SIGKILL");
   assert.equal((await running).termination, "wall_timeout");
+});
+
+test("wall timeout reaps a real child process group and its descendant before resolving", {
+  skip: process.platform === "win32" ? "POSIX process groups are unavailable" : false,
+}, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-process-group-"));
+  const marker = path.join(root, "descendant-side-effect");
+  const descendant = [
+    "const fs=require('node:fs');",
+    `setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},'late'),500);`,
+    "setInterval(()=>{},100);",
+  ].join("");
+  const source = [
+    "const {spawn}=require('node:child_process');",
+    `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','inherit','inherit']});`,
+    "process.on('SIGTERM',()=>{});",
+    "setTimeout(()=>process.stdout.write('late-output'),250);",
+    "setInterval(()=>{},100);",
+  ].join("");
+  let closed = false;
+  const started = Date.now();
+  const result = await runRuntimeNode(["-e", source], { env: {} }, {
+    spawnChild(command, args, options) {
+      const spawned = spawn(command, args, options);
+      spawned.once("close", () => { closed = true; });
+      return spawned;
+    },
+    wallTimeoutMs: 75,
+    terminationGraceMs: 75,
+  });
+  assert.equal(result.termination, "wall_timeout");
+  assert.equal(result.stdout, "");
+  assert.equal(closed, true, "launcher promise must wait for child close/reaping");
+  assert.ok(Date.now() - started < 3_000, "forced kill must remain bounded");
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await assert.rejects(readFile(marker), (error) => error.code === "ENOENT");
 });

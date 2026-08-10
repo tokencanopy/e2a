@@ -4,7 +4,7 @@ import { executionBounds } from "./contract.mjs";
 import { EvalError, isStableEvalErrorCode } from "./errors.mjs";
 import { normalizeMessageIdToken, parseMimeEvidence } from "./mime.mjs";
 import {
-  NormalizationError, normalizeAddressSet, normalizeMailbox, replaceMailboxText,
+  NormalizationError, normalizeAddressSet, normalizeMailbox, normalizeMailboxHeader, replaceMailboxText,
 } from "./normalize.mjs";
 
 const CAPABILITIES = Object.freeze([
@@ -21,6 +21,8 @@ const CAPABILITIES = Object.freeze([
 const TIMEOUTS = Object.freeze({ maxRetries: 2, maxElapsedMs: 15_000, timeoutMs: 10_000 });
 const MIME_CASE_BUDGET_BYTES = 25 * 1024 * 1024;
 const SENT_AS_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
+const RELAY_DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const MAX_RELAY_FROM_BYTES = 998;
 
 class ReadonlyCapabilitySet {
   #values;
@@ -683,6 +685,53 @@ function reconcileSentAs(values) {
   return observed[0] ?? null;
 }
 
+function normalizedRelayPhysicalFrom(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_RELAY_FROM_BYTES) {
+    throw transportError("malformed_message", "Evaluation relay sender evidence is malformed");
+  }
+  let mailbox;
+  try {
+    mailbox = normalizeMailboxHeader(value);
+  } catch {
+    throw transportError("malformed_message", "Evaluation relay sender evidence is malformed");
+  }
+  const separator = mailbox.address.lastIndexOf("@");
+  const localPart = mailbox.address.slice(0, separator);
+  const domain = mailbox.address.slice(separator + 1);
+  const suffix = " via e2a";
+  const displayName = mailbox.displayName;
+  if (localPart !== "agent" || !RELAY_DOMAIN.test(domain)
+    || typeof displayName !== "string" || !displayName.endsWith(suffix)
+    || displayName.length === suffix.length) {
+    throw transportError("malformed_message", "Evaluation relay sender evidence is malformed");
+  }
+  return { source: value.replace(/^[ \t]+|[ \t]+$/g, ""), address: mailbox.address, displayName };
+}
+
+function reconcileRelaySender(data, message, mime, logicalFrom) {
+  const logicalAddress = normalizedAgent(logicalFrom);
+  const physical = [];
+  for (const value of [message?.headerFrom, mime?.from]) {
+    if (value === undefined || value === null) continue;
+    if (normalizedAgent(value) === logicalAddress) continue;
+    physical.push(normalizedRelayPhysicalFrom(value));
+  }
+  if (mime && normalizedAgent(mime.from) === logicalAddress) {
+    throw transportError("conflicting_evidence", "Evaluation relay sender representations conflict");
+  }
+  if (mime && physical.length === 0) {
+    throw transportError("malformed_message", "Evaluation relay sender evidence is missing");
+  }
+  if (!mime && physical.length === 0) return null;
+  if (data.method !== "smtp") {
+    throw transportError("conflicting_evidence", "Evaluation relay sender provenance is inconsistent");
+  }
+  if (new Set(physical.map(({ address, displayName }) => `${displayName}\n${address}`)).size > 1) {
+    throw transportError("conflicting_evidence", "Evaluation relay sender representations conflict");
+  }
+  return physical[0]?.source ?? null;
+}
+
 async function mimeFromMessage(message, {
   required, budget, label = "message", requireMessageId = true,
 }) {
@@ -872,10 +921,17 @@ async function normalizeCandidate(sdk, target, metadata, budget) {
     if (mime) mime = { ...mime, messageId: canonicalCandidateMessageId(event, data, mime) };
     transitions = await readLifecycle(sdk, target, messageId);
   }
-  const from = reconcileMailbox("candidate sender", [data.from, message?.headerFrom, mime?.from, data.agent_email], {
+  const sentAs = reconcileSentAs([data.sent_as, message?.sentAs]);
+  const from = reconcileMailbox("candidate sender", [data.from, data.agent_email], {
     required: true,
-    preferred: mime?.from ?? message?.headerFrom ?? data.from ?? data.agent_email,
+    preferred: data.from ?? data.agent_email,
   });
+  let physicalFrom = null;
+  if (sentAs === "relay") {
+    physicalFrom = reconcileRelaySender(data, message, mime, from);
+  } else {
+    reconcileMailbox("candidate sender", [from, message?.headerFrom, mime?.from], { required: true });
+  }
   const subject = reconcileText("candidate subject", [data.subject, message?.subject, mime?.subject], {
     required: event.type !== "email.review_requested",
   });
@@ -891,7 +947,6 @@ async function normalizeCandidate(sdk, target, metadata, budget) {
     // outbound rows. It is not a redundant representation of the header the
     // sender requested, so outbound Reply-To evidence comes from strict MIME.
   }
-  const sentAs = reconcileSentAs([data.sent_as, message?.sentAs]);
   const observedAt = eventInstant(event).iso;
   return {
     ref: event.id,
@@ -900,6 +955,7 @@ async function normalizeCandidate(sdk, target, metadata, budget) {
     provenance: "target_outbound",
     messageType: typeof data.message_type === "string" ? data.message_type : null,
     from,
+    ...(physicalFrom === null ? {} : { physicalFrom }),
     sentAs,
     ...(mime ? { replyTo: mime.replyTo } : {}),
     ...recipients,

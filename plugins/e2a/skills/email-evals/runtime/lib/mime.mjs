@@ -182,13 +182,9 @@ function splitAddressList(value, name) {
 }
 
 function strictAddressList(headers, key) {
-  const values = headersFor(headers, key);
-  if (values.length === 0) return [];
-  const result = [];
-  for (const value of values) {
-    for (const entry of splitAddressList(value, key)) result.push(strictMailbox(entry, key).address);
-  }
-  return result;
+  const value = singletonHeader(headers, key);
+  if (value === null) return [];
+  return splitAddressList(value, key).map((entry) => strictMailbox(entry, key).address);
 }
 
 function attachmentMetadata(attachment) {

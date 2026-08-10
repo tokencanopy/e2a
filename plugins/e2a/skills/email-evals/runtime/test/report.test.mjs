@@ -48,6 +48,9 @@ test("artifact writer creates a private run and refuses collisions without overw
   await first.appendCase({ id: "one", status: "pass" }, { status: "pass", counts: { total: 1, passed: 1, failed: 0, errors: 0 } });
   await first.finalize({ status: "pass", counts: { total: 1, passed: 1, failed: 0, errors: 0 }, cases: [{ id: "one", status: "pass", assertions: [] }] });
   assert.equal((await stat(first.runDirectory)).mode & 0o777, 0o700);
+  const authFile = path.join(outputRoot, ".email-evals-artifact-auth-key");
+  assert.equal((await stat(authFile)).mode & 0o777, 0o600);
+  assert.match(await readFile(authFile, "utf8"), /^[a-f0-9]{64}\n$/);
   const before = await readFile(first.files.cases, "utf8");
   await assert.rejects(createArtifactWriter({ outputRoot, runId: RUN_ID }), /already exists/i);
   assert.equal(await readFile(first.files.cases, "utf8"), before);
@@ -344,6 +347,46 @@ expect:
   assert.doesNotMatch(serialized, /synthetic-credential|token-123|e2a_unknown_secret|outside@example\.com/);
 });
 
+test("redaction loss metadata is bounded, semantic-path-specific, and secret-free across free text", () => {
+  const configured = suite();
+  configured.executionDigest = "b".repeat(64);
+  configured.transport.apiKey = "synthetic-credential";
+  const secret = configured.transport.apiKey;
+  const record = aliasCaseRecord({
+    id: "loss-paths",
+    status: "error",
+    versions: { evidence: 1 },
+    suite: { version: 1, digest: "a".repeat(64), executionDigest: configured.executionDigest },
+    expectation: { body: { requiredFacts: [`Fact ${secret}`] } },
+    evidence: {
+      version: 1, capabilities: [], candidates: [{
+        direction: "outbound", provenance: "target_outbound", from: `${secret} <${TARGET}>`,
+        subject: `Subject ${secret}`, mime: {
+          text: `Body ${secret}`,
+          attachments: [{ filename: `${secret}.txt`, contentType: "text/plain", disposition: "attachment", sizeBytes: 1, sha256: "a".repeat(64) }],
+        },
+      }],
+    },
+    assertions: [{ id: "body.required_facts", status: "error", code: "synthetic", expected: secret, actual: `Actual ${secret}`, evidenceRefs: [] }],
+    primaryError: { class: "grader_error", code: "grader_threw", origin: "grader", boundary: "content", message: `Diagnostic ${secret}` },
+    secondaryErrors: [],
+  }, configured);
+  const serialized = JSON.stringify(record);
+  assert.doesNotMatch(serialized, new RegExp(secret));
+  assert.match(record.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
+  assert.ok(record.redactionLoss.entries.length <= 512);
+  assert.deepEqual(new Set(record.redactionLoss.entries.map(({ path: lossPath }) => lossPath)), new Set([
+    "/expectation/body/requiredFacts/0",
+    "/evidence/candidates/0/from/displayName",
+    "/evidence/candidates/0/subject",
+    "/evidence/candidates/0/mime/text",
+    "/evidence/candidates/0/mime/attachments/0/filename",
+    "/assertions/0/expected",
+    "/assertions/0/actual",
+    "/primaryError/message",
+  ]));
+});
+
 test("credential values cannot corrupt aliases or semantic evidence tokens", async () => {
   const fixtureRoot = await root();
   await mkdir(path.join(fixtureRoot, "cases"));
@@ -384,7 +427,7 @@ expect: { action: { kind: none, count: 0 } }
           from: TARGET,
           to: [ACTOR],
           lifecycle: { submission: "sent" },
-          mime: { text: `secret=${credential}` },
+          mime: { subject: credential, text: `secret=${credential}` },
         }],
       },
       assertions: [],
@@ -398,6 +441,7 @@ expect: { action: { kind: none, count: 0 } }
     assert.equal(candidate.provenance, "target_outbound");
     assert.equal(candidate.sentAs, "own_address");
     assert.equal(candidate.lifecycle.submission, "sent");
+    assert.match(candidate.mime.subject, /^\[ENV:E2A_EVAL_API_KEY(?::semantic:\d+)?\]$/);
     assert.match(candidate.mime.text, /^secret=\[ENV:E2A_EVAL_API_KEY(?::semantic:\d+)?\]$/);
   }
 });

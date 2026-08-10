@@ -56,27 +56,35 @@ function runNode(args, options) {
 export function runRuntimeNode(args, options, dependencies = {}) {
   const {
     spawnChild = spawn,
+    killProcess = process.kill,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     graceMs = RUNTIME_STDERR_GRACE_MS,
+    terminationGraceMs = RUNTIME_STDERR_GRACE_MS,
     wallTimeoutMs = RUNTIME_WALL_TIMEOUT_MS,
   } = dependencies;
   return new Promise((resolve) => {
     const stdoutCapture = { chunks: [], size: 0, finalized: false };
     const stderrCapture = { chunks: [], size: 0, finalized: false };
     let truncated = false;
+    let acceptingOutput = true;
     let settled = false;
     let exited = false;
+    let closed = false;
     let exitCode = 4;
     let exitSignal = null;
-    let graceTimer = null;
+    let streamTimer = null;
+    let terminationTimer = null;
     let wallTimer = null;
+    let forcedTermination = null;
+    let escalated = false;
     let child;
 
     function finish(result) {
       if (settled) return;
       settled = true;
-      if (graceTimer !== null) clearTimer(graceTimer);
+      if (streamTimer !== null) clearTimer(streamTimer);
+      if (terminationTimer !== null) clearTimer(terminationTimer);
       if (wallTimer !== null) clearTimer(wallTimer);
       resolve(result);
     }
@@ -85,8 +93,49 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       finish({ code: 4, stdout: "", stderr: "", truncated: true, finalized: false, termination });
     }
 
+    function processGroupAlive() {
+      if (process.platform === "win32" || !Number.isInteger(child?.pid) || child.pid <= 0) return null;
+      try {
+        killProcess(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return error?.code !== "ESRCH";
+      }
+    }
+
+    function signalRuntime(signal) {
+      if (process.platform !== "win32" && Number.isInteger(child?.pid) && child.pid > 0) {
+        try {
+          killProcess(-child.pid, signal);
+          return true;
+        } catch {
+          // Fall back to the direct child for injected children and platform races.
+        }
+      }
+      try {
+        return child?.kill?.(signal) !== false;
+      } catch {
+        return false;
+      }
+    }
+
     function finishFromExit() {
-      if (!exited || !stdoutCapture.finalized || !stderrCapture.finalized) return;
+      if (!exited || !closed || !stdoutCapture.finalized || !stderrCapture.finalized) return;
+      if (forcedTermination !== null) {
+        // Before the grace deadline, only finish early when the whole POSIX
+        // process group is demonstrably gone. Unknown/fake groups wait for the
+        // escalation attempt so descendants cannot outlive the launcher.
+        if (!escalated && processGroupAlive() !== false) return;
+        finish({
+          code: 4,
+          stdout: "",
+          stderr: "",
+          truncated: true,
+          finalized: true,
+          termination: forcedTermination,
+        });
+        return;
+      }
       finish({
         code: exitSignal || !Number.isInteger(exitCode) ? 4 : exitCode,
         stdout: Buffer.concat(stdoutCapture.chunks).toString("utf8"),
@@ -97,9 +146,30 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       });
     }
 
+    function beginTermination(termination) {
+      if (settled || forcedTermination !== null) return;
+      forcedTermination = termination;
+      acceptingOutput = false;
+      truncated = true;
+      stdoutCapture.chunks = [];
+      stdoutCapture.size = 0;
+      stderrCapture.chunks = [];
+      stderrCapture.size = 0;
+      if (streamTimer !== null) clearTimer(streamTimer);
+      if (wallTimer !== null) clearTimer(wallTimer);
+      signalRuntime("SIGTERM");
+      terminationTimer = setTimer(() => {
+        if (settled) return;
+        escalated = true;
+        signalRuntime("SIGKILL");
+        finishFromExit();
+      }, terminationGraceMs);
+      finishFromExit();
+    }
+
     function captureStream(stream, capture, limit) {
       stream.on("data", (chunk) => {
-        if (settled) return;
+        if (settled || !acceptingOutput) return;
         const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         if (capture.size >= limit) {
           truncated = true;
@@ -117,11 +187,21 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       };
       stream.once("end", finalize);
       stream.once("close", finalize);
-      stream.once("error", () => fixedFailure("stream_error"));
+      stream.once("error", () => {
+        if (forcedTermination !== null) {
+          finalize();
+          return;
+        }
+        fixedFailure("stream_error");
+      });
     }
 
     try {
-      child = spawnChild(process.execPath, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnChild(process.execPath, args, {
+        ...options,
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(process.platform === "win32" ? {} : { detached: true }),
+      });
     } catch {
       fixedFailure("spawn_error");
       return;
@@ -134,30 +214,34 @@ export function runRuntimeNode(args, options, dependencies = {}) {
     captureStream(child.stdout, stdoutCapture, RUNTIME_STDOUT_LIMIT);
     captureStream(child.stderr, stderrCapture, RUNTIME_STDERR_LIMIT);
     wallTimer = setTimer(() => {
-      if (settled) return;
-      try { child.kill?.("SIGKILL"); } catch {}
-      try { child.stdout.destroy?.(); } catch {}
-      try { child.stderr.destroy?.(); } catch {}
-      fixedFailure("wall_timeout");
+      beginTermination("wall_timeout");
     }, wallTimeoutMs);
-    child.once("error", () => fixedFailure("spawn_error"));
+    child.once("error", () => {
+      if (forcedTermination === null) fixedFailure("spawn_error");
+    });
     child.once("exit", (code, signal) => {
       if (settled) return;
       exited = true;
       exitCode = code;
       exitSignal = signal;
-      if (stdoutCapture.finalized && stderrCapture.finalized) {
-        finishFromExit();
-        return;
+      finishFromExit();
+      if (forcedTermination === null && !settled
+        && (!closed || !stdoutCapture.finalized || !stderrCapture.finalized)) {
+        streamTimer = setTimer(() => beginTermination("stream_timeout"), graceMs);
       }
-      graceTimer = setTimer(() => {
-        if ((stdoutCapture.finalized && stderrCapture.finalized) || settled) return;
-        truncated = true;
-        try { child.stdout.destroy?.(); } catch {}
-        try { child.stderr.destroy?.(); } catch {}
-        try { child.unref?.(); } catch {}
-        fixedFailure("stream_timeout");
-      }, graceMs);
+    });
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      closed = true;
+      if (!exited) {
+        // Node emits close only after the child has terminated (or a spawn
+        // error) and its stdio has closed. Treat it as the terminal event for
+        // kill/error races where no separate exit event is delivered.
+        exited = true;
+        exitCode = code;
+        exitSignal = signal;
+      }
+      finishFromExit();
     });
   });
 }

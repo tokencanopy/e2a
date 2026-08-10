@@ -531,7 +531,7 @@ test("generated run IDs use the exact UTC timestamp and lowercase random suffix"
   const now = () => new Date("2026-08-08T12:34:56.000Z");
   const summary = await runSuite({ suite: suite(), adapter: adapter(), outputRoot, now });
   assert.match(summary.runId, /^run_20260808T123456_[a-f0-9]{8}$/);
-  assert.deepEqual(await readdir(outputRoot), [summary.runId]);
+  assert.deepEqual((await readdir(outputRoot)).sort(), [".email-evals-artifact-auth-key", summary.runId].sort());
 });
 
 test("invalid clocks fail before preflight or sends", async () => {
@@ -754,6 +754,176 @@ test("open bounded sent-as tokens remain durable and regradable", async () => {
 
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
+});
+
+test("relay logical and physical sender evidence survives artifacts and regrade independently", async () => {
+  const expected = expectation();
+  expected.sender.sentAs = "relay";
+  const one = suite([{
+    id: "relay-sender",
+    send: { subject: "Synthetic", text: "Synthetic question" },
+    expect: expected,
+  }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      Object.assign(captured.candidates[0], {
+        from: `Synthetic Target <${TARGET}>`,
+        physicalFrom: "Synthetic Target via e2a <agent@agents.localhost>",
+        sentAs: "relay",
+      });
+      captured.candidates[0].mime = {
+        ...captured.candidates[0].mime,
+        from: "Synthetic Target via e2a <agent@agents.localhost>",
+        fromAddress: "agent@agents.localhost",
+      };
+      return captured;
+    }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass", JSON.stringify(summary.cases));
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].from, {
+    address: "target", displayName: "Synthetic Target",
+  });
+  assert.deepEqual(summary.cases[0].evidence.candidates[0].physicalFrom, {
+    address: "observed:1", displayName: "Synthetic Target via e2a",
+  });
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
+  assert.equal(regraded.cases[0].assertions.find(({ id }) => id === "sender.sent_as").status, "pass");
+});
+
+test("authenticated path losses preserve safe regrades and reject unknowable assertion edits", async () => {
+  const secret = "synthetic-credential";
+  const expected = expectation();
+  expected.sender.displayName = secret;
+  expected.subject = { exact: `Answer ${secret}` };
+  expected.body.requiredFacts = [`Fact ${secret}`];
+  expected.attachments = { exactly: [{
+    filename: `${secret}.txt`, contentType: "text/plain", disposition: "attachment",
+    sizeBytes: 1, sha256: "a".repeat(64),
+  }] };
+  const one = suite([{
+    id: "path-loss", send: { subject: "Synthetic", text: "Synthetic question" }, expect: expected,
+  }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      Object.assign(captured.candidates[0], {
+        from: `${secret} <${TARGET}>`, subject: `Answer ${secret}`,
+      });
+      captured.candidates[0].mime = {
+        ...captured.candidates[0].mime,
+        subject: `Answer ${secret}`,
+        text: `Fact ${secret}`,
+        attachments: [{
+          filename: `${secret}.txt`, contentType: "text/plain", disposition: "attachment",
+          sizeBytes: 1, sha256: "a".repeat(64),
+        }],
+      };
+      return captured;
+    }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass", JSON.stringify(summary.cases));
+  const stored = JSON.parse(await readFile(summary.files.cases, "utf8"));
+  assert.doesNotMatch(JSON.stringify(stored), new RegExp(secret));
+  assert.match(stored.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
+  const lossPaths = new Set(stored.redactionLoss.entries.map(({ path: lossPath }) => lossPath));
+  for (const lossPath of [
+    "/expectation/sender/displayName",
+    "/evidence/candidates/0/from/displayName",
+    "/evidence/candidates/0/subject",
+    "/evidence/candidates/0/mime/text",
+    "/evidence/candidates/0/mime/attachments/0/filename",
+  ]) assert.equal(lossPaths.has(lossPath), true, lossPath);
+
+  one.cases[0].expect.lifecycle = { submission: "sent" };
+  const safe = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(safe.status, "pass", JSON.stringify(safe.cases));
+  assert.equal(safe.cases[0].assertions.find(({ id }) => id === "lifecycle.submission").status, "pass");
+
+  one.cases[0].expect.body.requiredFacts = ["[ENV:E2A_EVAL_API_KEY]"];
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "redacted_evidence_assertion_change",
+  );
+
+  stored.evidence.candidates[0].mime.text = "forged retained text";
+  await writeFile(summary.files.cases, `${JSON.stringify(stored)}\n`);
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+});
+
+test("redaction-loss authentication survives API-key rotation without replay egress", async () => {
+  const keyA = "synthetic-key-a";
+  const keyB = "synthetic-key-b";
+  const one = suite([{
+    id: "rotated-artifact-key",
+    send: { subject: "Synthetic", text: "Synthetic question" },
+    expect: expectation(),
+  }]);
+  one.transport.apiKey = keyA;
+  let adapterCalls = 0;
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      adapterCalls += 1;
+      const captured = evidence(testCase);
+      captured.candidates[0].mime.text = `Synthetic answer ${keyA}`;
+      return captured;
+    }),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass", JSON.stringify(summary.cases));
+  const stored = JSON.parse(await readFile(summary.files.cases, "utf8"));
+  assert.doesNotMatch(JSON.stringify(stored), new RegExp(keyA));
+  assert.match(stored.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
+
+  one.transport.apiKey = keyB;
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
+  assert.equal(adapterCalls, 1);
+
+  await writeFile(
+    path.join(path.dirname(path.dirname(summary.files.cases)), ".email-evals-artifact-auth-key"),
+    `${"c".repeat(64)}\n`,
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+});
+
+test("literal user-authored environment markers carry no redaction authority", async () => {
+  const marker = "[ENV:E2A_EVAL_API_KEY:semantic:1]";
+  const expected = expectation();
+  expected.body.requiredFacts = [marker];
+  const one = suite([{
+    id: "literal-marker", send: { subject: "Synthetic", text: "Synthetic" }, expect: expected,
+  }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => evidence(testCase, {
+      candidates: [{
+        ...evidence(testCase).candidates[0],
+        mime: { ...evidence(testCase).candidates[0].mime, text: marker },
+      }],
+    })),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass");
+  const stored = JSON.parse(await readFile(summary.files.cases, "utf8"));
+  assert.equal(stored.redactionLoss, undefined);
+  one.cases[0].expect.body.requiredFacts = ["reply"];
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "fail");
+  assert.equal(regraded.cases[0].assertions.find(({ id }) => id === "body.required_facts").status, "fail");
 });
 
 test("adapter evidence is a strict projection and unknown nested data never reaches artifacts", async () => {

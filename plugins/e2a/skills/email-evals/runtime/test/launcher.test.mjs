@@ -240,17 +240,19 @@ test("runtime capture ignores stdin, waits for both streams, and enforces a hard
     wallTimeoutMs: 1,
   });
   assert.equal(options.stdio[0], "ignore");
+  if (process.platform !== "win32") assert.equal(options.detached, true);
   child.stdout.emit("data", Buffer.from("safe\n"));
   child.emit("exit", 0, null);
   child.stdout.emit("end");
   child.stderr.emit("end");
+  child.emit("close", 0, null);
   assert.deepEqual(await running, {
     code: 0, stdout: "safe\n", stderr: "", truncated: false, finalized: true, termination: "exit",
   });
 
   const hung = fakeChild();
-  let killed = 0;
-  hung.kill = () => { killed += 1; return true; };
+  const signals = [];
+  hung.kill = (signal) => { signals.push(signal); return true; };
   const wallTimers = [];
   const wall = runRuntimeNode([], {}, {
     spawnChild: () => hung,
@@ -259,6 +261,41 @@ test("runtime capture ignores stdin, waits for both streams, and enforces a hard
     wallTimeoutMs: 1,
   });
   wallTimers[0]();
-  assert.equal(killed, 1);
-  assert.equal((await wall).termination, "wall_timeout");
+  assert.deepEqual(signals, ["SIGTERM"]);
+  let resolved = false;
+  wall.then(() => { resolved = true; });
+  await Promise.resolve();
+  assert.equal(resolved, false, "timeout must not settle before child reaping");
+  wallTimers[1]();
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  hung.stdout.emit("data", Buffer.from("late output must be discarded"));
+  hung.emit("exit", null, "SIGKILL");
+  hung.stdout.emit("end");
+  hung.stderr.emit("end");
+  hung.emit("close", null, "SIGKILL");
+  assert.deepEqual(await wall, {
+    code: 4, stdout: "", stderr: "", truncated: true, finalized: true, termination: "wall_timeout",
+  });
+});
+
+test("wall timeout remains bounded across kill-false and kill-error close races", async () => {
+  for (const kill of [() => false, () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); }]) {
+    const child = fakeChild();
+    child.kill = kill;
+    const timers = [];
+    const running = runRuntimeNode([], {}, {
+      spawnChild: () => child,
+      setTimer: (callback) => { timers.push(callback); return callback; },
+      clearTimer: () => {},
+      wallTimeoutMs: 1,
+    });
+    timers[0]();
+    timers[1]();
+    child.stdout.emit("end");
+    child.stderr.emit("end");
+    child.emit("close", null, null);
+    assert.deepEqual(await running, {
+      code: 4, stdout: "", stderr: "", truncated: true, finalized: true, termination: "wall_timeout",
+    });
+  }
 });

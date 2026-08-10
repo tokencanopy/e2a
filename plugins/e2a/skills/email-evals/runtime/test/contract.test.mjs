@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -299,6 +299,28 @@ test("alias expansion and deterministic file swaps are stable configuration erro
   await assert.rejects(loadSuite(path.join(root, "suite.yaml"), {
     environment: validEnvironment,
     beforeRead: async ({ label }) => { if (label === "case") await rename(path.join(root, "replacement.yaml"), path.join(root, "case.yaml")); },
+  }), (error) => error.errorClass === "configuration_error" && error.code === "file_changed_during_load");
+
+  await writeMinimalSuite(root);
+  const caseFile = path.join(root, "case.yaml");
+  const original = await readFile(caseFile, "utf8");
+  const before = await stat(caseFile);
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), {
+    environment: validEnvironment,
+    beforeRead: async ({ label }) => {
+      if (label === "case") await writeFile(caseFile, original.replace("subject: Synthetic", "subject: Fictional"));
+    },
+  }), (error) => error.errorClass === "configuration_error" && error.code === "file_changed_during_load");
+  const after = await stat(caseFile);
+  assert.equal(after.ino, before.ino, "regression must mutate the same inode");
+  assert.equal(after.size, before.size, "regression must preserve descriptor size");
+
+  await writeMinimalSuite(root);
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), {
+    environment: validEnvironment,
+    beforeRead: async ({ label }) => {
+      if (label === "case") await writeFile(caseFile, `${await readFile(caseFile, "utf8")}# bounded growth\n`);
+    },
   }), (error) => error.errorClass === "configuration_error" && error.code === "file_changed_during_load");
 });
 

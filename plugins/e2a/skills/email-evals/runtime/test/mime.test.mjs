@@ -48,7 +48,7 @@ test("parseMimeEvidence rejects injected or duplicated singleton headers", async
     parseMimeEvidence(await fixture("mime/header-injection.eml")),
     (error) => error.errorClass === "grader_error" && ["malformed_mime_header", "duplicate_mime_header"].includes(error.code),
   );
-  for (const header of ["Message-ID", "In-Reply-To", "References", "From", "Reply-To", "Subject"]) {
+  for (const header of ["Message-ID", "In-Reply-To", "References", "From", "Reply-To", "Subject", "To", "Cc"]) {
     const raw = [
       "Message-ID: <message@agents.localhost>",
       "From: sender@eval.test",
@@ -62,6 +62,19 @@ test("parseMimeEvidence rejects injected or duplicated singleton headers", async
       header,
     );
   }
+});
+
+test("To and Cc each permit one field containing multiple mailboxes", async () => {
+  const raw = [
+    "Message-ID: <message@agents.localhost>",
+    "From: sender@eval.test",
+    "To: First <first@eval.test>, second@eval.test",
+    "Cc: Third <third@eval.test>, fourth@eval.test",
+    "", "body",
+  ].join("\r\n");
+  const parsed = await parseMimeEvidence(Buffer.from(raw).toString("base64"));
+  assert.deepEqual(parsed.to, ["first@eval.test", "second@eval.test"]);
+  assert.deepEqual(parsed.cc, ["third@eval.test", "fourth@eval.test"]);
 });
 
 test("parseMimeEvidence rejects fused and punctuation-prefixed thread tokens without partial acceptance", async () => {

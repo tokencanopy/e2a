@@ -104,6 +104,11 @@ plugins/e2a/skills/email-evals/email-evals.sh regrade --suite <suite-root>/suite
 Regrade accepts a changed full-suite digest only when the execution digest is
 unchanged. It always uses the current validated assertions and rejects changes
 to sending, correlation, timing, containment, actor, target, or origin inputs.
+The output root also contains the private mode-`0600`
+`.email-evals-artifact-auth-key`, which authenticates redaction-loss metadata
+independently of the rotatable API key. Keep that hidden file with its run
+directories; never publish it or place it inside a suite. Regrade fails closed
+for redacted runs if this authentication root is missing or replaced.
 If body evidence required configured-pattern redaction, the forbidden-pattern
 set must remain identical (reordering is allowed); changing that set fails
 closed because arbitrary new regexes cannot be evaluated against erased text.

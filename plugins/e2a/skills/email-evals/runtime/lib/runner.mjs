@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -15,6 +15,8 @@ import { gradeCore } from "./grade-core.mjs";
 import { containsMailboxText, NormalizationError, normalizeMailbox } from "./normalize.mjs";
 import {
   aliasCaseRecord,
+  artifactAuthKeyForOutputRoot,
+  artifactRedactionLossDigest,
   artifactCaseId,
   artifactSuiteName,
   CASES_ARTIFACT_LIMITS,
@@ -46,6 +48,23 @@ const SECONDARY_CODES = new Set([
 ]);
 const GRADER_BOUNDARIES = new Set(["core", "content"]);
 const SENT_AS_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
+const STORED_ADDRESS_SCALARS = new Set([
+  "address", "email", "mailbox", "from", "physicalFrom", "headerFrom", "recipient", "actor", "target",
+]);
+const STORED_ADDRESS_ARRAYS = new Set([
+  "to", "cc", "bcc", "replyTo", "envelopeRecipients", "participants", "addresses", "duplicates", "missing", "unexpected", "original",
+]);
+const STRUCTURAL_COLLISION_FIELDS = new Set([
+  "status", "class", "origin", "boundary", "direction", "provenance", "eventType", "messageType", "sentAs", "stage",
+  "outcome", "submission", "kind", "policy", "capability", "capabilities",
+]);
+const STRUCTURAL_COLLISION_VALUES = new Set([
+  ...SEMANTIC_ENV_VALUES,
+  "outbound", "inbound", "target_outbound", "pass", "fail", "error", "assertion_failure", "configuration_error",
+  "capability_error", "transport_error", "target_timeout", "grader_error", "own_address", "relay", "email.sent",
+  "email.failed", "email.blocked", "email.review_requested", "email.received", "message_action", "visible_recipients",
+  "blind_recipients", "envelope_recipients", "thread_headers", "raw_mime", "attachment_hashes", "delivery_lifecycle",
+]);
 
 function invalidEvidence() {
   throw new TypeError("invalid evidence");
@@ -200,7 +219,7 @@ function projectCandidateLifecycle(value, stored) {
 
 function projectCandidate(value, stored) {
   const source = exactObject(value, new Set([
-    "ref", "eventType", "direction", "provenance", "messageType", "from", "sentAs", "replyTo", "to", "cc", "bcc",
+    "ref", "eventType", "direction", "provenance", "messageType", "from", "physicalFrom", "sentAs", "replyTo", "to", "cc", "bcc",
     "envelopeRecipients", "conversationId", "messageId", "subject", "observedAt", "sentAt", "mime", "lifecycle",
   ]));
   const result = {};
@@ -208,6 +227,7 @@ function projectCandidate(value, stored) {
     copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
   copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "physicalFrom", (entry) => mailboxValue(entry, stored, { nullable: true }));
   copyOptional(source, result, "sentAs", (entry) => tokenValue(entry, { nullable: true }));
   copyOptional(source, result, "subject", (entry) => textValue(entry, { nullable: true }));
   for (const key of ["replyTo", "to", "cc", "bcc", "envelopeRecipients"]) {
@@ -704,7 +724,7 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
         raw = await executeOne({ suite, adapter, testCase, runId: resolvedRunId, runStartedAt: runStart.iso, now });
         executionMs += raw.durations.executionMs;
         gradingMs += raw.durations.gradingMs;
-        record = aliasCaseRecord(raw, suite);
+        record = aliasCaseRecord(raw, suite, { artifactAuthKey: writer.artifactAuthKey });
       }
       if (caseLineBytes(record) > CASES_ARTIFACT_LIMITS.lineBytes) {
         record = aliasCaseRecord({
@@ -713,7 +733,7 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
           evidence: null,
           assertions: [],
           primaryError: primaryEvalError("transport_error", "invalid_evidence", "Evaluation evidence exceeded the artifact size limit", "runner"),
-        }, suite);
+        }, suite, { artifactAuthKey: writer.artifactAuthKey });
       }
 
       let recordBytes = caseLineBytes(record);
@@ -857,13 +877,10 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
 function restoreAliasValue(value, parentKey = "", forceAddress = false) {
   const replacements = new Map([["actor", "actor@aliases.invalid"], ["target", "target@aliases.invalid"]]);
   if (typeof value === "string") {
-    const restored = value.replace(/\[ENV:[A-Z][A-Z0-9_]*:semantic:(\d+)\]/g, (marker, index) => (
-      SEMANTIC_ENV_VALUES[Number(index)] ?? marker
-    ));
-    if (!forceAddress) return restored;
-    if (/^probe:\d+$/.test(restored)) return `probe-${restored.slice(6)}@aliases.invalid`;
-    if (/^observed:\d+$/.test(restored)) return `observed-${restored.slice(9)}@aliases.invalid`;
-    return replacements.get(restored) ?? restored;
+    if (!forceAddress) return value;
+    if (/^probe:\d+$/.test(value)) return `probe-${value.slice(6)}@aliases.invalid`;
+    if (/^observed:\d+$/.test(value)) return `observed-${value.slice(9)}@aliases.invalid`;
+    return replacements.get(value) ?? value;
   }
   if (Array.isArray(value)) {
     const childAddress = forceAddress || [
@@ -879,7 +896,7 @@ function restoreAliasValue(value, parentKey = "", forceAddress = false) {
   }
   const result = {};
   for (const [key, entry] of Object.entries(value)) {
-    const childAddress = ["address", "email", "mailbox", "from", "headerFrom", "recipient", "actor", "target"].includes(key)
+    const childAddress = ["address", "email", "mailbox", "from", "physicalFrom", "headerFrom", "recipient", "actor", "target"].includes(key)
       || ["to", "cc", "bcc", "replyTo", "envelopeRecipients", "participants"].includes(key)
       || (key === "exactly" && ["sender", "replyTo", "to", "cc", "bcc", "envelope"].includes(parentKey));
     result[key] = restoreAliasValue(entry, key, childAddress);
@@ -911,6 +928,7 @@ function aliasSuiteFor(record, suite) {
     actor: { email: "actor@aliases.invalid" },
     target: { email: "target@aliases.invalid" },
     transport: {
+      apiKey: suite?.transport?.apiKey,
       allowedEnvelopeRecipients: [
         "actor@aliases.invalid", "target@aliases.invalid",
         ...[...probes].sort((a, b) => a - b).map((index) => `probe-${index}@aliases.invalid`),
@@ -936,6 +954,36 @@ function exactCaseObject(value, allowed) {
   }
 }
 
+function validateStoredRedactionLoss(record, suite, artifactAuthKey) {
+  if (!Object.hasOwn(record, "redactionLoss")) return null;
+  if (typeof artifactAuthKey !== "string" || !/^[a-f0-9]{64}$/.test(artifactAuthKey)) invalidCaseArtifact();
+  const metadata = exactCaseObject(record.redactionLoss, new Set(["version", "entries", "envelopeDigest"]));
+  if (metadata.version !== 1 || !Array.isArray(metadata.entries)
+    || metadata.entries.length < 1 || metadata.entries.length > 512
+    || typeof metadata.envelopeDigest !== "string" || !/^[a-f0-9]{64}$/.test(metadata.envelopeDigest)) {
+    invalidCaseArtifact();
+  }
+  let previous = null;
+  const entries = metadata.entries.map((entry) => {
+    const source = exactCaseObject(entry, new Set(["path", "kind"]));
+    const validPointer = typeof source.path === "string" && source.path.startsWith("/")
+      && source.path.split("/").slice(1).every((segment) => (
+        !/[\u0000-\u001F\u007F]/.test(segment) && !/~(?![01])/u.test(segment)
+      ));
+    if (source.kind !== "redacted_text" || typeof source.path !== "string"
+      || source.path.length < 1 || source.path.length > 512
+      || !validPointer
+      || (source.path !== "/" && !/^\/(?:expectation|evidence|assertions|primaryError|secondaryErrors)(?:\/|$)/.test(source.path))
+      || (previous !== null && previous.localeCompare(source.path) >= 0)) invalidCaseArtifact();
+    previous = source.path;
+    return { path: source.path, kind: source.kind };
+  });
+  const envelope = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "redactionLoss"));
+  const expected = artifactRedactionLossDigest(envelope, entries, suite, artifactAuthKey);
+  if (!timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(metadata.envelopeDigest, "hex"))) invalidCaseArtifact();
+  return { version: 1, entries, envelopeDigest: metadata.envelopeDigest };
+}
+
 function safeStoredString(value, { nullable = false, allowSentAs = false } = {}) {
   if (nullable && value === null) return null;
   if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidCaseArtifact();
@@ -959,26 +1007,39 @@ function safeStoredIdentifier(value) {
 
 function storedArtifactContainsSecret(value, suite) {
   const secrets = [suite?.transport?.apiKey, ...(suite?.[RESOLVED_ENVIRONMENT_VALUES] ?? []).map((entry) => entry?.value)]
-    .filter((entry) => typeof entry === "string" && entry.length > 0 && !SEMANTIC_ENV_VALUES.includes(entry));
+    .filter((entry) => typeof entry === "string" && entry.length > 0);
   let unsafe = false;
-  const visit = (entry, parentKey = "", allowSentAs = false) => {
+  const visit = (entry, parentKey = "", forceAddress = false, semanticKind = "") => {
     if (unsafe) return;
     if (typeof entry === "string") {
+      const structuralAlias = (forceAddress || semanticKind === "address")
+        && /^(?:actor|target|probe:\d+|observed:\d+)$/.test(entry);
+      const structuralToken = (STRUCTURAL_COLLISION_FIELDS.has(parentKey) || semanticKind === "sentAs")
+        && STRUCTURAL_COLLISION_VALUES.has(entry);
+      const safeOpenSentAs = (parentKey === "sentAs" || semanticKind === "sentAs")
+        && SENT_AS_TOKEN.test(entry) && !secrets.some((secret) => entry.includes(secret));
       unsafe = containsMailboxText(entry)
         || (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(entry)
-          && !((allowSentAs || parentKey === "sentAs") && SENT_AS_TOKEN.test(entry)))
-        || secrets.some((secret) => entry.includes(secret));
+          && !structuralToken && !safeOpenSentAs)
+        || (secrets.some((secret) => entry.includes(secret)) && !structuralAlias && !structuralToken);
       return;
     }
     if (Array.isArray(entry)) {
-      for (const item of entry) visit(item, parentKey, allowSentAs);
+      const childAddress = forceAddress || STORED_ADDRESS_ARRAYS.has(parentKey);
+      for (const item of entry) visit(item, parentKey, childAddress, semanticKind);
       return;
     }
     if (entry && typeof entry === "object") {
+      if (parentKey === "redactionLoss") return;
       const sentAsAssertion = entry.id === "sender.sent_as";
+      const addressAssertion = /^(?:recipients\.(?:to|cc|bcc|envelope|no_target_self)|sender\.(?:from|reply_to))$/.test(entry.id);
       for (const [key, item] of Object.entries(entry)) {
         if (DANGEROUS_OBJECT_KEYS.has(key) || /[\u0000-\u001F\u007F]/.test(key)) { unsafe = true; return; }
-        visit(item, key, allowSentAs || (sentAsAssertion && ["expected", "actual"].includes(key)));
+        const childAddress = STORED_ADDRESS_SCALARS.has(key) || STORED_ADDRESS_ARRAYS.has(key)
+          || (key === "exactly" && ["sender", "replyTo", "to", "cc", "bcc", "envelope"].includes(parentKey));
+        const childSemantic = sentAsAssertion && ["expected", "actual"].includes(key) ? "sentAs"
+          : addressAssertion && ["expected", "actual"].includes(key) ? "address" : semanticKind;
+        visit(item, key, childAddress, childSemantic);
       }
     }
   };
@@ -1047,7 +1108,7 @@ function projectStoredAssertion(value) {
   };
 }
 
-function expectedArtifactExpectation(suite, testCase) {
+function expectedArtifactRecord(suite, testCase) {
   return aliasCaseRecord({
     id: testCase.id,
     status: "pass",
@@ -1058,7 +1119,151 @@ function expectedArtifactExpectation(suite, testCase) {
     assertions: [],
     primaryError: null,
     secondaryErrors: [],
-  }, suite).expectation;
+  }, suite);
+}
+
+const SUBJECT_ASSERTION_IDS = Object.freeze([
+  "subject.exact", "subject.regex", "subject.policy", "subject.required_fragments",
+  "subject.forbidden_fragments", "subject.no_header_injection",
+]);
+const BODY_TEXT_ASSERTION_IDS = Object.freeze([
+  "body.required_facts", "body.forbidden_patterns", "body.plain_text",
+]);
+
+function decodePointer(pathValue) {
+  if (pathValue === "/") return [];
+  return pathValue.slice(1).split("/").map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function addExpectationLossAssertions(result, segments) {
+  const [section, field] = segments;
+  if (section === "action") {
+    result.add(field === "kind" ? "action.kind" : "action.count");
+    if (field === "count") result.add("action.no_duplicates");
+  } else if (section === "sender") {
+    const id = { exactly: "sender.from", sentAs: "sender.sent_as", replyTo: "sender.reply_to", displayName: "sender.display_name" }[field];
+    if (id) result.add(id); else result.add("*");
+  } else if (section === "recipients") {
+    if (["to", "cc", "bcc", "envelope"].includes(field)) result.add(`recipients.${field}`);
+    else result.add("*");
+  } else if (section === "thread") {
+    const id = { messageId: "thread.message_id", inReplyTo: "thread.in_reply_to", references: "thread.references", conversation: "thread.conversation" }[field];
+    if (id) result.add(id); else result.add("*");
+  } else if (section === "subject") {
+    const id = { exact: "subject.exact", regex: "subject.regex", policy: "subject.policy", requiredFragments: "subject.required_fragments", forbiddenFragments: "subject.forbidden_fragments" }[field];
+    if (id) result.add(id); else SUBJECT_ASSERTION_IDS.forEach((entry) => result.add(entry));
+  } else if (section === "body") {
+    const id = { requiredFacts: "body.required_facts", forbiddenPatterns: "body.forbidden_patterns", plainText: "body.plain_text", maxSize: "body.max_size" }[field];
+    if (id) result.add(id); else BODY_TEXT_ASSERTION_IDS.forEach((entry) => result.add(entry));
+  } else if (section === "attachments") {
+    result.add("attachments.exactly");
+  } else if (section === "timing") {
+    result.add("timing.reply_within");
+  } else if (section === "lifecycle") {
+    result.add(field === "actorReceived" ? "lifecycle.actor_received" : "lifecycle.submission");
+  } else {
+    result.add("*");
+  }
+}
+
+function redactionAffectedAssertions(record) {
+  const result = new Set();
+  for (const entry of record.redactionLoss?.entries ?? []) {
+    const segments = decodePointer(entry.path);
+    if (segments.length === 0) { result.add("*"); continue; }
+    if (segments[0] === "expectation") {
+      addExpectationLossAssertions(result, segments.slice(1));
+    } else if (segments[0] === "assertions") {
+      const assertion = record.assertions?.[Number(segments[1])];
+      if (assertion?.id) result.add(assertion.id); else result.add("*");
+    } else if (segments[0] === "evidence") {
+      if (segments.includes("attachments")) result.add("attachments.exactly");
+      else if (segments.includes("text")) BODY_TEXT_ASSERTION_IDS.forEach((id) => result.add(id));
+      else if (segments.includes("subject")) SUBJECT_ASSERTION_IDS.forEach((id) => result.add(id));
+      else if (segments.includes("displayName") && segments.includes("from") && !segments.includes("physicalFrom")) {
+        result.add("sender.display_name");
+      }
+    }
+  }
+  return result;
+}
+
+function assertionExpectationValue(expectation, id) {
+  const values = {
+    "action.kind": expectation?.action?.kind,
+    "action.count": expectation?.action?.count,
+    "action.no_duplicates": expectation?.action?.count,
+    "sender.from": expectation?.sender?.exactly,
+    "sender.sent_as": expectation?.sender?.sentAs,
+    "sender.reply_to": expectation?.sender?.replyTo,
+    "sender.display_name": expectation?.sender?.displayName,
+    "recipients.to": expectation?.recipients?.to,
+    "recipients.cc": expectation?.recipients?.cc,
+    "recipients.bcc": expectation?.recipients?.bcc,
+    "recipients.envelope": expectation?.recipients?.envelope,
+    "thread.message_id": expectation?.thread?.messageId,
+    "thread.in_reply_to": expectation?.thread?.inReplyTo,
+    "thread.references": expectation?.thread?.references,
+    "thread.conversation": expectation?.thread?.conversation,
+    "subject.exact": expectation?.subject?.exact,
+    "subject.regex": expectation?.subject?.regex,
+    "subject.policy": expectation?.subject?.policy,
+    "subject.required_fragments": expectation?.subject?.requiredFragments,
+    "subject.forbidden_fragments": expectation?.subject?.forbiddenFragments,
+    "subject.no_header_injection": expectation?.subject === undefined ? undefined : "safe headers",
+    "body.required_facts": expectation?.body?.requiredFacts,
+    "body.forbidden_patterns": forbiddenPatternDigests(expectation),
+    "body.plain_text": expectation?.body?.plainText,
+    "body.max_size": expectation?.body?.maxSize,
+    "attachments.exactly": expectation?.attachments?.exactly,
+    "timing.reply_within": expectation?.timing?.replyWithinMs,
+    "lifecycle.submission": expectation?.lifecycle?.submission,
+    "lifecycle.actor_received": expectation?.lifecycle?.actorReceived,
+  };
+  return Object.hasOwn(values, id) && values[id] !== undefined ? values[id] : { unavailable: true };
+}
+
+function assertRedactionBoundaryUnchanged(storedRecord, currentArtifact) {
+  if (!storedRecord.redactionLoss) return new Set();
+  const currentLossPaths = new Set(currentArtifact.redactionLoss?.entries.map((entry) => entry.path) ?? []);
+  for (const entry of storedRecord.redactionLoss.entries) {
+    if (entry.path.startsWith("/expectation/") && !currentLossPaths.has(entry.path)) {
+      throw new EvalError(
+        "configuration_error", "redacted_evidence_assertion_change",
+        "Assertions depending on redacted evidence cannot change during regrade",
+      );
+    }
+  }
+  const affected = redactionAffectedAssertions(storedRecord);
+  const mismatch = affected.has("*")
+    ? JSON.stringify(storedRecord.expectation) !== JSON.stringify(currentArtifact.expectation)
+    : [...affected].some((id) => (
+      JSON.stringify(assertionExpectationValue(storedRecord.expectation, id))
+        !== JSON.stringify(assertionExpectationValue(currentArtifact.expectation, id))
+    ));
+  if (mismatch) {
+    throw new EvalError(
+      "configuration_error", "redacted_evidence_assertion_change",
+      "Assertions depending on redacted evidence cannot change during regrade",
+    );
+  }
+  return affected;
+}
+
+function remapInheritedAssertionLoss(entries, previousAssertions, nextAssertions) {
+  const nextIndexById = new Map(nextAssertions.map((assertion, index) => [assertion.id, index]));
+  return entries.map((entry) => {
+    const segments = decodePointer(entry.path);
+    if (segments[0] !== "assertions" || !/^\d+$/.test(segments[1] ?? "")) return entry;
+    const id = previousAssertions[Number(segments[1])]?.id;
+    const nextIndex = nextIndexById.get(id);
+    if (nextIndex === undefined) return { path: "/", kind: "redacted_text" };
+    segments[1] = String(nextIndex);
+    return {
+      path: `/${segments.map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`,
+      kind: "redacted_text",
+    };
+  });
 }
 
 function canonicalObservedAliases(value) {
@@ -1106,7 +1311,8 @@ function validateStoredArtifactLimitRecord(record, suite) {
   };
 }
 
-function validateStoredRecord(record, suite, testCase) {
+function validateStoredRecord(record, suite, testCase, artifactAuthKey) {
+  const redactionLoss = validateStoredRedactionLoss(record, suite, artifactAuthKey);
   if (storedArtifactContainsSecret(record, suite)) invalidCaseArtifact();
   if (record?.primaryError?.class === "transport_error"
     && record?.primaryError?.code === "cases_artifact_limit") {
@@ -1114,7 +1320,7 @@ function validateStoredRecord(record, suite, testCase) {
   }
   const source = exactCaseObject(record, new Set([
     "id", "status", "startedAt", "completedAt", "durations", "versions", "suite", "expectation", "evidence",
-    "assertions", "primaryError", "secondaryErrors",
+    "assertions", "primaryError", "secondaryErrors", "redactionLoss",
   ]));
   if (!["pass", "fail", "error"].includes(source.status) || !Array.isArray(source.assertions)
     || !Array.isArray(source.secondaryErrors)) invalidCaseArtifact();
@@ -1203,6 +1409,7 @@ function validateStoredRecord(record, suite, testCase) {
     assertions,
     primaryError: canonicalPrimary,
     secondaryErrors: canonicalSecondary,
+    ...(redactionLoss ? { redactionLoss } : {}),
   };
   for (const key of ["startedAt", "completedAt"]) copyOptional(source, result, key, (entry) => safeStoredControlFreeString(entry));
   if (Object.hasOwn(source, "durations")) {
@@ -1248,6 +1455,7 @@ async function readStoredRun(runDirectory) {
   if (state.isSymbolicLink() || !state.isDirectory()) throw new EvalError("configuration_error", "invalid_run_directory", "Invalid evaluation run directory");
   const canonical = await realpath(runDirectory);
   if (path.basename(canonical) !== path.basename(runDirectory)) throw new EvalError("configuration_error", "invalid_run_directory", "Invalid evaluation run directory");
+  const artifactAuthKey = await artifactAuthKeyForOutputRoot(path.dirname(canonical));
   const casesFile = path.join(canonical, "cases.jsonl");
   const casesState = await lstat(casesFile);
   if (casesState.isSymbolicLink() || !casesState.isFile()) throw new EvalError("configuration_error", "invalid_cases_artifact", "Invalid evaluation cases artifact");
@@ -1282,7 +1490,7 @@ async function readStoredRun(runDirectory) {
   } catch {
     throw new EvalError("configuration_error", "invalid_cases_artifact", "Evaluation cases artifact is not valid JSONL");
   }
-  return { canonical, records, casesFile };
+  return { canonical, records, casesFile, artifactAuthKey };
 }
 
 /** Re-run deterministic graders from stored alias-only records; no adapter is accepted or used. */
@@ -1301,7 +1509,13 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     || new Set(storedIds).size !== storedIds.length) {
     throw new EvalError("configuration_error", "case_set_mismatch", "Stored run cases do not exactly match the resolved suite");
   }
-  const validatedRecords = stored.records.map((record, index) => validateStoredRecord(record, suite, suite.cases[index]));
+  const validatedRecords = stored.records.map((record, index) => (
+    validateStoredRecord(record, suite, suite.cases[index], stored.artifactAuthKey)
+  ));
+  const currentArtifacts = suite.cases.map((testCase) => expectedArtifactRecord(suite, testCase));
+  const affectedAssertions = validatedRecords.map((record, index) => (
+    assertRedactionBoundaryUnchanged(record, currentArtifacts[index])
+  ));
   for (const [index, record] of validatedRecords.entries()) {
     if (evidenceRedactionDigests(record.evidence).length === 0) continue;
     const storedPatterns = forbiddenPatternDigests(record.expectation);
@@ -1323,7 +1537,7 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   }
 
   const cases = validatedRecords.map((storedRecord, index) => {
-    const currentArtifactExpectation = expectedArtifactExpectation(suite, suite.cases[index]);
+    const currentArtifactExpectation = currentArtifacts[index].expectation;
     const expectation = trustedReplayExpectation(suite.cases[index], currentArtifactExpectation);
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
       || storedRecord.primaryError?.class === "target_timeout"
@@ -1341,6 +1555,14 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     const graded = runGraders(expectation, evidence, { replayRedactions: true });
     if (graded.boundary === null) {
       assertions = graded.assertions;
+      const affected = affectedAssertions[index];
+      if (affected.size > 0) {
+        const historical = new Map(storedRecord.assertions.map((assertion) => [assertion.id, assertion]));
+        assertions = assertions.map((assertion) => (
+          (affected.has("*") || affected.has(assertion.id)) && historical.has(assertion.id)
+            ? historical.get(assertion.id) : assertion
+        ));
+      }
       ({ status, error } = classifyAssertions(assertions));
     } else {
       status = "error";
@@ -1349,11 +1571,17 @@ export async function regradeRun({ suite, runDirectory } = {}) {
         "A deterministic grader threw while evaluating captured evidence", "grader", graded.boundary,
       );
     }
+    const inheritedRedactionLoss = remapInheritedAssertionLoss(
+      storedRecord.redactionLoss?.entries ?? [], storedRecord.assertions, assertions,
+    );
     return aliasCaseRecord({
       ...storedRecord,
       suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
       status, expectation, evidence, assertions, primaryError: error,
-    }, aliasSuiteFor({ ...storedRecord, expectation }, suite));
+    }, aliasSuiteFor({ ...storedRecord, expectation }, suite), {
+      inheritedRedactionLoss,
+      artifactAuthKey: stored.artifactAuthKey,
+    });
   });
 
   let prior = {};
