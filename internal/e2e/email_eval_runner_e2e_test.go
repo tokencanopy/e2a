@@ -836,6 +836,7 @@ expect:
   action: { kind: reply, count: 1 }
   sender:
     exactly: %q
+    sent_as: own_address
     reply_to: { exactly: [%q] }
   recipients:
     to: { exactly: [%q] }
@@ -843,8 +844,10 @@ expect:
     bcc: { exactly: [] }
     envelope: { exactly: [%q] }
   thread:
+    message_id: required
     in_reply_to: original
     references: contains_original
+    conversation: same
   subject: { policy: preserve }
   body:
     required_facts: [%q]
@@ -864,13 +867,18 @@ expect:
 	return filepath.Join(directory, "suite.yaml")
 }
 
-func emailEvalRuntimeDirectory(t *testing.T) string {
+func emailEvalSkillDirectory(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
-		t.Fatal("resolve email eval runtime")
+		t.Fatal("resolve email eval skill")
 	}
-	return filepath.Join(filepath.Dir(file), "..", "..", "plugins", "e2a", "skills", "email-evals", "runtime")
+	return filepath.Join(filepath.Dir(file), "..", "..", "plugins", "e2a", "skills", "email-evals")
+}
+
+func emailEvalLauncher(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(emailEvalSkillDirectory(t), "email-evals.sh")
 }
 
 type boundedChildBuffer struct {
@@ -965,7 +973,7 @@ func startDeterministicResponder(t *testing.T, baseURL, apiKey, targetAddress st
 	ctx, cancel := context.WithCancel(context.Background())
 	stdout := newBoundedChildBuffer(8 << 10)
 	stderr := newBoundedChildBuffer(8 << 10)
-	command := exec.CommandContext(ctx, node, filepath.Join(emailEvalRuntimeDirectory(t), "test", "live-responder.mjs"))
+	command := exec.CommandContext(ctx, node, filepath.Join(emailEvalSkillDirectory(t), "runtime", "test", "live-responder.mjs"))
 	command.Env = []string{
 		"E2A_EVAL_API_KEY=" + apiKey,
 		"E2A_EVAL_BASE_URL=" + baseURL,
@@ -1021,10 +1029,103 @@ type evalCLIResult struct {
 	RunDirectory string
 }
 
-func runEmailEvalCLI(t *testing.T, suite, apiKey string) evalCLIResult {
+func emailEvalCommandEnvironment(apiKey string) []string {
+	return []string{
+		"E2A_EVAL_API_KEY=" + apiKey,
+		"PATH=" + os.Getenv("PATH"),
+		"TMPDIR=" + os.TempDir(),
+	}
+}
+
+func assertEmailEvalValidation(t *testing.T, suite, apiKey, trustedOrigin string) string {
 	t.Helper()
-	node, err := exec.LookPath("node")
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	stdout := newBoundedChildBuffer(64 << 10)
+	stderr := newBoundedChildBuffer(16 << 10)
+	command := exec.CommandContext(ctx, emailEvalLauncher(t),
+		"validate", "--suite", suite, "--trusted-origin", trustedOrigin, "--json")
+	command.Env = emailEvalCommandEnvironment(apiKey)
+	command.Dir = filepath.Dir(suite)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil || ctx.Err() != nil || stderr.String() != "" {
+		t.Fatal("email eval validation did not complete safely")
+	}
+	var output struct {
+		Command string `json:"command"`
+		Plan    struct {
+			BaseURL        string `json:"baseUrl"`
+			NetworkSends   bool   `json:"networkSends"`
+			ApprovalDigest string `json:"approvalDigest"`
+			Cases          []struct {
+				ID string `json:"id"`
+			} `json:"cases"`
+		} `json:"plan"`
+	}
+	if json.Unmarshal([]byte(stdout.String()), &output) != nil || output.Command != "validate" ||
+		output.Plan.NetworkSends || len(output.Plan.Cases) != 1 || output.Plan.Cases[0].ID != "deterministic-reply" ||
+		!strings.HasPrefix(output.Plan.BaseURL, trustedOrigin) {
+		t.Fatal("email eval validation returned an incomplete plan")
+	}
+	if len(output.Plan.ApprovalDigest) != 64 {
+		t.Fatal("email eval validation omitted its approval digest")
+	}
+	for _, character := range output.Plan.ApprovalDigest {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			t.Fatal("email eval validation returned an invalid approval digest")
+		}
+	}
+	for _, secret := range []string{apiKey, evalActorAddress, evalTargetAddress} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatal("email eval validation disclosed a resolved secret or mailbox")
+		}
+	}
+	return output.Plan.ApprovalDigest
+}
+
+func assertEmailEvalRegrade(t *testing.T, suite, apiKey, trustedOrigin, runDirectory string) {
+	t.Helper()
+	before, err := os.ReadFile(filepath.Join(runDirectory, "cases.jsonl"))
 	if err != nil {
+		t.Fatal("read pre-regrade case artifact")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	stdout := newBoundedChildBuffer(64 << 10)
+	stderr := newBoundedChildBuffer(16 << 10)
+	command := exec.CommandContext(ctx, emailEvalLauncher(t),
+		"regrade", "--suite", suite, "--run", runDirectory,
+		"--trusted-origin", trustedOrigin, "--json")
+	command.Env = emailEvalCommandEnvironment(apiKey)
+	command.Dir = filepath.Dir(suite)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil || ctx.Err() != nil || stderr.String() != "" {
+		t.Fatal("email eval regrade did not complete safely")
+	}
+	var output struct {
+		Command string `json:"command"`
+		Report  string `json:"report"`
+		Summary struct {
+			Status   string `json:"status"`
+			Complete bool   `json:"complete"`
+		} `json:"summary"`
+	}
+	if json.Unmarshal([]byte(stdout.String()), &output) != nil || output.Command != "regrade" ||
+		output.Summary.Status != "pass" || !output.Summary.Complete ||
+		output.Report != filepath.Base(runDirectory)+"/report.md" {
+		t.Fatal("email eval regrade returned an invalid result")
+	}
+	after, err := os.ReadFile(filepath.Join(runDirectory, "cases.jsonl"))
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatal("email eval regrade rewrote captured case evidence")
+	}
+}
+
+func runEmailEvalCLI(t *testing.T, suite, apiKey, trustedOrigin, approvalDigest string) evalCLIResult {
+	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
 		t.Fatal("node is required for the local eval runtime")
 	}
 	outputRoot := filepath.Join(filepath.Dir(suite), "results")
@@ -1032,10 +1133,11 @@ func runEmailEvalCLI(t *testing.T, suite, apiKey string) evalCLIResult {
 	defer cancel()
 	stdout := newBoundedChildBuffer(64 << 10)
 	stderr := newBoundedChildBuffer(16 << 10)
-	command := exec.CommandContext(ctx, node,
-		filepath.Join(emailEvalRuntimeDirectory(t), "cli.mjs"),
-		"run", "--suite", suite, "--output", outputRoot, "--json")
-	command.Env = []string{"E2A_EVAL_API_KEY=" + apiKey}
+	command := exec.CommandContext(ctx, emailEvalLauncher(t),
+		"run", "--suite", suite, "--output", outputRoot,
+		"--approval-digest", approvalDigest,
+		"--trusted-origin", trustedOrigin, "--json")
+	command.Env = emailEvalCommandEnvironment(apiKey)
 	command.Dir = filepath.Dir(suite)
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -1061,16 +1163,36 @@ func runEmailEvalCLI(t *testing.T, suite, apiKey string) evalCLIResult {
 		result.Stderr = "email eval runtime reported a fixed target-timeout diagnostic"
 	case "email-evals: grader_error\n":
 		result.Stderr = "email eval runtime reported a fixed grader-error diagnostic"
+	case "email-evals: configuration_error\n":
+		result.Stderr = "email eval runtime reported a fixed configuration-error diagnostic"
+	case "email-evals: capability_error\n":
+		result.Stderr = "email eval runtime reported a fixed capability-error diagnostic"
 	case "email-evals: unexpected runner failure\n":
 		result.Stderr = "email eval runtime reported a fixed unexpected-runner diagnostic"
+	case "email-evals: runtime failure\n":
+		result.Stderr = "email eval launcher rejected the runtime protocol"
+	case "email-evals: runtime unavailable\n":
+		result.Stderr = "email eval launcher could not verify its trusted runtime"
 	}
 	var output struct {
 		Command string `json:"command"`
 		Summary struct {
 			Status string `json:"status"`
+			Cases  []struct {
+				Status     string `json:"status"`
+				ErrorClass string `json:"errorClass"`
+			} `json:"cases"`
 		} `json:"summary"`
 	}
 	parsedOutput := json.Unmarshal([]byte(stdout.String()), &output) == nil && output.Command == "run"
+	if result.ExitCode != 0 && parsedOutput {
+		for _, evalCase := range output.Summary.Cases {
+			if evalCase.Status != "pass" && evalCase.ErrorClass != "" {
+				result.Stderr = "email eval runtime reported " + evalCase.ErrorClass
+				break
+			}
+		}
+	}
 	if result.ExitCode == 0 && (!parsedOutput || output.Summary.Status != "pass") {
 		result.ExitCode = 4
 		result.Stderr = "email eval runtime returned an invalid result"
@@ -1091,6 +1213,33 @@ func runEmailEvalCLI(t *testing.T, suite, apiKey string) evalCLIResult {
 	if result.ExitCode == 0 && result.RunDirectory == "" {
 		result.ExitCode = 4
 		result.Stderr = "email eval runtime omitted its report"
+	}
+	if result.ExitCode != 0 && result.RunDirectory != "" {
+		caseData, readCaseErr := os.ReadFile(filepath.Join(result.RunDirectory, "cases.jsonl"))
+		var failedCase struct {
+			PrimaryError struct {
+				Class   string `json:"class"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"primaryError"`
+			Assertions []struct {
+				ID     string          `json:"id"`
+				Status string          `json:"status"`
+				Code   string          `json:"code"`
+				Actual json.RawMessage `json:"actual"`
+			} `json:"assertions"`
+		}
+		if readCaseErr == nil && json.Unmarshal(bytes.TrimSpace(caseData), &failedCase) == nil &&
+			failedCase.PrimaryError.Class != "" && failedCase.PrimaryError.Code != "" {
+			result.Stderr = fmt.Sprintf("email eval runtime reported %s/%s: %s",
+				failedCase.PrimaryError.Class, failedCase.PrimaryError.Code, failedCase.PrimaryError.Message)
+			for _, assertion := range failedCase.Assertions {
+				if assertion.Status != "pass" {
+					result.Stderr += fmt.Sprintf(" (%s=%s/%s actual=%s)",
+						assertion.ID, assertion.Status, assertion.Code, string(assertion.Actual))
+				}
+			}
+		}
 	}
 	return result
 }
@@ -1137,7 +1286,20 @@ func assertReport(t *testing.T, runDirectory, wantStatus string, assertionIDs ..
 	}
 	statuses := make(map[string]string, len(record.Assertions))
 	for _, assertion := range record.Assertions {
+		if _, duplicate := statuses[assertion.ID]; duplicate {
+			t.Fatalf("email eval assertion ID %s is duplicated", assertion.ID)
+		}
 		statuses[assertion.ID] = assertion.Status
+	}
+	actualIDs := make([]string, 0, len(statuses))
+	for id := range statuses {
+		actualIDs = append(actualIDs, id)
+	}
+	sort.Strings(actualIDs)
+	expectedIDs := append([]string(nil), assertionIDs...)
+	sort.Strings(expectedIDs)
+	if strings.Join(actualIDs, ",") != strings.Join(expectedIDs, ",") {
+		t.Fatalf("email eval assertion IDs = %v, want %v", actualIDs, expectedIDs)
 	}
 	for _, id := range assertionIDs {
 		if statuses[id] != "pass" {
@@ -1759,14 +1921,36 @@ func TestEmailEvalRunnerRoundTrip(t *testing.T) {
 	var actorEgressBaseline, unauthorizedEgressBaseline int
 	t.Run("actor to target reply round trip", func(t *testing.T) {
 		suite = writeEvalSuite(t, ts.HTTPServer.URL, actor.EmailAddress(), target.EmailAddress())
+		approvalDigest := assertEmailEvalValidation(t, suite, apiKey.PlaintextKey, ts.HTTPServer.URL)
 		responder := startDeterministicResponder(t, ts.HTTPServer.URL, apiKey.PlaintextKey, target.EmailAddress())
-		result := runEmailEvalCLI(t, suite, apiKey.PlaintextKey)
+		result := runEmailEvalCLI(t, suite, apiKey.PlaintextKey, ts.HTTPServer.URL, approvalDigest)
 		initialResponderResult = responder.WaitForReply(t)
 		if result.ExitCode != 0 {
 			t.Fatalf("email eval failed: %s", result.Stderr)
 		}
-		assertReport(t, result.RunDirectory, "pass", "recipients.bcc",
-			"thread.in_reply_to", "subject.policy", "body.required_facts")
+		assertReport(t, result.RunDirectory, "pass",
+			"action.kind", "action.count", "action.no_duplicates",
+			"sender.from", "sender.sent_as", "sender.reply_to",
+			"recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope",
+			"recipients.cross_field", "recipients.no_target_self",
+			"thread.message_id", "thread.in_reply_to", "thread.references", "thread.conversation",
+			"subject.policy", "subject.no_header_injection",
+			"body.required_facts", "body.plain_text", "attachments.exactly",
+			"timing.reply_within", "lifecycle.submission", "lifecycle.actor_received")
+		actorEgressBeforeRegrade := forwarder.countRecipient(actor.EmailAddress())
+		assertEmailEvalRegrade(t, suite, apiKey.PlaintextKey, ts.HTTPServer.URL, result.RunDirectory)
+		if got := forwarder.countRecipient(actor.EmailAddress()); got != actorEgressBeforeRegrade {
+			t.Fatalf("regrade SMTP egress count = %d, want %d", got, actorEgressBeforeRegrade)
+		}
+		assertReport(t, result.RunDirectory, "pass",
+			"action.kind", "action.count", "action.no_duplicates",
+			"sender.from", "sender.sent_as", "sender.reply_to",
+			"recipients.to", "recipients.cc", "recipients.bcc", "recipients.envelope",
+			"recipients.cross_field", "recipients.no_target_self",
+			"thread.message_id", "thread.in_reply_to", "thread.references", "thread.conversation",
+			"subject.policy", "subject.no_header_injection",
+			"body.required_facts", "body.plain_text", "attachments.exactly",
+			"timing.reply_within", "lifecycle.submission", "lifecycle.actor_received")
 		forwarder.assertProviderMessageIDs(t)
 		assertOutboundIdentity(t, forwarder.latestMessageFor(t, target.EmailAddress()),
 			"bounces@bounce.eval.test", actor.EmailAddress(), "Eval Actor", actor.EmailAddress())

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,6 +40,7 @@ function suite(cases = [
     version: 1,
     name: "synthetic-suite",
     digest: "a".repeat(64),
+    executionDigest: "b".repeat(64),
     actor: { email: ACTOR },
     target: { email: TARGET },
     transport: {
@@ -59,7 +61,7 @@ function evidence(testCase, overrides = {}) {
     provenance: "target_outbound",
     messageType: "reply",
     from: TARGET,
-    sentAs: TARGET,
+    sentAs: "own_address",
     replyTo: [],
     to: [ACTOR],
     cc: [],
@@ -223,7 +225,7 @@ test("failed assertions are assertion_failure and a thrown grader boundary is gr
   assert.deepEqual(regraded.cases[0].primaryError, thrown.cases[0].primaryError);
 });
 
-test("regrade rejects a forged grader_threw over clean projected evidence", async () => {
+test("regrade ignores historical grader outcomes and applies current trusted assertions", async () => {
   const one = suite([{ id: "clean-grader", send: { subject: "Clean", text: "Synthetic" }, expect: expectation() }]);
   const original = await runSuite({ suite: one, adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
   const records = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
@@ -233,10 +235,10 @@ test("regrade rejects a forged grader_threw over clean projected evidence", asyn
     class: "grader_error", code: "grader_threw", origin: "grader", boundary: "content", message: "Forged grader failure",
   };
   await writeFile(original.files.cases, `${records.map(JSON.stringify).join("\n")}\n`);
-  await assert.rejects(
-    regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) }),
-    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
-  );
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(original.files.cases) });
+  assert.equal(regraded.status, "pass");
+  assert.equal(regraded.cases[0].primaryError, null);
+  assert.ok(regraded.cases[0].assertions.length > 0);
 });
 
 test("loader-produced hidden grader state and its exact throwing boundary survive replay", async () => {
@@ -269,9 +271,10 @@ expect:
     required_facts: [Synthetic answer]
     forbidden_patterns: ["blocked-[0-9]+"]
 `);
-  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
-    E2A_EVAL_API_KEY: "synthetic-credential",
-  } });
+  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), {
+    environment: { E2A_EVAL_API_KEY: "synthetic-credential" },
+    trustedOrigin: "https://api.example.test",
+  });
   const compiled = loaded.cases[0].expect.body.forbiddenPatternRegexes[0];
   Object.defineProperty(compiled, "exec", {
     configurable: true,
@@ -289,10 +292,8 @@ expect:
   const forgedBoundary = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
   forgedBoundary[0].primaryError.boundary = "core";
   await writeFile(original.files.cases, `${forgedBoundary.map(JSON.stringify).join("\n")}\n`);
-  await assert.rejects(
-    regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) }),
-    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
-  );
+  const boundaryRegraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) });
+  assert.equal(boundaryRegraded.cases[0].primaryError.boundary, "content");
 });
 
 test("direct run rejects oversized resolved identifiers before preflight or send", async () => {
@@ -360,7 +361,7 @@ test("identifier boundaries and canonically equivalent quoted mailbox evidence s
       captured.target.email = target;
       captured.stimulus.participants = ['Actor Alias <"a\\ b"@EXAMPLE.COM> (comment)'];
       captured.candidates[0].from = `Target Alias <${target}>`;
-      captured.candidates[0].sentAs = target;
+      captured.candidates[0].sentAs = "own_address";
       captured.candidates[0].to = ['Actor Alias <"a\\ b"@EXAMPLE.COM> (comment)'];
       captured.candidates[0].envelopeRecipients = ['"a\\ b"@EXAMPLE.COM'];
       return captured;
@@ -623,7 +624,7 @@ test("a durable reporting failure makes an otherwise passing incomplete run fail
   assert.equal(await readFile(sentinel, "utf8"), "sentinel\n");
 });
 
-test("environment-backed suite names, case IDs, and action enums redact without changing regrade semantics", async () => {
+test("environment-backed suite names, case IDs, and action enums are rejected before execution", async () => {
   const fixtureRoot = await root();
   await mkdir(path.join(fixtureRoot, "cases"));
   await writeFile(path.join(fixtureRoot, "suite.yaml"), `
@@ -643,24 +644,16 @@ id: "\${E2A_CASE_ID}"
 send: { subject: Synthetic, text: Synthetic }
 expect: { action: { kind: "\${E2A_ACTION}", count: 0 } }
 `);
-  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
-    E2A_SUITE_NAME: "private-suite-name",
-    E2A_CASE_ID: "private-case-id",
-    E2A_ACTION: "none",
-    E2A_EVAL_TARGET: TARGET,
-    E2A_EVAL_ACTOR: ACTOR,
-    E2A_EVAL_API_KEY: "synthetic-credential",
-  } });
-  const summary = await runSuite({ suite: loaded, adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
-  const artifacts = await Promise.all(Object.values(summary.files).map((file) => readFile(file, "utf8")));
-  assert.equal(summary.status, "pass");
-  assert.equal(summary.suite.name, "[ENV:E2A_SUITE_NAME]");
-  assert.equal(summary.cases[0].id, "[ENV:E2A_CASE_ID]");
-  assert.equal(summary.cases[0].expectation.action.kind, "[ENV:E2A_ACTION:semantic:0]");
-  assert.doesNotMatch(artifacts.join("\n"), /private-suite-name|private-case-id|synthetic-credential/);
-  const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(summary.files.cases) });
-  assert.equal(regraded.status, "pass");
-  assert.equal(regraded.cases[0].status, "pass");
+  await assert.rejects(
+    loadSuite(path.join(fixtureRoot, "suite.yaml"), {
+      environment: {
+        E2A_SUITE_NAME: "private-suite-name", E2A_CASE_ID: "private-case-id", E2A_ACTION: "none",
+        E2A_EVAL_TARGET: TARGET, E2A_EVAL_ACTOR: ACTOR, E2A_EVAL_API_KEY: "synthetic-credential",
+      },
+      trustedOrigin: "https://api.example.test",
+    }),
+    (error) => error.errorClass === "configuration_error" && error.code === "environment_reference_not_allowed",
+  );
 });
 
 test("environment-backed mailbox fields retain typed aliases through run and regrade", async () => {
@@ -675,7 +668,7 @@ transport:
   adapter: e2a
   api_key: "\${E2A_EVAL_API_KEY}"
   base_url: https://api.example.test
-  allowed_envelope_recipients: ["\${E2A_EVAL_TARGET}", "\${E2A_EVAL_ACTOR}", "\${E2A_PROBE_CC}", "\${E2A_PROBE_BCC}"]
+  allowed_envelope_recipients: ["\${E2A_EVAL_TARGET}", "\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_PROBE_CC}", "\${E2A_EVAL_PROBE_BCC}"]
 cases: [cases/mailboxes.yaml]
 `);
   await writeFile(path.join(fixtureRoot, "cases/mailboxes.yaml"), `
@@ -685,28 +678,31 @@ expect:
   action: { kind: reply_all, count: 1 }
   sender:
     exactly: "\${E2A_EVAL_TARGET}"
-    sent_as: "\${E2A_EVAL_TARGET}"
+    sent_as: own_address
     display_name: Synthetic Target
-    reply_to: { exactly: ["\${E2A_PROBE_CC}"] }
+    reply_to: { exactly: ["\${E2A_EVAL_PROBE_CC}"] }
   recipients:
     to: { exactly: ["\${E2A_EVAL_ACTOR}"] }
-    cc: { exactly: ["\${E2A_PROBE_CC}"] }
-    bcc: { exactly: ["\${E2A_PROBE_BCC}"] }
-    envelope: { exactly: ["\${E2A_EVAL_ACTOR}", "\${E2A_PROBE_CC}", "\${E2A_PROBE_BCC}"] }
+    cc: { exactly: ["\${E2A_EVAL_PROBE_CC}"] }
+    bcc: { exactly: ["\${E2A_EVAL_PROBE_BCC}"] }
+    envelope: { exactly: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_PROBE_CC}", "\${E2A_EVAL_PROBE_BCC}"] }
 `);
   const probeCc = "cc-probe@eval.test";
   const probeBcc = "bcc-probe@eval.test";
-  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
-    E2A_EVAL_TARGET: TARGET, E2A_EVAL_ACTOR: ACTOR, E2A_EVAL_API_KEY: "synthetic-credential",
-    E2A_PROBE_CC: probeCc, E2A_PROBE_BCC: probeBcc,
-  } });
+  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), {
+    environment: {
+      E2A_EVAL_TARGET: TARGET, E2A_EVAL_ACTOR: ACTOR, E2A_EVAL_API_KEY: "synthetic-credential",
+      E2A_EVAL_PROBE_CC: probeCc, E2A_EVAL_PROBE_BCC: probeBcc,
+    },
+    trustedOrigin: "https://api.example.test",
+  });
   const summary = await runSuite({
     suite: loaded,
     adapter: adapter((testCase) => {
       const captured = evidence(testCase);
       captured.stimulus.participants = [`Synthetic Actor <${ACTOR}>`, `CC Probe <${probeCc}>`];
       Object.assign(captured.candidates[0], {
-        from: `Synthetic Target <${TARGET}>`, sentAs: `Synthetic Target <${TARGET}>`, replyTo: [`CC Probe <${probeCc}>`],
+        from: `Synthetic Target <${TARGET}>`, sentAs: "own_address", replyTo: [`CC Probe <${probeCc}>`],
         to: [`Synthetic Actor <${ACTOR}>`], cc: [`CC Probe <${probeCc}>`], bcc: [`BCC Probe <${probeBcc}>`],
         envelopeRecipients: [`Synthetic Actor <${ACTOR}>`, `CC Probe <${probeCc}>`, `BCC Probe <${probeBcc}>`],
       });
@@ -716,19 +712,48 @@ expect:
   });
   assert.equal(summary.status, "pass");
   assert.deepEqual(summary.cases[0].expectation.sender, {
-    exactly: "target", sentAs: "target", displayName: "Synthetic Target", replyTo: { exactly: ["probe:2"] },
+    exactly: "target", sentAs: "own_address", displayName: "Synthetic Target", replyTo: { exactly: ["probe:2"] },
   });
   assert.deepEqual(summary.cases[0].expectation.recipients, {
     to: { exactly: ["actor"] }, cc: { exactly: ["probe:2"] }, bcc: { exactly: ["probe:1"] },
     envelope: { exactly: ["actor", "probe:1", "probe:2"] },
   });
   assert.deepEqual(summary.cases[0].evidence.candidates[0].from, { address: "target", displayName: "Synthetic Target" });
-  assert.deepEqual(summary.cases[0].evidence.candidates[0].sentAs, { address: "target", displayName: "Synthetic Target" });
+  assert.equal(summary.cases[0].evidence.candidates[0].sentAs, "own_address");
   assert.deepEqual(summary.cases[0].evidence.candidates[0].replyTo, [{ address: "probe:2", displayName: "CC Probe" }]);
   assert.deepEqual(summary.cases[0].evidence.candidates[0].to, [{ address: "actor", displayName: "Synthetic Actor" }]);
   const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(summary.files.cases) });
-  assert.equal(regraded.status, "pass");
+  assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
   assert.deepEqual(regraded.cases[0].expectation, summary.cases[0].expectation);
+});
+
+test("open bounded sent-as tokens remain durable and regradable", async () => {
+  const expected = expectation();
+  expected.sender.sentAs = "e2a_custom";
+  const one = suite([{
+    id: "open-sent-as",
+    send: { subject: "Synthetic", text: "Synthetic question" },
+    expect: expected,
+  }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => {
+      const captured = evidence(testCase);
+      captured.candidates[0].sentAs = "e2a_custom";
+      return captured;
+    }),
+    outputRoot: await root(),
+    runId: RUN_ID,
+  });
+  assert.equal(summary.status, "pass", JSON.stringify(summary.cases));
+  assert.equal(summary.cases[0].expectation.sender.sentAs, "e2a_custom");
+  assert.equal(summary.cases[0].evidence.candidates[0].sentAs, "e2a_custom");
+  const sentAs = summary.cases[0].assertions.find((assertion) => assertion.id === "sender.sent_as");
+  assert.equal(sentAs.expected, "e2a_custom");
+  assert.equal(sentAs.actual.byRef[0].actual.actual, "e2a_custom");
+
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "pass", JSON.stringify(regraded.cases));
 });
 
 test("adapter evidence is a strict projection and unknown nested data never reaches artifacts", async () => {
@@ -792,6 +817,47 @@ test("body mailbox text is artifact-safe and replay-equivalent", async () => {
   assert.doesNotMatch(await readFile(summary.files.cases, "utf8"), /outside@example\.com/);
   const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
   assert.equal(regraded.status, "pass");
+});
+
+test("configured forbidden evidence is redacted and remains a replayed failure", async () => {
+  const expected = expectation();
+  expected.subject = { policy: "preserve" };
+  expected.body.requiredFacts = ["answer"];
+  expected.body.forbiddenPatterns = ["token-[0-9]+", "never-match"];
+  const one = suite([{
+    id: "redacted-forbidden", send: { subject: "Question token-123", text: "Synthetic" }, expect: expected,
+  }]);
+  const summary = await runSuite({
+    suite: one,
+    adapter: adapter((testCase) => evidence(testCase, {
+      candidates: [{
+        ...evidence(testCase).candidates[0],
+        mime: { ...evidence(testCase).candidates[0].mime, text: "Synthetic answer token-123" },
+      }],
+    })),
+    outputRoot: await root(), runId: RUN_ID,
+  });
+  assert.equal(summary.status, "fail");
+  const artifact = await readFile(summary.files.cases, "utf8");
+  const stored = JSON.parse(artifact);
+  assert.doesNotMatch(stored.evidence.candidates[0].mime.text, /token-123/);
+  assert.match(stored.evidence.candidates[0].mime.text, /\[REDACTED:0\]/);
+  assert.match(stored.evidence.candidates[0].mime.subject, /token-123/);
+  assert.deepEqual(stored.evidence.candidates[0].mime.textRedactions.forbiddenPatternDigests, [
+    createHash("sha256").update("token-[0-9]+").digest("hex"),
+  ]);
+  one.cases[0].expect.body.forbiddenPatterns.reverse();
+  const regraded = await regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) });
+  assert.equal(regraded.status, "fail");
+  assert.equal(
+    regraded.cases[0].assertions.find(({ id }) => id === "body.forbidden_patterns").code,
+    "forbidden_pattern_matched",
+  );
+  one.cases[0].expect.body.forbiddenPatterns = ["different-pattern"];
+  await assert.rejects(
+    regradeRun({ suite: one, runDirectory: path.dirname(summary.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "redacted_evidence_assertion_change",
+  );
 });
 
 test("nonthrowing malformed observations are transport errors while thrown graders remain grader errors", async () => {
@@ -1036,7 +1102,9 @@ test("cumulative cases artifact bounds stop later sends and remain regradable", 
     assert.equal(record.status, "error");
     assert.equal(record.evidence, null);
     assert.deepEqual(record.assertions, []);
-    assert.deepEqual(record.suite, { version: largeSuite.version, digest: largeSuite.digest });
+    assert.deepEqual(record.suite, {
+      version: largeSuite.version, digest: largeSuite.digest, executionDigest: largeSuite.executionDigest,
+    });
     assert.deepEqual(record.versions, { evidence: 1 });
     assert.equal(record.primaryError.origin, "runner");
   }
@@ -1130,12 +1198,15 @@ test("regradeRun deterministically regrades the committed alias-only pass golden
   assert.equal(await readFile(path.join(runDirectory, "report.md"), "utf8"), await readFile(new URL("../testdata/reports/pass/report.md", import.meta.url), "utf8"));
 });
 
-test("regradeRun rejects a changed suite digest and evidence version", async () => {
+test("regradeRun permits assertion digest changes but rejects execution digest and evidence version changes", async () => {
   const outputRoot = await root();
   const original = await runSuite({ suite: suite(), adapter: adapter(), outputRoot, runId: RUN_ID });
+  assert.equal((await regradeRun({
+    suite: { ...suite(), digest: "c".repeat(64) }, runDirectory: path.dirname(original.files.cases),
+  })).status, "pass");
   await assert.rejects(
-    regradeRun({ suite: { ...suite(), digest: "b".repeat(64) }, runDirectory: path.dirname(original.files.cases) }),
-    (error) => error.errorClass === "configuration_error" && error.code === "suite_digest_mismatch",
+    regradeRun({ suite: { ...suite(), executionDigest: "c".repeat(64) }, runDirectory: path.dirname(original.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "suite_execution_digest_mismatch",
   );
 
   const secondRoot = await root();

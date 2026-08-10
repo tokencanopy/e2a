@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
@@ -24,7 +25,7 @@ const senderKeys = new Set(["exactly", "sent_as", "reply_to", "display_name"]);
 const replyToKeys = new Set(["exactly"]);
 const recipientsKeys = new Set(["to", "cc", "bcc", "envelope"]);
 const recipientSetKeys = new Set(["exactly"]);
-const threadKeys = new Set(["in_reply_to", "references", "conversation"]);
+const threadKeys = new Set(["message_id", "in_reply_to", "references", "conversation"]);
 const subjectKeys = new Set(["exact", "regex", "policy", "required_fragments", "forbidden_fragments"]);
 const bodyKeys = new Set(["required_facts", "forbidden_patterns", "plain_text", "html", "max_size"]);
 const htmlKeys = new Set(["policy"]);
@@ -38,6 +39,20 @@ const subjectPolicies = new Set(["preserve", "forward"]);
 const plainTextPolicies = new Set(["required", "forbidden"]);
 const htmlPolicies = new Set(["required", "forbidden", "equivalent_if_present"]);
 const submissionStates = new Set(["sent", "failed", "pending_review", "scheduled"]);
+const mailboxEnvironmentName = /^E2A_EVAL_(?:ACTOR|TARGET|PROBE_[A-Z0-9_]{1,64})$/;
+const sentAsToken = /^[a-z][a-z0-9_]{0,63}$/;
+const MAX_YAML_FILE_BYTES = 256 * 1024;
+const MAX_YAML_TOTAL_BYTES = 4 * 1024 * 1024;
+const MAX_CASES = 100;
+const MAX_ARRAY_ITEMS = 100;
+const MAX_ATTACHMENTS = 32;
+const MAX_ACTION_COUNT = 100;
+const MAX_STRING_BYTES = 64 * 1024;
+const MAX_SEND_TEXT_BYTES = 256 * 1024;
+const MAX_SUBJECT_BYTES = 998;
+const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
+const MAX_SUITE_EXECUTION_MS = 25 * 60 * 1_000;
+export const executionBounds = Object.freeze({ maxSuiteTimeoutMs: MAX_SUITE_EXECUTION_MS });
 function configurationError(code, message, pointer) {
   return new EvalError("configuration_error", code, message, pointer ? { path: pointer } : undefined);
 }
@@ -85,13 +100,17 @@ function allowedObject(value, allowed, pointer, required = []) {
   return object;
 }
 
-function asString(value, pointer) {
+function asString(value, pointer, maximumBytes = MAX_STRING_BYTES) {
   if (typeof value !== "string" || value.length === 0) throw configurationError("invalid_schema", "Expected a non-empty string", pointer);
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) {
+    throw configurationError("string_too_large", "Configuration string exceeds its size limit", pointer);
+  }
   return value;
 }
 
-function asArray(value, pointer) {
+function asArray(value, pointer, maximumItems = MAX_ARRAY_ITEMS) {
   if (!Array.isArray(value)) throw configurationError("invalid_schema", "Expected an array", pointer);
+  if (value.length > maximumItems) throw configurationError("array_too_large", "Configuration array exceeds its item limit", pointer);
   return value;
 }
 
@@ -105,26 +124,32 @@ function asNonnegativeInteger(value, pointer) {
   return value;
 }
 
-function resolveEnvironment(value, environment, pointer) {
-  const source = asString(value, pointer);
+function resolveEnvironment(value, environment, pointer, allowedName = () => false, maximumBytes = MAX_STRING_BYTES) {
+  const source = asString(value, pointer, maximumBytes);
   if (source.includes("${") && !environmentReference.test(source)) {
     throw configurationError("partial_environment_reference", "Environment references must occupy the complete scalar", pointer);
   }
   const match = source.match(environmentReference);
   if (!match) return { source, value: source };
+  if (!allowedName(match[1])) {
+    throw configurationError("environment_reference_not_allowed", "Environment reference is not allowed for this field", pointer);
+  }
   const resolved = environment?.[match[1]];
   if (typeof resolved !== "string" || resolved.length === 0) {
     throw configurationError("missing_environment", `Missing environment variable ${match[1]}`, pointer);
   }
+  if (Buffer.byteLength(resolved, "utf8") > maximumBytes) {
+    throw configurationError("string_too_large", "Resolved environment value exceeds its size limit", pointer);
+  }
   return { source, value: resolved };
 }
 
-function resolveString(value, environment, pointer) {
-  return resolveEnvironment(value, environment, pointer);
+function resolveString(value, environment, pointer, maximumBytes = MAX_STRING_BYTES) {
+  return resolveEnvironment(value, environment, pointer, () => false, maximumBytes);
 }
 
 function normalizeScalarMailbox(value, environment, pointer) {
-  const resolved = resolveEnvironment(value, environment, pointer);
+  const resolved = resolveEnvironment(value, environment, pointer, (name) => mailboxEnvironmentName.test(name));
   try {
     const mailbox = normalizeMailbox(resolved.value);
     return {
@@ -161,6 +186,14 @@ function normalizeDuration(value, environment, pointer) {
     if (error instanceof NormalizationError) throw configurationError(error.code, "Invalid duration", pointer);
     throw error;
   }
+}
+
+function normalizeSentAs(value, environment, pointer) {
+  const resolved = resolveString(value, environment, pointer);
+  if (!sentAsToken.test(resolved.value)) {
+    throw configurationError("invalid_sent_as", "Sent-as expectation must be a bounded token", pointer);
+  }
+  return resolved;
 }
 
 function normalizeRegexes(value, environment, pointer) {
@@ -200,8 +233,8 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
   assertEvalIdentifier(id.value, "caseIdBytes", idPointer);
   const sendRaw = allowedObject(item.send, sendKeys, "/send", ["subject", "text"]);
   const send = {
-    subject: resolveString(sendRaw.subject, environment, "/send/subject"),
-    text: resolveString(sendRaw.text, environment, "/send/text"),
+    subject: resolveString(sendRaw.subject, environment, "/send/subject", MAX_SUBJECT_BYTES),
+    text: resolveString(sendRaw.text, environment, "/send/text", MAX_SEND_TEXT_BYTES),
   };
   const expectRaw = allowedObject(item.expect, expectKeys, "/expect", ["action"]);
   const actionRaw = allowedObject(expectRaw.action, actionKeys, "/expect/action", ["kind", "count"]);
@@ -209,6 +242,9 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     kind: resolveEnum(actionRaw.kind, environment, actionKinds, "invalid_action_kind", "/expect/action/kind"),
     count: asNonnegativeInteger(actionRaw.count, "/expect/action/count"),
   };
+  if (action.count > MAX_ACTION_COUNT) {
+    throw configurationError("invalid_action_count", "Action count exceeds the bounded observation limit", "/expect/action/count");
+  }
   if ((action.kind.value === "none") !== (action.count === 0)) {
     throw configurationError("invalid_action_count", "Action kind and count are inconsistent", "/expect/action");
   }
@@ -229,10 +265,9 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
       sourceRecipients.push(normalized.mailbox.address);
     }
     if (senderRaw.sent_as !== undefined) {
-      const normalized = normalizeScalarMailbox(senderRaw.sent_as, environment, "/expect/sender/sent_as");
-      sender.sentAs = normalized.mailbox.address;
-      senderCanonical.sentAs = normalized.canonical;
-      sourceRecipients.push(normalized.mailbox.address);
+      const normalized = normalizeSentAs(senderRaw.sent_as, environment, "/expect/sender/sent_as");
+      sender.sentAs = normalized.value;
+      senderCanonical.sentAs = normalized.source;
     }
     if (senderRaw.display_name !== undefined) {
       sender.displayName = resolveString(senderRaw.display_name, environment, "/expect/sender/display_name").value;
@@ -263,7 +298,7 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     expectation.recipients = recipients;
     canonical.expect.recipients = recipientsCanonical;
   }
-  if (normalizedAction.count > 0 && !expectation.recipients?.envelope) {
+  if (normalizedAction.kind !== "none" && !expectation.recipients?.envelope) {
     throw configurationError("missing_envelope_allowlist", "Outbound cases require an exact envelope expectation", "/expect/recipients/envelope");
   }
 
@@ -271,7 +306,7 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     const threadRaw = allowedObject(expectRaw.thread, threadKeys, "/expect/thread");
     const thread = {};
     const threadCanonical = {};
-    for (const [rawKey, normalizedKey, allowed] of [["in_reply_to", "inReplyTo", new Set(["original"])], ["references", "references", new Set(["contains_original"])], ["conversation", "conversation", new Set(["same"])]]) {
+    for (const [rawKey, normalizedKey, allowed] of [["message_id", "messageId", new Set(["required"])], ["in_reply_to", "inReplyTo", new Set(["original"])], ["references", "references", new Set(["contains_original"])], ["conversation", "conversation", new Set(["same"])]]) {
       if (threadRaw[rawKey] !== undefined) {
         const resolved = resolveEnum(threadRaw[rawKey], environment, allowed, "invalid_thread_expectation", `/expect/thread/${rawKey}`);
         thread[normalizedKey] = resolved.value;
@@ -343,6 +378,9 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     }
     if (bodyRaw.max_size !== undefined) {
       body.maxSize = asNonnegativeInteger(bodyRaw.max_size, "/expect/body/max_size");
+      if (body.maxSize > MAX_MESSAGE_BYTES) {
+        throw configurationError("invalid_body_size", "Body size exceeds the evidence limit", "/expect/body/max_size");
+      }
       bodyCanonical.maxSize = body.maxSize;
     }
     expectation.body = body;
@@ -353,7 +391,7 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     const attachmentsRaw = allowedObject(expectRaw.attachments, attachmentsKeys, "/expect/attachments", ["exactly"]);
     const attachments = [];
     const attachmentsCanonical = [];
-    for (const [index, attachment] of asArray(attachmentsRaw.exactly, "/expect/attachments/exactly").entries()) {
+    for (const [index, attachment] of asArray(attachmentsRaw.exactly, "/expect/attachments/exactly", MAX_ATTACHMENTS).entries()) {
       if (typeof attachment === "string") {
         const resolved = resolveString(attachment, environment, `/expect/attachments/exactly/${index}`);
         attachments.push(resolved.value);
@@ -375,6 +413,9 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
       }
       if (object.size_bytes !== undefined) {
         normalized.sizeBytes = asNonnegativeInteger(object.size_bytes, `/expect/attachments/exactly/${index}/size_bytes`);
+        if (normalized.sizeBytes > MAX_MESSAGE_BYTES) {
+          throw configurationError("invalid_attachment_expectation", "Attachment size exceeds the evidence limit", `/expect/attachments/exactly/${index}/size_bytes`);
+        }
         normalizedCanonical.sizeBytes = normalized.sizeBytes;
       }
       attachments.push(normalized);
@@ -399,7 +440,10 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
       lifecycle.submission = resolved.value;
       lifecycleCanonical.submission = resolved.source;
     }
-    if (lifecycleRaw.actor_received !== undefined) lifecycle.actorReceived = asBoolean(lifecycleRaw.actor_received, "/expect/lifecycle/actor_received");
+    if (lifecycleRaw.actor_received !== undefined) {
+      lifecycle.actorReceived = asBoolean(lifecycleRaw.actor_received, "/expect/lifecycle/actor_received");
+      lifecycleCanonical.actorReceived = lifecycle.actorReceived;
+    }
     expectation.lifecycle = lifecycle;
     canonical.expect.lifecycle = lifecycleCanonical;
   }
@@ -413,11 +457,17 @@ function contained(root, candidate) {
 }
 
 // The optional hooks are internal test seams: callers never receive file handles.
-async function readYaml(file, label, { root, pointer, openFile = open, beforeRead } = {}) {
+async function readYaml(file, label, {
+  root, pointer, openFile = open, beforeRead, byteBudget = { remaining: MAX_YAML_TOTAL_BYTES },
+} = {}) {
   let handle;
   try {
-    handle = await openFile(file, "r");
+    handle = await openFile(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     const handleStat = await handle.stat();
+    if (!handleStat.isFile()) throw configurationError("unsafe_file_type", "Configuration path is not a regular file", pointer);
+    if (handleStat.size > MAX_YAML_FILE_BYTES || handleStat.size > byteBudget.remaining) {
+      throw configurationError("yaml_too_large", "Configuration YAML exceeds its size limit", pointer);
+    }
     const resolved = await realpath(file);
     if (root && !contained(root, resolved)) throw configurationError("path_outside_suite", "Case path is outside the suite root", pointer);
     await beforeRead?.({ file, label, resolved });
@@ -425,7 +475,20 @@ async function readYaml(file, label, { root, pointer, openFile = open, beforeRea
     if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
       throw configurationError("file_changed_during_load", "Configuration file changed while loading", pointer);
     }
-    const source = await handle.readFile({ encoding: "utf8" });
+    const buffer = Buffer.allocUnsafe(Math.min(MAX_YAML_FILE_BYTES, byteBudget.remaining) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_YAML_FILE_BYTES || length > byteBudget.remaining) {
+      throw configurationError("yaml_too_large", "Configuration YAML exceeds its size limit", pointer);
+    }
+    byteBudget.remaining -= length;
+    let source;
+    try { source = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)); }
+    catch { throw configurationError("invalid_yaml", "Suite YAML is invalid", pointer); }
     let document;
     try {
       document = parseDocument(source, { prettyErrors: true, strict: true, uniqueKeys: true, version: "1.2" });
@@ -433,7 +496,7 @@ async function readYaml(file, label, { root, pointer, openFile = open, beforeRea
         const duplicate = document.errors.some((error) => /unique|duplicate/i.test(error.message));
         throw configurationError(duplicate ? "duplicate_key" : "invalid_yaml", "Suite YAML is invalid");
       }
-      return { value: document.toJS(), resolved };
+      return { value: document.toJS({ maxAliasCount: 50 }), resolved };
     } catch (error) {
       if (error instanceof EvalError) throw error;
       throw configurationError("invalid_yaml", "Suite YAML is invalid", pointer);
@@ -494,8 +557,8 @@ function aliasCaseMailboxCanonical(testCase, aliases) {
   const expectation = { ...testCase.expect };
   if (expectation.sender) {
     expectation.sender = { ...expectation.sender };
-    for (const key of ["exactly", "sentAs"]) {
-      if (expectation.sender[key] !== undefined) expectation.sender[key] = aliasMailboxCanonical(expectation.sender[key], aliases);
+    if (expectation.sender.exactly !== undefined) {
+      expectation.sender.exactly = aliasMailboxCanonical(expectation.sender.exactly, aliases);
     }
     if (expectation.sender.replyTo) {
       expectation.sender.replyTo = { ...expectation.sender.replyTo, exactly: aliasMailboxSetCanonical(expectation.sender.replyTo.exactly, aliases) };
@@ -513,9 +576,12 @@ function aliasCaseMailboxCanonical(testCase, aliases) {
   return { ...testCase, expect: expectation };
 }
 
-export async function loadSuite(suiteFile, { environment = process.env, openFile, beforeRead } = {}) {
+export async function loadSuite(suiteFile, {
+  environment = process.env, openFile, beforeRead, trustedOrigin,
+} = {}) {
+  const byteBudget = { remaining: MAX_YAML_TOTAL_BYTES };
   const requestedSuiteFile = path.resolve(suiteFile);
-  const suiteDocument = await readYaml(requestedSuiteFile, "suite", { openFile, beforeRead });
+  const suiteDocument = await readYaml(requestedSuiteFile, "suite", { openFile, beforeRead, byteBudget });
   const resolvedSuiteFile = suiteDocument.resolved;
   const suiteRoot = path.dirname(resolvedSuiteFile);
   const rawSuite = suiteDocument.value;
@@ -532,12 +598,38 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
   const transportRaw = allowedObject(suite.transport, transportKeys, "/transport", ["adapter", "api_key", "allowed_envelope_recipients"]);
   const adapter = resolveString(transportRaw.adapter, environment, "/transport/adapter");
   if (adapter.value !== "e2a") throw configurationError("invalid_adapter", "Unsupported transport adapter", "/transport/adapter");
-  const apiKey = resolveEnvironment(transportRaw.api_key, environment, "/transport/api_key");
-  if (!environmentReference.test(apiKey.source)) throw configurationError("api_key_environment_required", "API key must be an environment reference", "/transport/api_key");
+  const apiKey = resolveEnvironment(
+    transportRaw.api_key,
+    environment,
+    "/transport/api_key",
+    (name) => name === "E2A_EVAL_API_KEY",
+  );
+  if (apiKey.source !== "${E2A_EVAL_API_KEY}") {
+    throw configurationError("api_key_environment_required", "API key must use E2A_EVAL_API_KEY", "/transport/api_key");
+  }
   const baseUrl = transportRaw.base_url === undefined ? { source: "https://api.e2a.dev", value: "https://api.e2a.dev" } : resolveString(transportRaw.base_url, environment, "/transport/base_url");
   let parsedUrl;
   try { parsedUrl = new URL(baseUrl.value); } catch { throw configurationError("invalid_base_url", "Invalid base URL", "/transport/base_url"); }
   if (!["http:", "https:"].includes(parsedUrl.protocol)) throw configurationError("invalid_base_url", "Invalid base URL", "/transport/base_url");
+  if (parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash
+    || (parsedUrl.pathname !== "" && parsedUrl.pathname !== "/")) {
+    throw configurationError("invalid_base_url", "Base URL must be an origin", "/transport/base_url");
+  }
+  const origin = parsedUrl.origin;
+  const isLoopback = new Set(["localhost", "127.0.0.1", "[::1]"]).has(parsedUrl.hostname);
+  if (parsedUrl.protocol === "http:" && !isLoopback) {
+    throw configurationError("insecure_base_url", "Cleartext base URLs are limited to loopback", "/transport/base_url");
+  }
+  if (origin !== "https://api.e2a.dev") {
+    let trusted;
+    try {
+      const parsedTrusted = new URL(trustedOrigin);
+      trusted = parsedTrusted.origin === trustedOrigin ? parsedTrusted.origin : null;
+    } catch { trusted = null; }
+    if (trusted !== origin) {
+      throw configurationError("untrusted_base_url", "Custom base URL requires exact operator opt-in", "/transport/base_url");
+    }
+  }
   const allowedRecipients = normalizeMailboxSet(transportRaw.allowed_envelope_recipients, environment, "/transport/allowed_envelope_recipients");
   const allowedSet = new Set(allowedRecipients.addresses);
   if (!allowedSet.has(target.mailbox.address) || !allowedSet.has(actor.mailbox.address)) {
@@ -550,18 +642,28 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
   const pollInterval = defaultsRaw.poll_interval === undefined ? { source: "500ms", milliseconds: 500 } : normalizeDuration(defaultsRaw.poll_interval, environment, "/defaults/poll_interval");
   if (pollInterval.milliseconds > timeout.milliseconds || settle.milliseconds > timeout.milliseconds) throw configurationError("invalid_duration", "Case timing is inconsistent", "/defaults");
 
-  const rawCases = asArray(suite.cases, "/cases");
+  const rawCases = asArray(suite.cases, "/cases", MAX_CASES);
+  if (rawCases.length === 0) throw configurationError("missing_cases", "Suite must contain at least one case", "/cases");
   const cases = [];
   const canonicalCases = [];
   const caseIds = new Set();
   for (let index = 0; index < rawCases.length; index += 1) {
-    const reference = asString(rawCases[index], `/cases/${index}`);
+    const reference = asString(rawCases[index], `/cases/${index}`, 4096);
     if (reference.includes("${")) throw configurationError("partial_environment_reference", "Case paths cannot contain environment interpolation", `/cases/${index}`);
     const candidate = path.resolve(suiteRoot, reference);
     if (!contained(suiteRoot, candidate)) throw configurationError("path_outside_suite", "Case path is outside the suite root", `/cases/${index}`);
-    const caseDocument = await readYaml(candidate, "case", { root: suiteRoot, pointer: `/cases/${index}`, openFile, beforeRead });
+    const caseDocument = await readYaml(candidate, "case", {
+      root: suiteRoot, pointer: `/cases/${index}`, openFile, beforeRead, byteBudget,
+    });
     const caseFile = caseDocument.resolved;
     const normalized = normalizeCase(caseDocument.value, environment, caseFile, `/cases/${index}`);
+    if (normalized.value.expect.sender?.sentAs?.includes(apiKey.value)) {
+      throw configurationError(
+        "sent_as_conflicts_credential",
+        "Sender sent_as must not contain the evaluation credential",
+        `/cases/${index}/expect/sender/sent_as`,
+      );
+    }
     if (caseIds.has(normalized.value.id)) throw configurationError("duplicate_case_id", "Duplicate case identifier", `/cases/${index}`);
     caseIds.add(normalized.value.id);
     for (const recipient of normalized.sourceRecipients) {
@@ -570,19 +672,60 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
     cases.push(normalized.value);
     canonicalCases.push({ file: path.relative(suiteRoot, caseFile).split(path.sep).join("/"), ...normalized.canonical });
   }
+  const plannedTimeoutMs = cases.length * timeout.milliseconds;
+  if (!Number.isSafeInteger(plannedTimeoutMs) || plannedTimeoutMs > MAX_SUITE_EXECUTION_MS) {
+    throw configurationError(
+      "suite_timeout_budget_exceeded",
+      "Suite case timeouts exceed the bounded public runtime budget",
+      "/defaults/timeout",
+    );
+  }
 
   const aliases = new Map([[actor.mailbox.address, "actor"], [target.mailbox.address, "target"]]);
   allowedRecipients.addresses.filter((address) => !aliases.has(address)).forEach((address, index) => aliases.set(address, `probe:${index + 1}`));
+  // Bind evidence to the resolved containment identities without serializing
+  // addresses into plans or artifacts. Credentials deliberately stay out so a
+  // key rotation does not invalidate otherwise identical captured evidence.
+  const identityDigest = createHash("sha256").update(stableJson({
+    actor: actor.mailbox.address,
+    target: target.mailbox.address,
+    allowedEnvelopeRecipients: [...allowedRecipients.addresses].sort(),
+  })).digest("hex");
   const canonical = {
     version: 1,
     name: name.source,
     target: { email: aliasMailboxCanonical(target.canonical, aliases) },
     actor: { email: aliasMailboxCanonical(actor.canonical, aliases) },
-    transport: { adapter: adapter.source, baseUrl: baseUrl.source, allowedEnvelopeRecipients: aliasMailboxSetCanonical(allowedRecipients.source, aliases) },
+    transport: {
+      adapter: adapter.source,
+      baseUrl: origin,
+      allowedEnvelopeRecipients: aliasMailboxSetCanonical(allowedRecipients.source, aliases),
+      identityDigest,
+    },
     defaults: { timeout: timeout.source, settle: settle.source, pollInterval: pollInterval.source },
     cases: canonicalCases.map((testCase) => aliasCaseMailboxCanonical(testCase, aliases)),
   };
   const digest = createHash("sha256").update(stableJson(canonical)).digest("hex");
+  const executionCanonical = {
+    version: canonical.version,
+    actor: canonical.actor,
+    target: canonical.target,
+    transport: canonical.transport,
+    defaults: canonical.defaults,
+    cases: canonical.cases.map((testCase, index) => ({
+      id: testCase.id,
+      send: testCase.send,
+      expect: {
+        action: { kind: testCase.expect.action.kind },
+        ...(testCase.expect.lifecycle?.actorReceived === undefined ? {} : {
+          lifecycle: { actorReceived: testCase.expect.lifecycle.actorReceived },
+        }),
+        ...(cases[index].expect.action.kind !== "new_message" || testCase.expect.subject === undefined
+          ? {} : { subject: testCase.expect.subject }),
+      },
+    })),
+  };
+  const executionDigest = createHash("sha256").update(stableJson(executionCanonical)).digest("hex");
 
   const resolvedSuite = {
     version: 1,
@@ -590,12 +733,13 @@ export async function loadSuite(suiteFile, { environment = process.env, openFile
     suiteFile: resolvedSuiteFile,
     suiteRoot,
     digest,
+    executionDigest,
     target: { email: target.mailbox.address, displayName: target.mailbox.displayName },
     actor: { email: actor.mailbox.address, displayName: actor.mailbox.displayName },
     transport: {
       adapter: "e2a",
       apiKey: apiKey.value,
-      baseUrl: baseUrl.value,
+      baseUrl: origin,
       allowedEnvelopeRecipients: allowedRecipients.addresses,
     },
     defaults: { timeoutMs: timeout.milliseconds, settleMs: settle.milliseconds, pollIntervalMs: pollInterval.milliseconds },

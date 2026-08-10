@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   lstat, mkdir, open, realpath, rename, unlink,
@@ -19,7 +19,7 @@ const RUN_ID_PATTERN = /^run_\d{8}T\d{6}_[a-f0-9]{8}$/;
 const SNAPSHOT_LIMITS = Object.freeze({ depth: 64, nodes: 16_384, keys: 512, array: 2_048 });
 export const CASES_ARTIFACT_LIMITS = Object.freeze({ lineBytes: 2 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 });
 const ADDRESS_SCALARS = new Set([
-  "address", "email", "mailbox", "from", "headerFrom", "sentAs", "recipient", "actor", "target",
+  "address", "email", "mailbox", "from", "headerFrom", "recipient", "actor", "target",
 ]);
 const ADDRESS_ARRAYS = new Set([
   "to", "cc", "bcc", "replyTo", "envelopeRecipients", "participants", "allowedEnvelopeRecipients",
@@ -138,6 +138,18 @@ function aliasMapFor(suite) {
   const probes = [...new Set(allowed.filter((entry) => entry !== actor && entry !== target))].sort();
   const aliases = new Map([[actor, "actor"], [target, "target"]]);
   probes.forEach((probe, index) => aliases.set(probe, `probe:${index + 1}`));
+  // Reserve aliases for addresses named by trusted assertions before looking
+  // at observation-only data. This keeps the same address stable when a run
+  // is replayed from its alias-only evidence: evidence-specific addresses
+  // (for example an RFC Message-ID domain) cannot shift assertion aliases.
+  const asserted = new Set();
+  for (const testCase of Array.isArray(suite?.cases) ? suite.cases : []) {
+    collectTypedAddresses(testCase?.expect, asserted);
+  }
+  const assertionAddresses = [...asserted]
+    .filter((address) => !aliases.has(address))
+    .sort();
+  assertionAddresses.forEach((address, index) => aliases.set(address, `observed:${index + 1}`));
   return aliases;
 }
 
@@ -168,7 +180,12 @@ function aliasesForRecord(suite, parts) {
   const observed = new Set();
   for (const part of parts) collectTypedAddresses(part, observed);
   const unknown = [...observed].filter((address) => !aliases.has(address)).sort();
-  unknown.forEach((address, index) => aliases.set(address, `observed:${index + 1}`));
+  const reserved = [...aliases.values()]
+    .map((alias) => /^observed:(\d+)$/.exec(alias)?.[1])
+    .filter(Boolean)
+    .map(Number);
+  const first = Math.max(0, ...reserved) + 1;
+  unknown.forEach((address, index) => aliases.set(address, `observed:${first + index}`));
   return aliases;
 }
 
@@ -209,7 +226,11 @@ function patternsFor(record, suite) {
   for (const [index, pattern] of source.entries()) {
     if (typeof pattern !== "string" || pattern.length > 512) continue;
     try {
-      patterns.push({ index, expression: new RegExp(pattern, "g") });
+      patterns.push({
+        index,
+        digest: createHash("sha256").update(pattern).digest("hex"),
+        expression: new RegExp(pattern, "g"),
+      });
     } catch {
       // Contract validation normally prevents this. Reporting remains safe if
       // called directly with malformed data.
@@ -246,14 +267,46 @@ const SEMANTIC_ENV_VALUES = Object.freeze([
   "required", "forbidden", "equivalent_if_present", "sent", "failed",
   "pending_review", "scheduled", "original", "contains_original", "same",
 ]);
+const STRUCTURAL_STRING_FIELDS = new Set([
+  "id", "status", "class", "origin", "boundary", "code", "direction", "provenance", "eventType",
+  "messageType", "sentAs", "stage", "outcome", "submission", "kind", "policy", "capability", "ref",
+]);
+const STRUCTURAL_STRING_VALUES = new Set([
+  ...SEMANTIC_ENV_VALUES,
+  "actor", "target", "outbound", "inbound", "target_outbound", "pass", "fail", "error",
+  "assertion_failure", "configuration_error", "capability_error", "transport_error", "target_timeout", "grader_error",
+  "own_address", "relay", "email.sent", "email.failed", "email.blocked", "email.review_requested", "email.received",
+]);
+const SENT_AS_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
 
 function environmentMarker(entry, resolved) {
   const semantic = SEMANTIC_ENV_VALUES.indexOf(resolved);
   return semantic === -1 ? entry.replacement : `${entry.replacement.slice(0, -1)}:semantic:${semantic}]`;
 }
 
-function tokenizeObservedEnvironment(value, environment) {
+function safeSentAsToken(value, sensitive) {
+  return typeof value === "string" && SENT_AS_TOKEN.test(value)
+    && !sensitive.some((entry) => typeof entry?.value === "string"
+      && entry.value.length > 0 && value.includes(entry.value));
+}
+
+function preserveStructuralString(value, parentKey, sensitive = []) {
+  // Exact aliases and closed semantic vocabulary must survive even when a
+  // credential happens to have the same bytes. Arbitrary IDs/refs/codes are
+  // preserved only when they do not contain a configured secret or a
+  // credential/mailbox-shaped value.
+  if (artifactAlias(value) || STRUCTURAL_STRING_VALUES.has(value)) return true;
+  if (parentKey === "sentAs" && safeSentAsToken(value, sensitive)) return true;
+  if (!STRUCTURAL_STRING_FIELDS.has(parentKey)) return false;
+  if (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(value) || mailboxAddressesInText(value).length > 0) return false;
+  return !sensitive.some((entry) => typeof entry?.value === "string"
+    && entry.value.length > 0 && !SEMANTIC_ENV_VALUES.includes(entry.value)
+    && value.includes(entry.value));
+}
+
+function tokenizeObservedEnvironment(value, environment, parentKey = "") {
   if (typeof value === "string") {
+    if (preserveStructuralString(value, parentKey, environment)) return value;
     let result = value;
     for (const entry of environment) {
       const replacement = environmentMarker(entry, entry.value);
@@ -261,9 +314,9 @@ function tokenizeObservedEnvironment(value, environment) {
     }
     return result;
   }
-  if (Array.isArray(value)) return value.map((entry) => tokenizeObservedEnvironment(entry, environment));
+  if (Array.isArray(value)) return value.map((entry) => tokenizeObservedEnvironment(entry, environment, parentKey));
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, tokenizeObservedEnvironment(entry, environment)]));
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, tokenizeObservedEnvironment(entry, environment, key)]));
 }
 
 function artifactAlias(value) {
@@ -327,11 +380,35 @@ function redactString(value, patterns, sensitive) {
   return result;
 }
 
-function redactTree(value, patterns, sensitive) {
-  if (typeof value === "string") return redactString(value, patterns, sensitive);
-  if (Array.isArray(value)) return value.map((entry) => redactTree(entry, patterns, sensitive));
+function redactTree(value, patterns, sensitive, parentKey = "", semanticKind = "") {
+  if (typeof value === "string") return (semanticKind === "sentAs" && safeSentAsToken(value, sensitive))
+    || preserveStructuralString(value, parentKey, sensitive)
+    ? value : redactString(value, patterns, sensitive);
+  if (Array.isArray(value)) return value.map((entry) => redactTree(entry, patterns, sensitive, parentKey, semanticKind));
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactTree(entry, patterns, sensitive)]));
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key, redactTree(entry, patterns, sensitive, key, semanticKind),
+  ]));
+}
+
+function redactEvidenceBodyText(value, patterns, parentKey = "") {
+  if (Array.isArray(value)) return value.map((entry) => redactEvidenceBodyText(entry, patterns, parentKey));
+  if (!value || typeof value !== "object") return value;
+  const result = Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key, redactEvidenceBodyText(entry, patterns, key),
+  ]));
+  if (parentKey === "mime" && typeof value.text === "string") {
+    const digests = [];
+    for (const pattern of patterns) {
+      pattern.expression.lastIndex = 0;
+      if (pattern.expression.test(value.text)) digests.push(pattern.digest);
+    }
+    result.text = redactString(value.text, patterns, []);
+    if (digests.length > 0) {
+      result.textRedactions = { forbiddenPatternDigests: [...new Set(digests)].sort() };
+    }
+  }
+  return result;
 }
 
 function safeError(value, stage, patterns, sensitive) {
@@ -359,17 +436,24 @@ function errorFromThrown(error, stage, patterns, sensitive) {
 function aliasAssertions(assertions, aliases, patterns, sensitive) {
   return assertions.map((assertion) => {
     let aliased = assertion;
-    if (/^(?:recipients\.|sender\.(?!display_name)|action\.)/.test(assertion.id ?? "")) {
+    if (/^(?:recipients\.|sender\.(?!display_name|sent_as)|action\.)/.test(assertion.id ?? "")) {
       aliased = transformTypedAddresses(assertion, aliases);
       if (/^recipients\./.test(assertion.id ?? "")) {
         aliased.expected = transformTypedAddresses(aliased.expected, aliases, "recipients", true);
         aliased.actual = transformTypedAddresses(aliased.actual, aliases, "recipients", true);
-      } else if (/^sender\.(?!display_name)/.test(assertion.id ?? "")) {
+      } else if (/^sender\.(?!display_name|sent_as)/.test(assertion.id ?? "")) {
         aliased.expected = transformTypedAddresses(aliased.expected, aliases, "sender", true);
         aliased.actual = transformTypedAddresses(aliased.actual, aliases, "sender", true);
       }
     }
-    return { ...aliased, actual: redactTree(aliased.actual, patterns, sensitive) };
+    const sentAs = assertion.id === "sender.sent_as";
+    return {
+      ...aliased,
+      expected: sentAs && safeSentAsToken(aliased.expected, sensitive)
+        ? aliased.expected : redactTree(aliased.expected, [], sensitive, "", sentAs ? "sentAs" : ""),
+      actual: sentAs && safeSentAsToken(aliased.actual, sensitive)
+        ? aliased.actual : redactTree(aliased.actual, patterns, sensitive, "", sentAs ? "sentAs" : ""),
+    };
   });
 }
 
@@ -414,10 +498,21 @@ export function aliasCaseRecord(record, suite) {
     versions: source.versions && typeof source.versions === "object" ? source.versions : { evidence: 1 },
     ...(source.suite && typeof source.suite === "object" ? { suite: source.suite } : {}),
     expectation: expectation.ok
-      ? tokenizeResolvedSource(transformTypedAddresses(expectation.value, aliases), caseSource?.expect, environment)
+      ? redactTree(
+        tokenizeResolvedSource(transformTypedAddresses(expectation.value, aliases), caseSource?.expect, environment),
+        [],
+        sensitive,
+      )
       : { unavailable: "serialization_error" },
     evidence: evidence.ok
-      ? tokenizeObservedEnvironment(transformTypedAddresses(evidence.value, aliases), environment)
+      ? redactTree(
+        redactEvidenceBodyText(
+          tokenizeObservedEnvironment(transformTypedAddresses(evidence.value, aliases), environment),
+          patterns,
+        ),
+        [],
+        sensitive,
+      )
       : { unavailable: "serialization_error" },
     assertions: assertions.ok && Array.isArray(assertions.value)
       ? tokenizeObservedEnvironment(transformTypedAddresses(aliasAssertions(assertions.value, aliases, patterns, sensitive), aliases), environment) : [],
@@ -523,6 +618,7 @@ export function renderMarkdown(summary) {
     `- Status: **${summary.status ?? "fail"}**`,
     `- Cases: ${summary.counts?.passed ?? 0} passed, ${summary.counts?.failed ?? 0} failed, ${summary.counts?.errors ?? 0} errors`,
     `- Suite digest: \`${summary.suite?.digest ?? "unknown"}\``,
+    `- Execution digest: \`${summary.suite?.executionDigest ?? "unknown"}\``,
     "",
     "| Case | Status | Primary result |",
     "| --- | --- | --- |",

@@ -9,11 +9,9 @@ const validOptions = {
   suiteName: "fictional-support-smoke",
   targetEnv: "E2A_EVAL_TARGET",
   actorEnv: "E2A_EVAL_ACTOR",
-  apiKeyEnv: "E2A_EVAL_API_KEY",
 };
 
 const expectedFiles = [
-  ".gitignore",
   "README.md",
   "cases/happy-path.yaml",
   "cases/missing-information.yaml",
@@ -43,7 +41,6 @@ test("scaffold creates three synthetic cases and preserves existing files", asyn
     suiteName: "ignored",
     targetEnv: "X",
     actorEnv: "Y",
-    apiKeyEnv: "Z",
   });
   assert.deepEqual(second.created, []);
   assert.deepEqual(second.preserved.sort(), expectedFiles);
@@ -55,7 +52,6 @@ test("scaffold rejects invalid suite and environment token formats before writin
     ["suiteName", "Fictional Support"],
     ["targetEnv", "e2a_eval_target"],
     ["actorEnv", "E2A-EVAL-ACTOR"],
-    ["apiKeyEnv", "1E2A_EVAL_KEY"],
   ]) {
     const root = await createRoot();
     await assert.rejects(
@@ -69,7 +65,7 @@ test("scaffold emits the fixed public-safe starter contract", async () => {
   const root = await createRoot();
   await scaffoldSuite({ root, ...validOptions });
 
-  assert.equal(await readFile(path.join(root, ".gitignore"), "utf8"), ".eval-runtime/\n");
+  await assert.rejects(readFile(path.join(root, ".gitignore"), "utf8"), (error) => error.code === "ENOENT");
   assert.equal(await readFile(path.join(root, "results/.gitignore"), "utf8"), "*\n!.gitignore\n");
 
   const cases = await Promise.all([
@@ -135,7 +131,7 @@ test("scaffold removes a file it exclusively created when writing it fails", asy
       close: () => handle.close(),
       stat: () => handle.stat(),
       writeFile: async () => {
-        await writeFile(path.join(root, ".gitignore"), "later user replacement\n", { flag: "wx" });
+        await writeFile(path.join(root, "README.md"), "later user replacement\n", { flag: "wx" });
         throw new Error("simulated write failure");
       },
     };
@@ -145,7 +141,7 @@ test("scaffold removes a file it exclusively created when writing it fails", asy
     scaffoldSuite({ root, ...validOptions }, { openFile }),
     /simulated write failure/,
   );
-  assert.equal(await readFile(path.join(root, ".gitignore"), "utf8"), "later user replacement\n");
+  assert.equal(await readFile(path.join(root, "README.md"), "utf8"), "later user replacement\n");
 });
 
 test("scaffold does not publish through a parent swapped before the no-clobber link", async () => {

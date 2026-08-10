@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -20,6 +20,7 @@ function fixtureSuite(overrides = {}) {
     version: 1,
     name: "fictional-support-smoke",
     digest: "a".repeat(64),
+    executionDigest: "b".repeat(64),
     suiteFile: "/resolved/suite.yaml",
     suiteRoot: "/resolved",
     actor: { email: ACTOR },
@@ -56,11 +57,36 @@ function harness(overrides = {}) {
     capabilities: CAPABILITIES,
     async preflight() {
       calls.push("preflight");
-      return { capabilities: CAPABILITIES, plan: { networkSends: false, recipientAliases: ["actor", "target"], cases: [{ id: "reply" }] } };
+      return {
+        capabilities: CAPABILITIES,
+        protectionDigest: "c".repeat(64),
+        plan: {
+          baseUrl: "https://api.example.test", networkSends: false,
+          capabilities: CAPABILITIES, recipientAliases: ["actor", "target"],
+          timeouts: { maxRetries: 2, maxElapsedMs: 15000, timeoutMs: 10000 },
+          executionBudget: { plannedTimeoutMs: 100, maximumTimeoutMs: 1_500_000 },
+          cases: [{
+            id: "reply",
+            stimulus: { action: "send", sender: "actor", recipients: ["target"], subject: "Synthetic question", text: "Synthetic body" },
+            expectedAction: { kind: "reply", count: 1 },
+            expectedSender: { from: null, sentAs: null, replyTo: null, displayName: null },
+            expectedRecipients: { to: null, cc: null, bcc: null, envelope: null },
+            recipientAliases: [],
+            assertions: [
+              { id: "action.kind", expected: "reply" },
+              { id: "action.count", expected: 1 },
+              { id: "action.no_duplicates", expected: 1 },
+            ],
+            evidenceCapabilities: ["message_action"],
+            semanticGraders: [],
+          }],
+        },
+      };
     },
     async executeCase() { calls.push("send"); },
   };
   return {
+    adapter,
     calls,
     output,
     errors,
@@ -90,6 +116,16 @@ function harness(overrides = {}) {
 
 function stdout(h) { return h.output.join(""); }
 function stderr(h) { return h.errors.join(""); }
+
+async function approve(h) {
+  assert.equal(await main(["validate", "--suite", "suite.yaml", "--json"], h.dependencies), 0);
+  const digest = JSON.parse(stdout(h)).plan.approvalDigest;
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  h.output.length = 0;
+  h.errors.length = 0;
+  h.calls.length = 0;
+  return digest;
+}
 
 test("help is local and exact command grammar rejects unknown commands", async () => {
   const help = harness();
@@ -122,8 +158,64 @@ test("validate performs full preflight but never sends and emits only aliases", 
   const h = harness();
   assert.equal(await main(["validate", "--suite", "suite.yaml", "--json"], h.dependencies), 0);
   assert.deepEqual(h.calls, ["load:/cwd/suite.yaml", "adapter", "preflight"]);
-  assert.doesNotMatch(stdout(h), /e2a_acct_|actor@eval\.test|target@eval\.test|api\.example\.test/);
-  assert.equal(JSON.parse(stdout(h)).plan.networkSends, false);
+  assert.doesNotMatch(stdout(h), /e2a_acct_|actor@eval\.test|target@eval\.test/);
+  const plan = JSON.parse(stdout(h)).plan;
+  assert.equal(plan.networkSends, false);
+  assert.deepEqual(plan.cases[0].stimulus, {
+    action: "send", sender: "actor", recipients: ["target"], subject: "Synthetic question", text: "Synthetic body",
+  });
+  assert.deepEqual(plan.cases[0].assertions.map(({ id }) => id), ["action.kind", "action.count", "action.no_duplicates"]);
+  assert.deepEqual(plan.cases[0].semanticGraders, []);
+});
+
+test("validate preserves a legitimate open sent-as token in both typed plan representations", async () => {
+  const configured = fixtureSuite({
+    cases: [{
+      id: "reply",
+      expect: { action: { kind: "reply", count: 1 }, sender: { sentAs: "e2a_custom" } },
+    }],
+  });
+  const h = harness({ suite: configured });
+  const originalPreflight = h.adapter.preflight.bind(h.adapter);
+  h.adapter.preflight = async () => {
+    const result = await originalPreflight();
+    result.plan.cases[0].expectedSender.sentAs = "e2a_custom";
+    result.plan.cases[0].assertions.push({ id: "sender.sent_as", expected: "e2a_custom" });
+    return result;
+  };
+  assert.equal(await main(["validate", "--suite", "suite.yaml", "--json"], h.dependencies), 0);
+  const planned = JSON.parse(stdout(h)).plan.cases[0];
+  assert.equal(planned.expectedSender.sentAs, "e2a_custom");
+  assert.equal(planned.assertions.find(({ id }) => id === "sender.sent_as").expected, "e2a_custom");
+});
+
+test("run requires and verifies the exact digest of the approved validation plan", async () => {
+  const h = harness();
+  assert.equal(await main(["validate", "--suite", "suite.yaml", "--json"], h.dependencies), 0);
+  const approvalDigest = JSON.parse(stdout(h)).plan.approvalDigest;
+  assert.match(approvalDigest, /^[a-f0-9]{64}$/);
+
+  h.output.length = 0;
+  h.errors.length = 0;
+  h.calls.length = 0;
+  assert.equal(await main([
+    "run", "--suite", "suite.yaml", "--approval-digest", approvalDigest, "--json",
+  ], h.dependencies), 0);
+  assert.deepEqual(h.calls, ["load:/cwd/suite.yaml", "adapter", "preflight", "run:/cwd/results"]);
+
+  h.output.length = 0;
+  h.errors.length = 0;
+  h.calls.length = 0;
+  h.dependencies.loadSuite = async (file) => {
+    h.calls.push(`load:${file}`);
+    return { ...fixtureSuite(), digest: "f".repeat(64) };
+  };
+  assert.equal(await main([
+    "run", "--suite", "suite.yaml", "--approval-digest", approvalDigest, "--json",
+  ], h.dependencies), 2);
+  assert.deepEqual(h.calls, ["load:/cwd/suite.yaml", "adapter", "preflight"]);
+  assert.equal(stdout(h), "");
+  assert.equal(stderr(h), "email-evals: configuration_error\n");
 });
 
 test("validate rejects a missing requested capability before reporting its plan", async () => {
@@ -169,14 +261,17 @@ test("validate capability mapping covers every runner assertion family", async (
 
 test("run caches its preflight for runSuite and maps result and preflight errors", async () => {
   const pass = harness();
-  assert.equal(await main(["run", "--suite", "suite.yaml", "--output", "relative-results"], pass.dependencies), 0);
+  const passApproval = await approve(pass);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", passApproval, "--output", "relative-results"], pass.dependencies), 0);
   assert.deepEqual(pass.calls, ["load:/cwd/suite.yaml", "adapter", "preflight", "run:/cwd/relative-results"]);
 
   const assertion = harness({ runSummary: summary("assertion_failure") });
-  assert.equal(await main(["run", "--suite", "suite.yaml"], assertion.dependencies), 1);
+  const assertionApproval = await approve(assertion);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", assertionApproval], assertion.dependencies), 1);
 
   const configuration = harness({ dependencies: { runSuite: async () => { throw new EvalError("configuration_error", "preflight_failed", "synthetic"); } } });
-  assert.equal(await main(["run", "--suite", "suite.yaml"], configuration.dependencies), 2);
+  const configurationApproval = await approve(configuration);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", configurationApproval], configuration.dependencies), 2);
 });
 
 test("completed human run and regrade summaries emit their fixed exit diagnostic", async () => {
@@ -193,7 +288,7 @@ test("completed human run and regrade summaries emit their fixed exit diagnostic
         ? { runSummary: summary(errorClass) }
         : { regradeSummary: summary(errorClass) });
       const args = command === "run"
-        ? ["run", "--suite", "suite.yaml"]
+        ? ["run", "--suite", "suite.yaml", "--approval-digest", await approve(h)]
         : ["regrade", "--suite", "suite.yaml", "--run", "run"];
       assert.equal(await main(args, h.dependencies), exitCode, `${command}:${errorClass}`);
       assert.match(stdout(h), /^Status: fail; 0\/1 passed\nComplete: yes\nReport: run_[a-zA-Z0-9_]+\/report\.md\n$/);
@@ -210,7 +305,7 @@ test("incomplete run and regrade summaries never publish human results", async (
       ? { runSummary: incomplete }
       : { regradeSummary: incomplete });
     const args = command === "run"
-      ? ["run", "--suite", "suite.yaml"]
+      ? ["run", "--suite", "suite.yaml", "--approval-digest", await approve(h)]
       : ["regrade", "--suite", "suite.yaml", "--run", "run"];
     assert.equal(await main(args, h.dependencies), 4, command);
     assert.equal(stdout(h), "", command);
@@ -227,14 +322,14 @@ test("preflight preserves every recognized error class and makes unknown failure
       async preflight() { throw new EvalError(errorClass, "synthetic", "unsafe actor@eval.test"); },
       async executeCase() { throw new Error("must not execute"); },
     } });
-    assert.equal(await main(["run", "--suite", "suite.yaml"], h.dependencies), exit, errorClass);
+    assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", "d".repeat(64)], h.dependencies), exit, errorClass);
     assert.equal(stderr(h), `email-evals: ${errorClass}\n`, errorClass);
   }
   const unknown = harness({ adapter: {
     async preflight() { throw new Error("unsafe actor@eval.test"); },
     async executeCase() { throw new Error("must not execute"); },
   } });
-  assert.equal(await main(["run", "--suite", "suite.yaml"], unknown.dependencies), 4);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", "d".repeat(64)], unknown.dependencies), 4);
   assert.equal(stderr(unknown), "email-evals: grader_error\n");
 });
 
@@ -247,19 +342,22 @@ test("regrade loads the suite but creates no adapter and makes no transport call
 
 test("JSON stdout is one object and human output carries a safe report path", async () => {
   const json = harness();
-  assert.equal(await main(["run", "--suite", "suite.yaml", "--json"], json.dependencies), 0);
+  const jsonApproval = await approve(json);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", jsonApproval, "--json"], json.dependencies), 0);
   assert.equal(stdout(json).split("\n").filter(Boolean).length, 1);
   assert.equal(JSON.parse(stdout(json)).command, "run");
 
   const human = harness();
-  assert.equal(await main(["run", "--suite", "suite.yaml"], human.dependencies), 0);
+  const humanApproval = await approve(human);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", humanApproval], human.dependencies), 0);
   assert.match(stdout(human), /Report: run_20260808T120000_0123abcd\/report\.md/);
   assert.doesNotMatch(stdout(human), /actor@eval\.test|target@eval\.test|e2a_acct_/);
 
   const pathLeak = summary();
   pathLeak.files.report = `/results/${ACTOR}/e2a_acct_synthetic/report.md`;
   const rejectedPath = harness({ runSummary: pathLeak, dependencies: { validateReport: async () => { throw new Error("unsafe path"); } } });
-  assert.equal(await main(["run", "--suite", "suite.yaml", "--json"], rejectedPath.dependencies), 4);
+  const rejectedApproval = await approve(rejectedPath);
+  assert.equal(await main(["run", "--suite", "suite.yaml", "--approval-digest", rejectedApproval, "--json"], rejectedPath.dependencies), 4);
   assert.equal(stdout(rejectedPath), "");
   assert.equal(stderr(rejectedPath), "email-evals: unexpected runner failure\n");
 });
@@ -329,25 +427,14 @@ function run(command, args, options = {}) {
   });
 }
 
-test("launcher routes scaffold locally and runtime commands through the suite runtime", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "email-evals-cli-"));
-  const suite = path.join(root, "suite.yaml");
-  const runtime = path.join(root, ".eval-runtime");
-  const captured = path.join(root, "captured.json");
-  await mkdir(runtime);
-  await writeFile(suite, "version: 1\n");
-  await writeFile(path.join(runtime, "cli.mjs"), `import { writeFile } from "node:fs/promises"; await writeFile(${JSON.stringify(captured)}, JSON.stringify(process.argv.slice(2)));`);
-  await chmod(path.join(runtime, "cli.mjs"), 0o700);
+test("launcher routes scaffold locally without depending on a suite runtime", async () => {
+  const root = await mkdtemp(path.join("/private/tmp", "email-evals-cli-"));
   const launcher = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../email-evals.sh");
-  const invoked = await run("bash", [launcher, "validate", "--suite", suite, "--json"]);
-  assert.equal(invoked.code, 0);
-  assert.deepEqual(JSON.parse(await readFile(captured, "utf8")), ["validate", "--suite", suite, "--json"]);
-
   const scaffoldRoot = path.join(root, "scaffolded");
   const scaffolded = await run("bash", [
     launcher, "scaffold", "--root", scaffoldRoot, "--name", "fictional-support-smoke",
-    "--target-env", "E2A_EVAL_TARGET", "--actor-env", "E2A_EVAL_ACTOR", "--api-key-env", "E2A_EVAL_API_KEY",
+    "--target-env", "E2A_EVAL_TARGET", "--actor-env", "E2A_EVAL_ACTOR",
   ]);
-  assert.equal(scaffolded.code, 0);
+  assert.equal(scaffolded.code, 0, scaffolded.errors);
   assert.match(await readFile(path.join(scaffoldRoot, "suite.yaml"), "utf8"), /fictional-support-smoke/);
 });

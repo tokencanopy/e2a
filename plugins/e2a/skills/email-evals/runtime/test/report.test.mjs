@@ -257,6 +257,37 @@ test("forbidden diagnostic matches and secrets in errors are redacted without Re
   assert.match(serialized, /\[REDACTED:0\]/);
 });
 
+test("persisted expectations and assertion expected values cannot retain credentials", () => {
+  const configured = suite();
+  const source = {
+    id: "expectation-redaction",
+    status: "fail",
+    expectation: {
+      action: { kind: "none", count: 0 },
+      sender: { exactly: TARGET },
+      body: { requiredFacts: ["literal synthetic-credential must not persist"] },
+    },
+    evidence: { candidates: [] },
+    assertions: [{
+      id: "body.required_facts",
+      status: "fail",
+      code: "missing_required_fact",
+      expected: ["literal synthetic-credential must not persist", "actor", "none"],
+      actual: "synthetic-credential",
+      evidenceRefs: [],
+    }],
+    primaryError: null,
+    secondaryErrors: [],
+  };
+  const record = aliasCaseRecord(source, configured);
+  const serialized = JSON.stringify(record);
+  assert.doesNotMatch(serialized, /synthetic-credential/);
+  assert.equal(record.expectation.action.kind, "none");
+  assert.equal(record.expectation.sender.exactly, "target");
+  assert.match(record.expectation.body.requiredFacts[0], /\[REDACTED:credential\]/);
+  assert.deepEqual(record.assertions[0].expected.slice(1), ["actor", "none"]);
+});
+
 test("invalid JSON data degrades to a safe reporting diagnostic", () => {
   const cyclic = {};
   cyclic.self = cyclic;
@@ -269,7 +300,7 @@ test("invalid JSON data degrades to a safe reporting diagnostic", () => {
   assert.doesNotThrow(() => JSON.stringify(aliased));
 });
 
-test("real loaded suites omit regex caches, tokenize resolved env values, and alias unknown observed mailboxes", async () => {
+test("real loaded suites omit regex caches, redact credentials, and alias unknown observed mailboxes", async () => {
   const fixtureRoot = await root();
   await mkdir(path.join(fixtureRoot, "cases"));
   await writeFile(path.join(fixtureRoot, "suite.yaml"), `
@@ -280,7 +311,6 @@ actor: { email: "\${E2A_EVAL_ACTOR}" }
 transport:
   adapter: e2a
   api_key: "\${E2A_EVAL_API_KEY}"
-  base_url: https://api.example.test
   allowed_envelope_recipients: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_TARGET}"]
 cases: [cases/env.yaml]
 `);
@@ -290,26 +320,141 @@ send: { subject: Synthetic, text: Synthetic }
 expect:
   action: { kind: none, count: 0 }
   body:
-    required_facts: ["\${E2A_EVAL_FACT}"]
+    required_facts: ["synthetic-required-fact"]
     forbidden_patterns: ["token-[0-9]+"]
 `);
   const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
     E2A_EVAL_TARGET: TARGET,
     E2A_EVAL_ACTOR: ACTOR,
     E2A_EVAL_API_KEY: "synthetic-credential",
-    E2A_EVAL_FACT: "synthetic-private-fact",
   } });
   const record = aliasCaseRecord({
     id: "env-case", status: "fail", expectation: loaded.cases[0].expect,
-    evidence: { version: 1, capabilities: ["message_action"], candidates: [{ to: ["outside@example.com"], mime: { text: "synthetic-private-fact token-123" } }] },
+    evidence: { version: 1, capabilities: ["message_action"], candidates: [{ direction: "outbound", sentAs: "own_address", to: ["outside@example.com"], mime: { text: "synthetic-credential token-123 e2a_unknown_secret" } }] },
     assertions: [{ id: "recipients.to", status: "fail", code: "unexpected_recipient", expected: [], actual: { unexpected: ["outside@example.com"], snippet: "token-123" }, evidenceRefs: [] }],
     primaryError: null, secondaryErrors: [],
   }, loaded);
   const serialized = JSON.stringify(record);
   assert.notDeepEqual(record.expectation, { unavailable: "serialization_error" });
-  assert.match(serialized, /\[ENV:E2A_EVAL_FACT\]|\[REDACTED:0\]/);
+  assert.match(serialized, /\[ENV:E2A_EVAL_API_KEY\]|\[REDACTED:0\]/);
   assert.match(serialized, /observed:1/);
-  assert.doesNotMatch(serialized, /synthetic-private-fact|outside@example\.com/);
+  assert.doesNotMatch(serialized, /token-123/);
+  assert.equal(record.evidence.candidates[0].direction, "outbound");
+  assert.equal(record.evidence.candidates[0].sentAs, "own_address");
+  assert.doesNotMatch(serialized, /synthetic-credential|token-123|e2a_unknown_secret|outside@example\.com/);
+});
+
+test("credential values cannot corrupt aliases or semantic evidence tokens", async () => {
+  const fixtureRoot = await root();
+  await mkdir(path.join(fixtureRoot, "cases"));
+  await writeFile(path.join(fixtureRoot, "suite.yaml"), `
+version: 1
+name: structural-token-suite
+target: { email: "\${E2A_EVAL_TARGET}" }
+actor: { email: "\${E2A_EVAL_ACTOR}" }
+transport:
+  adapter: e2a
+  api_key: "\${E2A_EVAL_API_KEY}"
+  allowed_envelope_recipients: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_TARGET}"]
+cases: [cases/none.yaml]
+`);
+  await writeFile(path.join(fixtureRoot, "cases/none.yaml"), `
+id: structural-token-case
+send: { subject: Synthetic, text: Synthetic }
+expect: { action: { kind: none, count: 0 } }
+`);
+
+  for (const credential of ["actor", "target", "sent", "outbound", "own_address"]) {
+    const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
+      E2A_EVAL_TARGET: TARGET,
+      E2A_EVAL_ACTOR: ACTOR,
+      E2A_EVAL_API_KEY: credential,
+    } });
+    const record = aliasCaseRecord({
+      id: "structural-token-case",
+      status: "fail",
+      expectation: loaded.cases[0].expect,
+      evidence: {
+        version: 1,
+        capabilities: ["message_action"],
+        candidates: [{
+          direction: "outbound",
+          provenance: "target_outbound",
+          sentAs: "own_address",
+          from: TARGET,
+          to: [ACTOR],
+          lifecycle: { submission: "sent" },
+          mime: { text: `secret=${credential}` },
+        }],
+      },
+      assertions: [],
+      primaryError: null,
+      secondaryErrors: [],
+    }, loaded);
+    const candidate = record.evidence.candidates[0];
+    assert.equal(candidate.from, "target");
+    assert.deepEqual(candidate.to, ["actor"]);
+    assert.equal(candidate.direction, "outbound");
+    assert.equal(candidate.provenance, "target_outbound");
+    assert.equal(candidate.sentAs, "own_address");
+    assert.equal(candidate.lifecycle.submission, "sent");
+    assert.match(candidate.mime.text, /^secret=\[ENV:E2A_EVAL_API_KEY(?::semantic:\d+)?\]$/);
+  }
+});
+
+test("credential collisions inside structural refs are tokenized before artifact publication", async () => {
+  const fixtureRoot = await root();
+  await mkdir(path.join(fixtureRoot, "cases"));
+  await writeFile(path.join(fixtureRoot, "suite.yaml"), `
+version: 1
+name: structural-ref-suite
+target: { email: "\${E2A_EVAL_TARGET}" }
+actor: { email: "\${E2A_EVAL_ACTOR}" }
+transport:
+  adapter: e2a
+  api_key: "\${E2A_EVAL_API_KEY}"
+  allowed_envelope_recipients: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_TARGET}"]
+cases: [cases/none.yaml]
+`);
+  await writeFile(path.join(fixtureRoot, "cases/none.yaml"), `
+id: structural-ref-case
+send: { subject: Synthetic, text: Synthetic }
+expect: { action: { kind: none, count: 0 } }
+`);
+  const credential = "e2a_acct_synthetic_collision";
+  const loaded = await loadSuite(path.join(fixtureRoot, "suite.yaml"), { environment: {
+    E2A_EVAL_TARGET: TARGET,
+    E2A_EVAL_ACTOR: ACTOR,
+    E2A_EVAL_API_KEY: credential,
+  } });
+  const record = aliasCaseRecord({
+    id: "structural-ref-case", status: "pass", expectation: loaded.cases[0].expect,
+    evidence: { version: 1, capabilities: [], candidates: [{
+      ref: `evt_${credential}`, direction: "outbound", provenance: "target_outbound",
+    }] },
+    assertions: [], primaryError: null, secondaryErrors: [],
+  }, loaded);
+  assert.doesNotMatch(JSON.stringify(record), new RegExp(credential));
+  assert.match(record.evidence.candidates[0].ref, /\[ENV:E2A_EVAL_API_KEY\]/);
+});
+
+test("the exact API key is redacted even when it has valid sent-as token syntax", () => {
+  const configured = suite();
+  configured.transport.apiKey = "e2a_custom";
+  const record = aliasCaseRecord({
+    id: "sent-as-credential-collision",
+    status: "pass",
+    expectation: { action: { kind: "none", count: 0 }, sender: { sentAs: "e2a_custom" } },
+    evidence: { candidates: [{ sentAs: "e2a_custom" }] },
+    assertions: [{
+      id: "sender.sent_as", status: "pass", code: "matched",
+      expected: "e2a_custom", actual: { actual: "e2a_custom" }, evidenceRefs: [],
+    }],
+    primaryError: null,
+    secondaryErrors: [],
+  }, configured);
+  assert.doesNotMatch(JSON.stringify(record), /e2a_custom/);
+  assert.equal(record.evidence.candidates[0].sentAs, "[REDACTED:credential]");
 });
 
 test("Markdown output is stable and separates failed and errored assertions", () => {

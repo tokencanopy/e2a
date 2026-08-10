@@ -9,8 +9,7 @@ actor:
 
 transport:
   adapter: e2a
-  api_key: ${__API_KEY_ENV__}
-  base_url: https://api.e2a.dev
+  api_key: ${E2A_EVAL_API_KEY}
   allowed_envelope_recipients:
     - "${__TARGET_ENV__}"
     - "${__ACTOR_ENV__}"

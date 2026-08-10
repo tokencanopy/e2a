@@ -155,12 +155,17 @@ The skill exposes three operations:
   recipient, assertion, and required evidence capability.
 - **run**: execute after validation succeeds.
 
-The skill bundles a Node 18+ runner and a pinned package manifest. Its setup
-script installs the pinned runtime dependencies into a project-local,
-gitignored `.eval-runtime/` directory. The runner uses the published e2a
-TypeScript SDK and a standards-compliant YAML parser; it does not duplicate the
-HTTP client or implement a bespoke YAML subset. The generated suite remains
-portable data and does not import runner internals.
+The skill checks in a Node 18+ single-file runner bundle built from a pinned
+package manifest. Its setup script verifies that plugin-owned bundle and the
+exact checked-in third-party notices; it does not install runtime code. The
+launcher always executes the plugin-relative bundle with an exact minimal
+environment and treats its JSON output as an untrusted protocol. Build-time
+source uses the published e2a TypeScript SDK and a standards-compliant YAML
+parser; it does not duplicate the HTTP client or implement a bespoke YAML
+subset. Freshness tests rebuild the bundle byte-for-byte and compare every
+bundled dependency's pinned version and license text to the notices. The
+generated suite remains portable data and cannot import or replace runner
+internals.
 
 ## Architecture
 
@@ -250,7 +255,9 @@ cases. It produces:
 3. Resolve environment references without writing their values into artifacts.
 4. Verify dedicated actor/target identities and the outbound recipient allowlist.
 5. Negotiate adapter and grader capabilities.
-6. Render a dry-run plan. `run` proceeds only after the same checks pass.
+6. Render a dry-run plan and opaque approval digest that binds the complete
+   plan, resolved identity digest, and containment preflight. `run` requires
+   that digest and proceeds only when a fresh preflight reproduces it.
 7. For each case, record the bounded actor-inbox message-ID baseline and event-
    query lower bound, then construct a stable idempotency key.
 8. Send exactly once through e2a.
@@ -284,7 +291,6 @@ actor:
 transport:
   adapter: e2a
   api_key: ${E2A_EVAL_API_KEY}
-  base_url: https://api.e2a.dev
   allowed_envelope_recipients:
     - ${E2A_EVAL_TARGET}
     - ${E2A_EVAL_ACTOR}
@@ -352,17 +358,22 @@ expect:
     actor_received: true
 ```
 
-Environment substitution is allowed only as a complete scalar value. The
-runner does not interpolate `${...}` embedded inside fixture text, avoiding
-accidental secret expansion into email bodies or reports.
+Environment substitution is allowed only as a complete scalar value in the
+fixed credential field and documented actor, target, probe, and expected-
+mailbox fields. It is rejected in names, identifiers, actions, timing,
+subjects, bodies, patterns, display names, and attachment metadata, avoiding
+secret expansion into email bodies or reports.
 
-`transport.api_key` must remain a complete environment reference. The account-
-scoped key must own both dedicated eval agents and is never written to results.
+`transport.api_key` must be exactly `${E2A_EVAL_API_KEY}`; the suite cannot
+select another inherited credential name. The account-scoped key must own both
+dedicated eval agents and is never written to results.
 `transport.allowed_envelope_recipients` is the single explicit run allowlist;
 it contains the actor, target, and any controlled probe mailbox used by a case.
-The default API base URL is explicit so dry-run output makes the destination
-visible; self-hosted suites may replace it with a complete environment
-reference.
+The public `https://api.e2a.dev` origin is the default. A suite may request an
+exact custom origin only when the operator independently repeats it with the
+trusted `--trusted-origin` launcher flag; cleartext origins are loopback-only.
+The complete alias-only validation plan displays the authorized origin before
+approval.
 
 Unknown keys are validation errors. `version` selects a closed schema; future
 additions require a new compatible schema revision or explicitly optional
@@ -381,7 +392,7 @@ cases that permit an outbound action must define an exact envelope allowlist.
 ### Sender identity
 
 - Exact RFC mailbox identity for From.
-- Authorized e2a sender identity / `sent_as` behavior.
+- Exact open bounded e2a `sent_as` token, such as `own_address` or `relay`.
 - Envelope sender policy when evidence is available.
 - Reply-To exact set or required absence.
 - Optional display-name assertion, separate from mailbox identity.
@@ -565,7 +576,8 @@ failure wins; cleanup errors are appended as secondary diagnostics.
 
 Every run records:
 
-- Suite contract version and normalized suite digest.
+- Suite contract version, a normalized full-suite digest, and a separate
+  execution digest covering every send/correlation/observation input.
 - Runner and e2a SDK versions.
 - Adapter capability set.
 - Run and case IDs.
@@ -576,8 +588,10 @@ Every run records:
 - Redaction metadata and whether raw evidence was retained.
 
 `cases.jsonl` is append-only during a run. Re-grading accepts captured evidence
-and a new grader configuration without resending email. Reports from different
-suite schema or evidence capability versions are not silently compared.
+and the current validated assertions without resending email when the execution
+digest is unchanged; a full-suite digest change is expected for assertion-only
+edits. Reports from different suite schema, execution, or evidence versions are
+not silently compared.
 
 ## Verification strategy
 
@@ -587,7 +601,8 @@ suite schema or evidence capability versions are not silently compared.
 - Unknown keys, unknown enum values, malformed durations, invalid regexes, and
   partial environment interpolation fail validation.
 - Scaffold output uses only synthetic identities and passes validation.
-- Generated results and runtime dependency directories are gitignored.
+- Generated results are gitignored; no executable runtime or dependency
+  directory is created beneath the suite root.
 
 ### Deterministic graders
 

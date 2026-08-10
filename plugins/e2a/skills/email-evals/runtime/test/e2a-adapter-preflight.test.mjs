@@ -106,11 +106,33 @@ test("preflight accepts the exact containment sets and returns an alias-only pla
   assert.throws(() => result.capabilities.add("unexpected"), TypeError);
   assert.equal(result.plan.networkSends, false);
   assert.deepEqual(result.plan.timeouts, { maxRetries: 2, maxElapsedMs: 15_000, timeoutMs: 10_000 });
-  assert.deepEqual(result.plan.cases, [{
-    id: "safe-reply",
-    expectedAction: { kind: "reply", count: 1 },
-    recipientAliases: ["actor", "target"],
-  }]);
+  assert.deepEqual(result.plan.executionBudget, { plannedTimeoutMs: 60_000, maximumTimeoutMs: 1_500_000 });
+  assert.equal(result.plan.cases.length, 1);
+  const [planned] = result.plan.cases;
+  assert.deepEqual(planned.stimulus, {
+    action: "send", sender: "actor", recipients: ["target"],
+    subject: "Synthetic request", text: "Synthetic only",
+  });
+  assert.deepEqual(planned.expectedAction, { kind: "reply", count: 1 });
+  assert.deepEqual(planned.expectedSender, { from: "target", sentAs: null, replyTo: null, displayName: null });
+  assert.deepEqual(planned.expectedRecipients, { to: ["actor"], cc: [], bcc: [], envelope: ["actor"] });
+  assert.deepEqual(planned.recipientAliases, ["actor", "target"]);
+  assert.deepEqual(planned.assertions, [
+    { id: "action.kind", expected: "reply" },
+    { id: "action.count", expected: 1 },
+    { id: "action.no_duplicates", expected: 1 },
+    { id: "sender.from", expected: "target" },
+    { id: "recipients.to", expected: ["actor"] },
+    { id: "recipients.cc", expected: [] },
+    { id: "recipients.bcc", expected: [] },
+    { id: "recipients.envelope", expected: ["actor"] },
+    { id: "recipients.cross_field", expected: "same recipient fields" },
+    { id: "recipients.no_target_self", expected: "target" },
+  ]);
+  assert.deepEqual(planned.evidenceCapabilities, [
+    "message_action", "visible_recipients", "blind_recipients", "envelope_recipients",
+  ]);
+  assert.deepEqual(planned.semanticGraders, []);
   assert.match(result.protectionDigest, /^[a-f0-9]{64}$/);
   assert.doesNotMatch(JSON.stringify(result), /not-logged|actor@eval\.test|target@eval\.test|probe@eval\.test/);
   assert.deepEqual(client.calls.map(([method]) => method), ["get", "get", "getProtection", "getProtection", "get"]);
@@ -155,7 +177,7 @@ test("preflight strips credential-bearing URL components only from the serializa
     client: fakeClient(),
   }).preflight(resolvedSuite());
 
-  assert.equal(result.plan.baseUrl, "https://api.example.test/evals/v1");
+  assert.equal(result.plan.baseUrl, "https://api.example.test");
   assert.doesNotMatch(JSON.stringify(result), /e2a-user|e2a-password|query-token|fragment-token/);
 });
 

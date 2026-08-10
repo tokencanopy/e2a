@@ -385,10 +385,16 @@ test("email-evals skill preserves the safe authoring and run sequence", async ()
   assert.match(source, /actor.*allowlist\/block\s*\[target\]/i);
   assert.match(source, /target.*allowlist\/block\s*\[actor, probes\.\.\.\]/i);
 
-  assert.match(source, /email-evals\.sh scaffold --root <suite-root> --name <suite-name> --target-env <[^>]+> --actor-env <[^>]+> --api-key-env <[^>]+>/);
+  assert.match(source, /email-evals\.sh scaffold --root <suite-root> --name <suite-name> --target-env <[^>]+> --actor-env <[^>]+>/);
+  assert.match(source, /credential name is fixed outside suite authority/i);
+  assert.match(source, /never copies or executes\s+JavaScript or dependencies\s+beneath the suite root/i);
+  assert.match(source, /--trusted-origin <origin>/);
   assert.match(source, /email-evals\.sh setup --root <suite-root>/);
   assert.match(source, /email-evals\.sh validate --suite <suite-root>\/suite\.yaml/);
-  assert.match(source, /show the complete alias-only dry-run plan and protection failures/i);
+  assert.match(source, /show the complete alias-only dry-run plan[\s\S]*protection failures/i);
+  assert.match(source, /`approvalDigest`/);
+  assert.match(source, /email-evals\.sh run --suite <suite-root>\/suite\.yaml --approval-digest <approvalDigest-from-validate>/);
+  assert.match(source, /request fresh approval/i);
   assert.match(source, /ask for explicit user approval immediately before.*`?run`?/is);
   assert.match(source, /sends real email between the dedicated agents/i);
   const scaffoldFlow = source.match(/## Scaffold, edit, and validate\n([\s\S]*?)(?=\n## )/)?.[1] ?? "";

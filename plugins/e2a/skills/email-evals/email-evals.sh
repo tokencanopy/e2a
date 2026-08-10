@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Prevent Node preload injection before any Node invocation, including the
+# version probe. The trusted launcher constructs narrower child environments.
+unset NODE_OPTIONS NODE_PATH
+
 plugin_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 if ! command -v node >/dev/null 2>&1; then
@@ -16,5 +20,5 @@ if [[ ! "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 18 )); then
 fi
 
 # The trusted dependency-free launcher owns full command grammar validation
-# before it resolves or executes any suite-local runtime code.
+# and never resolves or executes suite-local runtime code.
 exec node "$plugin_root/launcher.mjs" "$@"

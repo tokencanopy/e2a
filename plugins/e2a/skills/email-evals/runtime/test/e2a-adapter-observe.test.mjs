@@ -154,11 +154,11 @@ function caseSpec(overrides = {}) {
     send: { subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?" },
     expect: {
       action: { kind: "reply", count: 1 },
-      sender: { exactly: TARGET, sentAs: TARGET, replyTo: { exactly: [] } },
+      sender: { exactly: TARGET, sentAs: "own_address", replyTo: { exactly: [] } },
       recipients: {
         to: { exactly: [ACTOR] }, cc: { exactly: [] }, bcc: { exactly: [] }, envelope: { exactly: [ACTOR] },
       },
-      thread: { inReplyTo: "original", references: "contains_original", conversation: "same" },
+      thread: { messageId: "required", inReplyTo: "original", references: "contains_original", conversation: "same" },
       subject: { policy: "preserve" },
       body: { requiredFacts: ["Refunds are available within 30 days"], plainText: "required" },
       attachments: { exactly: [] },
@@ -172,7 +172,7 @@ function caseSpec(overrides = {}) {
 
 function caseContext(overrides = {}) {
   return {
-    suiteDigest: "a".repeat(64), runId: "run_synthetic", actor: ACTOR, target: TARGET,
+    executionDigest: "a".repeat(64), runId: "run_synthetic", actor: ACTOR, target: TARGET,
     startedAt: "2026-08-08T12:00:00.000Z", timeoutMs: 5_000, settleMs: 1_000, pollIntervalMs: 500,
     ...overrides,
   };
@@ -208,7 +208,7 @@ test("executeCase reuses one frozen stimulus and exact stable idempotency key af
   assert.deepEqual(evidence.candidates[0].bcc, []);
   assert.equal(evidence.candidates[0].direction, "outbound");
   assert.equal(evidence.candidates[0].provenance, "target_outbound");
-  assert.equal(evidence.candidates[0].sentAs, TARGET);
+  assert.equal(evidence.candidates[0].sentAs, "own_address");
   assert.equal(evidence.stimulus.rfcMessageId, "original@agents.localhost");
   assert.equal(evidence.actorReceipt.messageId, "msg_synthetic_target_out");
   assert.doesNotMatch(JSON.stringify(evidence), /rawMessage|must not escape|Content-Transfer-Encoding/);
@@ -217,7 +217,56 @@ test("executeCase reuses one frozen stimulus and exact stable idempotency key af
   }
 });
 
-test("executeCase uses validated provider identity when sender-side MIME predates provider Message-ID", async () => {
+test("SDK-optional message and conversation identity states reconcile with nonempty sources", async () => {
+  for (const absent of ["", undefined]) {
+    const events = await fixture("events-success.json");
+    for (const event of events.slice(0, 2)) {
+      event.conversationId = absent;
+      event.data.conversation_id = absent;
+      event.messageId = absent;
+    }
+    const client = fakeClient({ events });
+    const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
+    assert.equal(evidence.stimulus.conversationId, "conv_synthetic");
+    assert.equal(evidence.candidates[0].conversationId, "conv_synthetic");
+  }
+});
+
+test("conversation evidence refreshes after a reply assigns the stimulus thread", async () => {
+  const events = await fixture("events-success.json");
+  events[0].conversationId = "";
+  events[0].data.conversation_id = "";
+  const messages = successfulMessages();
+  messages.msg_synthetic_target_in.conversationId = "";
+  let stimulusReads = 0;
+  const client = fakeClient({
+    events,
+    messages,
+    getMessage: (_email, messageId) => {
+      const message = structuredClone(messages[messageId]);
+      if (messageId === "msg_synthetic_target_in" && ++stimulusReads > 1) {
+        message.conversationId = "conv_synthetic";
+      }
+      return message;
+    },
+  });
+  const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
+  assert.equal(evidence.stimulus.conversationId, "conv_synthetic");
+  assert.equal(stimulusReads, 2);
+});
+
+test("one MIME-correlated reply supplies a late target-local conversation identity", async () => {
+  const events = await fixture("events-success.json");
+  events[0].conversationId = "";
+  events[0].data.conversation_id = "";
+  const messages = successfulMessages();
+  messages.msg_synthetic_target_in.conversationId = "";
+  const evidence = await adapter(fakeClient({ events, messages })).adapter.executeCase(caseSpec(), caseContext());
+  assert.equal(evidence.stimulus.conversationId, "conv_synthetic");
+  assert.equal(evidence.candidates[0].conversationId, "conv_synthetic");
+});
+
+test("executeCase accepts an exact provider Message-ID when sender MIME omits it", async () => {
   const events = await fixture("events-success.json");
   events.find((event) => event.type === "email.sent").data.provider_message_id = "<reply@agents.localhost>";
   const messages = successfulMessages();
@@ -232,9 +281,7 @@ test("executeCase uses validated provider identity when sender-side MIME predate
   const client = fakeClient({ events, messages });
 
   const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
-
   assert.equal(evidence.candidates[0].mime.messageId, "reply@agents.localhost");
-  assert.equal(evidence.actorReceipt.messageId, "msg_synthetic_target_out");
 });
 
 test("executeCase fails closed on missing malformed or conflicting provider Message-ID evidence", async () => {
@@ -260,7 +307,7 @@ test("executeCase fails closed on missing malformed or conflicting provider Mess
         caseSpec(), caseContext(),
       ),
       (error) => error.errorClass === "transport_error"
-        && error.code === (scenario === "conflicting" ? "conflicting_evidence" : "observation_failed"),
+        && error.code === (scenario === "conflicting" ? "conflicting_evidence" : "malformed_event"),
       scenario,
     );
   }
@@ -628,4 +675,184 @@ test("bounded list overflow is an observation transport error and cannot trigger
   await assert.rejects(adapter(client).adapter.executeCase(caseSpec(), caseContext({ timeoutMs: 1_000 })), (error) =>
     error.errorClass === "transport_error" && error.code === "observation_limit_exceeded");
   assert.equal(client.calls.send.length, 1);
+});
+
+test("defined malformed event identities fail closed instead of being filtered as absent", async () => {
+  for (const mutate of [
+    (event) => { event.agentEmail = 42; },
+    (event) => { event.agentEmail = null; },
+    (event) => { delete event.data.agent_email; },
+    (event) => { event.data.agent_email = null; },
+    (event) => { event.data.agent_email = "not a mailbox"; },
+    (event) => { event.messageId = null; },
+    (event) => { event.data.message_id = null; },
+    (event) => { event.conversationId = null; },
+    (event) => { event.data.conversation_id = null; },
+    (event) => { event.data.direction = 42; },
+    (event) => { event.data.from = { address: TARGET }; },
+  ]) {
+    const events = await fixture("events-success.json");
+    mutate(events[1]);
+    const client = fakeClient({ events, listEvents: () => pager(events) });
+    await assert.rejects(
+      adapter(client).adapter.executeCase(caseSpec(), caseContext()),
+      (error) => error.errorClass === "transport_error" && error.code === "malformed_event",
+    );
+  }
+});
+
+test("conflicting event mailbox sources and malformed direction cannot make no-action pass", async () => {
+  const noneCase = caseSpec({ expect: { ...caseSpec().expect, action: { kind: "none", count: 0 } } });
+  for (const [mutate, code] of [
+    [(event) => { event.data.agent_email = ACTOR; }, "conflicting_evidence"],
+    [(event) => { delete event.data.direction; }, "malformed_event"],
+    [(event) => { event.data.direction = "inbound"; }, "conflicting_evidence"],
+  ]) {
+    const events = await fixture("events-success.json");
+    mutate(events[1]);
+    const time = clock();
+    await assert.rejects(
+      adapter(fakeClient({ events, listEvents: () => pager(events) }), time).adapter.executeCase(
+        noneCase, caseContext({ timeoutMs: 5_000, settleMs: 0, pollIntervalMs: 100 }),
+      ),
+      (error) => error.errorClass === "transport_error" && error.code === code,
+    );
+  }
+
+  const oppositeReceipt = await fixture("events-success.json");
+  oppositeReceipt[0].data.direction = "outbound";
+  await assert.rejects(
+    adapter(fakeClient({ events: oppositeReceipt, listEvents: () => pager(oppositeReceipt) })).adapter.executeCase(
+      caseSpec(), caseContext(),
+    ),
+    (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+  );
+});
+
+test("structured message and MIME representations must agree exactly", async () => {
+  for (const mutate of [
+    (events, messages) => { messages.msg_synthetic_target_out.headerFrom = "other@eval.test"; },
+    (events, messages) => {
+      events[1].data.sent_as = "own_address";
+      messages.msg_synthetic_target_out.sentAs = "relay";
+    },
+    (events, messages) => { messages.msg_synthetic_target_out.to = ["other@eval.test"]; },
+    (events, messages) => { messages.msg_synthetic_target_out.subject = "Conflicting subject"; },
+  ]) {
+    const events = await fixture("events-success.json");
+    const messages = successfulMessages();
+    mutate(events, messages);
+    await assert.rejects(
+      adapter(fakeClient({ events, messages })).adapter.executeCase(caseSpec(), caseContext()),
+      (error) => error.errorClass === "transport_error" && error.code === "conflicting_evidence",
+    );
+  }
+});
+
+test("stimulus and candidates share one cumulative MIME budget", async () => {
+  const events = await fixture("events-success.json");
+  const messages = successfulMessages();
+  const stimulusBytes = Buffer.from(messages.msg_synthetic_target_in.rawMessage, "base64").length;
+  const candidateBytes = Buffer.from(messages.msg_synthetic_target_out.rawMessage, "base64").length;
+  const client = fakeClient({ events, messages });
+  const time = clock();
+  const e2a = createE2AAdapter({
+    apiKey: "not-logged", baseUrl: "https://api.example.test", client,
+    now: time.now, sleep: time.sleep, mimeBudgetBytes: stimulusBytes + candidateBytes - 1,
+  });
+  await assert.rejects(
+    e2a.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "mime_observation_failed",
+  );
+});
+
+test("candidate MIME is charged before later raw messages are fetched or retained", async () => {
+  const sourceEvents = await fixture("events-success.json");
+  const events = [structuredClone(sourceEvents[0])];
+  events[0].conversationId = "";
+  events[0].data.conversation_id = "";
+  const messages = successfulMessages();
+  messages.msg_synthetic_target_in.conversationId = "";
+  const candidateBytes = [];
+  for (let index = 1; index <= 3; index += 1) {
+    const event = structuredClone(sourceEvents[1]);
+    event.id = `evt_synthetic_candidate_${index}`;
+    event.messageId = `msg_synthetic_candidate_${index}`;
+    event.conversationId = `conv_candidate_${index}`;
+    event.createdAt = `2026-08-08T12:00:04.${index}00Z`;
+    event.data.message_id = event.messageId;
+    event.data.conversation_id = event.conversationId;
+    event.data.provider_message_id = `<reply-${index}@agents.localhost>`;
+    events.push(event);
+    const raw = rawMessage({
+      messageId: `reply-${index}@agents.localhost`, from: TARGET, to: ACTOR,
+      subject: `Re: ${SUBJECT}`, inReplyTo: "original@agents.localhost",
+      references: ["original@agents.localhost"], text: "Refunds are available within 30 days.",
+    });
+    candidateBytes.push(Buffer.from(raw, "base64").length);
+    messages[event.messageId] = {
+      id: event.messageId, direction: "outbound", conversationId: event.conversationId,
+      createdAt: new Date(event.createdAt), headerFrom: TARGET, to: [ACTOR], cc: [],
+      replyTo: [], sentAs: "own_address", subject: `Re: ${SUBJECT}`, rawMessage: raw,
+    };
+  }
+  const stimulusBytes = Buffer.from(messages.msg_synthetic_target_in.rawMessage, "base64").length;
+  const client = fakeClient({ events, messages });
+  const time = clock();
+  const e2a = createE2AAdapter({
+    apiKey: "not-logged", baseUrl: "https://api.example.test", client,
+    now: time.now, sleep: time.sleep,
+    mimeBudgetBytes: stimulusBytes + candidateBytes[0] + candidateBytes[1] - 1,
+  });
+  await assert.rejects(
+    e2a.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "mime_observation_failed",
+  );
+  assert.equal(client.calls.gets.some(({ messageId }) => messageId === "msg_synthetic_candidate_3"), false);
+});
+
+test("an in-flight network operation cannot outlive the case deadline", async () => {
+  const client = fakeClient({ send: async () => new Promise(() => {}) });
+  const clientOptions = [];
+  const e2a = createE2AAdapter({
+    apiKey: "not-logged", baseUrl: "https://api.example.test",
+    clientFactory: (options) => { clientOptions.push(options); return client; },
+    now: () => new Date(), sleep: async () => {},
+  });
+  const outcome = await Promise.race([
+    e2a.executeCase(caseSpec(), caseContext({ timeoutMs: 25 })).then(
+      () => ({ type: "resolved" }),
+      (error) => ({ type: "rejected", error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ type: "hung" }), 250)),
+  ]);
+  assert.equal(outcome.type, "rejected");
+  assert.equal(outcome.error.errorClass, "transport_error");
+  assert.equal(outcome.error.code, "stimulus_send_failed");
+  assert.ok(clientOptions.length >= 3);
+  assert.ok(clientOptions.slice(1).every((options) => options.maxRetries === 0
+    && options.maxElapsedMs > 0 && options.maxElapsedMs <= 25
+    && options.timeoutMs > 0 && options.timeoutMs <= options.maxElapsedMs));
+});
+
+test("case deadline is checked after baseline and before every stimulus send", async () => {
+  let milliseconds = START;
+  const client = fakeClient({
+    listMessages: (_email, _params, call) => call === 1 ? {
+      async toArray() {
+        milliseconds += 5_000;
+        return [];
+      },
+    } : pager([]),
+  });
+  const e2a = createE2AAdapter({
+    apiKey: "not-logged", baseUrl: "https://api.example.test", client,
+    now: () => new Date(milliseconds),
+    sleep: async () => {},
+  });
+  await assert.rejects(
+    e2a.executeCase(caseSpec(), caseContext()),
+    (error) => error.errorClass === "transport_error" && error.code === "stimulus_send_failed",
+  );
+  assert.equal(client.calls.send.length, 0);
 });

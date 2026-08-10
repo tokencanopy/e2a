@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
 
 const STATUS_WEIGHT = Object.freeze({ pass: 0, fail: 1, error: 2 });
@@ -318,7 +319,7 @@ function receiptState(evidence, candidates) {
 }
 
 /** Grade normalized MIME/content evidence without retaining raw MIME. */
-export function gradeContent(expectation = {}, evidence = {}) {
+export function gradeContent(expectation = {}, evidence = {}, { replayRedactions = false } = {}) {
   const snapshot = snapshotJsonSafePlainData(evidence);
   if (!snapshot.ok) {
     // A root Proxy is opaque: classifying it as candidate or actor-receipt
@@ -340,10 +341,16 @@ export function gradeContent(expectation = {}, evidence = {}) {
   const thread = expectation.thread;
   if (thread) {
     if (!hasCapability(evidence, "thread_headers")) {
-      for (const id of [["inReplyTo", "thread.in_reply_to"], ["references", "thread.references"], ["conversation", "thread.conversation"]]) {
+      for (const id of [["messageId", "thread.message_id"], ["inReplyTo", "thread.in_reply_to"], ["references", "thread.references"], ["conversation", "thread.conversation"]]) {
         if (thread[id[0]] !== undefined) results.push(result(id[1], "error", "missing_thread_headers_evidence", thread[id[0]], null, candidates));
       }
     } else {
+      if (thread.messageId !== undefined) results.push(aggregate("thread.message_id", thread.messageId, candidates, (candidate) => {
+        const actual = threadToken(mimeOf(candidate)?.messageId);
+        return actual
+          ? { status: "pass", code: "matched", actual }
+          : { status: "error", code: "missing_message_id_evidence", actual: null };
+      }));
       if (thread.inReplyTo !== undefined) results.push(aggregate("thread.in_reply_to", thread.inReplyTo, candidates, (candidate) => {
         const needed = threadToken(evidence?.stimulus?.rfcMessageId);
         const found = threadToken(mimeOf(candidate)?.inReplyTo);
@@ -441,7 +448,14 @@ export function gradeContent(expectation = {}, evidence = {}) {
         const found = text(candidate); if (found.error) return found.error;
         const patterns = body.forbiddenPatternRegexes ?? body.forbiddenPatterns.map((pattern) => compileRegex(pattern));
         if (patterns.some((pattern) => !pattern)) return { status: "error", code: "invalid_forbidden_pattern", actual: null };
-        const matched = found.value === null ? [] : patterns.map((pattern, index) => ({ pattern: body.forbiddenPatterns[index], matched: pattern.test(found.value) })).filter((entry) => entry.matched).map((entry) => entry.pattern);
+        const replayDigests = replayRedactions && Array.isArray(mimeOf(candidate)?.textRedactions?.forbiddenPatternDigests)
+          ? new Set(mimeOf(candidate).textRedactions.forbiddenPatternDigests) : new Set();
+        const matched = found.value === null ? [] : patterns.map((pattern, index) => ({
+          pattern: body.forbiddenPatterns[index],
+          matched: pattern.test(found.value) || replayDigests.has(
+            createHash("sha256").update(body.forbiddenPatterns[index]).digest("hex"),
+          ),
+        })).filter((entry) => entry.matched).map((entry) => entry.pattern);
         return { status: matched.length === 0 ? "pass" : "fail", code: matched.length === 0 ? "matched" : "forbidden_pattern_matched", actual: { matched } };
       }));
       if (body.plainText !== undefined) results.push(aggregate("body.plain_text", body.plainText, candidates, (candidate) => {

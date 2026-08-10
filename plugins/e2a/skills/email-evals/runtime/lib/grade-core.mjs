@@ -58,7 +58,11 @@ function sameSet(left, right) {
 }
 
 function hasVerifiedOutboundProvenance(candidate) {
-  return candidate.direction === "outbound" || candidate.provenance === "target_outbound";
+  return candidate.direction === "outbound" && candidate.provenance === "target_outbound";
+}
+
+function boundedToken(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : null;
 }
 
 function canonical(value) {
@@ -273,8 +277,17 @@ export function gradeCore(expectation = {}, evidence = {}) {
   if (expectation.sender?.exactly !== undefined) results.push(aggregate("sender.from", mailbox(expectation.sender.exactly), attempts, (candidate) => {
     const actual = mailbox(candidate.from); return { status: actual === mailbox(expectation.sender.exactly) ? "pass" : "fail", code: actual === mailbox(expectation.sender.exactly) ? "matched" : "sender_mismatch", actual };
   }));
-  if (expectation.sender?.sentAs !== undefined) results.push(aggregate("sender.sent_as", mailbox(expectation.sender.sentAs), attempts, (candidate) => {
-    const actual = mailbox(candidate.sentAs); return { status: actual === mailbox(expectation.sender.sentAs) ? "pass" : "fail", code: actual === mailbox(expectation.sender.sentAs) ? "matched" : "sent_as_mismatch", actual };
+  if (expectation.sender?.sentAs !== undefined) results.push(aggregate("sender.sent_as", expectation.sender.sentAs, attempts, (candidate) => {
+    if (!Object.hasOwn(candidate, "sentAs") || candidate.sentAs === null || candidate.sentAs === undefined) {
+      return { status: "error", code: "missing_sent_as_evidence", actual: null };
+    }
+    const actual = boundedToken(candidate.sentAs);
+    if (actual === null) return { status: "error", code: "invalid_sent_as_evidence", actual: null };
+    return {
+      status: actual === expectation.sender.sentAs ? "pass" : "fail",
+      code: actual === expectation.sender.sentAs ? "matched" : "sent_as_mismatch",
+      actual,
+    };
   }));
   if (expectation.sender?.replyTo !== undefined) results.push(aggregate("sender.reply_to", expectedAddresses(expectation.sender.replyTo), attempts, (candidate) => {
     if (!Object.hasOwn(candidate, "replyTo") || !Array.isArray(candidate.replyTo)) {

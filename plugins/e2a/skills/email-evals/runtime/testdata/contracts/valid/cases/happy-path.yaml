@@ -8,6 +8,7 @@ expect:
     count: 1
   sender:
     exactly: ${E2A_EVAL_TARGET}
+    sent_as: own_address
     reply_to:
       exactly: []
   recipients:
@@ -16,6 +17,7 @@ expect:
     bcc: { exactly: [] }
     envelope: { exactly: ["${E2A_EVAL_ACTOR}"] }
   thread:
+    message_id: required
     in_reply_to: original
     references: contains_original
     conversation: same

@@ -1,20 +1,20 @@
 const COMMANDS = new Set(["validate", "run", "regrade"]);
-const OPTION_NAMES = new Set(["--suite", "--output", "--run", "--json"]);
+const OPTION_NAMES = new Set(["--suite", "--output", "--run", "--trusted-origin", "--approval-digest", "--json"]);
 const COMMAND_OPTIONS = Object.freeze({
-  validate: new Set(["--suite", "--json"]),
-  run: new Set(["--suite", "--output", "--json"]),
-  regrade: new Set(["--suite", "--run", "--json"]),
+  validate: new Set(["--suite", "--trusted-origin", "--json"]),
+  run: new Set(["--suite", "--output", "--trusted-origin", "--approval-digest", "--json"]),
+  regrade: new Set(["--suite", "--run", "--trusted-origin", "--json"]),
 });
-const VALUE_OPTIONS = new Set(["--suite", "--output", "--run"]);
+const VALUE_OPTIONS = new Set(["--suite", "--output", "--run", "--trusted-origin", "--approval-digest"]);
 
 export class CliUsageError extends Error {}
 
 export function usage() {
   return [
     "Usage:",
-    "  email-evals validate --suite <suite.yaml> [--json]",
-    "  email-evals run --suite <suite.yaml> [--output <results-dir>] [--json]",
-    "  email-evals regrade --suite <suite.yaml> --run <run-dir> [--json]",
+    "  email-evals validate --suite <suite.yaml> [--trusted-origin <origin>] [--json]",
+    "  email-evals run --suite <suite.yaml> --approval-digest <sha256> [--output <results-dir>] [--trusted-origin <origin>] [--json]",
+    "  email-evals regrade --suite <suite.yaml> --run <run-dir> [--trusted-origin <origin>] [--json]",
   ].join("\n");
 }
 
@@ -45,8 +45,21 @@ export function parseRuntimeArguments(argv) {
       values[token] = true;
     }
   }
-  for (const required of command === "regrade" ? ["--suite", "--run"] : ["--suite"]) {
+  const requiredOptions = command === "regrade" ? ["--suite", "--run"]
+    : command === "run" ? ["--suite", "--approval-digest"] : ["--suite"];
+  for (const required of requiredOptions) {
     if (!Object.hasOwn(values, required)) throw new CliUsageError(`Missing required option: ${required}`);
   }
-  return { command, suite: values["--suite"], output: values["--output"], run: values["--run"], json: values["--json"] === true };
+  if (command === "run" && !/^[a-f0-9]{64}$/.test(values["--approval-digest"])) {
+    throw new CliUsageError("Invalid value for: --approval-digest");
+  }
+  return {
+    command,
+    suite: values["--suite"],
+    output: values["--output"],
+    run: values["--run"],
+    trustedOrigin: values["--trusted-origin"],
+    approvalDigest: values["--approval-digest"],
+    json: values["--json"] === true,
+  };
 }

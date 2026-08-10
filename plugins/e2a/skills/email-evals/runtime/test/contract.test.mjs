@@ -32,6 +32,7 @@ test("loadSuite resolves complete scalar references and canonicalizes the closed
   assert.deepEqual(suite.transport.allowedEnvelopeRecipients, ["actor@eval.test", "target@eval.test"]);
   assert.deepEqual(suite.defaults, { timeoutMs: 60_000, settleMs: 5_000, pollIntervalMs: 500 });
   assert.match(suite.digest, /^[a-f0-9]{64}$/);
+  assert.match(suite.executionDigest, /^[a-f0-9]{64}$/);
   assert.equal(suite.cases.length, 3);
   assert.equal(suite.cases[0].expect.timing.replyWithinMs, 60_000);
   assert.deepEqual(suite.cases[0].expect.recipients.envelope.exactly, ["actor@eval.test"]);
@@ -50,7 +51,6 @@ actor: { email: "\${E2A_EVAL_ACTOR}" }
 transport:
   adapter: e2a
   api_key: "\${E2A_EVAL_API_KEY}"
-  base_url: https://api.example.test
   allowed_envelope_recipients: ["\${E2A_EVAL_ACTOR}", "\${E2A_EVAL_TARGET}"]
 cases: [cases/env-regex.yaml]
 `);
@@ -63,7 +63,7 @@ expect:
 `);
   await assert.rejects(
     loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_EVAL_PATTERN: "secret-[0-9]+" } }),
-    (error) => error.errorClass === "configuration_error" && error.code === "regex_environment_not_supported",
+    (error) => error.errorClass === "configuration_error" && error.code === "environment_reference_not_allowed",
   );
 });
 
@@ -74,6 +74,136 @@ test("digest uses the unresolved alias-safe contract, not an API-key value", asy
   });
   assert.equal(first.digest, second.digest);
   assert.doesNotMatch(JSON.stringify(first).replace(first.transport.apiKey, "[key]"), /synthetic-key-rotated/);
+});
+
+test("suite timeout budget leaves bounded overhead beneath the public launcher wall", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-suite-budget-"));
+  const caseSource = (id) => [
+    `id: ${id}`, "send: { subject: Synthetic, text: Synthetic }",
+    "expect: { action: { kind: none, count: 0 } }", "",
+  ].join("\n");
+  await writeFile(path.join(root, "first.yaml"), caseSource("first"));
+  await writeFile(path.join(root, "second.yaml"), caseSource("second"));
+  const suiteSource = (timeout) => [
+    "version: 1", "name: synthetic", "target: { email: \"${E2A_EVAL_TARGET}\" }",
+    "actor: { email: \"${E2A_EVAL_ACTOR}\" }", "transport:", "  adapter: e2a",
+    "  api_key: \"${E2A_EVAL_API_KEY}\"",
+    "  allowed_envelope_recipients: [\"${E2A_EVAL_ACTOR}\", \"${E2A_EVAL_TARGET}\"]",
+    `defaults: { timeout: ${timeout}, settle: 1s, poll_interval: 1s }`,
+    "cases: [first.yaml, second.yaml]", "",
+  ].join("\n");
+  await writeFile(path.join(root, "suite.yaml"), suiteSource("750s"));
+  await assert.doesNotReject(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }));
+  await writeFile(path.join(root, "suite.yaml"), suiteSource("13m"));
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error"
+      && error.code === "suite_timeout_budget_exceeded"
+      && error.details?.path === "/defaults/timeout",
+  );
+});
+
+test("action cardinality cannot exceed the bounded observation set", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-action-count-"));
+  const source = (count) => [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    `  action: { kind: reply, count: ${count} }`,
+    "  recipients: { envelope: { exactly: [\"${E2A_EVAL_ACTOR}\"] } }", "",
+  ].join("\n");
+  await writeMinimalSuite(root, { caseSource: source(100) });
+  await assert.doesNotReject(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }));
+  await writeMinimalSuite(root, { caseSource: source(101) });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_action_count"
+      && error.details?.path === "/expect/action/count",
+  );
+});
+
+test("full and execution digests separate assertion-only edits from execution edits", async () => {
+  const roots = await Promise.all([0, 1, 2, 3].map(() => mkdtemp(path.join(tmpdir(), "email-evals-digest-split-"))));
+  const caseFor = ({ actorReceived, text, fact }) => [
+    "id: synthetic-case", "send:", "  subject: Synthetic", `  text: ${text}`, "expect:",
+    "  action: { kind: none, count: 0 }", `  body: { required_facts: [${fact}] }`,
+    `  lifecycle: { actor_received: ${actorReceived} }`, "",
+  ].join("\n");
+  await writeMinimalSuite(roots[0], { caseSource: caseFor({ actorReceived: true, text: "Synthetic", fact: "First" }) });
+  await writeMinimalSuite(roots[1], { caseSource: caseFor({ actorReceived: true, text: "Synthetic", fact: "Second" }) });
+  await writeMinimalSuite(roots[2], { caseSource: caseFor({ actorReceived: true, text: "Changed", fact: "First" }) });
+  await writeMinimalSuite(roots[3], { caseSource: caseFor({ actorReceived: false, text: "Synthetic", fact: "First" }) });
+  const [first, assertionEdit, executionEdit, receiptEdit] = await Promise.all(roots.map((root) => (
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment })
+  )));
+  assert.notEqual(first.digest, assertionEdit.digest);
+  assert.equal(first.executionDigest, assertionEdit.executionDigest);
+  assert.notEqual(first.executionDigest, executionEdit.executionDigest);
+  assert.notEqual(first.executionDigest, receiptEdit.executionDigest);
+});
+
+test("digests bind resolved actor target and containment identities without binding the API key", async () => {
+  const suiteFile = fixture("contracts/valid/suite.yaml");
+  const first = await loadSuite(suiteFile, { environment: validEnvironment });
+  const rotated = await loadSuite(suiteFile, { environment: {
+    ...validEnvironment,
+    E2A_EVAL_ACTOR: "rotated-actor@eval.test",
+    E2A_EVAL_TARGET: "rotated-target@eval.test",
+  } });
+  const keyOnly = await loadSuite(suiteFile, { environment: {
+    ...validEnvironment,
+    E2A_EVAL_API_KEY: "synthetic-key-rotated",
+  } });
+  assert.notEqual(first.digest, rotated.digest);
+  assert.notEqual(first.executionDigest, rotated.executionDigest);
+  assert.equal(first.digest, keyOnly.digest);
+  assert.equal(first.executionDigest, keyOnly.executionDigest);
+});
+
+test("sent_as accepts bounded future-safe tokens and rejects mailbox-shaped or credential-overlapping values", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-sent-as-"));
+  const source = (sentAs) => [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    "  action: { kind: none, count: 0 }", "  sender:", `    sent_as: ${sentAs}`, "",
+  ].join("\n");
+  await writeMinimalSuite(root, { caseSource: source("future_route") });
+  assert.equal((await loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment })).cases[0].expect.sender.sentAs, "future_route");
+  await writeMinimalSuite(root, { caseSource: source("target@eval.test") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_sent_as",
+  );
+  await writeMinimalSuite(root, { caseSource: source("e2a_custom") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_EVAL_API_KEY: "e2a_custom" } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "sent_as_conflicts_credential",
+  );
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_EVAL_API_KEY: "custom" } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "sent_as_conflicts_credential",
+  );
+});
+
+test("suite loading bounds files, cases, arrays, and semantic strings before execution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-bounds-"));
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", `send: { subject: ${"s".repeat(999)}, text: Synthetic }`,
+    "expect: { action: { kind: none, count: 0 } }", "",
+  ].join("\n") });
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.code === "string_too_large");
+
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    "  action: { kind: none, count: 0 }", `  attachments: { exactly: ${JSON.stringify(Array.from({ length: 33 }, (_, index) => `file-${index}`))} }`, "",
+  ].join("\n") });
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.code === "array_too_large");
+
+  await writeMinimalSuite(root);
+  const suiteSource = await readFile(path.join(root, "suite.yaml"), "utf8");
+  await writeFile(path.join(root, "suite.yaml"), suiteSource.replace("cases: [case.yaml]", `cases: ${JSON.stringify(Array(101).fill("case.yaml"))}`));
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.code === "array_too_large");
+
+  await writeMinimalSuite(root);
+  await writeFile(path.join(root, "case.yaml"), `# ${"x".repeat(256 * 1024)}\n`);
+  await assert.rejects(loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }), (error) => error.code === "yaml_too_large");
 });
 
 async function writeMinimalSuite(root, { name = "synthetic", caseSource, recipients = "[\"${E2A_EVAL_TARGET}\", \"${E2A_EVAL_ACTOR}\"]" } = {}) {
@@ -87,19 +217,19 @@ async function writeMinimalSuite(root, { name = "synthetic", caseSource, recipie
   ].join("\n"));
 }
 
-test("complete references resolve in IDs, enums, policies, and nested attachments", async () => {
+test("only documented credential and mailbox fields accept complete environment references", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "email-evals-env-"));
   await writeMinimalSuite(root, { name: "${E2A_SUITE_NAME}", caseSource: [
     "id: ${E2A_CASE_ID}", "send:", "  subject: Synthetic", "  text: Synthetic", "expect:", "  action:", "    kind: ${E2A_ACTION}", "    count: 0",
     "  subject:", "    policy: ${E2A_POLICY}", "  attachments:", "    exactly:", "      - filename: ${E2A_FILENAME}", "        content_type: ${E2A_CONTENT_TYPE}", "        disposition: ${E2A_DISPOSITION}", "        sha256: ${E2A_HASH}", "",
   ].join("\n") });
-  const suite = await loadSuite(path.join(root, "suite.yaml"), { environment: {
-    ...validEnvironment, E2A_SUITE_NAME: "synthetic", E2A_CASE_ID: "synthetic-case", E2A_ACTION: "none", E2A_POLICY: "preserve",
-    E2A_FILENAME: "synthetic.txt", E2A_CONTENT_TYPE: "text/plain", E2A_DISPOSITION: "attachment", E2A_HASH: "abc",
-  } });
-  assert.equal(suite.cases[0].id, "synthetic-case");
-  assert.equal(suite.cases[0].expect.action.kind, "none");
-  assert.equal(suite.cases[0].expect.attachments.exactly[0].filename, "synthetic.txt");
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: {
+      ...validEnvironment, E2A_SUITE_NAME: "synthetic", E2A_CASE_ID: "synthetic-case", E2A_ACTION: "none", E2A_POLICY: "preserve",
+      E2A_FILENAME: "synthetic.txt", E2A_CONTENT_TYPE: "text/plain", E2A_DISPOSITION: "attachment", E2A_HASH: "abc",
+    } }),
+    (error) => error.errorClass === "configuration_error" && error.code === "environment_reference_not_allowed",
+  );
 });
 
 test("empty attachment expectation mappings are rejected instead of becoming count-only", async () => {
@@ -191,7 +321,7 @@ for (const [name, code] of [
   });
 }
 
-test("case symlinks cannot escape the suite root after realpath resolution", async () => {
+test("case symlinks are rejected before they can escape the suite root", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "email-evals-contract-"));
   const outside = path.join(root, "outside.yaml");
   await writeFile(outside, "id: escaped\nsend: { subject: x, text: x }\nexpect: { action: { kind: none, count: 0 } }\n");
@@ -205,7 +335,7 @@ test("case symlinks cannot escape the suite root after realpath resolution", asy
   ].join("\n"));
   await assert.rejects(
     loadSuite(path.join(suiteRoot, "suite.yaml"), { environment: validEnvironment }),
-    (error) => error.errorClass === "configuration_error" && error.code === "path_outside_suite",
+    (error) => error.errorClass === "configuration_error" && error.code === "case_file_unreadable",
   );
 });
 
@@ -301,40 +431,37 @@ test("mailbox normalization rejects malformed comments, quotes, and brackets con
 
 test("closed contract rejects oversized suite and case identifiers with safe pointers", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "email-evals-identifiers-"));
-  await writeMinimalSuite(root, { name: "${E2A_SUITE_NAME}" });
+  await writeMinimalSuite(root, { name: "s".repeat(129) });
   await assert.rejects(
-    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_SUITE_NAME: "s".repeat(129) } }),
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
     (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
       && error.details?.path === "/name" && Object.keys(error.details).length === 1,
   );
 
   await writeMinimalSuite(root, { caseSource: [
-    "id: ${E2A_CASE_ID}", "send: { subject: Synthetic, text: Synthetic }", "expect: { action: { kind: none, count: 0 } }", "",
+    `id: ${"c".repeat(129)}`, "send: { subject: Synthetic, text: Synthetic }", "expect: { action: { kind: none, count: 0 } }", "",
   ].join("\n") });
   await assert.rejects(
-    loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_CASE_ID: "c".repeat(129) } }),
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
     (error) => error.errorClass === "configuration_error" && error.code === "identifier_too_long"
       && error.details?.path === "/cases/0/id" && Object.keys(error.details).length === 1,
   );
 
-  for (const [environment, code, pointer] of [
-    [{ E2A_SUITE_NAME: "safe\n# injected" }, "invalid_suite_name", "/name"],
-    [{ E2A_CASE_ID: "safe\u0000id" }, "invalid_case_id", "/cases/0/id"],
-    [{ E2A_CASE_ID: `${"é".repeat(64)}a` }, "identifier_too_long", "/cases/0/id"],
-    [{ E2A_CASE_ID: "é".repeat(64) }, "invalid_case_id", "/cases/0/id"],
+  for (const [literal, code] of [
+    [`${"é".repeat(64)}a`, "identifier_too_long"],
+    ["é".repeat(64), "invalid_case_id"],
   ]) {
     await writeMinimalSuite(root, {
-      name: environment.E2A_SUITE_NAME === undefined ? "synthetic" : "${E2A_SUITE_NAME}",
       caseSource: [
-        `id: ${environment.E2A_CASE_ID === undefined ? "synthetic-case" : "${E2A_CASE_ID}"}`,
+        `id: ${literal}`,
         "send: { subject: Synthetic, text: Synthetic }",
         "expect: { action: { kind: none, count: 0 } }", "",
       ].join("\n"),
     });
     await assert.rejects(
-      loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, ...environment } }),
+      loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
       (error) => error.errorClass === "configuration_error" && error.code === code
-        && error.details?.path === pointer && Object.keys(error.details).length === 1,
+        && error.details?.path === "/cases/0/id" && Object.keys(error.details).length === 1,
     );
   }
 });
@@ -346,7 +473,6 @@ test("scaffolded synthetic starter templates satisfy the same closed loader", as
     suiteName: "fictional-support-smoke",
     targetEnv: "E2A_EVAL_TARGET",
     actorEnv: "E2A_EVAL_ACTOR",
-    apiKeyEnv: "E2A_EVAL_API_KEY",
   });
   const suite = await loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment });
   assert.equal(suite.cases.length, 3);

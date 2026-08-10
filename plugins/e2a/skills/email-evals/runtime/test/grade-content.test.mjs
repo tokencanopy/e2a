@@ -9,6 +9,7 @@ function candidate(overrides = {}) {
     conversationId: "conv_synthetic",
     observedAt: "2026-08-08T12:00:04.000Z",
     mime: {
+      messageId: "reply@agents.localhost",
       inReplyTo: "original@agents.localhost",
       references: ["root@agents.localhost", "original@agents.localhost"],
       subject: "Re: Question",
@@ -39,7 +40,7 @@ function evidence(overrides = {}) {
 
 function expectation(overrides = {}) {
   return {
-    thread: { inReplyTo: "original", references: "contains_original", conversation: "same" },
+    thread: { messageId: "required", inReplyTo: "original", references: "contains_original", conversation: "same" },
     subject: { policy: "preserve" },
     body: { requiredFacts: ["Refunds are available within 30 days"], forbiddenPatterns: ["synthetic-secret-[A-Za-z0-9]+"], plainText: "required", maxSize: 100 },
     attachments: { exactly: [] },
@@ -60,9 +61,19 @@ function assertResult(results, id, status, code = "matched") {
 
 test("content grading checks original RFC Message-ID and conversation together", () => {
   const results = gradeContent(expectation(), evidence({ candidates: [candidate({ conversationId: "conv_other", mime: { ...candidate().mime, inReplyTo: "wrong@agents.localhost", references: [] } })] }));
+  assertResult(results, "thread.message_id", "pass");
   assertResult(results, "thread.in_reply_to", "fail", "wrong_in_reply_to");
   assertResult(results, "thread.references", "fail", "missing_original_reference");
   assertResult(results, "thread.conversation", "fail", "wrong_conversation");
+});
+
+test("content grading requires explicit singleton Message-ID evidence", () => {
+  const withoutMessageID = candidate({ mime: { ...candidate().mime } });
+  delete withoutMessageID.mime.messageId;
+  assertResult(
+    gradeContent(expectation(), evidence({ candidates: [withoutMessageID] })),
+    "thread.message_id", "error", "missing_message_id_evidence",
+  );
 });
 
 test("fused and punctuation-prefixed thread tokens cannot satisfy thread assertions", () => {
@@ -100,6 +111,14 @@ test("subject, body, and attachment checks produce stable literal and regex fail
   assertResult(results, "body.required_facts", "fail", "required_fact_missing");
   assertResult(results, "body.forbidden_patterns", "fail", "forbidden_pattern_matched");
   assertResult(results, "attachments.exactly", "fail", "attachment_set_mismatch");
+});
+
+test("literal artifact marker text has no live forbidden-pattern authority", () => {
+  const results = gradeContent(
+    expectation({ body: { forbiddenPatterns: ["token-[0-9]+"] } }),
+    evidence({ candidates: [candidate({ mime: { ...candidate().mime, text: "Harmless [REDACTED:0] text" } })] }),
+  );
+  assertResult(results, "body.forbidden_patterns", "pass");
 });
 
 test("content grading checks ordered attachment metadata and explicit capabilities", () => {

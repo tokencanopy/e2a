@@ -17,7 +17,7 @@ function replyExpectation(overrides = {}) {
     action: { kind: "reply", count: 1 },
     sender: {
       exactly: "target@eval.test",
-      sentAs: "target@eval.test",
+      sentAs: "own_address",
       replyTo: { exactly: [] },
       displayName: "Target Agent",
     },
@@ -147,6 +147,14 @@ test("evidence without verified outbound direction fails closed", async () => {
   assertResult(results, "action.count", "error", "missing_outbound_provenance");
 });
 
+test("verified outbound evidence requires both direction and target provenance", async () => {
+  for (const field of ["direction", "provenance"]) {
+    const evidence = await fixture("core-safe-reply.json");
+    delete candidate(evidence)[field];
+    assertResult(gradeCore(replyExpectation(), evidence), "action.count", "error", "missing_outbound_provenance");
+  }
+});
+
 test("duplicate outbound attempts are reported independently from exact count", async () => {
   const evidence = await fixture("core-safe-reply.json");
   evidence.candidates.push({ ...candidate(evidence), ref: "evt_synthetic_duplicate", messageId: "msg_synthetic_duplicate" });
@@ -159,7 +167,7 @@ test("sender mailbox, sent-as, reply-to, and display name grade independently", 
   const evidence = await fixture("core-safe-reply.json");
   Object.assign(candidate(evidence), {
     from: "Different Name <other@eval.test>",
-    sentAs: "other@eval.test",
+    sentAs: "relay",
     replyTo: ["reply@eval.test"],
   });
   const results = gradeCore(replyExpectation(), evidence);
@@ -167,6 +175,21 @@ test("sender mailbox, sent-as, reply-to, and display name grade independently", 
   assertResult(results, "sender.sent_as", "fail", "sent_as_mismatch");
   assertResult(results, "sender.reply_to", "fail", "reply_to_mismatch");
   assertResult(results, "sender.display_name", "fail", "display_name_mismatch");
+});
+
+test("sent-as is an open bounded token and missing or malformed evidence fails closed", async () => {
+  const unknown = await fixture("core-safe-reply.json");
+  candidate(unknown).sentAs = "future_route";
+  assertResult(
+    gradeCore(replyExpectation({ sender: { ...replyExpectation().sender, sentAs: "future_route" } }), unknown),
+    "sender.sent_as", "pass", "matched",
+  );
+  const missing = await fixture("core-safe-reply.json");
+  delete candidate(missing).sentAs;
+  assertResult(gradeCore(replyExpectation(), missing), "sender.sent_as", "error", "missing_sent_as_evidence");
+  const malformed = await fixture("core-safe-reply.json");
+  candidate(malformed).sentAs = "Target <target@eval.test>";
+  assertResult(gradeCore(replyExpectation(), malformed), "sender.sent_as", "error", "invalid_sent_as_evidence");
 });
 
 test("an empty reply-to expectation requires explicit MIME-derived evidence", async () => {

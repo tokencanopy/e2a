@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { E2AClient, E2AConnectionError } from "@e2a/sdk/v1";
+import { executionBounds } from "./contract.mjs";
 import { EvalError, isStableEvalErrorCode } from "./errors.mjs";
 import { normalizeMessageIdToken, parseMimeEvidence } from "./mime.mjs";
-import { NormalizationError, normalizeAddressSet, normalizeMailbox } from "./normalize.mjs";
+import {
+  NormalizationError, normalizeAddressSet, normalizeMailbox, replaceMailboxText,
+} from "./normalize.mjs";
 
 const CAPABILITIES = Object.freeze([
   "message_action",
@@ -16,6 +19,8 @@ const CAPABILITIES = Object.freeze([
 ]);
 
 const TIMEOUTS = Object.freeze({ maxRetries: 2, maxElapsedMs: 15_000, timeoutMs: 10_000 });
+const MIME_CASE_BUDGET_BYTES = 25 * 1024 * 1024;
+const SENT_AS_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
 
 class ReadonlyCapabilitySet {
   #values;
@@ -105,7 +110,7 @@ function serializableBaseUrl(value) {
   parsed.password = "";
   parsed.search = "";
   parsed.hash = "";
-  return parsed.toString();
+  return parsed.origin;
 }
 
 function normalizeAddress(value, code = "invalid_mailbox") {
@@ -194,7 +199,8 @@ function collectCaseAddresses(testCase) {
     throw configurationError("invalid_suite", "Resolved evaluation case is invalid");
   }
   const action = testCase.expect.action;
-  if (!action || typeof action !== "object" || typeof action.kind !== "string" || !Number.isSafeInteger(action.count) || action.count < 0) {
+  if (!action || typeof action !== "object" || typeof action.kind !== "string"
+    || !Number.isSafeInteger(action.count) || action.count < 0 || action.count > OBSERVATION_LIMIT) {
     throw configurationError("invalid_suite", "Resolved case action is invalid");
   }
 
@@ -202,8 +208,9 @@ function collectCaseAddresses(testCase) {
   const sender = testCase.expect.sender;
   if (sender !== undefined) {
     if (!sender || typeof sender !== "object") throw configurationError("invalid_suite", "Resolved case sender is invalid");
-    for (const field of ["exactly", "sentAs"]) {
-      if (sender[field] !== undefined) addresses.push(normalizeAddress(sender[field], "invalid_suite"));
+    if (sender.exactly !== undefined) addresses.push(normalizeAddress(sender.exactly, "invalid_suite"));
+    if (sender.sentAs !== undefined && !SENT_AS_TOKEN.test(sender.sentAs)) {
+      throw configurationError("invalid_suite", "Resolved sent-as expectation is invalid");
     }
     if (sender.replyTo !== undefined) addresses.push(...exactlyAddresses(sender.replyTo));
   }
@@ -214,24 +221,161 @@ function collectCaseAddresses(testCase) {
       if (recipients[field] !== undefined) addresses.push(...exactlyAddresses(recipients[field]));
     }
   }
-  if (action.count > 0 && recipients?.envelope === undefined) {
+  if (action.kind !== "none" && recipients?.envelope === undefined) {
     throw configurationError("missing_envelope_allowlist", "Outbound cases require an exact envelope expectation");
   }
-  return { id: testCase.id, action: { kind: action.kind, count: action.count }, addresses: [...new Set(addresses)].sort() };
+  return {
+    id: testCase.id,
+    action: { kind: action.kind, count: action.count },
+    addresses: [...new Set(addresses)].sort(),
+    source: testCase,
+  };
 }
 
-function makePlan({ baseUrl, aliases, allowedAliases, cases }) {
+function planString(value, aliases, apiKey) {
+  let result = replaceMailboxText(value, (mailbox) => aliases.get(mailbox.address) ?? "[REDACTED:address]");
+  if (typeof apiKey === "string" && apiKey.length > 0) {
+    result = result.replaceAll(apiKey, "[REDACTED:credential]");
+  }
+  return result
+    .replace(/[\u0000-\u001f\u007f]/g, "[REDACTED:control]")
+    .replace(/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/g, "[REDACTED:credential]")
+    .replace(/@/g, "[REDACTED:address]");
+}
+
+function planSentAs(value, apiKey) {
+  if (typeof apiKey === "string" && apiKey.length > 0 && value.includes(apiKey)) {
+    return "[REDACTED:credential]";
+  }
+  return SENT_AS_TOKEN.test(value) ? value : "[REDACTED:credential]";
+}
+
+function planValue(value, aliases, apiKey) {
+  if (typeof value === "string") return planString(value, aliases, apiKey);
+  if (Array.isArray(value)) return value.map((entry) => planValue(entry, aliases, apiKey));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, planValue(entry, aliases, apiKey)]));
+}
+
+function planAddresses(value, aliases) {
+  if (value === undefined) return null;
+  return exactlyAddresses(value).map((address) => aliasOf(aliases, address));
+}
+
+function caseAssertionPlan(testCase, aliases, apiKey) {
+  const expectation = testCase.expect;
+  const assertions = [];
+  const add = (id, expected) => assertions.push({ id, expected: planValue(expected, aliases, apiKey) });
+  add("action.kind", expectation.action.kind);
+  add("action.count", expectation.action.count);
+  add("action.no_duplicates", expectation.action.count);
+
+  if (expectation.sender?.exactly !== undefined) {
+    add("sender.from", aliasOf(aliases, normalizeAddress(expectation.sender.exactly, "invalid_suite")));
+  }
+  if (expectation.sender?.sentAs !== undefined) {
+    assertions.push({ id: "sender.sent_as", expected: planSentAs(expectation.sender.sentAs, apiKey) });
+  }
+  if (expectation.sender?.replyTo !== undefined) add("sender.reply_to", planAddresses(expectation.sender.replyTo, aliases));
+  if (expectation.sender?.displayName !== undefined) add("sender.display_name", expectation.sender.displayName);
+
+  if (expectation.recipients !== undefined) {
+    for (const field of ["to", "cc", "bcc", "envelope"]) {
+      if (expectation.recipients[field] !== undefined) {
+        add(`recipients.${field}`, planAddresses(expectation.recipients[field], aliases));
+      }
+    }
+    add("recipients.cross_field", "same recipient fields");
+    add("recipients.no_target_self", "target");
+  }
+
+  for (const [field, id] of [
+    ["messageId", "thread.message_id"], ["inReplyTo", "thread.in_reply_to"],
+    ["references", "thread.references"], ["conversation", "thread.conversation"],
+  ]) {
+    if (expectation.thread?.[field] !== undefined) add(id, expectation.thread[field]);
+  }
+  for (const [field, id] of [
+    ["exact", "subject.exact"], ["regex", "subject.regex"], ["policy", "subject.policy"],
+    ["requiredFragments", "subject.required_fragments"], ["forbiddenFragments", "subject.forbidden_fragments"],
+  ]) {
+    if (expectation.subject?.[field] !== undefined) add(id, expectation.subject[field]);
+  }
+  if (expectation.subject !== undefined) add("subject.no_header_injection", "safe headers");
+  for (const [field, id] of [
+    ["requiredFacts", "body.required_facts"], ["forbiddenPatterns", "body.forbidden_patterns"],
+    ["plainText", "body.plain_text"], ["maxSize", "body.max_size"],
+  ]) {
+    if (expectation.body?.[field] !== undefined) add(id, expectation.body[field]);
+  }
+  if (expectation.attachments?.exactly !== undefined) add("attachments.exactly", expectation.attachments.exactly);
+  if (expectation.timing?.replyWithinMs !== undefined) add("timing.reply_within", expectation.timing.replyWithinMs);
+  if (expectation.lifecycle?.submission !== undefined) add("lifecycle.submission", expectation.lifecycle.submission);
+  if (expectation.lifecycle?.actorReceived !== undefined) add("lifecycle.actor_received", expectation.lifecycle.actorReceived);
+  return assertions;
+}
+
+function caseCapabilities(testCase) {
+  const expectation = testCase.expect;
+  const required = new Set();
+  if (expectation.action) required.add("message_action");
+  if (expectation.sender || expectation.recipients?.to || expectation.recipients?.cc) required.add("visible_recipients");
+  if (expectation.recipients?.bcc) required.add("blind_recipients");
+  if (expectation.recipients?.envelope) required.add("envelope_recipients");
+  if (expectation.thread) required.add("thread_headers");
+  if (expectation.subject || expectation.body) required.add("raw_mime");
+  if (expectation.attachments) required.add("attachment_hashes");
+  if (expectation.lifecycle) required.add("delivery_lifecycle");
+  return CAPABILITIES.filter((capability) => required.has(capability));
+}
+
+function makePlan({ baseUrl, aliases, allowedAliases, cases, apiKey, defaults }) {
+  const plannedTimeoutMs = cases.reduce((total, testCase) => (
+    total + (testCase.source.timeoutMs ?? defaults?.timeoutMs ?? 0)
+  ), 0);
+  if (!Number.isSafeInteger(plannedTimeoutMs) || plannedTimeoutMs <= 0
+    || plannedTimeoutMs > executionBounds.maxSuiteTimeoutMs) {
+    throw configurationError("suite_timeout_budget_exceeded", "Suite case timeouts exceed the bounded public runtime budget");
+  }
   return {
     baseUrl,
     recipientAliases: allowedAliases,
     capabilities: [...CAPABILITIES],
     timeouts: { ...TIMEOUTS },
+    executionBudget: {
+      plannedTimeoutMs,
+      maximumTimeoutMs: executionBounds.maxSuiteTimeoutMs,
+    },
     networkSends: false,
-    cases: cases.map((testCase) => ({
-      id: testCase.id,
-      expectedAction: testCase.action,
-      recipientAliases: testCase.addresses.map((address) => aliasOf(aliases, address)),
-    })),
+    cases: cases.map((collected) => {
+      const testCase = collected.source;
+      const sender = testCase.expect.sender;
+      const recipients = testCase.expect.recipients;
+      return {
+        id: collected.id,
+        stimulus: {
+          action: "send",
+          sender: "actor",
+          recipients: ["target"],
+          subject: planString(testCase.send.subject, aliases, apiKey),
+          text: planString(testCase.send.text, aliases, apiKey),
+        },
+        expectedAction: collected.action,
+        expectedSender: {
+          from: sender?.exactly === undefined ? null : aliasOf(aliases, normalizeAddress(sender.exactly, "invalid_suite")),
+          sentAs: sender?.sentAs === undefined ? null : planSentAs(sender.sentAs, apiKey),
+          replyTo: sender?.replyTo === undefined ? null : planAddresses(sender.replyTo, aliases),
+          displayName: sender?.displayName === undefined ? null : planString(sender.displayName, aliases, apiKey),
+        },
+        expectedRecipients: Object.fromEntries(["to", "cc", "bcc", "envelope"].map((field) => [
+          field, recipients?.[field] === undefined ? null : planAddresses(recipients[field], aliases),
+        ])),
+        recipientAliases: collected.addresses.map((address) => aliasOf(aliases, address)),
+        assertions: caseAssertionPlan(testCase, aliases, apiKey),
+        evidenceCapabilities: caseCapabilities(testCase),
+        semanticGraders: [],
+      };
+    }),
   };
 }
 
@@ -345,46 +489,85 @@ function evidenceString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+const ABSENT_IDENTITY = Symbol("absent-identity");
+
+function identityField(source, key) {
+  return source !== null && typeof source === "object" && Object.hasOwn(source, key)
+    ? source[key] : ABSENT_IDENTITY;
+}
+
 function reconciledIdentity(kind, values, { required = false, authoritative = null } = {}) {
-  const observed = values.map(evidenceString).filter(Boolean);
+  const observed = [];
+  for (const value of values) {
+    // Generated SDK views materialize omitted optional message/conversation
+    // class fields as own undefined values, while the API also uses an empty
+    // pre-assignment string. Those exact states are absent. Explicit null and
+    // every other defined value must satisfy the strict string contract.
+    if (value === ABSENT_IDENTITY || value === undefined || value === "") continue;
+    if (typeof value !== "string") {
+      throw transportError("malformed_event", `Evaluation ${kind} reference is malformed`);
+    }
+    observed.push(value);
+  }
   if (new Set(observed).size > 1) {
     throw transportError("conflicting_evidence", `Evaluation ${kind} references conflict`);
   }
   if (required && observed.length === 0) {
     throw transportError("malformed_event", `Evaluation event omitted its ${kind} reference`);
   }
-  return evidenceString(authoritative) ?? observed[0] ?? null;
+  return authoritative === ABSENT_IDENTITY || authoritative === undefined || authoritative === ""
+    ? observed[0] ?? null : authoritative;
 }
 
 function messageIdOf(event, data, message, { required = false } = {}) {
-  return reconciledIdentity("message", [event?.messageId, data?.message_id, message?.id], {
+  return reconciledIdentity("message", [
+    identityField(event, "messageId"), identityField(data, "message_id"), identityField(message, "id"),
+  ], {
     required,
-    authoritative: message?.id,
+    authoritative: identityField(message, "id"),
   });
 }
 
 function conversationIdOf(event, data, message) {
-  return reconciledIdentity("conversation", [event?.conversationId, data?.conversation_id, message?.conversationId], {
-    authoritative: message?.conversationId,
+  return reconciledIdentity("conversation", [
+    identityField(event, "conversationId"), identityField(data, "conversation_id"),
+    identityField(message, "conversationId"),
+  ], {
+    authoritative: identityField(message, "conversationId"),
   });
 }
 
 function normalizedAgent(value) {
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string" || value.length === 0) {
+    throw transportError("malformed_event", "Evaluation mailbox identity is malformed");
+  }
   try {
     return normalizeMailbox(value).address;
   } catch {
-    return null;
+    throw transportError("malformed_event", "Evaluation mailbox identity is malformed");
   }
 }
 
 function eventIsFor(event, expectedAgent, direction) {
   const data = dataOf(event);
-  const envelopeAgent = event.agentEmail === undefined ? null : normalizedAgent(event.agentEmail);
-  const payloadAgent = normalizedAgent(data.agent_email);
-  return payloadAgent === expectedAgent
-    && (envelopeAgent === null || envelopeAgent === expectedAgent)
-    && data.direction === direction;
+  const envelopeIdentity = identityField(event, "agentEmail");
+  const payloadIdentity = identityField(data, "agent_email");
+  const envelopeAgent = envelopeIdentity === ABSENT_IDENTITY ? null : normalizedAgent(envelopeIdentity);
+  if (payloadIdentity === ABSENT_IDENTITY) {
+    throw transportError("malformed_event", "Evaluation event omitted its mailbox identity");
+  }
+  const payloadAgent = normalizedAgent(payloadIdentity);
+  if (envelopeAgent !== null && envelopeAgent !== payloadAgent) {
+    throw transportError("conflicting_evidence", "Evaluation event mailbox identities conflict");
+  }
+  if (typeof data.direction !== "string" || !["inbound", "outbound"].includes(data.direction)) {
+    throw transportError("malformed_event", "Evaluation event direction is malformed");
+  }
+  if (payloadAgent !== expectedAgent) return false;
+  if (data.direction !== direction) {
+    throw transportError("conflicting_evidence", "Evaluation event direction conflicts with its event type");
+  }
+  return true;
 }
 
 function stableEnvelopeRecipients(to, cc, bcc) {
@@ -445,19 +628,89 @@ function validateMessage(message, messageId, direction) {
   return message;
 }
 
-async function mimeFromMessage(message, { required }) {
+function reconcileText(kind, values, { required = false } = {}) {
+  const observed = [];
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") throw transportError("malformed_message", `Evaluation ${kind} evidence is malformed`);
+    observed.push(value);
+  }
+  if (required && observed.length === 0) throw transportError("malformed_message", `Evaluation ${kind} evidence is missing`);
+  if (new Set(observed).size > 1) throw transportError("conflicting_evidence", `Evaluation ${kind} representations conflict`);
+  return observed[0] ?? null;
+}
+
+function reconcileMailbox(kind, values, { required = false, preferred = null } = {}) {
+  const observed = [];
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    observed.push({ source: value, address: normalizedAgent(value) });
+  }
+  if (required && observed.length === 0) throw transportError("malformed_message", `Evaluation ${kind} evidence is missing`);
+  if (new Set(observed.map((entry) => entry.address)).size > 1) {
+    throw transportError("conflicting_evidence", `Evaluation ${kind} representations conflict`);
+  }
+  return preferred ?? observed[0]?.source ?? null;
+}
+
+function normalizedEvidenceAddresses(kind, value, { optional = false } = {}) {
+  if (value === undefined || value === null) {
+    if (optional) return null;
+    throw transportError("malformed_message", `Evaluation ${kind} evidence is missing`);
+  }
+  if (!Array.isArray(value)) throw transportError("malformed_message", `Evaluation ${kind} evidence is malformed`);
+  return value.map((entry) => normalizedAgent(entry)).sort();
+}
+
+function reconcileAddressSources(kind, primary, redundant) {
+  const left = normalizedEvidenceAddresses(kind, primary);
+  if (redundant === undefined || redundant === null) return primary;
+  const right = normalizedEvidenceAddresses(kind, redundant);
+  if (!sameSet(left, right)) throw transportError("conflicting_evidence", `Evaluation ${kind} representations conflict`);
+  return primary;
+}
+
+function reconcileSentAs(values) {
+  const observed = [];
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string" || !SENT_AS_TOKEN.test(value)) {
+      throw transportError("malformed_message", "Evaluation sent-as evidence is malformed");
+    }
+    observed.push(value);
+  }
+  if (new Set(observed).size > 1) throw transportError("conflicting_evidence", "Evaluation sent-as representations conflict");
+  return observed[0] ?? null;
+}
+
+async function mimeFromMessage(message, {
+  required, budget, label = "message", requireMessageId = true,
+}) {
   if (typeof message.rawMessage !== "string") {
     if (required) throw transportError("raw_mime_unavailable", "Evaluation message raw MIME is unavailable");
     return null;
   }
+  const key = typeof message.id === "string" ? message.id : null;
+  const fingerprint = createHash("sha256").update(message.rawMessage).digest("hex");
+  const cached = key === null ? null : budget.cache.get(key);
+  if (cached) {
+    if (cached.fingerprint !== fingerprint) throw transportError("conflicting_evidence", "Evaluation raw MIME changed during observation");
+    return cached.mime;
+  }
   try {
-    return await parseMimeEvidence(message.rawMessage);
-  } catch {
-    throw transportError("mime_observation_failed", "Evaluation message MIME could not be normalized");
+    const mime = await parseMimeEvidence(message.rawMessage, { maxBytes: budget.remaining, requireMessageId });
+    budget.remaining -= mime.sizeBytes;
+    if (key !== null) budget.cache.set(key, { fingerprint, mime });
+    return mime;
+  } catch (error) {
+    if (error instanceof EvalError && error.errorClass === "transport_error") throw error;
+    const reason = error instanceof EvalError && /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
+      ? ` (${error.code})` : "";
+    throw transportError("mime_observation_failed", `Evaluation ${label} MIME could not be normalized${reason}`);
   }
 }
 
-async function normalizeStimulus(sdk, event, actor, target) {
+async function normalizeStimulus(sdk, event, actor, target, budget) {
   const data = dataOf(event);
   if (event.type !== "email.received" || !eventIsFor(event, target, "inbound") || normalizedAgent(data.header_from) !== actor) {
     throw transportError("stimulus_identity_mismatch", "Target stimulus identity could not be verified");
@@ -467,9 +720,15 @@ async function normalizeStimulus(sdk, event, actor, target) {
   const messageId = messageIdOf(event, data, fetchedMessage, { required: true });
   const message = validateMessage(fetchedMessage, messageId, "inbound");
   const conversationId = conversationIdOf(event, data, message);
-  const mime = await mimeFromMessage(message, { required: true });
+  const mime = await mimeFromMessage(message, { required: true, budget, label: "stimulus" });
+  reconcileMailbox("stimulus sender", [data.header_from, message.headerFrom, mime.from], { required: true });
+  const subject = reconcileText("stimulus subject", [data.subject, message.subject, mime.subject], { required: true });
   const to = strings(data.to);
   const cc = strings(data.cc, { optional: true });
+  reconcileAddressSources("stimulus To", to, message.to ?? mime.to);
+  reconcileAddressSources("stimulus To", to, mime.to);
+  reconcileAddressSources("stimulus Cc", cc, message.cc ?? mime.cc);
+  reconcileAddressSources("stimulus Cc", cc, mime.cc);
   const participants = stableEnvelopeRecipients([data.header_from], to, cc).filter((address) => address !== target);
   const receivedAt = instant(data.received_at ?? message.createdAt ?? event.createdAt, "malformed_event").iso;
   const normalized = {
@@ -477,11 +736,28 @@ async function normalizeStimulus(sdk, event, actor, target) {
     messageId,
     conversationId,
     rfcMessageId: mime.messageId,
-    subject: typeof data.subject === "string" ? data.subject : message.subject,
+    subject,
     receivedAt,
   };
   normalized.participants = participants;
   return normalized;
+}
+
+async function refreshStimulusConversation(sdk, stimulus, target) {
+  if (evidenceString(stimulus?.conversationId)) return stimulus;
+  const fetchedMessage = await sdk.messages.get(target, stimulus.messageId);
+  const message = validateMessage(fetchedMessage, stimulus.messageId, "inbound");
+  const conversationId = conversationIdOf(null, null, message);
+  return conversationId === null ? stimulus : { ...stimulus, conversationId };
+}
+
+function bindCorrelatedConversation(stimulus, candidates) {
+  if (evidenceString(stimulus?.conversationId)) return stimulus;
+  const conversations = [...new Set(candidates.map((candidate) => evidenceString(candidate.conversationId)).filter(Boolean))];
+  if (conversations.length > 1) {
+    throw transportError("conflicting_evidence", "Correlated replies carried conflicting conversation references");
+  }
+  return conversations.length === 1 ? { ...stimulus, conversationId: conversations[0] } : stimulus;
 }
 
 function stimulusEvents(events, actor, target, subject, lowerBound, upperBound) {
@@ -584,16 +860,38 @@ async function hydrateCandidateMetadata(sdk, target, metadata) {
   };
 }
 
-async function normalizeCandidate(sdk, target, metadata) {
+async function normalizeCandidate(sdk, target, metadata, budget) {
   const { event, data, messageId, message } = metadata;
   const recipients = outboundRecipients(event.type, data);
   let mime = null;
   let transitions = [];
   if (message) {
-    mime = await mimeFromMessage(message, { required: event.type !== "email.review_requested" });
+    mime = await mimeFromMessage(message, {
+      required: event.type !== "email.review_requested", budget, label: "candidate", requireMessageId: false,
+    });
     if (mime) mime = { ...mime, messageId: canonicalCandidateMessageId(event, data, mime) };
     transitions = await readLifecycle(sdk, target, messageId);
   }
+  const from = reconcileMailbox("candidate sender", [data.from, message?.headerFrom, mime?.from, data.agent_email], {
+    required: true,
+    preferred: mime?.from ?? message?.headerFrom ?? data.from ?? data.agent_email,
+  });
+  const subject = reconcileText("candidate subject", [data.subject, message?.subject, mime?.subject], {
+    required: event.type !== "email.review_requested",
+  });
+  if (mime) {
+    if (message?.to !== undefined) reconcileAddressSources("candidate To", recipients.to, message.to);
+    reconcileAddressSources("candidate To", recipients.to, mime.to);
+    if (recipients.cc !== undefined) {
+      if (message?.cc !== undefined) reconcileAddressSources("candidate Cc", recipients.cc, message.cc);
+      reconcileAddressSources("candidate Cc", recipients.cc, mime.cc);
+    }
+    else if (mime.cc.length > 0) throw transportError("conflicting_evidence", "Evaluation candidate Cc representations conflict");
+    // MessageView.replyTo is deliberately inbound-only and always empty for
+    // outbound rows. It is not a redundant representation of the header the
+    // sender requested, so outbound Reply-To evidence comes from strict MIME.
+  }
+  const sentAs = reconcileSentAs([data.sent_as, message?.sentAs]);
   const observedAt = eventInstant(event).iso;
   return {
     ref: event.id,
@@ -601,12 +899,13 @@ async function normalizeCandidate(sdk, target, metadata) {
     direction: "outbound",
     provenance: "target_outbound",
     messageType: typeof data.message_type === "string" ? data.message_type : null,
-    from: typeof data.from === "string" ? data.from : message?.headerFrom ?? data.agent_email,
-    sentAs: data.agent_email,
+    from,
+    sentAs,
     ...(mime ? { replyTo: mime.replyTo } : {}),
     ...recipients,
     conversationId: metadata.conversationId,
     messageId,
+    subject,
     observedAt,
     sentAt: observedAt,
     mime,
@@ -620,27 +919,52 @@ function relatedByMime(candidate, stimulus) {
     || candidate.mime.references?.includes(stimulus.rfcMessageId);
 }
 
-async function correlatedCandidates(sdk, events, resolvedCase, stimulus, target, lowerBound, upperBound) {
+async function correlatedCandidates(sdk, events, resolvedCase, stimulus, target, lowerBound, upperBound, budget) {
   const stimulusLowerBound = Math.max(lowerBound, instant(stimulus.receivedAt, "malformed_event").milliseconds);
   const eventMetadata = uniqueEvents(events)
     .map((event) => eventCandidateMetadata(event, target, stimulusLowerBound, upperBound))
     .filter(Boolean);
-  const metadata = await Promise.all(eventMetadata.map((entry) => hydrateCandidateMetadata(sdk, target, entry)));
-  const exact = stimulus.conversationId
-    ? metadata.filter((entry) => entry.conversationId === stimulus.conversationId)
-    : [];
-  if (exact.length > 0) return Promise.all(exact.map((entry) => normalizeCandidate(sdk, target, entry)));
-
   if (resolvedCase.expect.action.kind === "new_message") {
-    const plausible = metadata.filter((entry) => normalizedAgent(entry.data.from ?? entry.data.agent_email) === target
+    const plausible = eventMetadata.filter((entry) => normalizedAgent(entry.data.from ?? entry.data.agent_email) === target
       && subjectMatches(entry.subject, resolvedCase.expect.subject, stimulus.subject));
-    if (plausible.length > 1) throw transportError("ambiguous_correlation", "Multiple outbound messages matched the evaluation case");
-    return plausible.length === 1 ? [await normalizeCandidate(sdk, target, plausible[0])] : [];
+    if (plausible.length === 0) return [];
+    // A provider event can omit the authoritative row conversation. Hydrate
+    // and immediately normalize one candidate at a time, then use the durable
+    // conversation to disambiguate without ever retaining a page of raw MIME.
+    const normalized = [];
+    for (const entry of plausible) {
+      const hydrated = await hydrateCandidateMetadata(sdk, target, entry);
+      normalized.push(await normalizeCandidate(sdk, target, hydrated, budget));
+    }
+    if (stimulus.conversationId) {
+      const exact = normalized.filter((candidate) => candidate.conversationId === stimulus.conversationId);
+      if (exact.length === 1) return exact;
+      if (exact.length > 1) throw transportError("ambiguous_correlation", "Multiple outbound messages matched the evaluation case");
+    }
+    if (normalized.length > 1) throw transportError("ambiguous_correlation", "Multiple outbound messages matched the evaluation case");
+    return normalized;
+  }
+
+  // Never retain a page of MessageViews containing raw MIME. When a durable
+  // conversation is available, inspect one row at a time and immediately
+  // normalize only exact matches. If no exact match exists, refetch rows one at
+  // a time for the MIME fallback; the extra bounded reads trade latency for a
+  // strict O(one message) raw-byte footprint.
+  if (stimulus.conversationId) {
+    const exact = [];
+    for (const entry of eventMetadata) {
+      const hydrated = await hydrateCandidateMetadata(sdk, target, entry);
+      if (hydrated.conversationId === stimulus.conversationId) {
+        exact.push(await normalizeCandidate(sdk, target, hydrated, budget));
+      }
+    }
+    if (exact.length > 0) return exact;
   }
 
   const normalized = [];
-  for (const entry of metadata) {
-    const candidate = await normalizeCandidate(sdk, target, entry);
+  for (const entry of eventMetadata) {
+    const hydrated = await hydrateCandidateMetadata(sdk, target, entry);
+    const candidate = await normalizeCandidate(sdk, target, hydrated, budget);
     if (relatedByMime(candidate, stimulus)) normalized.push(candidate);
   }
   return normalized;
@@ -681,7 +1005,7 @@ function uniqueMessageSummaries(summaries) {
   return [...byId.values()];
 }
 
-async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candidates, actor, target, lowerBound, upperBound) {
+async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candidates, actor, target, lowerBound, upperBound, budget) {
   const receipts = [];
   const candidateSubjects = new Set(candidates.map((candidate) => candidate.mime?.subject).filter((subject) => typeof subject === "string"));
   for (const event of uniqueEvents(actorEvents)) {
@@ -696,7 +1020,9 @@ async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candi
     const receivedMessageId = messageIdOf(event, data, message, { required: true });
     validateMessage(message, receivedMessageId, "inbound");
     conversationIdOf(event, data, message);
-    const mime = await mimeFromMessage(message, { required: true });
+    const mime = await mimeFromMessage(message, { required: true, budget, label: "actor receipt" });
+    reconcileMailbox("actor receipt sender", [data.header_from, message.headerFrom, mime.from], { required: true });
+    reconcileText("actor receipt subject", [data.subject, message.subject, mime.subject], { required: true });
     const candidate = candidateForMime(candidates, mime);
     if (candidate) receipts.push({
       ref: event.id,
@@ -714,7 +1040,9 @@ async function findActorReceipt(sdk, actorEvents, actorMessages, baseline, candi
     if (candidateSubjects.size > 0 && !candidateSubjects.has(summary.subject)) continue;
     const message = validateMessage(await sdk.messages.get(actor, summary.id), summary.id, "inbound");
     if (normalizedAgent(message.headerFrom) !== target) continue;
-    const mime = await mimeFromMessage(message, { required: true });
+    const mime = await mimeFromMessage(message, { required: true, budget, label: "actor receipt" });
+    reconcileMailbox("actor receipt sender", [summary.headerFrom, message.headerFrom, mime.from], { required: true });
+    reconcileText("actor receipt subject", [summary.subject, message.subject, mime.subject], { required: true });
     const candidate = candidateForMime(candidates, mime);
     if (!candidate) continue;
     receipts.push({
@@ -749,7 +1077,7 @@ function validateExecution(resolvedCase, context) {
       throw configurationError("invalid_execution_context", "Evaluation execution timing is invalid");
     }
   }
-  for (const field of ["suiteDigest", "runId", "actor", "target"]) {
+  for (const field of ["executionDigest", "runId", "actor", "target"]) {
     if (typeof context?.[field] !== "string" || context[field].length === 0) {
       throw configurationError("invalid_execution_context", "Evaluation execution context is invalid");
     }
@@ -792,13 +1120,131 @@ function evidenceDocument({ capabilities, context, caseStartedAt, sendAcceptedAt
   };
 }
 
+function deadlineBoundClient({
+  client, clientFactory, apiKey, baseUrl, deadline, now,
+  setTimer = setTimeout, clearTimer = clearTimeout,
+}) {
+  const remainingMilliseconds = () => Math.max(0, deadline - clockInstant(now).milliseconds);
+
+  async function call(operation, code, message) {
+    const remaining = remainingMilliseconds();
+    if (remaining <= 0) throw transportError(code, message);
+    const active = client ?? clientFactory({
+      apiKey,
+      baseUrl,
+      maxRetries: 0,
+      maxElapsedMs: remaining,
+      timeoutMs: Math.max(1, Math.min(TIMEOUTS.timeoutMs, remaining)),
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimer(() => {
+        if (settled) return;
+        settled = true;
+        reject(transportError(code, message));
+      }, remaining);
+      Promise.resolve().then(() => operation(active)).then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimer(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimer(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  function list(resource, args) {
+    return {
+      async toArray({ limit }) {
+        if (client) {
+          return call(
+            async (active) => active[resource].list(...args).toArray({ limit }),
+            "observation_failed",
+            "Evaluation evidence read exceeded the case deadline",
+          );
+        }
+        const items = [];
+        const cursors = new Set();
+        let cursor;
+        while (items.length < limit) {
+          const page = await call(
+            async (active) => active[resource].list(...args).page(cursor),
+            "observation_failed",
+            "Evaluation evidence read exceeded the case deadline",
+          );
+          if (!page || !Array.isArray(page.items)) throw transportError("malformed_page", "Evaluation list response is malformed");
+          for (const item of page.items) {
+            items.push(item);
+            if (items.length >= limit) return items;
+          }
+          const next = page.next_cursor;
+          if (!next) return items;
+          if (typeof next !== "string" || cursors.has(next)) {
+            throw transportError("malformed_page", "Evaluation list cursor did not advance safely");
+          }
+          cursors.add(next);
+          cursor = next;
+          if (cursors.size > OBSERVATION_LIMIT + 1) {
+            throw transportError("observation_limit_exceeded", "Evaluation observation exceeded its bounded result limit");
+          }
+        }
+        return items;
+      },
+    };
+  }
+
+  return {
+    messages: {
+      list: (...args) => list("messages", args),
+      get: (...args) => call(
+        (active) => active.messages.get(...args),
+        "observation_failed",
+        "Evaluation message read exceeded the case deadline",
+      ),
+      getLifecycle: (...args) => call(
+        (active) => active.messages.getLifecycle(...args),
+        "observation_failed",
+        "Evaluation lifecycle read exceeded the case deadline",
+      ),
+      send: (...args) => call(
+        (active) => active.messages.send(...args),
+        "stimulus_send_failed",
+        "Evaluation case deadline elapsed during stimulus submission",
+      ),
+    },
+    events: {
+      list: (...args) => list("events", args),
+    },
+  };
+}
+
 /**
  * Creates the e2a transport adapter. Its first operation is deliberately a
  * read-only containment preflight; no protection mutation or mail send lives
  * on this path.
  */
-export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date(), sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) }) {
-  const sdk = client ?? new E2AClient({ apiKey, baseUrl, ...TIMEOUTS });
+export function createE2AAdapter({
+  apiKey, baseUrl, client, now = () => new Date(),
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  mimeBudgetBytes = MIME_CASE_BUDGET_BYTES,
+  clientFactory = (options) => new E2AClient(options),
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+}) {
+  if (!Number.isSafeInteger(mimeBudgetBytes) || mimeBudgetBytes <= 0 || mimeBudgetBytes > MIME_CASE_BUDGET_BYTES) {
+    throw configurationError("invalid_suite", "Evaluation MIME budget is invalid");
+  }
+  if (typeof clientFactory !== "function" || typeof setTimer !== "function" || typeof clearTimer !== "function") {
+    throw configurationError("invalid_suite", "Evaluation network boundary is invalid");
+  }
+  const sdk = client ?? clientFactory({ apiKey, baseUrl, ...TIMEOUTS });
   const capabilities = new ReadonlyCapabilitySet(CAPABILITIES);
 
   return Object.freeze({
@@ -850,7 +1296,9 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
         target: { email: "target" },
         probes: probes.map((address) => aliasOf(aliases, address)),
         protectionDigest,
-        plan: makePlan({ baseUrl: safeBaseUrl, aliases, allowedAliases, cases }),
+        plan: makePlan({
+          baseUrl: safeBaseUrl, aliases, allowedAliases, cases, apiKey, defaults: resolvedSuite.defaults,
+        }),
       };
     },
     async executeCase(resolvedCase, context) {
@@ -862,11 +1310,20 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
       const caseStart = clockInstant(now);
       const caseStartedAt = caseStart.iso;
       const deadline = caseStart.milliseconds + context.timeoutMs;
+      const caseSdk = deadlineBoundClient({
+        client, clientFactory, apiKey, baseUrl, deadline, now, setTimer, clearTimer,
+      });
+      const mimeBudget = { remaining: mimeBudgetBytes, cache: new Map() };
+      const requireSendWindow = () => {
+        if (clockInstant(now).milliseconds >= deadline) {
+          throw transportError("stimulus_send_failed", "Evaluation case deadline elapsed before stimulus submission");
+        }
+      };
       const baselineSince = new Date(caseStart.milliseconds - 2 * context.timeoutMs).toISOString();
       let baselineItems;
       try {
         baselineItems = await boundedItems(
-          sdk.messages.list(actor, { direction: "inbound", since: baselineSince, limit: OBSERVATION_LIMIT }),
+          caseSdk.messages.list(actor, { direction: "inbound", since: baselineSince, limit: OBSERVATION_LIMIT }),
           "baseline_limit_exceeded",
         );
       } catch (error) {
@@ -881,7 +1338,7 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
         text: resolvedCase.send.text,
       });
       const idempotencyKey = `eev1_${createHash("sha256").update([
-        context.suiteDigest,
+        context.executionDigest,
         context.runId,
         resolvedCase.id,
         stableJson(stimulusBody),
@@ -889,7 +1346,8 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
       const sendOptions = Object.freeze({ idempotencyKey, wait: "sent" });
       let sendResult;
       try {
-        sendResult = await sdk.messages.send(actor, stimulusBody, sendOptions);
+        requireSendWindow();
+        sendResult = await caseSdk.messages.send(actor, stimulusBody, sendOptions);
       } catch (error) {
         if (!isConnectionError(error)) {
           throw transportError("stimulus_send_failed", "Evaluation stimulus could not be submitted");
@@ -898,7 +1356,8 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
           // The SDK already exhausted its keyed retries. This is the only
           // explicit recovery: request the server's idempotent replay with the
           // exact same frozen body object and key.
-          sendResult = await sdk.messages.send(actor, stimulusBody, sendOptions);
+          requireSendWindow();
+          sendResult = await caseSdk.messages.send(actor, stimulusBody, sendOptions);
         } catch {
           throw transportError("send_acceptance_unknown", "Evaluation stimulus acceptance could not be established safely");
         }
@@ -920,17 +1379,43 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
         const elapsed = Math.max(logicalElapsed, realElapsed);
         if (elapsed > context.timeoutMs) logicalElapsed = context.timeoutMs;
 
+        // Do not begin a fresh network operation once the case or settle
+        // boundary has already been reached. The previous complete read is
+        // authoritative at that point; attempting one more bounded read would
+        // manufacture an observation failure exactly at the deadline.
+        const boundaryReached = elapsed >= context.timeoutMs
+          || (resolvedCase.expect.action.kind !== "none"
+            && terminalObservedAt !== null
+            && elapsed >= Math.min(context.timeoutMs, terminalObservedAt + context.settleMs));
+        if (boundaryReached) {
+          if (lastReadFailure && lastReadFailure.elapsed >= lastSuccessfulReadAt) {
+            throw transportError("observation_failed", "Evaluation evidence could not be read completely");
+          }
+          if (!lastEvidence.stimulus) {
+            throw transportError("stimulus_not_observed", "Evaluation stimulus receipt was not observed");
+          }
+          return evidenceDocument({
+            capabilities,
+            context: { ...context, actor, target },
+            caseStartedAt,
+            sendAcceptedAt,
+            sendResult,
+            ...lastEvidence,
+            completedAt: clockInstant(now).iso,
+          });
+        }
+
         try {
           const targetEvents = await boundedItems(
-            sdk.events.list({ agentEmail: target, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            caseSdk.events.list({ agentEmail: target, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
             "observation_limit_exceeded",
           );
           const actorEvents = await boundedItems(
-            sdk.events.list({ agentEmail: actor, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            caseSdk.events.list({ agentEmail: actor, since: caseStartedAt, limit: OBSERVATION_LIMIT }),
             "observation_limit_exceeded",
           );
           const actorMessages = await boundedItems(
-            sdk.messages.list(actor, { direction: "inbound", since: caseStartedAt, limit: OBSERVATION_LIMIT }),
+            caseSdk.messages.list(actor, { direction: "inbound", since: caseStartedAt, limit: OBSERVATION_LIMIT }),
             "observation_limit_exceeded",
           );
 
@@ -939,16 +1424,31 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
             const matches = stimulusEvents(targetEvents, actor, target, resolvedCase.send.subject, caseStart.milliseconds, deadline);
             const messageRefs = [...new Set(matches.map((event) => messageIdOf(event, dataOf(event), null, { required: true })))];
             if (messageRefs.length > 1) throw transportError("ambiguous_correlation", "Multiple target messages matched the evaluation stimulus");
-            if (matches.length > 0) stimulus = await normalizeStimulus(sdk, matches[0], actor, target);
+            if (matches.length > 0) stimulus = await normalizeStimulus(caseSdk, matches[0], actor, target, mimeBudget);
           }
 
           let candidates = [];
           let actorReceipt = null;
           if (stimulus) {
-            candidates = await correlatedCandidates(sdk, targetEvents, resolvedCase, stimulus, target, caseStart.milliseconds, deadline);
+            candidates = await correlatedCandidates(
+              caseSdk, targetEvents, resolvedCase, stimulus, target, caseStart.milliseconds, deadline, mimeBudget,
+            );
             candidates.sort((left, right) => left.observedAt.localeCompare(right.observedAt) || left.ref.localeCompare(right.ref));
+            if (candidates.length > 0 && !evidenceString(stimulus.conversationId)) {
+              // An inbound row can receive its agent-local conversation ID only
+              // when the target creates the reply. Refresh that structured row
+              // after MIME correlation so conversation grading remains an
+              // independent durable-source check.
+              stimulus = await refreshStimulusConversation(caseSdk, stimulus, target);
+              if (!evidenceString(stimulus.conversationId) && resolvedCase.expect.action.kind !== "new_message") {
+                // Some inbound APIs assign no target-local conversation until
+                // reply creation and do not backfill MessageView. A uniquely
+                // MIME-correlated reply supplies that same durable thread ID.
+                stimulus = bindCorrelatedConversation(stimulus, candidates);
+              }
+            }
             actorReceipt = await findActorReceipt(
-              sdk, actorEvents, actorMessages, baseline, candidates, actor, target, caseStart.milliseconds, deadline,
+              caseSdk, actorEvents, actorMessages, baseline, candidates, actor, target, caseStart.milliseconds, deadline, mimeBudget,
             );
           }
           lastEvidence = { stimulus, candidates, actorReceipt };
@@ -960,6 +1460,7 @@ export function createE2AAdapter({ apiKey, baseUrl, client, now = () => new Date
         } catch (error) {
           if (error instanceof EvalError && [
             "observation_limit_exceeded", "ambiguous_correlation", "conflicting_event_ref", "conflicting_evidence",
+            "malformed_event", "malformed_message", "mime_observation_failed", "stimulus_identity_mismatch",
           ].includes(error.code)) throw error;
           lastReadFailure = { error, elapsed };
         }

@@ -112,8 +112,12 @@ function isCfws(value) {
   return consumeCfws(value) === value.length;
 }
 
+function trimFws(value) {
+  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
 function sourceMailboxSyntax(value) {
-  const source = value.trim();
+  const source = trimFws(value);
   let quoted = false;
   let escaped = false;
   let commentDepth = 0;
@@ -151,7 +155,7 @@ function sourceMailboxSyntax(value) {
   if (angleStart === -1) return angleEnd === -1 ? { addressSpec: source, displayPrefix: null } : null;
   if (angleEnd < angleStart || !isCfws(source.slice(angleEnd + 1))) return null;
   return {
-    addressSpec: source.slice(angleStart + 1, angleEnd).trim(),
+    addressSpec: trimFws(source.slice(angleStart + 1, angleEnd)),
     displayPrefix: source.slice(0, angleStart),
   };
 }
@@ -215,6 +219,115 @@ function quotedAddressSpec(value) {
   };
 }
 
+const STRICT_ATEXT = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]$/u;
+
+function consumeStrictDotAtom(value, start) {
+  let cursor = start;
+  let segment = 0;
+  let total = 0;
+  while (cursor < value.length) {
+    const character = value[cursor];
+    if (STRICT_ATEXT.test(character)) {
+      segment += 1;
+      total += 1;
+      cursor += 1;
+      continue;
+    }
+    if (character === "." && segment > 0 && STRICT_ATEXT.test(value[cursor + 1] ?? "")) {
+      segment = 0;
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  return total > 0 && segment > 0 ? cursor : -1;
+}
+
+function consumeStrictDomain(value, start) {
+  if (value[start] !== "[") return consumeStrictDotAtom(value, start);
+  let cursor = start + 1;
+  let content = 0;
+  let escaped = false;
+  while (cursor < value.length) {
+    const character = value[cursor];
+    if (escaped) {
+      if (isControl(character)) return -1;
+      escaped = false;
+      content += 1;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "]") {
+      return content > 0 ? cursor + 1 : -1;
+    } else {
+      if (isControl(character) || character === "[") return -1;
+      content += 1;
+    }
+    cursor += 1;
+  }
+  return -1;
+}
+
+function strictUnquotedAddressSpec(value) {
+  let cursor = consumeCfws(value);
+  if (cursor < 0) return null;
+  const localStart = cursor;
+  cursor = consumeStrictDotAtom(value, cursor);
+  if (cursor < 0) return null;
+  const local = value.slice(localStart, cursor).toLowerCase();
+  cursor = consumeCfws(value, cursor);
+  if (cursor < 0 || value[cursor] !== "@") return null;
+  cursor = consumeCfws(value, cursor + 1);
+  if (cursor < 0) return null;
+  const domainStart = cursor;
+  cursor = consumeStrictDomain(value, cursor);
+  if (cursor < 0) return null;
+  const domain = value.slice(domainStart, cursor).toLowerCase();
+  cursor = consumeCfws(value, cursor);
+  return cursor === value.length ? `${local}@${domain}` : null;
+}
+
+function strictDisplayPrefix(value) {
+  // Deliberately accept a conservative RFC phrase subset: ASCII atoms or
+  // quoted strings separated by folding whitespace. Anything outside this
+  // grammar is rejected rather than delegated to a permissive parser.
+  let cursor = 0;
+  let words = 0;
+  const whitespace = () => {
+    const start = cursor;
+    while (value[cursor] === " " || value[cursor] === "\t") cursor += 1;
+    return cursor > start;
+  };
+  whitespace();
+  while (cursor < value.length) {
+    if (value[cursor] === '"') {
+      cursor += 1;
+      let closed = false;
+      while (cursor < value.length) {
+        const character = value[cursor];
+        if (character === '"') { cursor += 1; closed = true; break; }
+        if (character === "\\") {
+          cursor += 1;
+          if (cursor >= value.length || value.charCodeAt(cursor) < 0x20 || value.charCodeAt(cursor) > 0x7e) return false;
+          cursor += 1;
+          continue;
+        }
+        const code = value.charCodeAt(cursor);
+        if (code < 0x20 || code > 0x7e) return false;
+        cursor += 1;
+      }
+      if (!closed) return false;
+    } else {
+      const start = cursor;
+      while (cursor < value.length && /[A-Za-z0-9!#$%&'*+\-./=?^_`{|}~]/.test(value[cursor])) cursor += 1;
+      if (cursor === start) return false;
+    }
+    words += 1;
+    if (cursor === value.length) break;
+    if (!whitespace()) return false;
+  }
+  return words > 0;
+}
+
 function parsedAddressParts(value) {
   const quoted = quotedAddressSpec(value);
   if (quoted) return { local: quoted.parserLocal, domain: quoted.domain };
@@ -260,6 +373,31 @@ export function normalizeMailbox(value) {
   const parsed = addressParser(parserSource, { flatten: true });
   if (parsed.length !== 1) throw new NormalizationError("invalid_mailbox", "Expected exactly one mailbox");
   return normalizedMailbox(parsed[0], syntax, quoted);
+}
+
+/** Strict header mailbox parser that proves the complete source was consumed. */
+export function normalizeMailboxHeader(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\r\n]/.test(value)) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const syntax = sourceMailboxSyntax(value);
+  if (syntax === null || (syntax.displayPrefix !== null && !strictDisplayPrefix(syntax.displayPrefix))) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const addressStart = consumeCfws(syntax.addressSpec);
+  const quoted = addressStart >= 0 && syntax.addressSpec[addressStart] === '"'
+    ? quotedAddressSpec(syntax.addressSpec) : null;
+  const exactAddress = quoted?.address ?? strictUnquotedAddressSpec(syntax.addressSpec);
+  if (exactAddress === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  if (quoted) {
+    const domainStart = quoted.address.lastIndexOf("@") + 1;
+    if (consumeStrictDomain(quoted.address, domainStart) !== quoted.address.length) {
+      throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+    }
+  }
+  const normalized = normalizeMailbox(value);
+  if (normalized.address !== exactAddress) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  return normalized;
 }
 
 /** Replace parser-valid mailbox tokens in free text without matching address prefixes. */

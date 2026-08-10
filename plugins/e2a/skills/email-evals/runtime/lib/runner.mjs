@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -45,6 +45,7 @@ const SECONDARY_CODES = new Set([
   "serialization_failed", "symlink_path", "writer_closed",
 ]);
 const GRADER_BOUNDARIES = new Set(["core", "content"]);
+const SENT_AS_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
 
 function invalidEvidence() {
   throw new TypeError("invalid evidence");
@@ -138,20 +139,37 @@ function projectAttachment(value) {
 
 function projectMime(value, stored) {
   if (value === null) return null;
-  const source = exactObject(value, new Set([
-    "messageId", "inReplyTo", "references", "subject", "from", "replyTo", "text", "htmlPresent", "sizeBytes", "attachments",
-  ]));
+  const allowed = new Set([
+    "messageId", "inReplyTo", "references", "subject", "from", "fromAddress", "replyTo", "to", "cc",
+    "text", "htmlPresent", "sizeBytes", "attachments",
+  ]);
+  if (stored) allowed.add("textRedactions");
+  const source = exactObject(value, allowed);
   const result = {};
   for (const key of ["messageId", "inReplyTo"]) copyOptional(source, result, key, (entry) => headerTokenValue(entry, { nullable: true }));
   for (const key of ["subject", "text"]) copyOptional(source, result, key, (entry) => textValue(entry, { nullable: true }));
   copyOptional(source, result, "references", (entry) => stringArray(entry, headerTokenValue));
   copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
-  copyOptional(source, result, "replyTo", (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
+  copyOptional(source, result, "fromAddress", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  for (const key of ["replyTo", "to", "cc"]) {
+    copyOptional(source, result, key, (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
+  }
   copyOptional(source, result, "htmlPresent", booleanValue);
   copyOptional(source, result, "sizeBytes", integerValue);
   copyOptional(source, result, "attachments", (entry) => {
     if (!Array.isArray(entry)) invalidEvidence();
     return entry.map(projectAttachment);
+  });
+  if (stored) copyOptional(source, result, "textRedactions", (entry) => {
+    const metadata = exactObject(entry, new Set(["forbiddenPatternDigests"]));
+    if (!Array.isArray(metadata.forbiddenPatternDigests)
+      || metadata.forbiddenPatternDigests.length < 1 || metadata.forbiddenPatternDigests.length > 100) invalidEvidence();
+    const digests = metadata.forbiddenPatternDigests.map((digest) => {
+      if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) invalidEvidence();
+      return digest;
+    });
+    if (new Set(digests).size !== digests.length) invalidEvidence();
+    return { forbiddenPatternDigests: [...digests].sort() };
   });
   return result;
 }
@@ -183,13 +201,15 @@ function projectCandidateLifecycle(value, stored) {
 function projectCandidate(value, stored) {
   const source = exactObject(value, new Set([
     "ref", "eventType", "direction", "provenance", "messageType", "from", "sentAs", "replyTo", "to", "cc", "bcc",
-    "envelopeRecipients", "conversationId", "messageId", "observedAt", "sentAt", "mime", "lifecycle",
+    "envelopeRecipients", "conversationId", "messageId", "subject", "observedAt", "sentAt", "mime", "lifecycle",
   ]));
   const result = {};
   for (const key of ["ref", "eventType", "direction", "provenance", "messageType", "conversationId", "messageId", "observedAt", "sentAt"]) {
     copyOptional(source, result, key, (entry) => tokenValue(entry, { nullable: true }));
   }
-  for (const key of ["from", "sentAs"]) copyOptional(source, result, key, (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "from", (entry) => mailboxValue(entry, stored, { nullable: true }));
+  copyOptional(source, result, "sentAs", (entry) => tokenValue(entry, { nullable: true }));
+  copyOptional(source, result, "subject", (entry) => textValue(entry, { nullable: true }));
   for (const key of ["replyTo", "to", "cc", "bcc", "envelopeRecipients"]) {
     copyOptional(source, result, key, (entry) => stringArray(entry, (address) => mailboxValue(address, stored)));
   }
@@ -293,6 +313,20 @@ function projectEvidence(value, { stored = false } = {}) {
   return result;
 }
 
+function forbiddenPatternDigests(expectation) {
+  const patterns = expectation?.body?.forbiddenPatterns;
+  if (!Array.isArray(patterns)) return [];
+  return [...new Set(patterns.filter((pattern) => typeof pattern === "string").map((pattern) => (
+    createHash("sha256").update(pattern).digest("hex")
+  )))].sort();
+}
+
+function evidenceRedactionDigests(evidence) {
+  return [...new Set((evidence?.candidates ?? []).flatMap((candidate) => (
+    candidate?.mime?.textRedactions?.forbiddenPatternDigests ?? []
+  )))].sort();
+}
+
 function instant(now) {
   let value;
   try {
@@ -365,6 +399,7 @@ function requiredCapabilities(suite) {
 function validateSuite(suite) {
   if (!suite || typeof suite !== "object" || !Array.isArray(suite.cases)
     || typeof suite.digest !== "string" || !/^[a-f0-9]{64}$/.test(suite.digest)
+    || typeof suite.executionDigest !== "string" || !/^[a-f0-9]{64}$/.test(suite.executionDigest)
     || typeof suite.name !== "string" || !suite.actor?.email || !suite.target?.email || !suite.defaults
     || suite.cases.some((testCase) => !testCase || typeof testCase !== "object" || typeof testCase.id !== "string")) {
     throw new EvalError("configuration_error", "invalid_suite", "Resolved evaluation suite is invalid");
@@ -405,7 +440,7 @@ function primaryEvalError(errorClass, code, message, origin, boundary) {
   };
 }
 
-function runGraders(expectation, evidence) {
+function runGraders(expectation, evidence, { replayRedactions = false } = {}) {
   let core;
   try {
     core = gradeCore(expectation, evidence);
@@ -413,7 +448,7 @@ function runGraders(expectation, evidence) {
     return { assertions: [], boundary: "core" };
   }
   try {
-    return { assertions: [...core, ...gradeContent(expectation, evidence)], boundary: null };
+    return { assertions: [...core, ...gradeContent(expectation, evidence, { replayRedactions })], boundary: null };
   } catch {
     return { assertions: [], boundary: "content" };
   }
@@ -473,7 +508,10 @@ function summaryDocument({ runId, startedAt, completedAt, suite, capabilities, c
     durations,
     capabilities: [...capabilities].sort(),
     versions: { runner: RUNNER_VERSION, sdk: SDK_VERSION, suite: suite.version, evidence: EVIDENCE_VERSION },
-    suite: { name: artifactSuiteName(suite), version: suite.version, digest: suite.digest },
+    suite: {
+      name: artifactSuiteName(suite), version: suite.version,
+      digest: suite.digest, executionDigest: suite.executionDigest,
+    },
     cases,
     files,
     ...(secondaryErrors.length > 0 ? { secondaryErrors } : {}),
@@ -482,7 +520,7 @@ function summaryDocument({ runId, startedAt, completedAt, suite, capabilities, c
 
 function executionContext(suite, testCase, runId, startedAt) {
   return {
-    suiteDigest: suite.digest,
+    executionDigest: suite.executionDigest,
     runId,
     actor: suite.actor.email,
     target: suite.target.email,
@@ -570,7 +608,7 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
     completedAt: caseEnd.iso,
     durations: { executionMs, gradingMs, totalMs: elapsed(caseStart.milliseconds, caseEnd.milliseconds) },
     versions: { evidence: EVIDENCE_VERSION },
-    suite: { version: suite.version, digest: suite.digest },
+    suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
     expectation: testCase.expect,
     evidence,
     assertions,
@@ -584,7 +622,7 @@ function artifactLimitRecord(suite, testCase) {
     id: artifactCaseId(suite, testCase.id),
     status: "error",
     versions: { evidence: EVIDENCE_VERSION },
-    suite: { version: suite.version, digest: suite.digest },
+    suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
     evidence: null,
     assertions: [],
     primaryError: primaryEvalError(
@@ -841,7 +879,7 @@ function restoreAliasValue(value, parentKey = "", forceAddress = false) {
   }
   const result = {};
   for (const [key, entry] of Object.entries(value)) {
-    const childAddress = ["address", "email", "mailbox", "from", "headerFrom", "sentAs", "recipient", "actor", "target"].includes(key)
+    const childAddress = ["address", "email", "mailbox", "from", "headerFrom", "recipient", "actor", "target"].includes(key)
       || ["to", "cc", "bcc", "replyTo", "envelopeRecipients", "participants"].includes(key)
       || (key === "exactly" && ["sender", "replyTo", "to", "cc", "bcc", "envelope"].includes(parentKey));
     result[key] = restoreAliasValue(entry, key, childAddress);
@@ -898,11 +936,12 @@ function exactCaseObject(value, allowed) {
   }
 }
 
-function safeStoredString(value, { nullable = false } = {}) {
+function safeStoredString(value, { nullable = false, allowSentAs = false } = {}) {
   if (nullable && value === null) return null;
   if (typeof value !== "string" || value.length > MAX_EVIDENCE_STRING) invalidCaseArtifact();
   if (containsMailboxText(value)) invalidCaseArtifact();
-  if (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(value)) invalidCaseArtifact();
+  if (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(value)
+    && !(allowSentAs && SENT_AS_TOKEN.test(value))) invalidCaseArtifact();
   return value;
 }
 
@@ -922,22 +961,24 @@ function storedArtifactContainsSecret(value, suite) {
   const secrets = [suite?.transport?.apiKey, ...(suite?.[RESOLVED_ENVIRONMENT_VALUES] ?? []).map((entry) => entry?.value)]
     .filter((entry) => typeof entry === "string" && entry.length > 0 && !SEMANTIC_ENV_VALUES.includes(entry));
   let unsafe = false;
-  const visit = (entry) => {
+  const visit = (entry, parentKey = "", allowSentAs = false) => {
     if (unsafe) return;
     if (typeof entry === "string") {
       unsafe = containsMailboxText(entry)
-        || /\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(entry)
+        || (/\b(?:sk|e2a)_[A-Za-z0-9_-]+\b/.test(entry)
+          && !((allowSentAs || parentKey === "sentAs") && SENT_AS_TOKEN.test(entry)))
         || secrets.some((secret) => entry.includes(secret));
       return;
     }
     if (Array.isArray(entry)) {
-      for (const item of entry) visit(item);
+      for (const item of entry) visit(item, parentKey, allowSentAs);
       return;
     }
     if (entry && typeof entry === "object") {
+      const sentAsAssertion = entry.id === "sender.sent_as";
       for (const [key, item] of Object.entries(entry)) {
         if (DANGEROUS_OBJECT_KEYS.has(key) || /[\u0000-\u001F\u007F]/.test(key)) { unsafe = true; return; }
-        visit(item);
+        visit(item, key, allowSentAs || (sentAsAssertion && ["expected", "actual"].includes(key)));
       }
     }
   };
@@ -945,20 +986,22 @@ function storedArtifactContainsSecret(value, suite) {
   return unsafe;
 }
 
-function projectStoredDiagnostic(value, depth = 0) {
+function projectStoredDiagnostic(value, depth = 0, parentKey = "", allowSentAs = false) {
   if (depth > 64) invalidCaseArtifact();
   if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "string") return safeStoredString(value);
+  if (typeof value === "string") return safeStoredString(value, {
+    allowSentAs: allowSentAs || parentKey === "sentAs",
+  });
   if (typeof value === "number") {
     if (!Number.isFinite(value)) invalidCaseArtifact();
     return value;
   }
-  if (Array.isArray(value)) return value.map((entry) => projectStoredDiagnostic(entry, depth + 1));
+  if (Array.isArray(value)) return value.map((entry) => projectStoredDiagnostic(entry, depth + 1, parentKey, allowSentAs));
   const source = exactCaseObject(value, new Set(Object.keys(value ?? {})));
   const result = {};
   for (const [key, entry] of Object.entries(source)) {
     if (/^(?:raw(?:mime|message)?(?:base64)?|attachmentbytes|contentbytes|bytes|content)$/i.test(key)) invalidCaseArtifact();
-    result[key] = projectStoredDiagnostic(entry, depth + 1);
+    result[key] = projectStoredDiagnostic(entry, depth + 1, key, allowSentAs);
   }
   return result;
 }
@@ -992,12 +1035,14 @@ function projectStoredAssertion(value) {
     || !Object.hasOwn(source, "id") || !Object.hasOwn(source, "code")
     || !Object.hasOwn(source, "expected") || !Object.hasOwn(source, "actual")
     || !Array.isArray(source.evidenceRefs)) invalidCaseArtifact();
+  const id = safeStoredIdentifier(source.id);
+  const sentAs = id === "sender.sent_as";
   return {
-    id: safeStoredIdentifier(source.id),
+    id,
     status: source.status,
     code: safeStoredIdentifier(source.code),
-    expected: projectStoredDiagnostic(source.expected),
-    actual: projectStoredDiagnostic(source.actual),
+    expected: projectStoredDiagnostic(source.expected, 0, "", sentAs),
+    actual: projectStoredDiagnostic(source.actual, 0, "", sentAs),
     evidenceRefs: source.evidenceRefs.map((entry) => safeStoredControlFreeString(entry)),
   };
 }
@@ -1007,7 +1052,7 @@ function expectedArtifactExpectation(suite, testCase) {
     id: testCase.id,
     status: "pass",
     versions: { evidence: EVIDENCE_VERSION },
-    suite: { version: suite.version, digest: suite.digest },
+    suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
     expectation: testCase.expect,
     evidence: { version: EVIDENCE_VERSION, capabilities: [], candidates: [] },
     assertions: [],
@@ -1040,10 +1085,11 @@ function validateStoredArtifactLimitRecord(record, suite) {
     "id", "status", "versions", "suite", "evidence", "assertions", "primaryError", "secondaryErrors",
   ]));
   const versions = exactCaseObject(source.versions, new Set(["evidence"]));
-  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest"]));
+  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest", "executionDigest"]));
   const primaryError = projectStoredError(source.primaryError);
   if (source.status !== "error" || versions.evidence !== EVIDENCE_VERSION
-    || suiteRef.version !== suite.version || suiteRef.digest !== suite.digest
+    || suiteRef.version !== suite.version || !/^[a-f0-9]{64}$/.test(suiteRef.digest)
+    || suiteRef.executionDigest !== suite.executionDigest
     || source.evidence !== null || !Array.isArray(source.assertions) || source.assertions.length !== 0
     || !Array.isArray(source.secondaryErrors) || source.secondaryErrors.length !== 0
     || primaryError.class !== "transport_error" || primaryError.code !== "cases_artifact_limit"
@@ -1052,7 +1098,7 @@ function validateStoredArtifactLimitRecord(record, suite) {
     id: safeStoredControlFreeString(source.id),
     status: "error",
     versions: { evidence: EVIDENCE_VERSION },
-    suite: { version: suite.version, digest: suite.digest },
+    suite: { version: suite.version, digest: suiteRef.digest, executionDigest: suiteRef.executionDigest },
     evidence: null,
     assertions: [],
     primaryError: { ...primaryError, message: ARTIFACT_LIMIT_MESSAGE },
@@ -1073,16 +1119,18 @@ function validateStoredRecord(record, suite, testCase) {
   if (!["pass", "fail", "error"].includes(source.status) || !Array.isArray(source.assertions)
     || !Array.isArray(source.secondaryErrors)) invalidCaseArtifact();
   const versions = exactCaseObject(source.versions, new Set(["evidence"]));
-  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest"]));
-  if (versions.evidence !== EVIDENCE_VERSION || suiteRef.version !== suite.version || suiteRef.digest !== suite.digest) invalidCaseArtifact();
-  const expected = expectedArtifactExpectation(suite, testCase);
-  if (JSON.stringify(canonicalObservedAliases(source.expectation))
-    !== JSON.stringify(canonicalObservedAliases(expected))) invalidCaseArtifact();
+  const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest", "executionDigest"]));
+  if (versions.evidence !== EVIDENCE_VERSION || suiteRef.version !== suite.version
+    || typeof suiteRef.digest !== "string" || !/^[a-f0-9]{64}$/.test(suiteRef.digest)
+    || suiteRef.executionDigest !== suite.executionDigest) invalidCaseArtifact();
+  projectStoredDiagnostic(source.expectation);
 
   let evidence = null;
   if (source.evidence !== null) {
     try { evidence = projectEvidence(source.evidence, { stored: true }); } catch { invalidCaseArtifact(); }
   }
+  const allowedRedactions = new Set(forbiddenPatternDigests(source.expectation));
+  if (evidenceRedactionDigests(evidence).some((digest) => !allowedRedactions.has(digest))) invalidCaseArtifact();
   const assertions = source.assertions.map(projectStoredAssertion);
   const primaryError = projectStoredError(source.primaryError);
   const secondaryErrors = source.secondaryErrors.map((entry) => projectStoredError(entry, { secondary: true }));
@@ -1115,14 +1163,8 @@ function validateStoredRecord(record, suite, testCase) {
     if (evidence === null) invalidCaseArtifact();
     if (primaryError.class === "grader_error") {
       if (source.status !== "error" || assertions.length !== 0) invalidCaseArtifact();
-      // A stored grader failure is only evidence that the historical runner
-      // crossed this boundary. Rebuild exclusively from the trusted suite
-      // expectation and the closed evidence projection, then require the same
-      // deterministic boundary to throw now. The stored message is never used.
-      const rebuiltExpectation = trustedReplayExpectation(testCase, expected);
-      const rebuiltEvidence = restoreAliasValue(evidence);
-      const graded = runGraders(rebuiltExpectation, rebuiltEvidence);
-      if (graded.boundary !== primaryError.boundary) invalidCaseArtifact();
+      // A historical grader boundary is validated structurally only. Current
+      // trusted assertions may legitimately remove the old throwing path.
     } else {
       const classified = classifyAssertions(assertions);
       if (classified.status !== source.status || classified.error?.class !== primaryError.class
@@ -1155,7 +1197,7 @@ function validateStoredRecord(record, suite, testCase) {
     id: safeStoredControlFreeString(source.id),
     status: source.status,
     versions: { evidence: EVIDENCE_VERSION },
-    suite: { version: suite.version, digest: suite.digest },
+    suite: { version: suite.version, digest: suiteRef.digest, executionDigest: suiteRef.executionDigest },
     expectation: source.expectation,
     evidence,
     assertions,
@@ -1247,8 +1289,8 @@ async function readStoredRun(runDirectory) {
 export async function regradeRun({ suite, runDirectory } = {}) {
   validateSuite(suite);
   const stored = await readStoredRun(runDirectory);
-  if (stored.records.some((record) => record?.suite?.digest !== suite.digest)) {
-    throw new EvalError("configuration_error", "suite_digest_mismatch", "Stored run does not match the resolved suite digest");
+  if (stored.records.some((record) => record?.suite?.executionDigest !== suite.executionDigest)) {
+    throw new EvalError("configuration_error", "suite_execution_digest_mismatch", "Stored run execution inputs do not match the resolved suite");
   }
   if (stored.records.some((record) => record?.versions?.evidence !== EVIDENCE_VERSION)) {
     throw new EvalError("configuration_error", "evidence_version_mismatch", "Stored run evidence version is unsupported");
@@ -1260,6 +1302,19 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     throw new EvalError("configuration_error", "case_set_mismatch", "Stored run cases do not exactly match the resolved suite");
   }
   const validatedRecords = stored.records.map((record, index) => validateStoredRecord(record, suite, suite.cases[index]));
+  for (const [index, record] of validatedRecords.entries()) {
+    if (evidenceRedactionDigests(record.evidence).length === 0) continue;
+    const storedPatterns = forbiddenPatternDigests(record.expectation);
+    const currentPatterns = forbiddenPatternDigests(suite.cases[index].expect);
+    if (storedPatterns.length !== currentPatterns.length
+      || storedPatterns.some((digest, patternIndex) => digest !== currentPatterns[patternIndex])) {
+      throw new EvalError(
+        "configuration_error",
+        "redacted_evidence_assertion_change",
+        "Forbidden-pattern assertions cannot change when stored body evidence required redaction",
+      );
+    }
+  }
   let artifactLimitSuffix = false;
   for (const record of validatedRecords) {
     const compact = record.primaryError?.code === "cases_artifact_limit";
@@ -1268,16 +1323,22 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   }
 
   const cases = validatedRecords.map((storedRecord, index) => {
+    const currentArtifactExpectation = expectedArtifactExpectation(suite, suite.cases[index]);
+    const expectation = trustedReplayExpectation(suite.cases[index], currentArtifactExpectation);
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
       || storedRecord.primaryError?.class === "target_timeout"
-      || storedRecord.primaryError?.class === "grader_error"
-      || (storedRecord.primaryError?.class === "transport_error" && storedRecord.primaryError.origin !== "grader")) return storedRecord;
-    const expectation = trustedReplayExpectation(suite.cases[index], storedRecord.expectation);
+      || (storedRecord.primaryError?.class === "transport_error" && storedRecord.primaryError.origin !== "grader")) {
+      return {
+        ...storedRecord,
+        suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
+        ...(Object.hasOwn(storedRecord, "expectation") ? { expectation: currentArtifactExpectation } : {}),
+      };
+    }
     const evidence = restoreAliasValue(storedRecord.evidence);
     let assertions = [];
     let status = "pass";
     let error = null;
-    const graded = runGraders(expectation, evidence);
+    const graded = runGraders(expectation, evidence, { replayRedactions: true });
     if (graded.boundary === null) {
       assertions = graded.assertions;
       ({ status, error } = classifyAssertions(assertions));
@@ -1288,7 +1349,11 @@ export async function regradeRun({ suite, runDirectory } = {}) {
         "A deterministic grader threw while evaluating captured evidence", "grader", graded.boundary,
       );
     }
-    return aliasCaseRecord({ ...storedRecord, status, expectation, evidence, assertions, primaryError: error }, aliasSuiteFor(storedRecord, suite));
+    return aliasCaseRecord({
+      ...storedRecord,
+      suite: { version: suite.version, digest: suite.digest, executionDigest: suite.executionDigest },
+      status, expectation, evidence, assertions, primaryError: error,
+    }, aliasSuiteFor({ ...storedRecord, expectation }, suite));
   });
 
   let prior = {};
@@ -1319,7 +1384,10 @@ export async function regradeRun({ suite, runDirectory } = {}) {
     durations: prior.durations,
     capabilities: prior.capabilities,
     versions: { runner: RUNNER_VERSION, sdk: SDK_VERSION, suite: suite.version, evidence: EVIDENCE_VERSION },
-    suite: { name: artifactSuiteName(suite), version: suite.version, digest: suite.digest },
+    suite: {
+      name: artifactSuiteName(suite), version: suite.version,
+      digest: suite.digest, executionDigest: suite.executionDigest,
+    },
     cases,
   };
   return rewriteDerivedArtifacts({ runDirectory: stored.canonical, summary });

@@ -10,6 +10,7 @@ expect:
     count: 1
   sender:
     exactly: ${__TARGET_ENV__}
+    sent_as: own_address
     reply_to:
       exactly: []
   recipients:
@@ -22,6 +23,7 @@ expect:
     envelope:
       exactly: ["${__ACTOR_ENV__}"]
   thread:
+    message_id: required
     in_reply_to: original
     references: contains_original
     conversation: same

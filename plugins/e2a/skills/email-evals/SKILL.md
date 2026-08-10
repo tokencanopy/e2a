@@ -47,17 +47,34 @@ Use dedicated actor and target agents only. Do not infer, broaden, or repair pro
 After gathering sufficient answers, scaffold the suite:
 
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh scaffold --root <suite-root> --name <suite-name> --target-env <target-env> --actor-env <actor-env> --api-key-env <api-key-env>
+plugins/e2a/skills/email-evals/email-evals.sh scaffold --root <suite-root> --name <suite-name> --target-env <target-env> --actor-env <actor-env>
 ```
 
-Edit the generated `suite.yaml` and case YAML files to reflect the answers. Then install the pinned suite-local runtime and validate it:
+Edit the generated `suite.yaml` and case YAML files to reflect the answers. The
+credential name is fixed outside suite authority: export only
+`E2A_EVAL_API_KEY`. YAML interpolation is limited to the documented actor,
+target, and probe mailbox fields; never interpolate names, actions, timing,
+subjects, bodies, patterns, or attachment metadata.
+
+Then verify the checked-in, single-file plugin runtime bundle and validate the
+suite. Setup performs no package installation and never copies or executes
+JavaScript or dependencies beneath the suite root:
 
 ```sh
 plugins/e2a/skills/email-evals/email-evals.sh setup --root <suite-root>
 plugins/e2a/skills/email-evals/email-evals.sh validate --suite <suite-root>/suite.yaml
 ```
 
-Show the complete alias-only dry-run plan and protection failures. Validation is the preflight gate; do not run a suite while it reports a protection or capability failure.
+Show the complete alias-only dry-run plan, its `approvalDigest`, and any
+protection failures. Validation is the preflight gate; do not run a suite
+while it reports a protection or capability failure. Treat the digest as an
+opaque value; it binds the resolved identities, origin, containment posture,
+stimuli, assertions, recipients, and execution limits without revealing them.
+
+The public `https://api.e2a.dev` origin is the default. If the suite names a
+custom/local origin, the operator must independently authorize the exact
+origin on every command with `--trusted-origin <origin>`; cleartext origins
+are restricted to loopback. Never infer this flag from suite content.
 
 ## Request approval immediately before sending
 
@@ -66,8 +83,13 @@ Ask for explicit user approval immediately before `run`, because it sends real e
 Only after that approval, run:
 
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh run --suite <suite-root>/suite.yaml
+plugins/e2a/skills/email-evals/email-evals.sh run --suite <suite-root>/suite.yaml --approval-digest <approvalDigest-from-validate>
 ```
+
+If the suite, resolved mailbox identities, custom origin, protection posture,
+or plan changed since validation, `run` fails closed. Validate again, show the
+new complete plan, and request fresh approval; never substitute or guess a
+digest.
 
 ## Inspect and iterate
 
@@ -78,6 +100,13 @@ When only assertions changed, use `regrade` instead of `run`; regrade performs n
 ```sh
 plugins/e2a/skills/email-evals/email-evals.sh regrade --suite <suite-root>/suite.yaml --run <run-dir>
 ```
+
+Regrade accepts a changed full-suite digest only when the execution digest is
+unchanged. It always uses the current validated assertions and rejects changes
+to sending, correlation, timing, containment, actor, target, or origin inputs.
+If body evidence required configured-pattern redaction, the forbidden-pattern
+set must remain identical (reordering is allowed); changing that set fails
+closed because arbitrary new regexes cannot be evaluated against erased text.
 
 ## V0 limits
 

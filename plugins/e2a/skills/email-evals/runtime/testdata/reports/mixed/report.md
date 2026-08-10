@@ -4,6 +4,7 @@
 - Status: **fail**
 - Cases: 0 passed, 1 failed, 1 errors
 - Suite digest: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+- Execution digest: `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
 
 | Case | Status | Primary result |
 | --- | --- | --- |

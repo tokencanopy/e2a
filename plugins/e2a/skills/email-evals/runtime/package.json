@@ -12,5 +12,8 @@
     "@e2a/sdk": "5.6.0",
     "postal-mime": "2.7.5",
     "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
   }
 }
