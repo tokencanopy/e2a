@@ -1,0 +1,54 @@
+{
+  "$comment": "Single source of truth for every generated core plugin + marketplace manifest. Edit this file, then run `node scripts/generate-plugin-manifests.mjs`. Never hand-edit a generated manifest — scripts/validate-plugin.mjs regenerates and fails CI on drift. Not read by any client; both Agent Plugins and Claude Code ignore unknown root files.",
+
+  "name": "e2a",
+  "displayName": "e2a",
+  "version": "0.8.0",
+  "license": "Apache-2.0",
+  "homepage": "https://e2a.dev",
+  "repository": "https://github.com/tokencanopy/e2a",
+  "icon": "./assets/icon.svg",
+
+  "author": {
+    "name": "TokenCanopy",
+    "url": "https://e2a.dev",
+    "email": "support@e2a.dev"
+  },
+
+  "keywords": ["email", "smtp", "agents", "spf", "dkim", "inbox", "mcp", "oauth"],
+
+  "descriptions": {
+    "$comment": "Three variants ship today. `manifest` omits HITL; both marketplace variants mention it. See docs/design/2026-08-09-agent-plugins-conformance.md — unifying them is a copy decision, deliberately not made by this migration. The MCP tool count must match mcp/tool-names.v1.json; the validator checks numeric claims.",
+    "manifest": "Authenticated email gateway for AI agents — per-agent inboxes, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+    "marketplaceLong": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+    "marketplaceShort": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log."
+  },
+
+  "mcp": {
+    "id": "e2a",
+    "url": "https://api.e2a.dev/mcp"
+  },
+
+  "codexInterface": {
+    "shortDescription": "Authenticated email for AI agents",
+    "longDescription": "Bundles the hosted e2a MCP server and five stable skills for setup, application integration, inbox operation, diagnosis, and evaluation — with SPF/DKIM verification, custom domains, attachments, and a replayable event log.",
+    "developerName": "TokenCanopy",
+    "category": "Productivity"
+  },
+
+  "marketplaces": {
+    "claude": {
+      "blurb": "e2a plugins for Claude Code — authenticated email for AI agents",
+      "category": "productivity"
+    },
+    "cursor": {
+      "blurb": "e2a — authenticated email gateway for AI agents (MCP configuration and canonical docs).",
+      "extraKeyword": "cursor"
+    },
+    "agents": {
+      "category": "Productivity"
+    }
+  },
+
+  "source": "./plugins/e2a"
+}

@@ -62,8 +62,10 @@ supplies the e2a MCP connection and authentication.
 
 ```
 plugins/e2a-labs/
-├── .claude-plugin/plugin.json  # Claude Code manifest; depends on core e2a
-├── .codex-plugin/plugin.json   # Codex manifest; skills only
+├── plugin.meta.json            # SOURCE OF TRUTH — the manifests below are generated from it
+├── plugin.json                 # Agent Plugins v1 portable manifest (generated)
+├── .claude-plugin/plugin.json  # Claude Code manifest; depends on core e2a (generated)
+├── .codex-plugin/plugin.json   # Codex manifest; skills only (generated)
 ├── assets/icon.svg
 └── skills/
     ├── agentify/               # autonomous-repo feedback-loop deployment
@@ -71,5 +73,7 @@ plugins/e2a-labs/
     └── tether/                  # email handoff for long-running sessions
 ```
 
-There is intentionally no Cursor manifest and no `.mcp.json`: core e2a is the
-sole owner of the e2a MCP connection.
+There is intentionally no Cursor manifest and no `.mcp.json`/`mcp.json`: core
+e2a is the sole owner of the e2a MCP connection. Edit `plugin.meta.json` and
+run `node scripts/generate-plugin-manifests.mjs` to change any manifest —
+hand edits fail CI.

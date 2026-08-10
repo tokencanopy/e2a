@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
+// Every manifest an agent-facing client reads at install time. Deliberately
+// excluded: the three marketplace.json files and the two plugin.meta.json
+// sources, which carry marketplace copy (it names HITL on purpose) rather
+// than agent guidance.
 const coreAgentFiles = [
   "plugins/e2a/README.md",
   "plugins/e2a/docs/auth.md",
@@ -10,6 +14,8 @@ const coreAgentFiles = [
   "plugins/e2a/docs/sdk.md",
   "plugins/e2a/docs/templates.md",
   "plugins/e2a/skills/e2a/SKILL.md",
+  "plugins/e2a/plugin.json",
+  "plugins/e2a/mcp.json",
   "plugins/e2a/.claude-plugin/plugin.json",
   "plugins/e2a/.codex-plugin/plugin.json",
   "plugins/e2a/.cursor-plugin/plugin.json",
