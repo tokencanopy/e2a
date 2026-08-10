@@ -57,6 +57,11 @@ function successfulMessages() {
     text: "Refunds are available within 30 days.",
   });
   return {
+    msg_synthetic_actor_out: {
+      id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
+      createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR, to: [TARGET], cc: [],
+      replyTo: [], subject: SUBJECT, rawMessage: original,
+    },
     msg_synthetic_target_in: {
       id: "msg_synthetic_target_in", direction: "inbound", conversationId: "conv_synthetic",
       createdAt: new Date("2026-08-08T12:00:01.000Z"), headerFrom: ACTOR, to: [TARGET], cc: [],
@@ -831,13 +836,16 @@ test("documented accepted response binds relay and provider identity from durabl
     messageId: "original@agents.localhost", from: actorPhysical, to: TARGET, replyTo: ACTOR,
     subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
   });
+  // MessageView deliberately carries no providerMessageId field. The durable
+  // provider identity arrives on the terminal email.sent event instead.
   messages.msg_synthetic_actor_out = {
     id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
     createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR,
     envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [],
-    sentAs: "relay", providerMessageId: "<original@agents.localhost>",
+    sentAs: "relay",
     subject: SUBJECT, rawMessage: actorOutbound,
   };
+  events.push(actorSentEvent("<original@agents.localhost>"));
   events[0].data.header_from = actorPhysical;
   events[0].data.envelope_from = "agent@agents.localhost";
   events[0].data.reply_to = [ACTOR];
@@ -870,14 +878,13 @@ test("documented accepted response binds relay and provider identity from durabl
   const client = fakeClient({
     events,
     messages,
-    // This is the documented async-accept shape: sent_as and provider identity
-    // are deliberately absent until the durable outbound row is observed.
+    // This is the documented async-accept shape: sent_as is deliberately
+    // absent until the durable outbound row is observed.
     send: async () => ({ messageId: "msg_synthetic_actor_out", status: "accepted", method: "smtp" }),
     getMessage: (_email, messageId) => {
       const message = structuredClone(messages[messageId]);
       if (messageId === "msg_synthetic_actor_out" && ++outboundReads === 1) {
         delete message.sentAs;
-        delete message.providerMessageId;
       }
       return message;
     },
@@ -1149,4 +1156,145 @@ test("case deadline is checked after baseline and before every stimulus send", a
     (error) => error.errorClass === "transport_error" && error.code === "stimulus_send_failed",
   );
   assert.equal(client.calls.send.length, 0);
+});
+
+function relayStimulusSetup(events, messages) {
+  const actorPhysical = "Eval Actor via e2a <agent@agents.localhost>";
+  const actorOutbound = rawMessage({
+    messageId: "original@agents.localhost", from: actorPhysical, to: TARGET, replyTo: ACTOR,
+    subject: SUBJECT, text: "Can fictional order ord_example_123 be refunded?",
+  });
+  messages.msg_synthetic_actor_out = {
+    id: "msg_synthetic_actor_out", direction: "outbound", conversationId: "conv_actor_out",
+    createdAt: new Date("2026-08-08T12:00:00.500Z"), headerFrom: ACTOR,
+    envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [],
+    sentAs: "relay", subject: SUBJECT, rawMessage: actorOutbound,
+  };
+  events[0].data.header_from = actorPhysical;
+  events[0].data.envelope_from = "agent@agents.localhost";
+  events[0].data.reply_to = [ACTOR];
+  messages.msg_synthetic_target_in.headerFrom = actorPhysical;
+  messages.msg_synthetic_target_in.envelopeFrom = "agent@agents.localhost";
+  messages.msg_synthetic_target_in.replyTo = [ACTOR];
+  messages.msg_synthetic_target_in.rawMessage = actorOutbound;
+  return { actorPhysical, actorOutbound };
+}
+
+function actorSentEvent(providerMessageId) {
+  return {
+    id: "evt_synthetic_actor_sent",
+    type: "email.sent",
+    schemaVersion: "1",
+    status: "processed",
+    createdAt: "2026-08-08T12:00:00.900Z",
+    agentEmail: ACTOR,
+    conversationId: "conv_actor_out",
+    messageId: "msg_synthetic_actor_out",
+    data: {
+      message_id: "msg_synthetic_actor_out",
+      agent_email: ACTOR,
+      direction: "outbound",
+      conversation_id: "conv_actor_out",
+      method: "smtp",
+      sent_as: "relay",
+      from: "Eval Actor via e2a <agent@agents.localhost>",
+      to: [TARGET],
+      cc: [],
+      bcc: [],
+      subject: SUBJECT,
+      ...(providerMessageId === undefined ? {} : { provider_message_id: providerMessageId }),
+    },
+  };
+}
+
+test("sparse accepted stimulus binds its provider identity from the terminal sent event fail-closed", async () => {
+  for (const [providerMessageId, code] of [
+    ["<other@agents.localhost>", "conflicting_evidence"],
+    ["not-a-bracketed-message-id", "malformed_event"],
+  ]) {
+    const events = await fixture("events-success.json");
+    const messages = successfulMessages();
+    relayStimulusSetup(events, messages);
+    events.push(actorSentEvent(providerMessageId));
+    await assert.rejects(
+      adapter(fakeClient({
+        events,
+        messages,
+        send: async () => ({ messageId: "msg_synthetic_actor_out", status: "accepted", method: "smtp" }),
+      })).adapter.executeCase(caseSpec(), caseContext()),
+      (error) => error.errorClass === "transport_error" && error.code === code,
+      `provider identity ${code}`,
+    );
+  }
+});
+
+test("an unrelated same-subject inbound in the window is never adopted as an own-address stimulus", async () => {
+  const events = await fixture("events-success.json");
+  const messages = successfulMessages();
+  const unrelated = rawMessage({
+    messageId: "unrelated@agents.localhost", from: ACTOR, to: TARGET,
+    subject: SUBJECT, text: "An unrelated synthetic note.",
+  });
+  messages.msg_synthetic_unrelated_in = {
+    id: "msg_synthetic_unrelated_in", direction: "inbound", conversationId: "conv_unrelated",
+    createdAt: new Date("2026-08-08T12:00:00.750Z"), headerFrom: ACTOR, to: [TARGET], cc: [],
+    replyTo: [], subject: SUBJECT, rawMessage: unrelated,
+  };
+  const unrelatedEvent = structuredClone(events[0]);
+  unrelatedEvent.id = "evt_synthetic_unrelated_received";
+  unrelatedEvent.createdAt = "2026-08-08T12:00:00.750Z";
+  unrelatedEvent.conversationId = "conv_unrelated";
+  unrelatedEvent.messageId = "msg_synthetic_unrelated_in";
+  unrelatedEvent.data.message_id = "msg_synthetic_unrelated_in";
+  unrelatedEvent.data.conversation_id = "conv_unrelated";
+  unrelatedEvent.data.received_at = "2026-08-08T12:00:00.750Z";
+  const client = fakeClient({
+    messages,
+    listEvents(params, invocation) {
+      const exposed = invocation <= 2 ? [unrelatedEvent] : [unrelatedEvent, ...events];
+      return pager(exposed.filter((event) => event.agentEmail === params.agentEmail));
+    },
+  });
+  const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
+  assert.equal(evidence.stimulus.messageId, "msg_synthetic_target_in");
+  assert.equal(evidence.stimulus.rfcMessageId, "original@agents.localhost");
+  assert.equal(evidence.candidates.length, 1);
+  assert.equal(evidence.actorReceipt.messageId, "msg_synthetic_target_out");
+});
+
+test("an unrelated same-subject relay inbound in the window is never adopted as the stimulus", async () => {
+  const events = await fixture("events-success.json");
+  const messages = successfulMessages();
+  const { actorPhysical } = relayStimulusSetup(events, messages);
+  const unrelated = rawMessage({
+    messageId: "unrelated@agents.localhost", from: actorPhysical, to: TARGET, replyTo: ACTOR,
+    subject: SUBJECT, text: "An unrelated synthetic note.",
+  });
+  messages.msg_synthetic_unrelated_in = {
+    id: "msg_synthetic_unrelated_in", direction: "inbound", conversationId: "conv_unrelated",
+    createdAt: new Date("2026-08-08T12:00:00.750Z"), headerFrom: actorPhysical,
+    envelopeFrom: "agent@agents.localhost", to: [TARGET], cc: [], replyTo: [ACTOR],
+    subject: SUBJECT, rawMessage: unrelated,
+  };
+  const unrelatedEvent = structuredClone(events[0]);
+  unrelatedEvent.id = "evt_synthetic_unrelated_received";
+  unrelatedEvent.createdAt = "2026-08-08T12:00:00.750Z";
+  unrelatedEvent.conversationId = "conv_unrelated";
+  unrelatedEvent.messageId = "msg_synthetic_unrelated_in";
+  unrelatedEvent.data.message_id = "msg_synthetic_unrelated_in";
+  unrelatedEvent.data.conversation_id = "conv_unrelated";
+  unrelatedEvent.data.received_at = "2026-08-08T12:00:00.750Z";
+  const client = fakeClient({
+    messages,
+    send: async () => ({ messageId: "msg_synthetic_actor_out", status: "accepted", method: "smtp" }),
+    listEvents(params, invocation) {
+      const exposed = invocation <= 2 ? [unrelatedEvent] : [unrelatedEvent, ...events];
+      return pager(exposed.filter((event) => event.agentEmail === params.agentEmail));
+    },
+  });
+  const evidence = await adapter(client).adapter.executeCase(caseSpec(), caseContext());
+  assert.equal(evidence.stimulus.messageId, "msg_synthetic_target_in");
+  assert.equal(evidence.stimulus.rfcMessageId, "original@agents.localhost");
+  assert.equal(evidence.stimulus.sentAs, "relay");
+  assert.equal(evidence.candidates.length, 1);
 });

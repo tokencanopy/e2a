@@ -21,6 +21,7 @@ import {
   artifactSuiteName,
   CASES_ARTIFACT_LIMITS,
   createArtifactWriter,
+  REDACTION_LOSS_VERSION,
   reportingError,
   rewriteDerivedArtifacts,
   snapshotJsonData,
@@ -646,8 +647,8 @@ async function executeOne({ suite, adapter, testCase, runId, runStartedAt, now }
   };
 }
 
-function artifactLimitRecord(suite, testCase) {
-  return {
+function artifactLimitRecord(suite, testCase, artifactAuthKey) {
+  const base = {
     id: artifactCaseId(suite, testCase.id),
     status: "error",
     versions: { evidence: EVIDENCE_VERSION },
@@ -658,6 +659,17 @@ function artifactLimitRecord(suite, testCase) {
       "transport_error", "cases_artifact_limit", ARTIFACT_LIMIT_MESSAGE, "runner",
     ),
     secondaryErrors: [],
+  };
+  // Compact records carry the same authenticated redaction metadata as every
+  // other record, so a forged or tampered suffix record fails closed on
+  // regrade instead of bypassing the keyed envelope check.
+  return {
+    ...base,
+    redactionLoss: {
+      version: REDACTION_LOSS_VERSION,
+      entries: [],
+      envelopeDigest: artifactRedactionLossDigest(base, [], suite, artifactAuthKey),
+    },
   };
 }
 
@@ -684,7 +696,12 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
     throw new EvalError("capability_error", "missing_capability", "Evaluation adapter cannot prove every requested assertion", { capabilities: missing });
   }
 
-  const artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase));
+  // Artifact creation happens after the complete read-only preflight and
+  // before the first send. A collision or unsafe path can therefore never
+  // leave an unreported mail send behind.
+  const writer = await createArtifactWriter({ outputRoot, runId: resolvedRunId });
+
+  const artifactLimitRecords = suite.cases.map((testCase) => artifactLimitRecord(suite, testCase, writer.artifactAuthKey));
   const artifactLimitLineBytes = artifactLimitRecords.map(caseLineBytes);
   const artifactLimitSuffixBytes = new Array(artifactLimitRecords.length + 1).fill(0);
   for (let index = artifactLimitRecords.length - 1; index >= 0; index -= 1) {
@@ -697,10 +714,6 @@ export async function runSuite({ suite, adapter, outputRoot, runId, now = () => 
     throw new EvalError("configuration_error", "cases_artifact_limit", "Evaluation case set cannot fit bounded artifact records");
   }
 
-  // Artifact creation happens after the complete read-only preflight and
-  // before the first send. A collision or unsafe path can therefore never
-  // leave an unreported mail send behind.
-  const writer = await createArtifactWriter({ outputRoot, runId: resolvedRunId });
   const cases = [];
   const runSecondary = [];
   let executionMs = 0;
@@ -1305,9 +1318,11 @@ function canonicalObservedAliases(value) {
   return visit(value);
 }
 
-function validateStoredArtifactLimitRecord(record, suite) {
+function validateStoredArtifactLimitRecord(record, suite, artifactAuthKey) {
+  const redactionLoss = validateStoredRedactionLoss(record, suite, artifactAuthKey);
+  if (redactionLoss.entries.length !== 0) invalidCaseArtifact();
   const source = exactCaseObject(record, new Set([
-    "id", "status", "versions", "suite", "evidence", "assertions", "primaryError", "secondaryErrors",
+    "id", "status", "versions", "suite", "evidence", "assertions", "primaryError", "secondaryErrors", "redactionLoss",
   ]));
   const versions = exactCaseObject(source.versions, new Set(["evidence"]));
   const suiteRef = exactCaseObject(source.suite, new Set(["version", "digest", "executionDigest"]));
@@ -1328,6 +1343,7 @@ function validateStoredArtifactLimitRecord(record, suite) {
     assertions: [],
     primaryError: { ...primaryError, message: ARTIFACT_LIMIT_MESSAGE },
     secondaryErrors: [],
+    redactionLoss,
   };
 }
 
@@ -1335,7 +1351,7 @@ function validateStoredRecord(record, suite, testCase, artifactAuthKey) {
   if (storedArtifactContainsSecret(record, suite)) invalidCaseArtifact();
   if (record?.primaryError?.class === "transport_error"
     && record?.primaryError?.code === "cases_artifact_limit") {
-    return validateStoredArtifactLimitRecord(record, suite);
+    return validateStoredArtifactLimitRecord(record, suite, artifactAuthKey);
   }
   const redactionLoss = validateStoredRedactionLoss(record, suite, artifactAuthKey);
   const source = exactCaseObject(record, new Set([
@@ -1572,6 +1588,11 @@ export async function regradeRun({ suite, runDirectory } = {}) {
   const cases = validatedRecords.map((storedRecord, index) => {
     const currentArtifactExpectation = currentArtifacts[index].expectation;
     const expectation = trustedReplayExpectation(suite.cases[index], currentArtifactExpectation);
+    if (storedRecord.primaryError?.code === "cases_artifact_limit") {
+      // Regenerate the compact suffix record so its authenticated redaction
+      // metadata binds the current suite reference exactly.
+      return artifactLimitRecord(suite, suite.cases[index], stored.artifactAuthKey);
+    }
     if (!storedRecord.evidence || storedRecord.evidence.unavailable === "serialization_error"
       || storedRecord.primaryError?.class === "target_timeout"
       || (storedRecord.primaryError?.class === "transport_error" && storedRecord.primaryError.origin !== "grader")) {

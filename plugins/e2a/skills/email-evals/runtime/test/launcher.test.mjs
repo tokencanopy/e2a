@@ -432,6 +432,53 @@ test("Windows taskkill failure falls back to a bounded fail-closed result", asyn
   });
 });
 
+test("a hung tree killer is killed and unref'd when the launcher settles", async () => {
+  const child = fakeChild();
+  child.pid = 9876;
+  const childUnrefs = [];
+  child.unref = () => { childUnrefs.push(true); };
+  const stdoutDestroys = [];
+  child.stdout.destroy = () => { stdoutDestroys.push(true); };
+  // The tree killer never emits error, exit, or close: a hung taskkill.
+  const taskkiller = new EventEmitter();
+  const killerKills = [];
+  const killerUnrefs = [];
+  taskkiller.kill = (signal) => { killerKills.push(signal); return true; };
+  taskkiller.unref = () => { killerUnrefs.push(true); };
+  const timers = [];
+  const running = runRuntimeNode([], {}, {
+    platform: "win32",
+    windowsSystemRoot: "C:\\Windows",
+    spawnChild: () => child,
+    spawnTreeKiller: () => taskkiller,
+    setTimer: (callback) => { timers.push(callback); return callback; },
+    clearTimer: () => {},
+    wallTimeoutMs: 1,
+    terminationGraceMs: 1,
+    finalReapMs: 1,
+  });
+
+  timers[0]();
+  child.emit("exit", null, "SIGKILL");
+  child.stdout.emit("end");
+  child.stderr.emit("end");
+  child.emit("close", null, "SIGKILL");
+  let resolved = false;
+  running.then(() => { resolved = true; });
+  await Promise.resolve();
+  assert.equal(resolved, false, "the launcher must await the hung tree terminator's grace bound");
+
+  timers[1]();
+  assert.deepEqual(await running, {
+    code: 4, stdout: "", stderr: "", truncated: true, finalized: false,
+    termination: "wall_timeout_tree_unavailable",
+  });
+  assert.ok(killerKills.includes("SIGKILL"), "a hung tree killer must be killed on settle");
+  assert.equal(killerUnrefs.length > 0, true, "a hung tree killer handle must be unref'd on settle");
+  assert.equal(childUnrefs.length > 0, true, "the runtime child handle must be unref'd on settle");
+  assert.equal(stdoutDestroys.length > 0, true, "the runtime child streams must be destroyed on settle");
+});
+
 test("Windows rejects an untrusted system-root search path and bounds a hung tree killer", async () => {
   for (const windowsSystemRoot of ["C:\\suite\\Windows", ".\\Windows"]) {
     const child = fakeChild();

@@ -29,7 +29,7 @@ const UNSAFE_ARTIFACT_KEYS = new Set([
   "apikey", "api_key", "environment", "env", "raw", "rawmime", "raw_mime", "rawmessage", "raw_message",
   "bytes", "contentbytes", "content_bytes", "attachmentbytes", "attachment_bytes",
 ]);
-const REDACTION_LOSS_VERSION = 2;
+export const REDACTION_LOSS_VERSION = 2;
 const REDACTION_LOSS_LIMIT = 512;
 const REDACTION_LOSS_KIND = "redacted_text";
 const ARTIFACT_AUTH_FILE = ".email-evals-artifact-auth-key";

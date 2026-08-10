@@ -119,6 +119,10 @@ export function runRuntimeNode(args, options, dependencies = {}) {
       if (terminationTimer !== null) clearTimer(terminationTimer);
       if (finalTimer !== null) clearTimer(finalTimer);
       if (wallTimer !== null) clearTimer(wallTimer);
+      // Every settle path must release the child and tree-killer handles. A
+      // hung taskkill that ignored SIGKILL would otherwise keep its ref-counted
+      // handle — and with it the CLI's event loop — alive forever.
+      releaseTerminationHandles();
       resolve(result);
     }
 

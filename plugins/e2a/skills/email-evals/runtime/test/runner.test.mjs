@@ -1456,11 +1456,13 @@ test("cumulative cases artifact bounds stop later sends and remain regradable", 
   assert.ok(bounded.length >= 2);
   for (const record of bounded) {
     assert.deepEqual(Object.keys(record).sort(), [
-      "assertions", "evidence", "id", "primaryError", "secondaryErrors", "status", "suite", "versions",
+      "assertions", "evidence", "id", "primaryError", "redactionLoss", "secondaryErrors", "status", "suite", "versions",
     ]);
     assert.equal(record.status, "error");
     assert.equal(record.evidence, null);
     assert.deepEqual(record.assertions, []);
+    assert.deepEqual(record.redactionLoss.entries, []);
+    assert.match(record.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
     assert.deepEqual(record.suite, {
       version: largeSuite.version, digest: largeSuite.digest, executionDigest: largeSuite.executionDigest,
     });
@@ -1484,6 +1486,48 @@ test("cumulative cases artifact bounds stop later sends and remain regradable", 
   await writeFile(original.files.cases, `${forged.map(JSON.stringify).join("\n")}\n`);
   await assert.rejects(
     regradeRun({ suite: largeSuite, runDirectory: path.dirname(original.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+});
+
+test("compact records carry authenticated redaction metadata that fails closed on tampering", async () => {
+  const cases = Array.from({ length: 18 }, (_, index) => ({
+    id: `large-${index + 1}`,
+    send: { subject: `Large ${index + 1}`, text: "Synthetic" },
+    expect: expectation(),
+  }));
+  const largeSuite = suite(cases);
+  const fake = adapter((testCase) => {
+    const captured = evidence(testCase);
+    captured.candidates[0].mime.text = `Synthetic answer ${"X".repeat(990_000)}`;
+    return captured;
+  });
+
+  // Rewriting a normal record into compact form erases that case's real
+  // outcome; without authenticated metadata on compact records this forgery
+  // regrades cleanly.
+  const forgedRun = await runSuite({ suite: largeSuite, adapter: fake, outputRoot: await root(), runId: RUN_ID });
+  const forged = (await readFile(forgedRun.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  const firstCompact = forged.findIndex((record) => record.primaryError?.code === "cases_artifact_limit");
+  assert.ok(firstCompact > 0);
+  forged[firstCompact - 1] = { ...forged[firstCompact], id: forged[firstCompact - 1].id };
+  await writeFile(forgedRun.files.cases, `${forged.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: largeSuite, runDirectory: path.dirname(forgedRun.files.cases) }),
+    (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
+  );
+
+  // A genuine compact record with a tampered authenticated field fails closed.
+  const tamperedRun = await runSuite({ suite: largeSuite, adapter: fake, outputRoot: await root(), runId: RUN_ID });
+  const tampered = (await readFile(tamperedRun.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  const compact = tampered[tampered.findIndex((record) => record.primaryError?.code === "cases_artifact_limit")];
+  assert.equal(compact.redactionLoss.version, 2);
+  assert.deepEqual(compact.redactionLoss.entries, []);
+  assert.match(compact.redactionLoss.envelopeDigest, /^[a-f0-9]{64}$/);
+  compact.suite.digest = "c".repeat(64);
+  await writeFile(tamperedRun.files.cases, `${tampered.map(JSON.stringify).join("\n")}\n`);
+  await assert.rejects(
+    regradeRun({ suite: largeSuite, runDirectory: path.dirname(tamperedRun.files.cases) }),
     (error) => error.errorClass === "configuration_error" && error.code === "invalid_case_artifact",
   );
 });
