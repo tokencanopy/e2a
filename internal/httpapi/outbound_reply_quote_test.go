@@ -91,3 +91,22 @@ func TestReplyWithoutQuoteHistoryIsVerbatim(t *testing.T) {
 		t.Fatalf("delivered HTMLBody = %q, want empty", got)
 	}
 }
+
+func TestReplyQuoteHistoryDateParentComposesAttribution(t *testing.T) {
+	// A Date-bearing parent produces the full "On <date>, <sender> wrote:"
+	// attribution form. That is the shape mailparse.quoteMarker matches on the
+	// receiving side, so a receiving agent's parsed.text drops the quoted block
+	// with no residue — the common real-mail round trip that no other quote
+	// test exercises (all other fixtures are Date-less and pin the residue
+	// path).
+	srv := testServer(t)
+	code, _ := postJSON(t, srv.URL+"/v1/agents/support%40acme.com/messages/msg_in1dated/reply", "good",
+		map[string]any{"text": "thanks", "quote_history": true})
+	if code != 200 {
+		t.Fatalf("want 200, got %d", code)
+	}
+	want := "thanks\r\n\r\nOn Thu, 31 Jul 2026 03:30:47 +0000, alice@x.com wrote:\r\n> hi\r\n"
+	if got := lastDeliveredReq().Body; got != want {
+		t.Fatalf("delivered Body = %q, want %q", got, want)
+	}
+}

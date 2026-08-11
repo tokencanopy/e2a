@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -281,5 +282,33 @@ func TestBuildForwardHTMLBody_EscapesHTMLSpecialsInHeaders(t *testing.T) {
 	}
 	if !strings.Contains(html, "&lt;script&gt;") {
 		t.Errorf("html body should contain escaped &lt;script&gt;: %s", html)
+	}
+}
+
+func TestBuildForwardBodyDepthBounded(t *testing.T) {
+	// maxExtractMIMEDepth caps the multipart recursion the forward quote shares
+	// with the reply quote path. Kept in forward_test.go — not quote_test.go —
+	// so the GA forward hardening stays covered even if the experimental
+	// reply-quote feature is ever reverted. A pathologically nested parent
+	// still yields the header block (no crash, no quoted body); nesting within
+	// the bound quotes normally.
+	nest := func(depth int) string {
+		body := "Content-Type: text/plain\r\n\r\ndeep\r\n"
+		for i := depth - 1; i >= 0; i-- {
+			b := fmt.Sprintf("b%d", i)
+			body = "Content-Type: multipart/mixed; boundary=" + b + "\r\n\r\n" +
+				"--" + b + "\r\n" + body + "--" + b + "--\r\n"
+		}
+		return body
+	}
+
+	deep := "From: a@x.com\r\n" + nest(200)
+	if got := BuildForwardBody("", ExtractForwardContext([]byte(deep))); strings.Contains(got, "deep") {
+		t.Fatalf("depth bound must cut the quoted body, got:\n%q", got)
+	}
+
+	shallow := "From: a@x.com\r\n" + nest(3)
+	if got := BuildForwardBody("", ExtractForwardContext([]byte(shallow))); !strings.Contains(got, "deep") {
+		t.Fatalf("shallow nesting must quote the body, got:\n%q", got)
 	}
 }

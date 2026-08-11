@@ -143,3 +143,34 @@ func TestExtractBodyPartsDepthBounded(t *testing.T) {
 		t.Fatalf("shallow nesting should extract, got %q", got)
 	}
 }
+
+func TestBuildReplyQuoteWhitespaceTextParentQuotesBothParts(t *testing.T) {
+	// A parent whose text/plain part is only whitespace has no quotable text,
+	// so the quote must fall through to the parent's HTML. That keeps the two
+	// alternatives of the reply consistent: the text part quotes the
+	// HTML-derived text and the HTML part quotes the parent's own markup.
+	ctx := ForwardContext{
+		From: "alice@example.com",
+		Text: "\r\n\r\n",
+		HTML: "<p>real content here</p>",
+	}
+	body := BuildReplyQuoteBody("ok", ctx)
+	htmlBody := BuildReplyQuoteHTMLBody("<p>ok</p>", ctx)
+	if !strings.Contains(body, "alice@example.com wrote:") || !strings.Contains(body, "> real content here\r\n") {
+		t.Fatalf("text part must quote the HTML-derived parent text, got %q", body)
+	}
+	if !strings.Contains(htmlBody, "alice@example.com wrote:") || !strings.Contains(htmlBody, "<p>real content here</p>") {
+		t.Fatalf("HTML part must quote the parent markup, got %q", htmlBody)
+	}
+}
+
+func TestBuildReplyQuoteHTMLBodyWhitespaceOnlyTextParentIsVerbatim(t *testing.T) {
+	// A parent whose only quotable part is whitespace text has no quotable
+	// body: the HTML body must ship the caller's markup verbatim rather than an
+	// attribution line over an empty quote block — the mirror of the text-part
+	// verbatim behavior.
+	ctx := ForwardContext{From: "alice@example.com", Text: " \r\n \t "}
+	if got := BuildReplyQuoteHTMLBody("<p>ok</p>", ctx); got != "<p>ok</p>" {
+		t.Fatalf("expected verbatim HTML body, got %q", got)
+	}
+}
