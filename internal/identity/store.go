@@ -1653,15 +1653,27 @@ func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
 // inTx runs only after the DELETE affected a row (the domain existed and was
 // owned by userID); it never runs for a not-found / FK-blocked delete.
 func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx) error) error {
+	domain = normalizeDomain(domain)
 	tx, err := s.senderIdentityBegin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
+	// Serialize deletion with same-name and hierarchical registration. Without
+	// these transaction locks, a same-owner ClaimOrCreateDomain can observe the
+	// old row while this DELETE is uncommitted, return it as an idempotent
+	// success, and then lose it when this transaction commits after provider
+	// teardown. Use the exact sorted namespace shared by the claim path.
+	for _, name := range domainClaimLockNames(domain) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, name); err != nil {
+			return err
+		}
+	}
+
 	tag, err := tx.Exec(ctx,
 		`DELETE FROM domains WHERE domain = $1 AND user_id = $2`,
-		normalizeDomain(domain), userID,
+		domain, userID,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "violates foreign key") {

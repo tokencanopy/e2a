@@ -102,6 +102,63 @@ func TestDeleteDomainTxUsesPinnedMutationConnection(t *testing.T) {
 	}
 }
 
+func TestDeleteDomainTxSerializesSameOwnerReRegistration(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	user, err := store.CreateOrGetUser(ctx, "sender-reclaim@example.com", "Sender Reclaim", "sender-reclaim-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "reclaim-during-delete.example.com"
+	first, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("first ClaimOrCreateDomain: %v", err)
+	}
+
+	deleteEntered := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- store.DeleteDomainTx(ctx, domain, user.ID, func(context.Context, pgx.Tx) error {
+			close(deleteEntered)
+			<-releaseDelete
+			return nil
+		})
+	}()
+	<-deleteEntered
+
+	type claimResult struct {
+		domain *identity.Domain
+		err    error
+	}
+	claimDone := make(chan claimResult, 1)
+	go func() {
+		d, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+		claimDone <- claimResult{domain: d, err: err}
+	}()
+	select {
+	case got := <-claimDone:
+		close(releaseDelete)
+		<-deleteDone
+		t.Fatalf("re-registration returned before delete committed: domain=%+v err=%v", got.domain, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseDelete)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("DeleteDomainTx: %v", err)
+	}
+	got := <-claimDone
+	if got.err != nil {
+		t.Fatalf("replacement ClaimOrCreateDomain: %v", got.err)
+	}
+	if got.domain.VerificationToken == first.VerificationToken {
+		t.Fatal("re-registration reused the incarnation deleted by the concurrent transaction")
+	}
+}
+
 func TestSendingStatusWriteRejectsDeletedIncarnation(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
