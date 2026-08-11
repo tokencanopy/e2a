@@ -237,6 +237,12 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
             "Stable key for retry-safe replies. A natural choice is the inbound `message_id` you're replying to — the same triggering event yields the same key, so a retry replays the original response instead of double-sending. Omit to let the SDK mint a fresh UUIDv4 per call.",
           ),
         send_at: sendAtField,
+        quote_history: z
+          .boolean()
+          .optional()
+          .describe(
+            "Beta (may change before stable): if true, the server appends the message being replied to as mail-client-style quoted history beneath the reply body — an 'On <date>, <sender> wrote:' attribution line followed by the original text ('>'-prefixed) and, when `html` is supplied, the original HTML in a blockquote. Composition happens server-side at accept time, so a held reply shows the reviewer the final quoted content. Only the body parts you supply are quoted (a text-only reply stays text-only). Defaults to false (the body is sent exactly as provided).",
+          ),
         email: emailSelector,
       }),
     },
@@ -262,6 +268,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
               : {}),
             ...(args.reply_to !== undefined ? { replyTo: args.reply_to } : {}),
             ...(args.send_at !== undefined ? { sendAt: new Date(args.send_at) } : {}),
+            ...(args.quote_history !== undefined ? { quoteHistory: args.quote_history } : {}),
           },
           opts,
           args.email,

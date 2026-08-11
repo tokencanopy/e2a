@@ -65,6 +65,9 @@ stable field are beta, `x-experimental-values` on that field):
   `template_data` request fields.
 - **Managed unsubscribe** — the `unsubscribe: {mode: "managed"}` request
   object and its raw `GET|POST /u/{token}` confirmation flow.
+- **Quoted-history replies** — the `quote_history` request field on reply
+  (server-composed mail-client-style quoted history; see the field reference
+  in [Messages](#messages-v1agentsemailmessages)).
 - **Review-hold projections** — `hold_reason`, the review-detail `protection`
   evidence, and the `flagged` / `flag_reason` verdict fields.
 - **Lifecycle transitions on events** — the optional `lifecycle_transitions`
@@ -683,6 +686,23 @@ declared stable.
   message reaches a terminal-or-held state or a bounded timeout; a future
   `send_at` instead returns `status=scheduled` immediately and does not wait
   until that time.
+- `quote_history` **(beta)** on reply: when `true`, the server appends
+  the referenced message beneath the reply body as mail-client-style quoted
+  history — an `On <date>, <sender> wrote:` attribution line, the original
+  text `>`-prefixed, and (when an `html` body is supplied) the original HTML
+  in a blockquote. Composed at accept time, so a held reply shows the reviewer
+  the final quoted content. Only body parts the caller supplies are quoted (a
+  text-only reply stays text-only). Which parts the *parent* carries does not
+  change that: quoting a parent that has no `text/plain` part renders its HTML
+  to plain text for the quoted text body, so both alternatives of the reply
+  carry the same history. A parent with no readable body at all (unparseable
+  MIME, or markup that renders to nothing) sends the reply verbatim rather
+  than emitting an empty quote block — the response is the same either way, so
+  do not treat a `202` as proof that history was attached. The quoted parent
+  counts against the 10 MiB composed-message ceiling, so a small reply to a
+  huge parent can return `413 payload_too_large` (scope `composed_message`).
+  Defaults to `false` (bodies are sent exactly as provided). May change before
+  it is declared stable.
 - `send_at` **(beta)** on send/reply/forward must be RFC 3339 with an explicit
   UTC offset, can be at most 90 days ahead, and **survives a review hold**: a
   held message keeps its `send_at` (surfaced as `scheduled_at` on the

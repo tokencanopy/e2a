@@ -682,6 +682,7 @@ class MessagesResource:
         body: Body,
         *,
         unsubscribe: Optional[UnsubscribeInput] = None,
+        quote_history: Optional[bool] = None,
         wait: Optional[Literal["sent"]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendResultView:
@@ -691,12 +692,23 @@ class MessagesResource:
         it is declared stable. The optional managed-unsubscribe field is also
         beta, and ``wait="sent"`` requests the same bounded wait (see
         :meth:`send`).
+
+        Beta: pass ``quote_history=True`` to have the server append
+        the referenced message as mail-client-style quoted history beneath
+        the reply body (an attribution line plus the '>'-quoted text, and a
+        blockquote when an HTML body is supplied); when given, it wins over
+        any ``quote_history`` already present in ``body``. This option may
+        change before it is declared stable.
         """
         req = _coerce(ReplyRequest, _reply_to_union(body))
         if unsubscribe is not None:
             if req is body:
                 req = req.model_copy()
             req.unsubscribe = _coerce(UnsubscribeOptions, unsubscribe)
+        if quote_history is not None:
+            if req is body:
+                req = req.model_copy()
+            req.quote_history = quote_history
         return await self._c._write_keyed(
             lambda h: self._api.reply_to_message(email, message_id, req, wait=wait, _headers=h),
             idempotency_key,

@@ -2815,6 +2815,115 @@ scenarios:
             deleted: true
             domain: filter-contract.test.dev
 
+  - name: reply_quote_history
+    description: >
+      Beta quote_history on reply: when true, the server composes the
+      referenced message beneath the caller's text as mail-client-style quoted
+      history (an attribution line plus the '>'-prefixed original body) at
+      accept time, so the stored outbound row already carries the final
+      content; when the flag is absent the stored body stays byte-verbatim.
+      The injected parent is Date-less and its raw body is the literal
+      "body", so the composed attribution is fully deterministic. The detail
+      view surfaces the quote-stripped parsed.text, so the assertions match
+      that projection exactly; the raw wire composition is pinned by unit
+      tests server-side. Both replies use a future send_at (composition
+      happens at accept, before scheduling) so the scenario never submits to
+      a provider — no real mail in seed mode, and trash-cancel in cleanup
+      cannot race a submission lease (the same pattern as the scheduled_*
+      scenarios).
+    setup:
+      - register_agent:
+          email: quote-history-{scenario_token}@agents.e2a.dev
+      - inject_message:
+          agent_email: "{agent_email}"
+          from: alice@example.net
+          subject: quote history target
+    steps:
+      - id: quoted_reply
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply
+        body:
+          text: quoted reply conformance
+          quote_history: true
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+        capture:
+          quoted_message_id: message_id
+
+      - id: get_quoted_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{quoted_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{quoted_message_id}"
+            # The detail view exposes the model-facing parsed.text, which the
+            # inbound-style parser QUOTE-STRIPS — the ">"-prefixed lines are
+            # removed and the attribution line remains. Its presence is the
+            # cross-surface proof the server composed the quote onto the wire
+            # (raw_message carries the full "> body" block but embeds a Date
+            # header, so it cannot be matched by equality). The exact wire
+            # composition is pinned by unit tests in internal/httpapi and
+            # internal/outbound.
+            "parsed.text": "quoted reply conformance\n\nalice@example.net wrote:"
+
+      - id: verbatim_reply
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages/{injected_message_id}/reply
+        body:
+          text: verbatim reply conformance
+          send_at: "{future_rfc3339}"
+        expect:
+          status: 202
+          body_match:
+            status: scheduled
+        capture:
+          verbatim_message_id: message_id
+
+      - id: get_verbatim_reply
+        action: request
+        method: GET
+        path: /v1/agents/{agent_email}/messages/{verbatim_message_id}
+        expect:
+          status: 200
+          body_match:
+            id: "{verbatim_message_id}"
+            "parsed.text": verbatim reply conformance
+
+    cleanup:
+      - id: trash_quoted_reply
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{quoted_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: trash_verbatim_reply
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}/messages/{verbatim_message_id}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/{agent_email}?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+
   - name: agent_metrics_counters
     description: >
       Per-agent counter metrics: an untouched agent reports null rates rather

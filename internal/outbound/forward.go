@@ -52,15 +52,24 @@ func ExtractForwardContext(rawMessage []byte) ForwardContext {
 
 	contentType := msg.Header.Get("Content-Type")
 	encoding := msg.Header.Get("Content-Transfer-Encoding")
-	ctx.Text, ctx.HTML = extractBodyParts(msg.Body, contentType, encoding)
+	ctx.Text, ctx.HTML = extractBodyParts(msg.Body, contentType, encoding, 0)
 	return ctx
 }
+
+// maxExtractMIMEDepth bounds the multipart recursion below. Legitimate mail
+// nests two or three levels (mixed > alternative > related); a crafted
+// inbound under the 10 MiB cap could otherwise nest tens of thousands of
+// parts and pin the request goroutine. Mirrors mailparse.maxMIMEDepth.
+const maxExtractMIMEDepth = 32
 
 // extractBodyParts walks a message body looking for the text/plain and
 // text/html parts. Recurses into multipart/alternative and
 // multipart/mixed. The body io.Reader is consumed in a single pass — for
 // non-multipart bodies the entire reader is treated as a single part.
-func extractBodyParts(body io.Reader, contentType, encoding string) (textOut, htmlOut string) {
+func extractBodyParts(body io.Reader, contentType, encoding string, depth int) (textOut, htmlOut string) {
+	if depth > maxExtractMIMEDepth {
+		return "", ""
+	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		// No Content-Type or malformed — fall through and treat as
@@ -99,7 +108,7 @@ func extractBodyParts(body io.Reader, contentType, encoding string) (textOut, ht
 		partType, _, _ := mime.ParseMediaType(partCT)
 
 		if strings.HasPrefix(partType, "multipart/") {
-			nestedText, nestedHTML := extractBodyParts(part, partCT, partEnc)
+			nestedText, nestedHTML := extractBodyParts(part, partCT, partEnc, depth+1)
 			if textOut == "" {
 				textOut = nestedText
 			}

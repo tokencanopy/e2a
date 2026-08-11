@@ -198,3 +198,42 @@ func TestParseHTML(t *testing.T) {
 		}
 	})
 }
+
+// HTMLToText is the exported rendering seam used by outbound reply quoting
+// (internal/outbound/quote.go) to quote an HTML-only parent into a text/plain
+// body. Pinned here because that caller depends on the normalization, not
+// just the tokenization.
+func TestHTMLToText(t *testing.T) {
+	t.Run("decodes entities and breaks at block boundaries", func(t *testing.T) {
+		got := HTMLToText("<p>first &amp; foremost</p><p>second</p>")
+		if !strings.Contains(got, "first & foremost") || !strings.Contains(got, "second") {
+			t.Fatalf("got %q", got)
+		}
+		if strings.Contains(got, "&amp;") {
+			t.Fatalf("entities must be decoded, got %q", got)
+		}
+	})
+
+	t.Run("drops script and style content", func(t *testing.T) {
+		got := HTMLToText("<style>p{color:red}</style><script>evil()</script><p>visible</p>")
+		if strings.Contains(got, "evil()") || strings.Contains(got, "color:red") {
+			t.Fatalf("script/style must not surface, got %q", got)
+		}
+		if !strings.Contains(got, "visible") {
+			t.Fatalf("body text missing, got %q", got)
+		}
+	})
+
+	t.Run("collapses the blank-line runs block tags produce", func(t *testing.T) {
+		got := HTMLToText("<div><div><p>one</p></div></div><p>two</p>")
+		if strings.Contains(got, "\n\n\n") {
+			t.Fatalf("blank runs must collapse, got %q", got)
+		}
+	})
+
+	t.Run("markup with no text renders empty", func(t *testing.T) {
+		if got := strings.TrimSpace(HTMLToText(`<img src="cid:logo"><br>`)); got != "" {
+			t.Fatalf("want empty, got %q", got)
+		}
+	})
+}

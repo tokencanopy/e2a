@@ -256,6 +256,12 @@ describe("scheduled send help", () => {
   });
 });
 
+describe("quoted-history reply help", () => {
+  it("labels --quote-history as beta", () => {
+    expect(USAGE).toMatch(/--quote-history[\s\S]*beta[\s\S]*may change before stable/i);
+  });
+});
+
 describe("getConversationId (FIX 3: --conversation-id / --conversation precedence)", () => {
   let mockStderr: ReturnType<typeof vi.spyOn>;
   let mockExit: ReturnType<typeof vi.spyOn>;

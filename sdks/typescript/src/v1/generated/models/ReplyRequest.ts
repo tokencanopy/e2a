@@ -33,6 +33,10 @@ export class ReplyRequest {
     */
     'conversationId'?: string;
     'html'?: string;
+    /**
+    * Beta: when true, the server appends the referenced message as mail-client-style quoted history beneath the reply body — an \'On <date>, <sender> wrote:\' attribution line followed by the original text (\'>\'-prefixed) and, when an html body is supplied, the original HTML in a blockquote. Composition happens at accept time, so a held reply shows the reviewer the final quoted content. Only the body parts the caller supplies are quoted (a text-only reply stays text-only). Defaults to false (the body is sent exactly as provided). This field may change before it is declared stable.
+    */
+    'quoteHistory'?: boolean;
     'replyAll'?: boolean;
     'replyTo'?: ForwardRequestReplyTo;
     /**
@@ -78,6 +82,12 @@ export class ReplyRequest {
             "name": "html",
             "baseName": "html",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "quoteHistory",
+            "baseName": "quote_history",
+            "type": "boolean",
             "format": ""
         },
         {

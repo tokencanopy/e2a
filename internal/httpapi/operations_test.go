@@ -567,6 +567,32 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 					RawMessage: []byte("From: alice@x.com\r\nTo: support@acme.com\r\nSubject: Question\r\nMessage-ID: <abc@x.com>\r\n\r\nhi"),
 				}, nil
 			}
+			if messageID == "msg_in1dated" {
+				// The same body shape as msg_in1 but WITH a Date header, so the
+				// reply's attribution takes the full "On <date>, <sender> wrote:"
+				// form — the shape mailparse.quoteMarker strips cleanly on the
+				// receiving side (residue-free). Every other quote fixture is
+				// Date-less and pins the residue path, so this is the only
+				// end-to-end exercise of the common real-mail form.
+				return &identity.Message{
+					ID: "msg_in1dated", AgentID: "support@acme.com", Sender: "alice@x.com",
+					Subject: "Question", EmailMessageID: "<dated@x.com>",
+					RawMessage: []byte("From: alice@x.com\r\nTo: support@acme.com\r\nSubject: Question\r\n" +
+						"Message-ID: <dated@x.com>\r\nDate: Thu, 31 Jul 2026 03:30:47 +0000\r\n\r\nhi"),
+				}, nil
+			}
+			if messageID == "msg_in_htmlonly" {
+				// An inbound carrying ONLY a text/html part — no text/plain to
+				// quote from. Exercises the reply-quote path's HTML→text
+				// derivation (a bare text/html message is common from bulk
+				// senders and some clients).
+				return &identity.Message{
+					ID: "msg_in_htmlonly", AgentID: "support@acme.com", Sender: "alice@x.com",
+					Subject: "Question", EmailMessageID: "<htmlonly@x.com>",
+					RawMessage: []byte("From: alice@x.com\r\nTo: support@acme.com\r\nSubject: Question\r\n" +
+						"Message-ID: <htmlonly@x.com>\r\nContent-Type: text/html\r\n\r\n<p>hi &amp; hello</p>"),
+				}, nil
+			}
 			if messageID == "msg_bigthread" {
 				// An inbound on a thread with 60 To recipients — reply_all fans
 				// them all into the outbound set, exceeding the 50 cap.
