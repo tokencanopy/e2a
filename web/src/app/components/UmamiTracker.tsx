@@ -30,23 +30,44 @@ declare global {
  * group. Unknown routes therefore stay untracked if a new product surface is
  * added without updating this component.
  */
-const PUBLIC_MARKETING_SEGMENTS = new Set([
-  "api-docs",
-  "blog",
-  "compare",
-  "docs",
-  "email-api-for-ai-agents",
-  "mcp",
-  "python-sdk",
-  "use-cases",
+const PUBLIC_MARKETING_PATHS = new Set([
+  "/",
+  "/api-docs",
+  "/blog",
+  "/blog/build-ecommerce-agent-with-email",
+  "/blog/build-procurement-agent-with-email",
+  "/blog/build-recruiting-agent-with-email",
+  "/blog/build-sales-agent-with-email",
+  "/blog/build-voice-follow-up-agent-with-email",
+  "/blog/email-agent-with-google-adk",
+  "/blog/email-for-openclaw-agents",
+  "/blog/human-in-the-loop-for-agent-email",
+  "/blog/send-email-from-python-agent",
+  "/compare/e2a-vs-agentmail",
+  "/docs",
+  "/docs/python",
+  "/email-api-for-ai-agents",
+  "/mcp",
+  "/python-sdk",
+  "/use-cases",
+  "/use-cases/ai-receptionist",
+  "/use-cases/ecommerce-agent",
+  "/use-cases/procurement-agent",
+  "/use-cases/recruiting-agent",
+  "/use-cases/sales-agent",
+  "/use-cases/scheduling-agent",
+  "/use-cases/support-agent",
+  "/use-cases/voice-agent",
 ]);
 
-export function isPublicMarketingPath(pathname: string | null): boolean {
-  if (pathname === "/") return true;
-  if (!pathname?.startsWith("/")) return false;
+function normalizePathname(pathname: string): string {
+  if (pathname === "/") return pathname;
+  return pathname.replace(/\/+$/, "");
+}
 
-  const segment = pathname.split("/")[1] ?? "";
-  return PUBLIC_MARKETING_SEGMENTS.has(segment);
+export function isPublicMarketingPath(pathname: string | null): boolean {
+  if (!pathname?.startsWith("/")) return false;
+  return PUBLIC_MARKETING_PATHS.has(normalizePathname(pathname));
 }
 
 function sanitizePublicURL(raw: string, origin: string): string | undefined {
@@ -55,9 +76,9 @@ function sanitizePublicURL(raw: string, origin: string): string | undefined {
     if (url.origin !== origin || !isPublicMarketingPath(url.pathname)) {
       return undefined;
     }
-    url.search = "";
-    url.hash = "";
-    return url.toString();
+    // Rebuild rather than mutating the parsed URL so userinfo, search data,
+    // and fragments can never survive into the analytics payload.
+    return new URL(normalizePathname(url.pathname), origin).toString();
   } catch {
     return undefined;
   }

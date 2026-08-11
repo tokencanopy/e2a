@@ -2,13 +2,16 @@ import { act, render, waitFor } from "@testing-library/react";
 import { UmamiTracker } from "./UmamiTracker";
 
 let mockPathname = "/";
+let mockWebsiteId = "website_test";
 
 jest.mock("next/navigation", () => ({
   usePathname: () => mockPathname,
 }));
 
 jest.mock("../../lib/site", () => ({
-  UMAMI_WEBSITE_ID: "website_test",
+  get UMAMI_WEBSITE_ID() {
+    return mockWebsiteId;
+  },
 }));
 
 jest.mock("next/script", () => {
@@ -40,6 +43,7 @@ const track = jest.fn<void, [TrackArgument]>();
 
 beforeEach(() => {
   mockPathname = "/";
+  mockWebsiteId = "website_test";
   window.history.replaceState({}, "", "/");
   Object.defineProperty(window, "umami", {
     configurable: true,
@@ -55,6 +59,19 @@ afterEach(() => {
 });
 
 describe("UmamiTracker", () => {
+  it("does not load or track when analytics is not configured", async () => {
+    mockWebsiteId = "";
+    render(<UmamiTracker />);
+
+    await act(async () => {});
+    expect(
+      document.querySelector(
+        'script[src="https://umami.tokencanopy.com/script.js"]',
+      ),
+    ).toBeNull();
+    expect(track).not.toHaveBeenCalled();
+  });
+
   it("loads an inert tracker and manually records one public pageview without query data", async () => {
     window.history.replaceState({}, "", "/?campaign=sensitive");
     render(<UmamiTracker />);
@@ -77,14 +94,33 @@ describe("UmamiTracker", () => {
   });
 
   it.each([
+    "/",
     "/api-docs",
+    "/blog",
+    "/blog/build-ecommerce-agent-with-email",
+    "/blog/build-procurement-agent-with-email",
+    "/blog/build-recruiting-agent-with-email",
+    "/blog/build-sales-agent-with-email",
+    "/blog/build-voice-follow-up-agent-with-email",
+    "/blog/email-agent-with-google-adk",
+    "/blog/email-for-openclaw-agents",
+    "/blog/human-in-the-loop-for-agent-email",
     "/blog/send-email-from-python-agent",
     "/compare/e2a-vs-agentmail",
+    "/docs",
     "/docs/python",
     "/email-api-for-ai-agents",
     "/mcp",
     "/python-sdk",
-    "/use-cases/customer-support",
+    "/use-cases",
+    "/use-cases/ai-receptionist",
+    "/use-cases/ecommerce-agent",
+    "/use-cases/procurement-agent",
+    "/use-cases/recruiting-agent",
+    "/use-cases/sales-agent",
+    "/use-cases/scheduling-agent",
+    "/use-cases/support-agent",
+    "/use-cases/voice-agent",
   ])("tracks the known public route %s", async (pathname) => {
     mockPathname = pathname;
     window.history.replaceState({}, "", pathname);
@@ -98,6 +134,7 @@ describe("UmamiTracker", () => {
     "/get-started",
     "/oauth/consent",
     "/future-authenticated-route",
+    "/blog/future-private-route",
   ])("fails closed and does not load or track %s", async (pathname) => {
     mockPathname = pathname;
     window.history.replaceState({}, "", `${pathname}?id=resource_private`);
@@ -128,6 +165,28 @@ describe("UmamiTracker", () => {
     expect(track).toHaveBeenCalledTimes(1);
   });
 
+  it("starts tracking only after a private-to-public transition and stops again on private routes", async () => {
+    mockPathname = "/oauth/consent";
+    window.history.replaceState({}, "", "/oauth/consent?state=private");
+    const { rerender } = render(<UmamiTracker />);
+
+    await act(async () => {});
+    expect(track).not.toHaveBeenCalled();
+
+    mockPathname = "/docs";
+    window.history.pushState({}, "", "/docs?source=private");
+    rerender(<UmamiTracker />);
+    await waitFor(() => expect(track).toHaveBeenCalledTimes(1));
+    expect(track.mock.calls[0][0]({}).referrer).toBe("");
+
+    mockPathname = "/inboxes";
+    window.history.pushState({}, "", "/inboxes?id=private");
+    rerender(<UmamiTracker />);
+
+    await act(async () => {});
+    expect(track).toHaveBeenCalledTimes(1);
+  });
+
   it("drops any attempted private payload and strips public query strings", async () => {
     render(<UmamiTracker />);
     await waitFor(() => expect(window.tcUmamiBeforeSend).toBeDefined());
@@ -146,5 +205,10 @@ describe("UmamiTracker", () => {
       referrer: "https://search.example/",
       url: "http://localhost/docs",
     });
+    expect(
+      window.tcUmamiBeforeSend?.("event", {
+        url: "http://user:secret@localhost/docs?resource=private",
+      }),
+    ).toMatchObject({ url: "http://localhost/docs" });
   });
 });
