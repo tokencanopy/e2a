@@ -68,6 +68,40 @@ func TestSendingIdentityMutationLockSerializesSameDomain(t *testing.T) {
 	}
 }
 
+func TestDeleteDomainTxUsesPinnedMutationConnection(t *testing.T) {
+	// Initialize and clean the shared test database, then use a dedicated
+	// one-connection pool to prove the advisory-lock callback does not try to
+	// acquire a second connection for its transaction.
+	_ = testutil.TestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cfg, err := pgxpool.ParseConfig(testutil.TestDBURL())
+	if err != nil {
+		t.Fatalf("parse pool config: %v", err)
+	}
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("one-connection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	store := identity.NewStore(pool)
+	user, err := store.CreateOrGetUser(ctx, "sender-pinned@example.com", "Sender Pinned", "sender-pinned-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "pinned-delete.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	err = store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
+		return store.DeleteDomainTx(lockedCtx, domain, user.ID, nil)
+	})
+	if err != nil {
+		t.Fatalf("DeleteDomainTx under one-connection mutation lock: %v", err)
+	}
+}
+
 func TestSendingStatusWriteRejectsDeletedIncarnation(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)

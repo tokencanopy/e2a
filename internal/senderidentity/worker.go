@@ -187,76 +187,89 @@ func (w *ReconcileV2Worker) Work(ctx context.Context, job *river.Job[ReconcileV2
 }
 
 func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, attempt, maxAttempt int, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int) error {
-	state, err := store.LoadSendingIdentityState(ctx, domain)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil // domain deleted; nothing to reconcile
+	var repairMissingIdentity bool
+	err := store.WithSendingIdentityMutationLock(ctx, domain, func(ctx context.Context) error {
+		state, err := store.LoadSendingIdentityState(ctx, domain)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // domain deleted; nothing to reconcile
+			}
+			return err
 		}
+		if !state.Verified || incarnation != state.Incarnation {
+			return nil // unverified or a stale job for an older registration
+		}
+		if state.Status != StatusPending {
+			return nil // already resolved (forced re-check, dup job, etc.)
+		}
+
+		res, err := provider.Status(ctx, domain)
+		if errors.Is(err, ErrIdentityNotFound) {
+			// The old blue/green slot may have deleted the replacement after v2
+			// installed it. Repair desired state immediately instead of turning a
+			// rollout race into a terminal customer-visible failure.
+			repairMissingIdentity = true
+			return nil
+		}
+		if errors.Is(err, ErrIdentityNotOwned) {
+			const reason = "provider identity exists but is not managed by e2a"
+			if err := setFailedFire(ctx, store, fire, domain, state, reason); err != nil {
+				return err
+			}
+			return store.ForgetSendingIdentityManaged(ctx, domain)
+		}
+		if err != nil {
+			// Transient SES/network error. Retry — UNLESS this was the last
+			// attempt, in which case returning err would let River discard the
+			// job and strand the domain in `pending` forever. Mark failed so the
+			// TTL is absolute even when the final poll errors.
+			if attempt >= maxAttempt {
+				return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
+			}
+			return err // retry (consumes an attempt)
+		}
+
+		switch res.Status {
+		case StatusVerified:
+			if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusVerified, res.DkimStatus, res.MailFromStatus, "", res.DNSRecords); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return err
+			}
+			fireOwner(ctx, fire, domain, state.Owner, StatusVerified, "")
+			return nil
+		case StatusFailed:
+			if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusFailed, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return err
+			}
+			fireOwner(ctx, fire, domain, state.Owner, StatusFailed, res.Error)
+			return nil
+		default: // still pending
+			if err := store.TouchSendingChecked(ctx, domain, state.Incarnation); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return err
+			}
+			if attempt >= maxAttempt {
+				return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
+			}
+			return errStillPending
+		}
+	})
+	if err != nil {
 		return err
 	}
-	if !state.Verified || incarnation != state.Incarnation {
-		return nil // unverified or a stale job for an older registration
-	}
-	if state.Status != StatusPending {
-		return nil // already resolved (forced re-check, dup job, etc.)
-	}
-
-	res, err := provider.Status(ctx, domain)
-	if errors.Is(err, ErrIdentityNotFound) {
-		// The old blue/green slot may have deleted the replacement after v2
-		// installed it. Repair desired state immediately instead of turning a
-		// rollout race into a terminal customer-visible failure.
+	if repairMissingIdentity {
+		// Re-enter through the normal mutation helper only after releasing this
+		// lock; convergeWorkerIdentity acquires the same non-reentrant lock.
 		return convergeWorkerIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, true)
 	}
-	if errors.Is(err, ErrIdentityNotOwned) {
-		const reason = "provider identity exists but is not managed by e2a"
-		if err := setFailedFire(ctx, store, fire, domain, state, reason); err != nil {
-			return err
-		}
-		return store.ForgetSendingIdentityManaged(ctx, domain)
-	}
-	if err != nil {
-		// Transient SES/network error. Retry — UNLESS this was the last
-		// attempt, in which case returning err would let River discard the
-		// job and strand the domain in `pending` forever. Mark failed so the
-		// TTL is absolute even when the final poll errors.
-		if attempt >= maxAttempt {
-			return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
-		}
-		return err // retry (consumes an attempt)
-	}
-
-	switch res.Status {
-	case StatusVerified:
-		if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusVerified, res.DkimStatus, res.MailFromStatus, "", res.DNSRecords); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			return err
-		}
-		fireOwner(ctx, fire, domain, state.Owner, StatusVerified, "")
-		return nil
-	case StatusFailed:
-		if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusFailed, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			return err
-		}
-		fireOwner(ctx, fire, domain, state.Owner, StatusFailed, res.Error)
-		return nil
-	default: // still pending
-		if err := store.TouchSendingChecked(ctx, domain, state.Incarnation); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			return err
-		}
-		if attempt >= maxAttempt {
-			return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
-		}
-		return errStillPending
-	}
+	return nil
 }
 
 // DeprovisionWorker removes the SES sending identity on domain/account

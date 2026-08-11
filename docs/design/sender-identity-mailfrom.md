@@ -61,6 +61,13 @@ for verified domains; (b) needed an aligned Return-Path.
   after success, and survives domain deletion until SES confirms teardown. The
   hourly reaper can therefore retry exhausted jobs without ever deleting an
   unrelated identity from the same SES account.
+- Every created SES identity carries `e2a-managed=sender-identity-v1`.
+  Existing identities without that exact tag are treated as foreign: e2a will
+  neither update nor delete them. The runtime IAM role should independently
+  require `aws:RequestTag/e2a-managed=sender-identity-v1` for create/tag calls
+  and `aws:ResourceTag/e2a-managed=sender-identity-v1` for DKIM, MAIL FROM, and
+  delete mutations. This provider-side condition closes the check-then-mutate
+  race that a client-side ownership check cannot close.
 - Mutation and reconcile job kinds and their River queue are versioned for
   blue/green rollout. The old slot does not listen to the v2 queue and cannot
   claim new work; legacy jobs are drained by compatibility
@@ -70,6 +77,34 @@ for verified domains; (b) needed an aligned Return-Path.
   every poll, so a verified domain's view keeps showing the records the customer
   must KEEP published (removing them later silently loses SPF alignment). (Adjusted
   from the original "clear on verify" after review.)
+
+## Upgrading an existing SES-enabled installation
+
+The ownership tag is a deliberate migration gate. Do not bulk-adopt everything
+returned by `ListEmailIdentities`: an AWS account/region may contain identities
+owned by another application.
+
+1. Before deploying this release, export the customer-owned domains for which
+   the existing e2a database records sender-identity work (`sending_status !=
+   'none'`). Separately inventory SES identities in the configured region.
+2. Review the intersection and confirm each candidate was created for this e2a
+   installation. Exclude every SES-only identity and every ambiguous domain.
+3. Tag only the confirmed candidates:
+
+   ```bash
+   aws sesv2 tag-resource \
+     --region "$AWS_REGION" \
+     --resource-arn "arn:aws:ses:$AWS_REGION:$AWS_ACCOUNT_ID:identity/$DOMAIN" \
+     --tags Key=e2a-managed,Value=sender-identity-v1
+   ```
+
+4. Grant the runtime principal `ses:TagResource` as dependent authorization for
+   tagged `CreateEmailIdentity` calls, in addition to the Create/Get/List/Put/
+   Delete actions above. Apply request-tag conditions to create/tag and the
+   resource-tag condition to both Put operations and delete.
+5. Re-run both inventories, then deploy. An untagged legacy e2a identity fails
+   closed with `identity not owned`; audit and tag it explicitly rather than
+   weakening the ownership check.
 
 ## Verification
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits

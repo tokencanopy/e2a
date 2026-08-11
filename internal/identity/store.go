@@ -1045,6 +1045,13 @@ func (s *Store) senderIdentityExecutor(ctx context.Context) senderIdentityExecut
 	return s.pool
 }
 
+func (s *Store) senderIdentityBegin(ctx context.Context) (pgx.Tx, error) {
+	if conn, ok := ctx.Value(senderIdentityExecutorKey{}).(*pgxpool.Conn); ok {
+		return conn.Begin(ctx)
+	}
+	return s.pool.Begin(ctx)
+}
+
 // WithSendingIdentityMutationLock serializes provider mutations for one
 // domain across workers, processes, and blue/green replicas. The callback gets
 // a context that pins the sender-identity store methods below to the lock-owning
@@ -1646,7 +1653,7 @@ func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
 // inTx runs only after the DELETE affected a row (the domain existed and was
 // owned by userID); it never runs for a not-found / FK-blocked delete.
 func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.senderIdentityBegin(ctx)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,6 +20,30 @@ type blockingProvisionProvider struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type blockingStatusProvider struct {
+	*FakeProvider
+	statusStarted    chan struct{}
+	statusRelease    chan struct{}
+	provisionStarted chan struct{}
+	statusOnce       sync.Once
+	provisionOnce    sync.Once
+}
+
+func (p *blockingStatusProvider) Status(ctx context.Context, domain string) (Result, error) {
+	p.statusOnce.Do(func() { close(p.statusStarted) })
+	select {
+	case <-p.statusRelease:
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+	return Result{Status: StatusVerified}, nil
+}
+
+func (p *blockingStatusProvider) Provision(ctx context.Context, domain, selector string, key []byte) (Result, error) {
+	p.provisionOnce.Do(func() { close(p.provisionStarted) })
+	return p.FakeProvider.Provision(ctx, domain, selector, key)
 }
 
 func (p *blockingProvisionProvider) Provision(ctx context.Context, domain, selector string, key []byte) (Result, error) {
@@ -432,6 +457,50 @@ func TestProviderMutationRace_DeletionWinsOverInFlightProvision(t *testing.T) {
 	}
 	if len(identities) != 0 {
 		t.Fatalf("provider identity survived delete/provision interleaving: %v", identities)
+	}
+}
+
+func TestProviderMutationRace_RefreshWinsOverStaleVerifiedPoll(t *testing.T) {
+	const domain = "refresh-race.example.com"
+	store := newFakeStore()
+	store.setStatus(domain, StatusPending)
+	store.setProvisionInputs("replacement-selector", []byte("replacement-key"), true)
+	provider := &blockingStatusProvider{
+		FakeProvider:     NewFakeProvider(),
+		statusStarted:    make(chan struct{}),
+		statusRelease:    make(chan struct{}),
+		provisionStarted: make(chan struct{}),
+	}
+	reconcile := &ReconcileV2Worker{store: store, provider: provider}
+	syncWorker := &SyncWorker{store: store, provider: provider}
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- reconcile.Work(context.Background(), &river.Job[ReconcileV2Args]{
+			JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 12, Kind: ReconcileV2Args{}.Kind()},
+			Args:   ReconcileV2Args{Domain: domain, Incarnation: domain + "-incarnation"},
+		})
+	}()
+	<-provider.statusStarted
+
+	syncDone := make(chan error, 1)
+	go func() {
+		syncDone <- syncWorker.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}})
+	}()
+	select {
+	case <-provider.provisionStarted:
+		t.Fatal("refresh provision crossed an in-flight provider status snapshot")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(provider.statusRelease)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("reconcile Work: %v", err)
+	}
+	if err := <-syncDone; err != nil {
+		t.Fatalf("sync Work: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status = %q, want pending after replacement key refresh", got)
 	}
 }
 
