@@ -37,7 +37,7 @@ func BuildReplyQuoteAttribution(ctx ForwardContext) string {
 // thread depended on which alternative their client picked. Deriving text
 // from HTML is also what mail clients do in the same spot.
 func quotedParentText(ctx ForwardContext) string {
-	if ctx.Text != "" {
+	if strings.TrimSpace(ctx.Text) != "" {
 		return ctx.Text
 	}
 	if ctx.HTML == "" {
@@ -85,7 +85,11 @@ func BuildReplyQuoteBody(replyText string, ctx ForwardContext) string {
 // text in <pre> when the parent has no HTML part; drops the quote block
 // when the parent has neither.
 func BuildReplyQuoteHTMLBody(replyHTML string, ctx ForwardContext) string {
-	if ctx.HTML == "" && ctx.Text == "" {
+	// Same quotable-parent rule as BuildReplyQuoteBody (quotedParentText): a
+	// whitespace-only text part is not quotable, so the two alternatives of a
+	// multipart/alternative reply stay consistent about whether history is
+	// attached.
+	if ctx.HTML == "" && strings.TrimSpace(ctx.Text) == "" {
 		return replyHTML
 	}
 	var buf strings.Builder
