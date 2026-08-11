@@ -136,12 +136,20 @@ test("consolidated plugin CI preserves release gates and fixture isolation", asy
     (step) => step.run === "npm ci --ignore-scripts --prefix plugins/e2a/skills/email-evals/runtime",
   );
 
-  assert.deepEqual(checkout.step.with, { "fetch-depth": 0 });
-  assert.ok(checkout.index < setupNode.index);
+  assert.equal(String(checkout.step.with["fetch-depth"]), "0");
+  assert.equal(checkout.index, 0);
+  assert.equal(setupNode.index, 1);
+  assert.deepEqual(
+    [pullRequestGate.index, pushGate.index].sort((left, right) => left - right),
+    [2, 3],
+  );
   for (const gate of [pullRequestGate, pushGate]) {
-    assert.ok(setupNode.index < gate.index);
     assert.ok(gate.index < globalInstall.index);
     assert.ok(gate.index < runtimeInstall.index);
+    assert.ok(
+      gate.step["continue-on-error"] === undefined || gate.step["continue-on-error"] === false,
+      `${gate.step.name} must fail closed`,
+    );
     assert.equal(gate.step.run, "node scripts/check-plugin-version-bump.mjs \"$PLUGIN_VERSION_BASE\"");
   }
   assert.equal(pullRequestGate.step.if, "github.event_name == 'pull_request'");
