@@ -24,6 +24,10 @@ interface CloudflareEnvelope<T> {
 type Fetch = typeof fetch;
 const REQUEST_TIMEOUT_MS = 15_000;
 
+export function cloudflareFixtureComment(suite: string, domain: string): string {
+  return `e2a conformance ${suite} ${domain} (temporary)`;
+}
+
 /**
  * Minimal Cloudflare DNS adapter for temporary conformance records.
  *

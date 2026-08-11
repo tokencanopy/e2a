@@ -1,11 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CloudflareDnsClient, type CloudflareDnsRecordRef } from "./cloudflare-dns.ts";
+import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "./cloudflare-dns.ts";
 import { DnsDeleteError } from "./domain-fixture-cleanup.ts";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
   headers: { "content-type": "application/json" },
+});
+
+test("fixture comments are scoped to the unique domain", () => {
+	const first = cloudflareFixtureComment("domain-lifecycle", "first.fixture.test");
+	const second = cloudflareFixtureComment("domain-lifecycle", "second.fixture.test");
+	assert.notEqual(first, second);
+	assert.match(first, /first\.fixture\.test/);
 });
 
 test("tracks a deterministic descriptor before an ambiguous create failure", async () => {

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ApiClient } from "../../harness/client.ts";
 import { cleanupDomainFixture } from "../../harness/domain-fixture-cleanup.ts";
-import { CloudflareDnsClient, type CloudflareDnsRecordRef } from "../../harness/cloudflare-dns.ts";
+import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "../../harness/cloudflare-dns.ts";
 import { track } from "../../harness/cleanup.ts";
 import { uniqueSlug } from "../../harness/fixtures.ts";
 import { writeReport, info, warn, fail } from "../../harness/report.ts";
@@ -156,7 +156,7 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
     assert.ok(mailFromSpf, "register returns a mail_from_spf TXT record (SESRegion is configured in prod)");
 
     // 2. publish ALL FIVE records in the isolated zone.
-    const comment = "e2a conformance domain-sending-identity (temporary)";
+    const comment = cloudflareFixtureComment("domain-sending-identity", domain);
     await cfDns.create({ type: "TXT", name: ownership!.name, content: ownership!.value }, dnsRecords, comment);
     await cfDns.create({ type: "MX", name: inboundMx!.name, content: inboundMx!.value, priority: inboundMx!.priority ?? 10 }, dnsRecords, comment);
     await cfDns.create({ type: "TXT", name: dkim!.name, content: dkim!.value }, dnsRecords, comment);

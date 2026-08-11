@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Resolver } from "node:dns/promises";
 import { ApiClient } from "../harness/client.ts";
 import { cleanupDomainFixture } from "../harness/domain-fixture-cleanup.ts";
-import { CloudflareDnsClient, type CloudflareDnsRecordRef } from "../harness/cloudflare-dns.ts";
+import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "../harness/cloudflare-dns.ts";
 import { track } from "../harness/cleanup.ts";
 import { uniqueSlug } from "../harness/fixtures.ts";
 import { writeReport, fail, info } from "../harness/report.ts";
@@ -111,15 +111,16 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     // 2. publish BOTH the ownership TXT and the inbound MX in the ISOLATED zone.
     //    `verified` requires the MX too, not just the TXT. Echo the MX priority
     //    the API returned rather than hardcoding it.
+    const comment = cloudflareFixtureComment("domain-lifecycle", domain);
     await cfDns.create(
       { type: "TXT", name: txt!.name, content: txt!.value },
       dnsRecords,
-      "e2a conformance domain-lifecycle (temporary)",
+      comment,
     );
     await cfDns.create(
       { type: "MX", name: mx!.name, content: mx!.value, priority: mx!.priority ?? 10 },
       dnsRecords,
-      "e2a conformance domain-lifecycle (temporary)",
+      comment,
     );
 
     // 3. wait for BOTH records to be publicly visible BEFORE the first verify —
