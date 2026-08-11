@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { access, readdir, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { test } from "node:test";
+
+const require = createRequire(import.meta.url);
+const { parse: parseYaml } = require("../plugins/e2a/skills/email-evals/runtime/node_modules/yaml");
 
 const skillNames = async (plugin) => (await readdir(`plugins/${plugin}/skills`, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
@@ -105,30 +109,50 @@ test("plugin CI is consolidated into parallel package and skill lanes", async ()
 
 test("consolidated plugin CI preserves release gates and fixture isolation", async () => {
   const workflow = await readFile(".github/workflows/plugin-tests.yml", "utf8");
-  const packageJob = workflow.match(/^  package:\n([\s\S]*?)(?=^  agentify:\n)/m)?.[1];
-  assert.ok(packageJob, "package job must exist before the agentify job");
-  const packageLines = packageJob.split("\n");
-
-  const stepIndex = (step) => {
-    const marker = `      - ${step}`;
-    const matches = packageLines
-      .map((line, index) => ({ line, index }))
-      .filter(({ line }) => line === marker);
-    assert.equal(matches.length, 1, `${step} must appear exactly once in the package job`);
-    return matches[0].index;
+  const steps = parseYaml(workflow).jobs.package.steps;
+  const onlyStep = (label, predicate) => {
+    const matches = steps
+      .map((step, index) => ({ step, index }))
+      .filter(({ step }) => predicate(step));
+    assert.equal(matches.length, 1, `${label} must appear exactly once in the package job`);
+    return matches[0];
   };
-  const orderedSteps = [
-    "uses: actions/checkout@v7",
-    "uses: actions/setup-node@v7",
-    "name: Require plugin version bumps in pull requests",
-    "name: Require plugin version bumps pushed to main",
-    "run: npm install --global \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\"",
-    "name: Install email-evals runtime dependencies",
-  ].map(stepIndex);
+  const checkout = onlyStep("checkout", (step) => step.uses === "actions/checkout@v7");
+  const setupNode = onlyStep("Node setup", (step) => step.uses === "actions/setup-node@v7");
+  const pullRequestGate = onlyStep(
+    "pull-request version gate",
+    (step) => step.name === "Require plugin version bumps in pull requests",
+  );
+  const pushGate = onlyStep(
+    "push version gate",
+    (step) => step.name === "Require plugin version bumps pushed to main",
+  );
+  const globalInstall = onlyStep(
+    "Claude Code install",
+    (step) => step.run === "npm install --global \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\"",
+  );
+  const runtimeInstall = onlyStep(
+    "email-evals runtime install",
+    (step) => step.run === "npm ci --ignore-scripts --prefix plugins/e2a/skills/email-evals/runtime",
+  );
 
-  assert.match(workflow, /github\.event\.pull_request\.base\.sha/);
-  assert.match(workflow, /github\.event\.before/);
-  assert.deepEqual(orderedSteps, [...orderedSteps].sort((left, right) => left - right));
+  assert.deepEqual(checkout.step.with, { "fetch-depth": 0 });
+  assert.ok(checkout.index < setupNode.index);
+  for (const gate of [pullRequestGate, pushGate]) {
+    assert.ok(setupNode.index < gate.index);
+    assert.ok(gate.index < globalInstall.index);
+    assert.ok(gate.index < runtimeInstall.index);
+    assert.equal(gate.step.run, "node scripts/check-plugin-version-bump.mjs \"$PLUGIN_VERSION_BASE\"");
+  }
+  assert.equal(pullRequestGate.step.if, "github.event_name == 'pull_request'");
+  assert.deepEqual(pullRequestGate.step.env, {
+    PLUGIN_VERSION_BASE: "${{ github.event.pull_request.base.sha }}",
+  });
+  assert.equal(
+    pushGate.step.if,
+    "github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'",
+  );
+  assert.deepEqual(pushGate.step.env, { PLUGIN_VERSION_BASE: "${{ github.event.before }}" });
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/runtime-skill/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/workflows\/feedback-triage\.yml\.tmpl/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/examples\/e2a\/autonomous-repo\.config\.yml/);
