@@ -2,8 +2,10 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { Resolver } from "node:dns/promises";
 import { ApiClient } from "../harness/client.ts";
+import { cleanupDomainFixture } from "../harness/domain-fixture-cleanup.ts";
+import { track } from "../harness/cleanup.ts";
 import { uniqueSlug } from "../harness/fixtures.ts";
-import { writeReport, info, warn } from "../harness/report.ts";
+import { writeReport, fail, info, warn } from "../harness/report.ts";
 
 // The FULL custom-domain lifecycle — the one flow prod e2e structurally can't do
 // because it needs REAL DNS: register → publish the verify records → verifyDomain
@@ -127,15 +129,13 @@ async function waitForPublicDns(domain: string, txtValue: string, mxHost: string
 test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → custom-domain agent → teardown", { skip }, async () => {
   const domain = `${uniqueSlug("dl")}.${CF_ZONE_NAME}`;
   const dnsIds: string[] = [];
-  let registered = false;
-  let agentEmail = "";
+  track("domain", domain);
   try {
     // 1. register the throwaway domain → returns the records to publish.
     const reg = await client.post<{
       dns_records: Array<{ type: string; name: string; value: string; purpose: string; priority?: number | null }>;
     }>("/v1/domains", { body: { domain } });
     assert.equal(reg.status, 201, `register ${domain}: ${reg.raw.slice(0, 200)}`);
-    registered = true;
     const txt = reg.body?.dns_records?.find((r) => r.purpose === "ownership" && r.type === "TXT");
     const mx = reg.body?.dns_records?.find((r) => r.purpose === "inbound_mx" && r.type === "MX");
     assert.ok(txt, "register returns an ownership TXT record");
@@ -173,7 +173,8 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     const got = await client.get<{ verified: boolean }>(`/v1/domains/${domain}`);
     assert.equal(got.body?.verified, true, "GET domain reflects verified=true");
 
-    agentEmail = `bot@${domain}`;
+    const agentEmail = `bot@${domain}`;
+    track("agent", agentEmail);
     const ag = await client.post<{ email: string; domain_verified: boolean }>("/v1/agents", {
       body: { email: agentEmail, name: "lifecycle bot" },
     });
@@ -187,24 +188,18 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     assert.equal(gotAgent.status, 200, `read custom-domain agent: ${gotAgent.raw.slice(0, 200)}`);
     assert.equal(gotAgent.body?.domain_verified, true, "custom-domain agent reports domain_verified=true on read");
   } finally {
-    // 6. teardown — each step guarded so an early failure can't strand a
-    //    shared-zone DNS record (the highest-value leak). CF records are
-    //    independent of the e2a domain/agent, so they're cleaned unconditionally.
-    if (agentEmail) {
-      try {
-        await client.delete(`/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE`);
-      } catch (e) {
-        warn(SUITE, "cleanup", `agent ${agentEmail} delete threw: ${String(e)}`);
-      }
+    // 6. teardown — the cleanup registry reverses creation order, so the
+    //    agent is permanently purged before the domain delete transaction
+    //    enqueues SES deprovisioning. Only then is it safe to remove DNS.
+    const result = await cleanupDomainFixture(client, dnsIds, cfDeleteRecord);
+    if (result.failed.length > 0) {
+      fail(
+        SUITE,
+        "resource-cleanup-failed",
+        `preserved ${dnsIds.length} DNS record(s) because ${result.failed.length} API fixture(s) survived teardown`,
+        result.failed,
+      );
     }
-    if (registered) {
-      try {
-        await client.delete(`/v1/domains/${domain}?confirm=DELETE`);
-      } catch (e) {
-        warn(SUITE, "cleanup", `domain ${domain} delete threw: ${String(e)}`);
-      }
-    }
-    for (const id of dnsIds) await cfDeleteRecord(id);
   }
 });
 
@@ -216,11 +211,10 @@ test("domain verify NEGATIVE control: an unpublished domain does NOT verify (gua
   // This asserts the real DNS path is live. Uses its own throwaway domain that we
   // never verify for real, so poisoning its 30-min negative cache is harmless.
   const domain = `${uniqueSlug("dlneg")}.${CF_ZONE_NAME}`;
-  let registered = false;
+  track("domain", domain);
   try {
     const reg = await client.post("/v1/domains", { body: { domain } });
     assert.equal(reg.status, 201, `register ${domain}: ${reg.raw.slice(0, 200)}`);
-    registered = true;
     const v = await client.post<{ verified: boolean; mx?: string }>(`/v1/domains/${domain}/verify`);
     // The discriminating assertion: verified MUST be false. A dev-mode
     // short-circuit would report verified=true here and fail this test.
@@ -228,12 +222,9 @@ test("domain verify NEGATIVE control: an unpublished domain does NOT verify (gua
     // Not-yet-verified is a normal 200 (branch on .verified), not a 412.
     assert.equal(v.status, 200, `unpublished domain verify → 200 with verified:false, got ${v.status}`);
   } finally {
-    if (registered) {
-      try {
-        await client.delete(`/v1/domains/${domain}?confirm=DELETE`);
-      } catch (e) {
-        warn(SUITE, "cleanup", `neg-control domain ${domain} delete threw: ${String(e)}`);
-      }
+    const result = await cleanupDomainFixture(client, [], cfDeleteRecord);
+    if (result.failed.length > 0) {
+      fail(SUITE, "negative-control-cleanup-failed", "negative-control domain survived teardown", result.failed);
     }
   }
 });

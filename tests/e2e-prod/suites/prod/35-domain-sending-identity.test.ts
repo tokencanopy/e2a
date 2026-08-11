@@ -4,6 +4,8 @@ import { Resolver } from "node:dns/promises";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ApiClient } from "../../harness/client.ts";
+import { cleanupDomainFixture } from "../../harness/domain-fixture-cleanup.ts";
+import { track } from "../../harness/cleanup.ts";
 import { uniqueSlug } from "../../harness/fixtures.ts";
 import { writeReport, info, warn, fail } from "../../harness/report.ts";
 
@@ -158,13 +160,11 @@ const SENDING_STATUS_POLL_MS = 15000;
 test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL FROM) -> verify -> [best-effort] sending_status -> custom-domain agent -> teardown", { skip }, async () => {
   const domain = `${uniqueSlug("dsi")}.${CF_ZONE_NAME}`;
   const dnsIds: string[] = [];
-  let registered = false;
-  let agentEmail = "";
+  track("domain", domain);
   try {
     // 1. register
     const reg = await client.post<DomainView>("/v1/domains", { body: { domain } });
     assert.equal(reg.status, 201, `register ${domain}: ${reg.raw.slice(0, 200)}`);
-    registered = true;
 
     const records = reg.body?.dns_records ?? [];
     const ownership = records.find((r) => r.purpose === "ownership" && r.type === "TXT");
@@ -275,46 +275,26 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
 
     // 6. custom-domain agent, regardless of the sending-identity outcome
     //    above (inbound verification, not sending, is what create-agent needs).
-    agentEmail = `bot@${domain}`;
+    const agentEmail = `bot@${domain}`;
+    track("agent", agentEmail);
     const ag = await client.post<{ email: string; domain_verified: boolean }>("/v1/agents", {
       body: { email: agentEmail, name: "sending-identity bot" },
     });
     assert.equal(ag.status, 201, `create custom-domain agent: ${ag.raw.slice(0, 200)}`);
     assert.equal(ag.body?.domain_verified, true, "custom-domain agent reports domain_verified=true on create");
   } finally {
-    // 7. teardown — agent BEFORE domain (domain_has_agents guard), then every
-    //    Cloudflare record, unconditionally.
-    if (agentEmail) {
-      try {
-        // permanent=true, not a plain trash-move: HasAgentsOnDomain (and the
-        // resulting domain_has_agents 400 on delete-domain below) counts a
-        // TRASHED agent as still "on" the domain — internal/httpapi/domains.go's
-        // own error text says so explicitly ("including any in the trash: they
-        // hold the address until restored or permanently deleted"). A plain
-        // ?confirm=DELETE here would strand the domain (live-verified during
-        // authoring: the domain delete below 400'd domain_has_agents even
-        // though this agent delete had already "succeeded"). permanent=true
-        // frees the address immediately so the domain delete that follows can
-        // actually succeed.
-        const del = await client.delete(`/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE&permanent=true`);
-        if (![200, 204, 404].includes(del.status)) {
-          fail(SUITE, "agent-cleanup-failed", `permanent delete of agent ${agentEmail} returned ${del.status}: ${del.raw.slice(0, 200)} — MANUAL CLEANUP MAY BE NEEDED (would strand the domain on the next run)`);
-        }
-      } catch (e) {
-        warn(SUITE, "cleanup", `agent ${agentEmail} delete threw: ${String(e)}`);
-      }
+    // 7. teardown — permanent agent purge first, then transactional domain +
+    //    SES deprovision enqueue, then DNS. If API teardown fails, retain DNS
+    //    so a still-live provider identity does not lose verification.
+    const result = await cleanupDomainFixture(client, dnsIds, cfDeleteRecord);
+    if (result.failed.length > 0) {
+      fail(
+        SUITE,
+        "resource-cleanup-failed",
+        `preserved ${dnsIds.length} DNS record(s) because ${result.failed.length} API fixture(s) survived teardown`,
+        result.failed,
+      );
     }
-    if (registered) {
-      try {
-        const del = await client.delete(`/v1/domains/${domain}?confirm=DELETE`);
-        if (![200, 204, 404].includes(del.status)) {
-          fail(SUITE, "domain-cleanup-failed", `delete domain ${domain} returned ${del.status}: ${del.raw.slice(0, 200)} — MANUAL CLEANUP MAY BE NEEDED`);
-        }
-      } catch (e) {
-        warn(SUITE, "cleanup", `domain ${domain} delete threw: ${String(e)}`);
-      }
-    }
-    for (const id of dnsIds) await cfDeleteRecord(id);
   }
 });
 
