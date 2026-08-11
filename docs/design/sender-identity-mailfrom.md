@@ -68,6 +68,12 @@ for verified domains; (b) needed an aligned Return-Path.
   and `aws:ResourceTag/e2a-managed=sender-identity-v1` for DKIM, MAIL FROM, and
   delete mutations. This provider-side condition closes the check-then-mutate
   race that a client-side ownership check cannot close.
+  `ses:TagResource` is also callable directly because AWS does not expose a
+  create-only variant of its dependent authorization. e2a itself never makes
+  that standalone call, but the runtime credential must remain trusted: this
+  tag is not a boundary against its deliberate compromise. Do not operate two
+  e2a installations with this shared tag value in the same AWS account and
+  region; use an isolated account/region or separately scoped principal.
 - Mutation and reconcile job kinds and their River queue are versioned for
   blue/green rollout. The old slot does not listen to the v2 queue and cannot
   claim new work; legacy jobs are drained by compatibility
