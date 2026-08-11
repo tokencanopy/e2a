@@ -155,10 +155,11 @@ notifications:
 # "none" and outbound keeps the relay "… via e2a" From — the fail-closed
 # default for dev/self-host without SES. Needs AWS credentials in the ambient
 # environment (env vars / instance role) with ses:CreateEmailIdentity,
+# ses:PutEmailIdentityDkimSigningAttributes,
 # ses:PutEmailIdentityMailFromAttributes, ses:GetEmailIdentity,
 # ses:DeleteEmailIdentity, ses:ListEmailIdentities. (Provisioning calls
-# PutEmailIdentityMailFromAttributes for the custom MAIL FROM — a role missing
-# it fails at that step even though CreateEmailIdentity succeeds.)
+# both Put operations when refreshing an existing identity — a role missing
+# either permission fails closed and River retries.)
 # Override with E2A_SENDER_IDENTITY_SES_REGION.
 sender_identity:
   ses_region: ""  # e.g. "us-east-1"

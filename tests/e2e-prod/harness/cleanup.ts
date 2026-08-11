@@ -3,7 +3,7 @@ import type { ApiClient } from "./client.ts";
 
 type Kind = "agent" | "domain";
 
-interface Tracked {
+export interface CleanupFixture {
   kind: Kind;
   id: string;
 }
@@ -23,6 +23,14 @@ export interface CleanupOpts {
    * fixtures for reasons that would clear on a second try.
    */
   attempts?: number;
+	/**
+	 * Attempt budget for the two known transient 409s. send_in_progress may
+	 * legally remain fresh for ten minutes, so the normal three-attempt budget
+	 * is not a meaningful cleanup guarantee. Defaults to 49 (>10 minutes of
+	 * the capped backoff); explicitly setting attempts also caps this unless
+	 * this option is provided.
+	 */
+	conflictAttempts?: number;
   /**
    * Floor for the delay between retries; grows linearly per attempt. A server
    * `Retry-After` wins when it is larger, because internal/ratelimit guarantees
@@ -34,14 +42,18 @@ export interface CleanupOpts {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const tracked: Tracked[] = [];
+const tracked: CleanupFixture[] = [];
 
 // A DELETE landing on one of these is terminal-good: the fixture is gone, or
-// was never ours to begin with (403 == "not owned"/already deleted under
-// anti-enumeration semantics). Stop retrying and untrack.
-const TERMINAL_OK = new Set([200, 204, 404, 403]);
+// A not-found response is the delete endpoints' anti-enumeration result for
+// both absent and not-owned resources. A 403 is a real scope/access failure and
+// therefore MUST remain tracked rather than being misreported as deletion.
+const TERMINAL_OK = new Set([200, 204, 404]);
 
 const DEFAULT_ATTEMPTS = 3;
+// 49 attempts yield at least 615 seconds of capped waits before the final
+// attempt, exceeding the server's ten-minute active-send lease.
+const DEFAULT_CONFLICT_ATTEMPTS = 49;
 // internal/ratelimit rounds Retry-After up to a whole second, so a sub-second
 // floor cannot outlast even the shortest 429 window.
 const DEFAULT_BACKOFF_MS = 1_000;
@@ -66,19 +78,32 @@ export function untrack(kind: Kind, id: string): void {
 }
 
 export async function cleanup(client: ApiClient, opts: CleanupOpts = {}): Promise<CleanupResult> {
-  const attempts = Math.max(1, opts.attempts ?? DEFAULT_ATTEMPTS);
+  return cleanupFixtures(client, [...tracked], opts);
+}
+
+/** Delete only the named fixtures, while keeping the shared leak registry honest. */
+export async function cleanupFixtures(
+  client: ApiClient,
+  fixtures: readonly CleanupFixture[],
+  opts: CleanupOpts = {},
+): Promise<CleanupResult> {
+	const attempts = Math.max(1, opts.attempts ?? DEFAULT_ATTEMPTS);
+	const conflictAttempts = Math.max(
+		attempts,
+		opts.conflictAttempts ?? (opts.attempts === undefined ? DEFAULT_CONFLICT_ATTEMPTS : attempts),
+	);
   const backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const failed: CleanupResult["failed"] = [];
   let succeeded = 0;
   // Snapshot up front: the loop mutates `tracked` via untrack().
-  const batch = [...tracked].reverse();
+  const batch = [...fixtures].reverse();
   for (const t of batch) {
     // Each fixture is fully isolated — its own try/catch AND its own retry
     // budget — so neither a hard failure nor an exhausted retry on one fixture
     // can stop the remaining ones from being deleted.
-    const reason = await deleteWithRetry(client, t, attempts, backoffMs, sleep);
+		const reason = await deleteWithRetry(client, t, attempts, conflictAttempts, backoffMs, sleep);
     if (reason === null) {
       succeeded++;
       untrack(t.kind, t.id);
@@ -92,21 +117,25 @@ export async function cleanup(client: ApiClient, opts: CleanupOpts = {}): Promis
 /** Returns null once the fixture is gone, or a human-readable reason on give-up. */
 async function deleteWithRetry(
   client: ApiClient,
-  t: Tracked,
-  attempts: number,
+	t: CleanupFixture,
+	attempts: number,
+	conflictAttempts: number,
   backoffMs: number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<string | null> {
   const path = pathFor(t);
   let reason = "no attempt made";
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    let retryable: boolean;
+	const maxAttempts = Math.max(attempts, conflictAttempts);
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		let retryable: boolean;
+		let budget = attempts;
     let waitMs = backoffMs * attempt;
     try {
       const res = await client.delete(path);
       if (TERMINAL_OK.has(res.status)) return null;
-      reason = `HTTP ${res.status}: ${res.raw.slice(0, 200)}`;
-      retryable = isRetryableStatus(res.status);
+			reason = `HTTP ${res.status}: ${res.raw.slice(0, 200)}`;
+			retryable = isRetryableResponse(res.status, res.raw);
+			if (isRetryableConflictResponse(res.status, res.raw)) budget = conflictAttempts;
       waitMs = Math.max(waitMs, retryAfterMs(res.headers));
     } catch (e) {
       // A thrown request is a transport failure (DNS, socket reset, abort).
@@ -120,7 +149,7 @@ async function deleteWithRetry(
       reason = errMessage(e);
       retryable = true;
     }
-    if (!retryable || attempt === attempts) break;
+		if (!retryable || attempt >= budget) break;
     await sleep(Math.min(waitMs, MAX_BACKOFF_MS));
   }
   return reason;
@@ -139,13 +168,26 @@ function retryAfterMs(headers: Record<string, string>): number {
   return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
 }
 
-// 429 is the realistic one — cleanup competes with the suite's own traffic
-// against the agent rate limit. 408 and 5xx are transient by definition.
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status === 408 || status >= 500;
+// 429 is the realistic one — cleanup competes with the suite's own traffic.
+// Permanent agent deletion can also race an active send or an earlier purge;
+// those two machine codes are explicitly retryable, unlike arbitrary 409s.
+function isRetryableResponse(status: number, raw: string): boolean {
+	if (status === 429 || status === 408 || status >= 500) return true;
+	return isRetryableConflictResponse(status, raw);
 }
 
-function pathFor(t: Tracked): string {
+function isRetryableConflictResponse(status: number, raw: string): boolean {
+	if (status !== 409) return false;
+  try {
+    const parsed = JSON.parse(raw) as { code?: unknown; error?: { code?: unknown } };
+    const code = parsed.code ?? parsed.error?.code;
+    return code === "send_in_progress" || code === "purge_in_progress";
+  } catch {
+    return false;
+  }
+}
+
+function pathFor(t: CleanupFixture): string {
   // Destructive deletes require ?confirm=DELETE (the API's irreversible-op
   // guard). Cleanup is always intentional, so we always confirm.
   //
@@ -170,7 +212,7 @@ function pathFor(t: Tracked): string {
   }
 }
 
-export function getTracked(): readonly Tracked[] {
+export function getTracked(): readonly CleanupFixture[] {
   return tracked;
 }
 

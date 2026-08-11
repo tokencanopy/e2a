@@ -238,8 +238,9 @@ func sendingRecordStatus(sendingStatus string) string {
 }
 
 // enqueueSenderProvision schedules SES sending-identity provisioning for a
-// verified domain when the dep is wired (no-op otherwise). Best-effort: a
-// missed enqueue is recovered by the next POST /domains/{domain}/verify.
+// previously verified domain when the dep is wired (no-op otherwise). Newly
+// verified domains use VerifyDomain's transactional outbox; this best-effort
+// path is only the explicit forced refresh.
 func (s *Server) enqueueSenderProvision(ctx context.Context, domain string) {
 	if s.deps.EnqueueSenderProvision != nil {
 		s.deps.EnqueueSenderProvision(ctx, domain)
@@ -387,9 +388,8 @@ func (s *Server) handleVerifyDomain(ctx context.Context, in *DomainParam) (*veri
 	if err := s.deps.VerifyDomain(ctx, in.Domain, user.ID); err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to verify domain")
 	}
-	// Newly verified (inbound ownership): kick off SES sending-identity
-	// provisioning so the domain can graduate to own-address From.
-	s.enqueueSenderProvision(ctx, in.Domain)
+	// Newly verified (inbound ownership): the production VerifyDomain dep
+	// atomically commits the sender-identity job with this state transition.
 	// Re-read for verified_at; fall back to the bare success shape.
 	updated, err := s.deps.LookupDomain(ctx, in.Domain, user.ID)
 	if err != nil || updated == nil {

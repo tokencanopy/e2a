@@ -23,12 +23,26 @@ import (
 // fakeSenderIdentity records SenderIdentityEnqueuer calls so the transactional
 // teardown contract can be asserted without SES/River.
 type fakeSenderIdentity struct {
-	deprovisionErr error
-	deprovisioned  []string
+	provisionErr    error
+	deprovisionErr  error
+	deprovisioned   []string
+	providerCleaned []string
+}
+
+func (f *fakeSenderIdentity) DeprovisionBeforeDelete(ctx context.Context, domain string, deleteFn func(context.Context) error) error {
+	f.providerCleaned = append(f.providerCleaned, domain)
+	if f.deprovisionErr != nil {
+		return f.deprovisionErr
+	}
+	return deleteFn(ctx)
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, _ string) error {
 	return nil
+}
+
+func (f *fakeSenderIdentity) EnqueueProvisionTx(_ context.Context, _ pgx.Tx, _ string) error {
+	return f.provisionErr
 }
 
 func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, domain string) error {
@@ -79,8 +93,37 @@ func TestBuildDepsDeleteDomainWithSenderIdentity(t *testing.T) {
 	if len(fake.deprovisioned) != 1 || fake.deprovisioned[0] != domain {
 		t.Fatalf("deprovisioned = %v, want [%s] — SES teardown must be enqueued", fake.deprovisioned, domain)
 	}
+	if len(fake.providerCleaned) != 1 || fake.providerCleaned[0] != domain {
+		t.Fatalf("providerCleaned = %v, want [%s] — 200 must mean SES teardown already completed", fake.providerCleaned, domain)
+	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
 		t.Fatal("domain row still present after DeleteDomain")
+	}
+}
+
+func TestBuildDepsVerifyDomainProvisionJobIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	hookErr := errors.New("river unavailable")
+	p.SenderIdentity = &fakeSenderIdentity{provisionErr: hookErr}
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "verify-outbox@example.com", "Owner", "verify-outbox-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "verify-outbox.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := deps.VerifyDomain(ctx, domain, user.ID); !errors.Is(err, hookErr) {
+		t.Fatalf("VerifyDomain error = %v, want %v", err, hookErr)
+	}
+	got, err := store.LookupDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("LookupDomain: %v", err)
+	}
+	if got.Verified {
+		t.Fatal("verified row committed without its sender-identity outbox job")
 	}
 }
 

@@ -18,6 +18,9 @@ for verified domains; (b) needed an aligned Return-Path.
   envelope sender. Leaf package (zero internal deps) so `outbound` uses it without
   importing `senderidentity`.
 - **SES provider** (`internal/senderidentity/ses.go`): `Provision` now also calls
+  `PutEmailIdentityDkimSigningAttributes` on `AlreadyExists` so a deleted and
+  re-registered domain replaces the prior incarnation's BYODKIM selector/key,
+  then calls
   `PutEmailIdentityMailFromAttributes(MailFromDomain=bounce.<domain>,
   BehaviorOnMxFailure=USE_DEFAULT_VALUE)` after `CreateEmailIdentity` (incl. the
   idempotent `AlreadyExists` path), and returns the **MX + SPF** DNS records
@@ -50,10 +53,19 @@ for verified domains; (b) needed an aligned Return-Path.
 
 ## Edge cases / invariants
 - Fail-closed: any non-`verified` state → e2a relay envelope + "via" From.
-- `Provision` idempotent (CreateEmailIdentity `AlreadyExists` + `PutEmailIdentity…`
-  both idempotent; the `verified` skip-guard already exists).
-- No migration: no domain was `verified` before (path dormant), so redefining
-  `verified` to require MAIL FROM has no existing rows to reconcile.
+- `Provision` idempotent (`CreateEmailIdentity` `AlreadyExists` refreshes both
+  BYODKIM and MAIL FROM with idempotent `PutEmailIdentity…` operations; the
+  desired-state worker serializes provider mutations per domain).
+- Migration 101 adds a durable managed-domain ledger. It is written before a
+  provider create/update, records the applied registration incarnation only
+  after success, and survives domain deletion until SES confirms teardown. The
+  hourly reaper can therefore retry exhausted jobs without ever deleting an
+  unrelated identity from the same SES account.
+- Mutation and reconcile job kinds and their River queue are versioned for
+  blue/green rollout. The old slot does not listen to the v2 queue and cannot
+  claim new work; legacy jobs are drained by compatibility
+  workers that converge current state and hand polling to an incarnation-aware
+  v2 job with a fresh attempt budget.
 - The MX/SPF records are **preserved across verify** — `Status()` re-emits them on
   every poll, so a verified domain's view keeps showing the records the customer
   must KEEP published (removing them later silently loses SPF alignment). (Adjusted
@@ -71,7 +83,8 @@ for verified domains; (b) needed an aligned Return-Path.
 
 ## Deferred
 - **Track A** — validate the real `sesv2` path (CreateEmailIdentity +
-  PutEmailIdentityMailFromAttributes + GetEmailIdentity + the BYODKIM
+  PutEmailIdentityDkimSigningAttributes + PutEmailIdentityMailFromAttributes +
+  GetEmailIdentity + the BYODKIM
   PKCS#1→PKCS#8 key) against a live SES account; then set `sender_identity.ses_region`
   in prod. Confirm in Gmail: no "via", aligned `mailed-by`, DMARC pass on SPF+DKIM.
 - Per-deployment configurable subdomain label (Q1).

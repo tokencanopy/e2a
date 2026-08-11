@@ -19,6 +19,7 @@ import (
 // AWS-touching calls themselves are exercised only against live SES).
 type sesAPI interface {
 	CreateEmailIdentity(ctx context.Context, in *sesv2.CreateEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error)
+	PutEmailIdentityDkimSigningAttributes(ctx context.Context, in *sesv2.PutEmailIdentityDkimSigningAttributesInput, optFns ...func(*sesv2.Options)) (*sesv2.PutEmailIdentityDkimSigningAttributesOutput, error)
 	PutEmailIdentityMailFromAttributes(ctx context.Context, in *sesv2.PutEmailIdentityMailFromAttributesInput, optFns ...func(*sesv2.Options)) (*sesv2.PutEmailIdentityMailFromAttributesOutput, error)
 	GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error)
 	DeleteEmailIdentity(ctx context.Context, in *sesv2.DeleteEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.DeleteEmailIdentityOutput, error)
@@ -30,12 +31,18 @@ type sesAPI interface {
 // so the DKIM d= aligns with the From domain (DMARC passes on DKIM
 // alignment), and configures a custom MAIL FROM subdomain (bounce.<domain>) so
 // the Return-Path aligns too (SPF passes on the From org-domain → no "via e2a").
-// NOTE: only exercised against live AWS — CI/tests use FakeProvider; the
-// status-mapping helpers below are unit-tested with a stub.
+// Every created identity carries an e2a ownership tag. Existing untagged
+// identities are never adopted or mutated; IAM independently applies the same
+// resource-tag condition to close the client-side check/mutation race.
 type SESProvider struct {
 	api    sesAPI
 	region string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
 }
+
+const (
+	managedIdentityTagKey   = "e2a-managed"
+	managedIdentityTagValue = "sender-identity-v1"
+)
 
 // NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL FROM
 // MX record target.
@@ -59,19 +66,47 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 		// A malformed key is not retryable — fail closed with a reason.
 		return Result{Status: StatusFailed, Error: "dkim private key not usable for BYODKIM: " + err.Error()}, nil
 	}
+	dkimAttributes := &ststypes.DkimSigningAttributes{
+		DomainSigningSelector:         &dkimSelector,
+		DomainSigningPrivateKey:       &privB64,
+		DomainSigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+	}
 	_, err = p.api.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{
-		EmailIdentity: &domain,
-		DkimSigningAttributes: &ststypes.DkimSigningAttributes{
-			DomainSigningSelector:         &dkimSelector,
-			DomainSigningPrivateKey:       &privB64,
-			DomainSigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
-		},
+		EmailIdentity:         &domain,
+		DkimSigningAttributes: dkimAttributes,
+		Tags: []ststypes.Tag{{
+			Key:   awsString(managedIdentityTagKey),
+			Value: awsString(managedIdentityTagValue),
+		}},
 	})
 	if err != nil {
-		// AlreadyExists is success (idempotent): the identity is registered;
-		// fall through to also (re)configure the custom MAIL FROM below.
+		// AlreadyExists means the domain may belong to an older registration.
+		// Update BYODKIM explicitly before touching MAIL FROM: Create's input is
+		// ignored on this path, and keeping the old selector/key would make a
+		// re-registered domain fail verification forever.
 		var already *ststypes.AlreadyExistsException
 		if !errors.As(err, &already) {
+			return Result{}, err // transient/permission — retry
+		}
+		existing, getErr := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+		if getErr != nil {
+			return Result{}, getErr
+		}
+		if !isManagedIdentity(existing) {
+			return Result{}, ErrIdentityNotOwned
+		}
+		// Put's nested shape deliberately omits DomainSigningAttributesOrigin.
+		// SES rejects every nested Origin value for this operation; EXTERNAL
+		// belongs only on the top-level SigningAttributesOrigin field.
+		putAttributes := &ststypes.DkimSigningAttributes{
+			DomainSigningSelector:   &dkimSelector,
+			DomainSigningPrivateKey: &privB64,
+		}
+		if _, err := p.api.PutEmailIdentityDkimSigningAttributes(ctx, &sesv2.PutEmailIdentityDkimSigningAttributesInput{
+			EmailIdentity:           &domain,
+			SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			SigningAttributes:       putAttributes,
+		}); err != nil {
 			return Result{}, err // transient/permission — retry
 		}
 	}
@@ -113,6 +148,9 @@ func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error)
 		}
 		return Result{}, err
 	}
+	if !isManagedIdentity(out) {
+		return Result{}, ErrIdentityNotOwned
+	}
 	// Re-emit the MAIL FROM records on every poll so the verify/failed transition
 	// preserves them (ReconcileWorker writes res.DNSRecords) — a verified domain's
 	// view keeps showing the MX/SPF the customer must KEEP published.
@@ -126,7 +164,18 @@ func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error)
 }
 
 func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
-	_, err := p.api.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: &domain})
+	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		var notFound *ststypes.NotFoundException
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return err
+	}
+	if !isManagedIdentity(out) {
+		return ErrIdentityNotOwned
+	}
+	_, err = p.api.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
 		var notFound *ststypes.NotFoundException
 		if errors.As(err, &notFound) {
@@ -134,8 +183,33 @@ func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 		}
 		return err
 	}
-	return nil
+	// DELETE success is followed by an absence read so the HTTP domain-delete
+	// boundary can safely release DNS. If SES is briefly eventually consistent,
+	// the caller retries while the database row and DNS remain intact.
+	_, err = p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		var notFound *ststypes.NotFoundException
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return err
+	}
+	return errors.New("senderidentity: provider identity still present after delete")
 }
+
+func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
+	if out == nil {
+		return false
+	}
+	for _, tag := range out.Tags {
+		if tag.Key != nil && tag.Value != nil && *tag.Key == managedIdentityTagKey && *tag.Value == managedIdentityTagValue {
+			return true
+		}
+	}
+	return false
+}
+
+func awsString(value string) *string { return &value }
 
 func (p *SESProvider) List(ctx context.Context) ([]string, error) {
 	var out []string

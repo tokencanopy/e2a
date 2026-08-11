@@ -46,9 +46,21 @@ func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, domain string) 
 	return f.provisionErr
 }
 
+func (f *fakeSenderIdentity) EnqueueProvisionTx(_ context.Context, _ pgx.Tx, domain string) error {
+	f.provisioned = append(f.provisioned, domain)
+	return f.provisionErr
+}
+
 func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, domain string) error {
 	f.deprovisioned = append(f.deprovisioned, domain)
 	return f.deprovisionErr
+}
+
+func (f *fakeSenderIdentity) DeprovisionBeforeDelete(ctx context.Context, _ string, deleteFn func(context.Context) error) error {
+	if f.deprovisionErr != nil {
+		return f.deprovisionErr
+	}
+	return deleteFn(ctx)
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {

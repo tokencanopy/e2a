@@ -101,7 +101,9 @@ type Params struct {
 // senderidentity package (River + AWS SDK) just to wire two optional deps.
 type SenderIdentityEnqueuer interface {
 	EnqueueProvision(ctx context.Context, domain string) error
+	EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain string) error
 	EnqueueDeprovisionTx(ctx context.Context, tx pgx.Tx, domain string) error
+	DeprovisionBeforeDelete(ctx context.Context, domain string, deleteFn func(context.Context) error) error
 }
 
 // BuildDeps maps Params into the httpapi dependency set. Kept as the single
@@ -294,7 +296,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		DeleteAPIKey:       p.Store.DeleteAPIKey,
 
 		TouchDomainChecked: p.Store.TouchDomainLastChecked,
-		VerifyDomain:       p.Store.VerifyDomain,
+		VerifyDomain:       verifyDomainFunc(p),
 		VerifyProbe: func(domain, token, dkimSel, dkimKey string) httpapi.DomainCheckResult {
 			c := agent.CheckDomainRecords(domain, p.SMTPDomain, token, dkimSel, dkimKey, p.Production)
 			return httpapi.DomainCheckResult{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM}
@@ -313,16 +315,30 @@ func BuildDeps(p Params) httpapi.Deps {
 	return deps
 }
 
-// deleteDomainFunc wires DELETE /domains. With SES configured the domain-row
-// delete and the SES deprovision job commit in ONE transaction (decision 4 —
-// the teardown job can never be lost); without it, a plain delete.
+func verifyDomainFunc(p Params) func(ctx context.Context, domain, userID string) error {
+	if p.SenderIdentity == nil {
+		return p.Store.VerifyDomain
+	}
+	return func(ctx context.Context, domain, userID string) error {
+		return p.Store.VerifyDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+			return p.SenderIdentity.EnqueueProvisionTx(ctx, tx, domain)
+		})
+	}
+}
+
+// deleteDomainFunc wires DELETE /domains. With SES configured it first confirms
+// provider deletion, then commits the domain-row delete and durable backstop
+// job in one transaction. Therefore HTTP success is safe for callers to use as
+// the boundary for removing DNS; without SES configured, this is a plain delete.
 func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) error {
 	if p.SenderIdentity == nil {
 		return p.Store.DeleteDomain
 	}
 	return func(ctx context.Context, domain, userID string) error {
-		return p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
-			return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
+		return p.SenderIdentity.DeprovisionBeforeDelete(ctx, domain, func(lockedCtx context.Context) error {
+			return p.Store.DeleteDomainTx(lockedCtx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+				return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
+			})
 		})
 	}
 }

@@ -16,7 +16,8 @@ type FakeProvider struct {
 	mu sync.Mutex
 
 	// provisionResult / provisionErr override Provision's return per call.
-	provisionErr error
+	provisionResult *Result
+	provisionErr    error
 	// statusByDomain returns a fixed Status result for a domain's polls.
 	statusByDomain map[string]Result
 	// statusSeq pops one result per Status call (then holds the last).
@@ -72,6 +73,13 @@ func (f *FakeProvider) SetProvisionErr(err error) {
 	f.provisionErr = err
 }
 
+// SetProvisionResult overrides the default pending provisioning result.
+func (f *FakeProvider) SetProvisionResult(result Result) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.provisionResult = &result
+}
+
 // SetStatus fixes the Result returned by Status for domain.
 func (f *FakeProvider) SetStatus(domain string, r Result) {
 	f.mu.Lock()
@@ -108,6 +116,9 @@ func (f *FakeProvider) Provision(ctx context.Context, domain, dkimSelector strin
 	f.ProvisionCalls = append(f.ProvisionCalls, domain)
 	if f.provisionErr != nil {
 		return Result{}, f.provisionErr
+	}
+	if f.provisionResult != nil {
+		return *f.provisionResult, nil
 	}
 	f.identities[domain] = true
 	// Mirror the SES provider: provisioning emits the custom MAIL FROM records

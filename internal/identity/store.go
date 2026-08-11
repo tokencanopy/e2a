@@ -11,6 +11,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -543,6 +544,10 @@ const (
 
 type Store struct {
 	pool *pgxpool.Pool
+	// senderIdentityMutationMu caps provider mutations at one per process.
+	// Each cross-process advisory lock owns one pool connection for the remote
+	// call, so this prevents an SES slowdown from consuming the whole DB pool.
+	senderIdentityMutationMu sync.Mutex
 	// dkimCipher envelope-encrypts DKIM private keys at rest (#144 / M4).
 	// Optional: nil ⇒ keys are stored as plaintext DER (dev/test without a
 	// configured signing secret). cmd/e2a always installs it in production.
@@ -1022,6 +1027,132 @@ func (s *Store) SendingProvisionInputs(ctx context.Context, domain string) (sele
 	return selector, privateKeyDER, true, nil
 }
 
+// senderIdentityExecutorKey pins sender-identity reads/writes to the same
+// connection that owns the session advisory lock. Keeping the lock and the
+// state snapshot on one connection avoids consuming a second pool connection
+// per worker (and the pool-exhaustion deadlock that can otherwise create).
+type senderIdentityExecutorKey struct{}
+
+type senderIdentityExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *Store) senderIdentityExecutor(ctx context.Context) senderIdentityExecutor {
+	if conn, ok := ctx.Value(senderIdentityExecutorKey{}).(*pgxpool.Conn); ok {
+		return conn
+	}
+	return s.pool
+}
+
+// WithSendingIdentityMutationLock serializes provider mutations for one
+// domain across workers, processes, and blue/green replicas. The callback gets
+// a context that pins the sender-identity store methods below to the lock-owning
+// connection, so a worker needs only one pool connection while it waits on SES.
+func (s *Store) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) (retErr error) {
+	s.senderIdentityMutationMu.Lock()
+	defer s.senderIdentityMutationMu.Unlock()
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, "sender-identity:"+normalizeDomain(domain)); err != nil {
+		// Cancellation has an uncertain outcome: PostgreSQL may have acquired
+		// the session lock even though the client never received success. Never
+		// return that connection to the pool. Closing the hijacked session is the
+		// only outcome-safe way to release a possibly-held advisory lock.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		raw := conn.Hijack()
+		_ = raw.Close(closeCtx)
+		return fmt.Errorf("acquire sender identity mutation lock: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, unlockErr := conn.Exec(releaseCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, "sender-identity:"+normalizeDomain(domain)); unlockErr != nil {
+			// Never return a connection carrying a session lock to the pool. Hijack
+			// removes it from the pool; closing the raw connection releases the lock.
+			raw := conn.Hijack()
+			_ = raw.Close(releaseCtx)
+			retErr = errors.Join(retErr, fmt.Errorf("release sender identity mutation lock: %w", unlockErr))
+			return
+		}
+		conn.Release()
+	}()
+
+	lockedCtx := context.WithValue(ctx, senderIdentityExecutorKey{}, conn)
+	return fn(lockedCtx)
+}
+
+// LoadSendingIdentityState returns one incarnation-consistent snapshot for the
+// provider synchronizer. A live but unverified domain is returned with
+// verified=false; callers converge that state to no provider identity.
+func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, err error) {
+	norm := normalizeDomain(domain)
+	var blob []byte
+	err = s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`SELECT verification_token, COALESCE(user_id::text, ''), verified, sending_status,
+		        COALESCE(dkim_selector, ''), dkim_private_key
+		   FROM domains WHERE domain = $1`,
+		norm,
+	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob)
+	if err != nil {
+		return "", "", false, "", "", nil, err
+	}
+	if !verified || selector == "" || len(blob) == 0 {
+		return incarnation, owner, verified, status, selector, nil, nil
+	}
+	privateKeyDER, err = s.unsealDKIM(blob, norm)
+	if err != nil {
+		return "", "", false, "", "", nil, fmt.Errorf("dkim key unseal: %w", err)
+	}
+	return incarnation, owner, verified, status, selector, privateKeyDER, nil
+}
+
+// SetSendingStatusForIncarnation refuses to write through a delete/re-register
+// race. pgx.ErrNoRows makes the stale worker retry; its next desired-state sync
+// then converges the provider to the current row (or to absence).
+func (s *Store) SetSendingStatusForIncarnation(ctx context.Context, domain, incarnation, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error {
+	var errPtr *string
+	if errMsg != "" {
+		errPtr = &errMsg
+	}
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE domains
+		    SET sending_status = $3,
+		        sending_error = $4,
+		        sending_dns_records = $5,
+		        sending_dkim_status = $6,
+		        sending_mail_from_status = $7,
+		        sending_last_checked_at = now()
+		  WHERE domain = $1 AND verification_token = $2`,
+		normalizeDomain(domain), incarnation, status, errPtr, recordsJSON, nullIfEmpty(dkimStatus), nullIfEmpty(mailFromStatus),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) TouchSendingCheckedForIncarnation(ctx context.Context, domain, incarnation string) error {
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE domains SET sending_last_checked_at = now() WHERE domain = $1 AND verification_token = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 // SetSendingStatus writes the sending lifecycle state for a domain and stamps
 // sending_last_checked_at. recordsJSON may be nil (cleared). dkimStatus and
 // mailFromStatus are the per-axis SES breakdown (migration 049); an empty
@@ -1100,6 +1231,79 @@ func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 		normalizeDomain(domain),
 	).Scan(&exists)
 	return exists, err
+}
+
+// MarkSendingIdentityManaged records that e2a may have created a provider
+// identity for this domain. Call it before the external create/update so an
+// ambiguous transport failure still leaves a durable cleanup candidate.
+func (s *Store) MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation, updated_at)
+		 VALUES ($1, $2, NULL, now())
+		 ON CONFLICT (domain) DO UPDATE
+		 SET incarnation = EXCLUDED.incarnation,
+		     applied_incarnation = NULL,
+		     updated_at = now()`,
+		normalizeDomain(domain), incarnation,
+	)
+	return err
+}
+
+// MarkSendingIdentityApplied records the incarnation whose selector/key was
+// confirmed installed at the provider. Keeping this separate from the
+// pre-mutation ownership mark lets the reaper repair ambiguous/exhausted
+// creates without re-provisioning healthy identities every hour.
+func (s *Store) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET applied_incarnation = $2, updated_at = now()
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// ForgetSendingIdentityManaged removes a cleanup candidate only after the
+// provider has confirmed deletion (NotFound is confirmed by the provider as
+// success). A DB failure leaves the ledger row for a later retry.
+func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`DELETE FROM sender_identity_managed_domains WHERE domain = $1`,
+		normalizeDomain(domain),
+	)
+	return err
+}
+
+// ListManagedSendingIdentityDomains returns only identities e2a has claimed
+// ownership of. It deliberately does not scan/delete arbitrary SES account
+// identities, which may belong to other applications.
+func (s *Store) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT domain, applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains ORDER BY domain`,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var domains []string
+	needsProvision := make(map[string]bool)
+	for rows.Next() {
+		var domain string
+		var needs bool
+		if err := rows.Scan(&domain, &needs); err != nil {
+			return nil, nil, err
+		}
+		domains = append(domains, domain)
+		needsProvision[domain] = needs
+	}
+	return domains, needsProvision, rows.Err()
 }
 
 // LookupDomain returns a domain if it exists and is owned by the given user.
@@ -1267,6 +1471,13 @@ func namesMoreSpecificThan(sub, match string) []string {
 
 // VerifyDomain marks a domain as verified, only if owned by the given user.
 func (s *Store) VerifyDomain(ctx context.Context, domain, userID string) error {
+	return s.VerifyDomainTx(ctx, domain, userID, nil)
+}
+
+// VerifyDomainTx marks a domain verified and runs inTx before commit. Sender
+// identity provisioning uses this hook to make its River job an atomic outbox:
+// a verified row can never commit without the corresponding durable job.
+func (s *Store) VerifyDomainTx(ctx context.Context, domain, userID string, inTx func(context.Context, pgx.Tx) error) error {
 	domain = normalizeDomain(domain)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -1299,6 +1510,11 @@ func (s *Store) VerifyDomain(ctx context.Context, domain, userID string) error {
 		domain, userID,
 	); err != nil {
 		return err
+	}
+	if inTx != nil {
+		if err := inTx(ctx, tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

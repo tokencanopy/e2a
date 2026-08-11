@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { Resolver } from "node:dns/promises";
 import { ApiClient } from "../harness/client.ts";
 import { cleanupDomainFixture } from "../harness/domain-fixture-cleanup.ts";
+import { CloudflareDnsClient, type CloudflareDnsRecordRef } from "../harness/cloudflare-dns.ts";
 import { track } from "../harness/cleanup.ts";
 import { uniqueSlug } from "../harness/fixtures.ts";
-import { writeReport, fail, info, warn } from "../harness/report.ts";
+import { writeReport, fail, info } from "../harness/report.ts";
 
 // The FULL custom-domain lifecycle — the one flow prod e2e structurally can't do
 // because it needs REAL DNS: register → publish the verify records → verifyDomain
@@ -40,42 +41,7 @@ const skip =
     ? false
     : "CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID + CLOUDFLARE_ZONE_NAME not set (isolated conformance DNS zone)";
 
-const CF_API = "https://api.cloudflare.com/client/v4";
-
-// cfCreateRecord publishes a DNS record in the isolated zone and returns its id.
-async function cfCreateRecord(rec: {
-  type: string;
-  name: string;
-  content: string;
-  priority?: number;
-}): Promise<string> {
-  const res = await fetch(`${CF_API}/zones/${CF_ZONE}/dns_records`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ ...rec, ttl: 60, comment: "e2a conformance domain-lifecycle (temporary)" }),
-  });
-  const j = (await res.json()) as { success: boolean; result?: { id: string }; errors?: unknown };
-  if (!j.success || !j.result?.id) throw new Error(`CF ${rec.type} create failed: ${JSON.stringify(j.errors)}`);
-  return j.result.id;
-}
-
-// cfDeleteRecord removes a record and SURFACES failures — a swallowed delete
-// leaks a record in the SHARED conformance zone, accumulating across CI runs.
-async function cfDeleteRecord(id: string): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetch(`${CF_API}/zones/${CF_ZONE}/dns_records/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${CF_TOKEN}` },
-    });
-  } catch (e) {
-    warn(SUITE, "cf-cleanup", `CF record ${id} delete threw — MANUAL CLEANUP NEEDED: ${String(e)}`);
-    return;
-  }
-  if (!res.ok) {
-    warn(SUITE, "cf-cleanup", `CF record ${id} delete failed HTTP ${res.status} — MANUAL CLEANUP NEEDED`);
-  }
-}
+const cfDns = new CloudflareDnsClient(CF_ZONE ?? "", CF_TOKEN ?? "");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -128,7 +94,8 @@ async function waitForPublicDns(domain: string, txtValue: string, mxHost: string
 
 test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → custom-domain agent → teardown", { skip }, async () => {
   const domain = `${uniqueSlug("dl")}.${CF_ZONE_NAME}`;
-  const dnsIds: string[] = [];
+  const dnsRecords: CloudflareDnsRecordRef[] = [];
+  let agentEmail: string | undefined;
   track("domain", domain);
   try {
     // 1. register the throwaway domain → returns the records to publish.
@@ -144,8 +111,16 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     // 2. publish BOTH the ownership TXT and the inbound MX in the ISOLATED zone.
     //    `verified` requires the MX too, not just the TXT. Echo the MX priority
     //    the API returned rather than hardcoding it.
-    dnsIds.push(await cfCreateRecord({ type: "TXT", name: txt!.name, content: txt!.value }));
-    dnsIds.push(await cfCreateRecord({ type: "MX", name: mx!.name, content: mx!.value, priority: mx!.priority ?? 10 }));
+    await cfDns.create(
+      { type: "TXT", name: txt!.name, content: txt!.value },
+      dnsRecords,
+      "e2a conformance domain-lifecycle (temporary)",
+    );
+    await cfDns.create(
+      { type: "MX", name: mx!.name, content: mx!.value, priority: mx!.priority ?? 10 },
+      dnsRecords,
+      "e2a conformance domain-lifecycle (temporary)",
+    );
 
     // 3. wait for BOTH records to be publicly visible BEFORE the first verify —
     //    otherwise the server negative-caches the miss for the SOA minimum (30min).
@@ -173,7 +148,7 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     const got = await client.get<{ verified: boolean }>(`/v1/domains/${domain}`);
     assert.equal(got.body?.verified, true, "GET domain reflects verified=true");
 
-    const agentEmail = `bot@${domain}`;
+    agentEmail = `bot@${domain}`;
     track("agent", agentEmail);
     const ag = await client.post<{ email: string; domain_verified: boolean }>("/v1/agents", {
       body: { email: agentEmail, name: "lifecycle bot" },
@@ -191,14 +166,17 @@ test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → cust
     // 6. teardown — the cleanup registry reverses creation order, so the
     //    agent is permanently purged before the domain delete transaction
     //    enqueues SES deprovisioning. Only then is it safe to remove DNS.
-    const result = await cleanupDomainFixture(client, dnsIds, cfDeleteRecord);
+    const result = await cleanupDomainFixture(client, { domain, agent: agentEmail, dnsRecords }, (record) => cfDns.delete(record));
     if (result.failed.length > 0) {
       fail(
         SUITE,
         "resource-cleanup-failed",
-        `preserved ${dnsIds.length} DNS record(s) because ${result.failed.length} API fixture(s) survived teardown`,
+        `preserved ${dnsRecords.length} DNS record(s) because ${result.failed.length} API fixture(s) survived teardown`,
         result.failed,
       );
+    }
+    if (result.dnsFailed.length > 0) {
+      fail(SUITE, "dns-cleanup-failed", `${result.dnsFailed.length} DNS record(s) survived teardown`, result.dnsFailed);
     }
   }
 });
@@ -222,7 +200,7 @@ test("domain verify NEGATIVE control: an unpublished domain does NOT verify (gua
     // Not-yet-verified is a normal 200 (branch on .verified), not a 412.
     assert.equal(v.status, 200, `unpublished domain verify → 200 with verified:false, got ${v.status}`);
   } finally {
-    const result = await cleanupDomainFixture(client, [], cfDeleteRecord);
+    const result = await cleanupDomainFixture(client, { domain, dnsRecords: [] }, (record) => cfDns.delete(record));
     if (result.failed.length > 0) {
       fail(SUITE, "negative-control-cleanup-failed", "negative-control domain survived teardown", result.failed);
     }

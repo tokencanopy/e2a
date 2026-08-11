@@ -11,14 +11,17 @@ import (
 // be driven from worker goroutines if needed. Domains not present in the
 // status map are treated as "gone" → GetSendingStatus returns pgx.ErrNoRows.
 type fakeStore struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	mutationMu sync.Mutex
 
 	// status holds the current sending status per domain. Absence ⇒ row gone.
 	status map[string]Status
 	// owners maps domain → owning user_id ("" or absent ⇒ no owner).
-	owners map[string]string
-	// live marks domains DomainExists should report true for.
-	live map[string]bool
+	owners       map[string]string
+	incarnations map[string]string
+	verified     map[string]bool
+	managed      map[string]string
+	applied      map[string]string
 
 	// provisionInputs feeds SendingProvisionInputs.
 	selector  string
@@ -47,9 +50,12 @@ type setStatusCall struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		status: map[string]Status{},
-		owners: map[string]string{},
-		live:   map[string]bool{},
+		status:       map[string]Status{},
+		owners:       map[string]string{},
+		incarnations: map[string]string{},
+		verified:     map[string]bool{},
+		managed:      map[string]string{},
+		applied:      map[string]string{},
 	}
 }
 
@@ -57,6 +63,18 @@ func (s *fakeStore) setStatus(domain string, st Status) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status[domain] = st
+	if s.incarnations[domain] == "" {
+		s.incarnations[domain] = domain + "-incarnation"
+	}
+	s.verified[domain] = true
+}
+
+func (s *fakeStore) deleteDomain(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.status, domain)
+	delete(s.incarnations, domain)
+	delete(s.verified, domain)
 }
 
 func (s *fakeStore) setOwner(domain, owner string) {
@@ -65,10 +83,10 @@ func (s *fakeStore) setOwner(domain, owner string) {
 	s.owners[domain] = owner
 }
 
-func (s *fakeStore) setLive(domain string, live bool) {
+func (s *fakeStore) setVerified(domain string, verified bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.live[domain] = live
+	s.verified[domain] = verified
 }
 
 func (s *fakeStore) setProvisionInputs(selector string, key []byte, ok bool) {
@@ -97,22 +115,57 @@ func (s *fakeStore) SendingProvisionInputs(ctx context.Context, domain string) (
 	return s.selector, s.privKey, s.inputsOK, nil
 }
 
-func (s *fakeStore) SetSendingStatus(ctx context.Context, domain string, status, dkimStatus, mailFromStatus Status, errMsg string, records []DNSRecord) error {
+func (s *fakeStore) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) error {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	return fn(ctx)
+}
+
+func (s *fakeStore) LoadSendingIdentityState(ctx context.Context, domain string) (SendingIdentityState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.getStatusErr != nil {
+		return SendingIdentityState{}, s.getStatusErr
+	}
+	status, ok := s.status[domain]
+	if !ok {
+		return SendingIdentityState{}, pgx.ErrNoRows
+	}
+	if s.inputsErr != nil {
+		return SendingIdentityState{}, s.inputsErr
+	}
+	return SendingIdentityState{
+		Incarnation: s.incarnations[domain],
+		Owner:       s.owners[domain],
+		Verified:    s.verified[domain],
+		Status:      status,
+		Selector:    s.selector,
+		PrivateKey:  append([]byte(nil), s.privKey...),
+	}, nil
+}
+
+func (s *fakeStore) SetSendingStatus(ctx context.Context, domain, incarnation string, status, dkimStatus, mailFromStatus Status, errMsg string, records []DNSRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.setStatusErr != nil {
 		return s.setStatusErr
+	}
+	if s.incarnations[domain] != incarnation {
+		return pgx.ErrNoRows
 	}
 	s.SetStatusCalls = append(s.SetStatusCalls, setStatusCall{Domain: domain, Status: status, DkimStatus: dkimStatus, MailFromStatus: mailFromStatus, ErrMsg: errMsg, Records: records})
 	s.status[domain] = status
 	return nil
 }
 
-func (s *fakeStore) TouchSendingChecked(ctx context.Context, domain string) error {
+func (s *fakeStore) TouchSendingChecked(ctx context.Context, domain, incarnation string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.touchErr != nil {
 		return s.touchErr
+	}
+	if s.incarnations[domain] != incarnation {
+		return pgx.ErrNoRows
 	}
 	s.TouchCalls = append(s.TouchCalls, domain)
 	return nil
@@ -137,10 +190,42 @@ func (s *fakeStore) DomainOwner(ctx context.Context, domain string) (string, err
 	return s.owners[domain], nil
 }
 
-func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, error) {
+func (s *fakeStore) MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.live[domain], nil
+	s.managed[domain] = incarnation
+	delete(s.applied, domain)
+	return nil
+}
+
+func (s *fakeStore) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managed[domain] != incarnation {
+		return pgx.ErrNoRows
+	}
+	s.applied[domain] = incarnation
+	return nil
+}
+
+func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.managed, domain)
+	delete(s.applied, domain)
+	return nil
+}
+
+func (s *fakeStore) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domains := make([]string, 0, len(s.managed))
+	needs := make(map[string]bool, len(s.managed))
+	for domain := range s.managed {
+		domains = append(domains, domain)
+		needs[domain] = s.applied[domain] != s.managed[domain]
+	}
+	return domains, needs, nil
 }
 
 // recordingFirer captures EventFirer invocations.

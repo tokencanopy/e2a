@@ -3,6 +3,7 @@ package senderidentity
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,23 @@ import (
 	"github.com/riverqueue/river/rivertest"
 	"github.com/riverqueue/river/rivertype"
 )
+
+type blockingProvisionProvider struct {
+	*FakeProvider
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingProvisionProvider) Provision(ctx context.Context, domain, selector string, key []byte) (Result, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+	return p.FakeProvider.Provision(ctx, domain, selector, key)
+}
 
 // workCtxWithClient returns a context carrying a real (but DB-less) River
 // client, shaped like the one River hands a live Work() call. The
@@ -42,7 +60,7 @@ func workCtxWithClient(t *testing.T) context.Context {
 func reconcileJob(domain string, attempt, maxAttempts int) *river.Job[ReconcileArgs] {
 	return &river.Job[ReconcileArgs]{
 		JobRow: &rivertype.JobRow{Attempt: attempt, MaxAttempts: maxAttempts, Kind: ReconcileArgs{}.Kind()},
-		Args:   ReconcileArgs{Domain: domain},
+		Args:   ReconcileArgs{Domain: domain, Incarnation: domain + "-incarnation"},
 	}
 }
 
@@ -172,10 +190,11 @@ func TestReconcileWorker_Work(t *testing.T) {
 		}
 	})
 
-	t.Run("identity not found sets failed and fires", func(t *testing.T) {
+	t.Run("identity not found repairs desired state", func(t *testing.T) {
 		store := newFakeStore()
 		store.setStatus(domain, StatusPending)
 		store.setOwner(domain, owner)
+		store.setProvisionInputs("current-selector", []byte("current-key"), true)
 		prov := NewFakeProvider()
 		prov.SetStatusNotFound(domain)
 		firer := &recordingFirer{}
@@ -185,11 +204,14 @@ func TestReconcileWorker_Work(t *testing.T) {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		got, _ := store.lastSetStatus()
-		if got.Status != StatusFailed || got.ErrMsg != "sending identity not found at provider" {
-			t.Fatalf("expected failed/not-found reason, got %+v", got)
+		if got.Status != StatusPending {
+			t.Fatalf("expected repaired identity to restart pending verification, got %+v", got)
 		}
-		if ev, _ := firer.last(); ev.Status != StatusFailed {
-			t.Fatalf("expected fired failed, got %+v", ev)
+		if len(prov.ProvisionCalls) != 1 {
+			t.Fatalf("missing provider identity was not recreated: %v", prov.ProvisionCalls)
+		}
+		if firer.count() != 0 {
+			t.Fatalf("repair must not fire a terminal event, got %d", firer.count())
 		}
 	})
 
@@ -235,61 +257,304 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 	}
 
 	t.Run("success calls provider Deprovision", func(t *testing.T) {
+		store := newFakeStore() // absent domain => desired provider state is absent
+		store.managed[domain] = "deleted-incarnation"
 		prov := NewFakeProvider()
 		prov.SeedIdentity(domain)
-		w := &DeprovisionWorker{provider: prov}
+		w := &DeprovisionWorker{store: store, provider: prov}
 		if err := w.Work(context.Background(), deprovJob()); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		if len(prov.DeprovisionCalls) != 1 || prov.DeprovisionCalls[0] != domain {
 			t.Fatalf("expected Deprovision(%q), got %v", domain, prov.DeprovisionCalls)
 		}
+		if store.managed[domain] == "" {
+			t.Fatal("worker removed deletion tombstone before the post-drain sweep")
+		}
 	})
 
 	t.Run("provider error propagates for retry", func(t *testing.T) {
+		store := newFakeStore()
 		prov := NewFakeProvider()
 		boom := errors.New("ses unreachable")
 		prov.SetDeprovisionErr(boom)
-		w := &DeprovisionWorker{provider: prov}
+		w := &DeprovisionWorker{store: store, provider: prov}
 		if err := w.Work(context.Background(), deprovJob()); !errors.Is(err, boom) {
 			t.Fatalf("expected provider error to propagate, got %v", err)
 		}
 	})
 }
 
-func reapJob() *river.Job[ReapArgs] {
-	return &river.Job[ReapArgs]{
-		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 1, Kind: ReapArgs{}.Kind()},
-		Args:   ReapArgs{},
+func TestManagerDeprovisionBeforeDelete(t *testing.T) {
+	const domain = "delete-boundary.example.test"
+	t.Run("provider failure preserves database state", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusVerified)
+		provider := NewFakeProvider()
+		provider.SetDeprovisionErr(errors.New("ses unavailable"))
+		manager := NewManager(store, provider, nil, Config{})
+		deleted := false
+		err := manager.DeprovisionBeforeDelete(context.Background(), domain, func(context.Context) error {
+			deleted = true
+			return nil
+		})
+		if err == nil || deleted {
+			t.Fatalf("provider failure must stop DB delete: err=%v deleted=%v", err, deleted)
+		}
+	})
+
+	t.Run("success confirms provider absence before database delete", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusVerified)
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain)
+		manager := NewManager(store, provider, nil, Config{})
+		providerAbsentInCallback := false
+		err := manager.DeprovisionBeforeDelete(context.Background(), domain, func(context.Context) error {
+			identities, _ := provider.List(context.Background())
+			providerAbsentInCallback = len(identities) == 0
+			store.deleteDomain(domain)
+			return nil
+		})
+		if err != nil || !providerAbsentInCallback {
+			t.Fatalf("delete boundary: err=%v providerAbsentInCallback=%v", err, providerAbsentInCallback)
+		}
+	})
+}
+
+func TestPostDrainSweepRepairsLegacyMutationRaces(t *testing.T) {
+	t.Run("late legacy create after delete is removed", func(t *testing.T) {
+		const domain = "deleted-race.example.com"
+		store := newFakeStore()
+		store.managed[domain] = "deleted-incarnation"
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain)
+
+		worker := &DeprovisionWorker{store: store, provider: provider}
+		if err := worker.Work(context.Background(), &river.Job[DeprovisionArgs]{Args: DeprovisionArgs{Domain: domain}}); err != nil {
+			t.Fatalf("initial deprovision: %v", err)
+		}
+		provider.SeedIdentity(domain)      // old slot finishes Provision after v2 delete
+		provider.SetStatusNotFound(domain) // audit only needs presence to choose force; absent DB still deprovisions
+		if err := (&PostDrainAuditWorker{store: store, provider: provider}).Work(context.Background(), &river.Job[PostDrainAuditArgs]{Args: PostDrainAuditArgs{Domain: domain}}); err != nil {
+			t.Fatalf("post-drain sweep: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 0 || len(store.managed) != 0 {
+			t.Fatalf("late legacy create survived sweep: provider=%v ledger=%v", identities, store.managed)
+		}
+	})
+
+	t.Run("late legacy delete of replacement is recreated", func(t *testing.T) {
+		const domain = "replacement-race.example.com"
+		store := newFakeStore()
+		store.setStatus(domain, StatusVerified)
+		store.setProvisionInputs("current-selector", []byte("current-key"), true)
+		provider := NewFakeProvider()
+		worker := &SyncWorker{store: store, provider: provider}
+		if err := worker.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+			t.Fatalf("v2 sync: %v", err)
+		}
+		if err := provider.Deprovision(context.Background(), domain); err != nil { // old slot finishes delete
+			t.Fatalf("legacy delete: %v", err)
+		}
+		provider.SetStatusNotFound(domain)
+		if err := (&PostDrainAuditWorker{store: store, provider: provider}).Work(context.Background(), &river.Job[PostDrainAuditArgs]{Args: PostDrainAuditArgs{Domain: domain}}); err != nil {
+			t.Fatalf("post-drain sweep: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 1 || identities[0] != domain || len(provider.ProvisionCalls) != 2 {
+			t.Fatalf("late legacy delete was not repaired: identities=%v provisions=%v", identities, provider.ProvisionCalls)
+		}
+	})
+}
+
+func TestLegacyReapRetainsDeletionTombstone(t *testing.T) {
+	const domain = "legacy-reap.example.test"
+	store := newFakeStore()
+	store.managed[domain] = "deleted-incarnation"
+	provider := NewFakeProvider()
+	provider.SeedIdentity(domain)
+	worker := &LegacyReapWorker{store: store, provider: provider}
+	if err := worker.Work(context.Background(), &river.Job[ReapArgs]{Args: ReapArgs{}}); err != nil {
+		t.Fatalf("legacy reap: %v", err)
+	}
+	if store.managed[domain] == "" {
+		t.Fatal("legacy reap finalized a tombstone while the old slot may still mutate SES")
+	}
+}
+
+func TestProviderMutationRace_DeletionWinsOverInFlightProvision(t *testing.T) {
+	const domain = "race.example.com"
+	store := newFakeStore()
+	store.setStatus(domain, StatusNone)
+	store.setProvisionInputs("sel", []byte("der"), true)
+	provider := &blockingProvisionProvider{
+		FakeProvider: NewFakeProvider(),
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	provision := &ProvisionWorker{store: store, provider: provider}
+	deprovision := &DeprovisionWorker{store: store, provider: provider}
+
+	provisionDone := make(chan error, 1)
+	go func() { provisionDone <- provision.Work(context.Background(), provisionJob(domain)) }()
+	<-provider.started
+
+	// The domain delete commits while the external Provision call is in flight.
+	// Its durable teardown job must serialize behind Provision and converge the
+	// provider to the now-absent domain state.
+	store.deleteDomain(domain)
+	deprovisionDone := make(chan error, 1)
+	go func() {
+		deprovisionDone <- deprovision.Work(context.Background(), &river.Job[DeprovisionArgs]{
+			JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3, Kind: DeprovisionArgs{}.Kind()},
+			Args:   DeprovisionArgs{Domain: domain},
+		})
+	}()
+	close(provider.release)
+
+	if err := <-provisionDone; err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("provision Work: %v", err)
+	}
+	if err := <-deprovisionDone; err != nil {
+		t.Fatalf("deprovision Work: %v", err)
+	}
+	identities, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(identities) != 0 {
+		t.Fatalf("provider identity survived delete/provision interleaving: %v", identities)
+	}
+}
+
+func TestDeprovisionWorker_ConvergesReRegisteredDomain(t *testing.T) {
+	const domain = "reclaimed.example.com"
+
+	t.Run("verified replacement is provisioned rather than deleted", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusNone)
+		store.setProvisionInputs("new-selector", []byte("new-key"), true)
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain) // identity from the deleted incarnation
+		worker := &DeprovisionWorker{store: store, provider: provider}
+
+		if err := worker.Work(context.Background(), &river.Job[DeprovisionArgs]{Args: DeprovisionArgs{Domain: domain}}); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if len(provider.DeprovisionCalls) != 0 || len(provider.ProvisionCalls) != 1 {
+			t.Fatalf("replacement must converge via provision; provision=%v deprovision=%v", provider.ProvisionCalls, provider.DeprovisionCalls)
+		}
+	})
+
+	t.Run("unverified replacement keeps provider identity absent", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusNone)
+		store.setVerified(domain, false)
+		store.setProvisionInputs("new-selector", []byte("new-key"), true)
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain)
+		worker := &DeprovisionWorker{store: store, provider: provider}
+
+		if err := worker.Work(context.Background(), &river.Job[DeprovisionArgs]{Args: DeprovisionArgs{Domain: domain}}); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 0 || len(provider.ProvisionCalls) != 0 || len(provider.DeprovisionCalls) != 1 {
+			t.Fatalf("unverified replacement must converge to absent; identities=%v provision=%v deprovision=%v", identities, provider.ProvisionCalls, provider.DeprovisionCalls)
+		}
+	})
+}
+
+func reapJob() *river.Job[ReapV2Args] {
+	return &river.Job[ReapV2Args]{
+		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 1, Kind: ReapV2Args{}.Kind()},
+		Args:   ReapV2Args{},
 	}
 }
 
 func TestReapWorker_Work(t *testing.T) {
-	t.Run("flags orphan but returns nil", func(t *testing.T) {
+	t.Run("deletes a managed orphan", func(t *testing.T) {
 		store := newFakeStore()
-		store.setLive("a.example", true)
-		store.setLive("b.example", false) // orphan: no live domain row
+		store.managed["b.example"] = "old-incarnation"
 		prov := NewFakeProvider()
-		prov.SeedIdentity("a.example")
 		prov.SeedIdentity("b.example")
 		w := &ReapWorker{store: store, provider: prov}
 
 		if err := w.Work(context.Background(), reapJob()); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
+		identities, _ := prov.List(context.Background())
+		if len(identities) != 0 || len(store.managed) != 0 {
+			t.Fatalf("managed orphan survived: provider=%v ledger=%v", identities, store.managed)
+		}
 	})
 
-	t.Run("all live returns nil", func(t *testing.T) {
+	t.Run("does not touch unmanaged provider identities", func(t *testing.T) {
 		store := newFakeStore()
-		store.setLive("a.example", true)
-		store.setLive("b.example", true)
 		prov := NewFakeProvider()
-		prov.SeedIdentity("a.example")
-		prov.SeedIdentity("b.example")
+		prov.SeedIdentity("shared.example")
 		w := &ReapWorker{store: store, provider: prov}
 
 		if err := w.Work(context.Background(), reapJob()); err != nil {
 			t.Fatalf("Work returned error: %v", err)
+		}
+		identities, _ := prov.List(context.Background())
+		if len(identities) != 1 || identities[0] != "shared.example" {
+			t.Fatalf("unmanaged identity was mutated: %v", identities)
+		}
+	})
+
+	t.Run("recreates a missing managed live identity", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("live.example", StatusVerified)
+		store.setProvisionInputs("current-selector", []byte("current-key"), true)
+		store.managed["live.example"] = "live.example-incarnation"
+		prov := NewFakeProvider()
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.ProvisionCalls) != 1 {
+			t.Fatalf("missing live identity was not recreated: %v", prov.ProvisionCalls)
+		}
+	})
+
+	t.Run("repairs an unapplied replacement even when an old identity exists", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("replacement.example", StatusVerified)
+		store.setProvisionInputs("new-selector", []byte("new-key"), true)
+		store.managed["replacement.example"] = "replacement.example-incarnation"
+		store.applied["replacement.example"] = "old-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("replacement.example")
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.ProvisionCalls) != 1 {
+			t.Fatalf("unapplied replacement was not refreshed: %v", prov.ProvisionCalls)
+		}
+	})
+
+	t.Run("healthy applied identity is not reprovisioned every sweep", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("healthy.example", StatusVerified)
+		store.setProvisionInputs("selector", []byte("key"), true)
+		store.managed["healthy.example"] = "healthy.example-incarnation"
+		store.applied["healthy.example"] = "healthy.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("healthy.example")
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.ProvisionCalls) != 0 || len(prov.DeprovisionCalls) != 0 {
+			t.Fatalf("healthy identity was mutated: provision=%v deprovision=%v", prov.ProvisionCalls, prov.DeprovisionCalls)
 		}
 	})
 }
@@ -362,6 +627,7 @@ func TestProvisionWorker_Work(t *testing.T) {
 		store.setOwner(domain, owner)
 		store.setProvisionInputs("", nil, false) // ok=false
 		prov := NewFakeProvider()
+		prov.SeedIdentity(domain)
 		firer := &recordingFirer{}
 		w := &ProvisionWorker{store: store, provider: prov, fire: firer.fire()}
 
@@ -370,6 +636,10 @@ func TestProvisionWorker_Work(t *testing.T) {
 		}
 		if len(prov.ProvisionCalls) != 0 {
 			t.Fatalf("Provision must not be called without key material, got %d", len(prov.ProvisionCalls))
+		}
+		identities, _ := prov.List(context.Background())
+		if len(identities) != 0 || len(prov.DeprovisionCalls) != 1 {
+			t.Fatalf("stale provider identity survived missing-key failure: identities=%v deprovision=%v", identities, prov.DeprovisionCalls)
 		}
 		got, _ := store.lastSetStatus()
 		if got.Status != StatusFailed {
@@ -405,25 +675,24 @@ func TestProvisionWorker_Work(t *testing.T) {
 		}
 	})
 
-	t.Run("provision inputs ErrNoRows is a no-op", func(t *testing.T) {
+	t.Run("stale provision job for a deleted domain converges provider to absent", func(t *testing.T) {
 		store := newFakeStore()
-		store.inputsErr = pgx.ErrNoRows
 		prov := NewFakeProvider()
+		prov.SeedIdentity(domain)
 		w := &ProvisionWorker{store: store, provider: prov}
 		if err := w.Work(context.Background(), provisionJob(domain)); err != nil {
-			t.Fatalf("expected nil for deleted domain, got %v", err)
+			t.Fatalf("expected nil while converging deleted domain, got %v", err)
 		}
-		if len(prov.ProvisionCalls) != 0 || len(store.SetStatusCalls) != 0 {
-			t.Fatalf("nothing should happen for a deleted domain")
+		if len(prov.ProvisionCalls) != 0 || len(prov.DeprovisionCalls) != 1 || len(store.SetStatusCalls) != 0 {
+			t.Fatalf("expected only provider deprovision for deleted domain; provision=%v deprovision=%v", prov.ProvisionCalls, prov.DeprovisionCalls)
 		}
 	})
 }
 
-// TestProvisionWorker_AlreadyVerifiedNoOp pins the review fix: re-running
-// provisioning for an already-verified domain (POST /verify forced re-check
-// after the unique-dedup window) must NOT call the provider or demote the
-// domain back to pending.
-func TestProvisionWorker_AlreadyVerifiedNoOp(t *testing.T) {
+// Legacy mutation jobs force current desired state during blue/green rollout.
+// This closes the window where an old reconcile could mark a replacement row
+// verified before its new BYODKIM key was installed.
+func TestProvisionWorker_AlreadyVerifiedConvergesCurrentKey(t *testing.T) {
 	store := newFakeStore()
 	store.setStatus("acme.com", StatusVerified)
 	store.setProvisionInputs("sel", []byte("der"), true)
@@ -433,11 +702,54 @@ func TestProvisionWorker_AlreadyVerifiedNoOp(t *testing.T) {
 	if err := w.Work(context.Background(), provisionJob("acme.com")); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
-	if len(prov.ProvisionCalls) != 0 {
-		t.Errorf("Provision must not run for an already-verified domain, got %d calls", len(prov.ProvisionCalls))
+	if len(prov.ProvisionCalls) != 1 {
+		t.Errorf("Provision must refresh an already-verified replacement, got %d calls", len(prov.ProvisionCalls))
 	}
-	if got, _ := store.GetSendingStatus(context.Background(), "acme.com"); got != StatusVerified {
-		t.Errorf("status = %q, want verified (no demotion)", got)
+	if got, _ := store.GetSendingStatus(context.Background(), "acme.com"); got != StatusPending {
+		t.Errorf("status = %q, want pending after key refresh", got)
+	}
+}
+
+func TestReconcileWorker_LegacyFinalAttemptConvergesReplacement(t *testing.T) {
+	const domain = "replacement.example.com"
+	store := newFakeStore()
+	store.setStatus(domain, StatusPending)
+	store.setProvisionInputs("new-selector", []byte("new-key"), true)
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	w := &ReconcileWorker{store: store, provider: prov}
+	job := &river.Job[ReconcileArgs]{
+		JobRow: &rivertype.JobRow{Attempt: 25, MaxAttempts: 25, Kind: ReconcileArgs{}.Kind()},
+		Args:   ReconcileArgs{Domain: domain}, // pre-upgrade payload: no incarnation
+	}
+
+	if err := w.Work(context.Background(), job); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(prov.StatusCalls) != 0 || len(prov.ProvisionCalls) != 1 {
+		t.Fatalf("legacy poll must provision current state, not poll old identity: provision=%v status=%v", prov.ProvisionCalls, prov.StatusCalls)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("replacement status = %q, want pending with a fresh v2 poll budget", got)
+	}
+}
+
+func TestProvisionWorker_TerminalProviderFailureRemovesStaleIdentity(t *testing.T) {
+	const domain = "malformed.example.com"
+	store := newFakeStore()
+	store.setStatus(domain, StatusNone)
+	store.setProvisionInputs("selector", []byte("malformed"), true)
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetProvisionResult(Result{Status: StatusFailed, Error: "invalid private key"})
+	w := &ProvisionWorker{store: store, provider: prov}
+
+	if err := w.Work(context.Background(), provisionJob(domain)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	identities, _ := prov.List(context.Background())
+	if len(identities) != 0 || len(prov.DeprovisionCalls) != 1 {
+		t.Fatalf("stale provider identity survived terminal provision failure: identities=%v deprovision=%v", identities, prov.DeprovisionCalls)
 	}
 }
 

@@ -18,7 +18,7 @@ import {
 } from "./cleanup.ts";
 
 /** A scripted response: an HTTP status, a thrown value, or a status + headers. */
-type Outcome = number | Error | unknown | { status: number; headers: Record<string, string> };
+type Outcome = number | Error | unknown | { status: number; headers: Record<string, string>; raw?: string };
 
 /** A DELETE recorder whose per-path responses are scripted by the test. */
 function fakeClient(script: (path: string, attempt: number) => Outcome): {
@@ -37,7 +37,7 @@ function fakeClient(script: (path: string, attempt: number) => Outcome): {
         typeof outcome === "number"
           ? { status: outcome, headers: {} as Record<string, string> }
           : outcome && typeof outcome === "object" && "status" in outcome
-            ? (outcome as { status: number; headers: Record<string, string> })
+            ? (outcome as { status: number; headers: Record<string, string>; raw?: string })
             : null;
       // Anything that isn't a status shape is a rejection — including non-Error
       // values, which is the point of the isolation test below.
@@ -47,7 +47,7 @@ function fakeClient(script: (path: string, attempt: number) => Outcome): {
         ok: shaped.status < 400,
         headers: shaped.headers,
         body: null,
-        raw: "",
+        raw: shaped.raw ?? "",
         latencyMs: 0,
       });
     },
@@ -77,9 +77,9 @@ after(() => {
 });
 
 test("cleanup deletes every tracked fixture and empties the registry", async () => {
-  track("agent", "a@x.dev");
-  track("agent", "b@x.dev");
-  track("domain", "d.x.dev");
+  track("agent", "a@x.test");
+  track("agent", "b@x.test");
+  track("domain", "d.x.test");
   const { client, calls } = fakeClient(() => 204);
 
   const r = await cleanup(client, { sleep: noSleep });
@@ -90,13 +90,13 @@ test("cleanup deletes every tracked fixture and empties the registry", async () 
   assert.equal(getTracked().length, 0);
   assert.equal(calls.length, 3);
   // Reverse order (newest fixture first) is the existing teardown contract.
-  assert.match(calls[0]!, /d\.x\.dev/);
+  assert.match(calls[0]!, /d\.x\.test/);
   assert.match(calls[0]!, /confirm=DELETE/);
 });
 
 test("agent cleanup purges permanently rather than trashing", async () => {
-  track("agent", "a@x.dev");
-  track("domain", "d.x.dev");
+  track("agent", "a@x.test");
+  track("domain", "d.x.test");
   const { client, calls } = fakeClient(() => 204);
 
   await cleanup(client, { sleep: noSleep });
@@ -118,9 +118,9 @@ test("agent cleanup purges permanently rather than trashing", async () => {
 });
 
 test("a permanently failing fixture does not block the remaining ones", async () => {
-  track("agent", "first@x.dev");
-  track("agent", "doomed@x.dev");
-  track("agent", "last@x.dev");
+  track("agent", "first@x.test");
+  track("agent", "doomed@x.test");
+  track("agent", "last@x.test");
   // 400 is non-retryable, so this is one attempt and a hard give-up.
   const { client } = fakeClient((path) => (path.includes("doomed") ? 400 : 204));
 
@@ -129,18 +129,18 @@ test("a permanently failing fixture does not block the remaining ones", async ()
   assert.equal(r.attempted, 3);
   assert.equal(r.succeeded, 2, "the other two fixtures must still be deleted");
   assert.equal(r.failed.length, 1);
-  assert.equal(r.failed[0]!.id, "doomed@x.dev");
+  assert.equal(r.failed[0]!.id, "doomed@x.test");
   // Only the failure stays tracked, so the safety net can report it as leaked.
   assert.deepEqual(
     getTracked().map((t) => t.id),
-    ["doomed@x.dev"],
+    ["doomed@x.test"],
   );
 });
 
 test("a thrown request does not block the remaining fixtures", async () => {
-  track("agent", "first@x.dev");
-  track("agent", "boom@x.dev");
-  track("agent", "last@x.dev");
+  track("agent", "first@x.test");
+  track("agent", "boom@x.test");
+  track("agent", "last@x.test");
   const { client } = fakeClient((path) =>
     path.includes("boom") ? new Error("socket hang up") : 204,
   );
@@ -153,7 +153,7 @@ test("a thrown request does not block the remaining fixtures", async () => {
 });
 
 test("a transient 429 is retried and the fixture is still deleted", async () => {
-  track("agent", "ratelimited@x.dev");
+  track("agent", "ratelimited@x.test");
   // This is the production failure mode: cleanup runs at the tail of a suite,
   // when the run's rate-limit budget is most depleted. Pre-fix, this single
   // 429 abandoned a real agent permanently.
@@ -168,14 +168,14 @@ test("a transient 429 is retried and the fixture is still deleted", async () => 
 });
 
 test("5xx is retried; a non-retryable status is not", async () => {
-  track("agent", "flaky@x.dev");
+  track("agent", "flaky@x.test");
   const flaky = fakeClient((_p, attempt) => (attempt < 3 ? 503 : 200));
   const r1 = await cleanup(flaky.client, { attempts: 3, sleep: noSleep });
   assert.equal(r1.succeeded, 1);
   assert.equal(flaky.calls.length, 3);
 
   drainTracked();
-  track("agent", "hard@x.dev");
+  track("agent", "hard@x.test");
   const hard = fakeClient(() => 422);
   const r2 = await cleanup(hard.client, { attempts: 3, sleep: noSleep });
   assert.equal(r2.failed.length, 1);
@@ -183,7 +183,7 @@ test("5xx is retried; a non-retryable status is not", async () => {
 });
 
 test("retries are bounded and the give-up reason names the last status", async () => {
-  track("agent", "downforever@x.dev");
+  track("agent", "downforever@x.test");
   const { client, calls } = fakeClient(() => 500);
 
   const r = await cleanup(client, { attempts: 3, sleep: noSleep });
@@ -194,7 +194,7 @@ test("retries are bounded and the give-up reason names the last status", async (
 });
 
 test("backoff grows per attempt", async () => {
-  track("agent", "slow@x.dev");
+  track("agent", "slow@x.test");
   const slept: number[] = [];
   const { client } = fakeClient(() => 429);
 
@@ -211,15 +211,67 @@ test("backoff grows per attempt", async () => {
   assert.deepEqual(slept, [100, 200]);
 });
 
-test("404 and 403 count as success (already gone / anti-enumeration)", async () => {
-  track("agent", "gone@x.dev");
-  track("agent", "notours@x.dev");
+test("404 counts as success but 403 remains a tracked cleanup failure", async () => {
+  track("agent", "gone@x.test");
+  track("agent", "notours@x.test");
   const { client } = fakeClient((path) => (path.includes("gone") ? 404 : 403));
 
   const r = await cleanup(client, { sleep: noSleep });
 
-  assert.equal(r.succeeded, 2);
-  assert.equal(getTracked().length, 0);
+  assert.equal(r.succeeded, 1);
+  assert.equal(r.failed.length, 1);
+  assert.equal(r.failed[0]!.id, "notours@x.test");
+  assert.deepEqual(getTracked(), [{ kind: "agent", id: "notours@x.test" }]);
+});
+
+test("only transient permanent-delete conflict codes are retried", async () => {
+  track("agent", "busy@x.test");
+  const { client, calls } = fakeClient((_path, attempt) =>
+    attempt < 3
+      ? { status: 409, headers: {}, raw: JSON.stringify({ error: { code: attempt === 1 ? "send_in_progress" : "purge_in_progress" } }) }
+      : 204,
+  );
+
+  const r = await cleanup(client, { attempts: 3, sleep: noSleep });
+
+  assert.equal(r.succeeded, 1);
+  assert.deepEqual(r.failed, []);
+  assert.equal(calls.length, 3);
+
+  drainTracked();
+  track("agent", "conflict@x.test");
+  const hard = fakeClient(() => ({ status: 409, headers: {}, raw: JSON.stringify({ error: { code: "address_in_trash" } }) }));
+  const hardResult = await cleanup(hard.client, { attempts: 3, sleep: noSleep });
+  assert.equal(hardResult.failed.length, 1);
+  assert.equal(hard.calls.length, 1, "unrelated 409 conflicts must not be retried");
+});
+
+test("default conflict budget outlasts the normal three-attempt window", async () => {
+	track("agent", "long-send@x.test");
+	const { client, calls } = fakeClient((_path, attempt) =>
+		attempt < 5
+			? { status: 409, headers: {}, raw: JSON.stringify({ error: { code: "send_in_progress" } }) }
+			: 204,
+	);
+
+	const r = await cleanup(client, { sleep: noSleep });
+
+	assert.equal(r.succeeded, 1);
+	assert.equal(calls.length, 5, "known 409 must not inherit the three-attempt transport budget");
+});
+
+test("default conflict waits out the full ten-minute send lease", async () => {
+	track("agent", "lease-boundary@x.test");
+	const waits: number[] = [];
+	const { client, calls } = fakeClient((_path, attempt) =>
+		attempt < 49
+			? { status: 409, headers: {}, raw: JSON.stringify({ error: { code: "send_in_progress" } }) }
+			: 204,
+	);
+	const result = await cleanup(client, { sleep: async (ms) => { waits.push(ms); } });
+	assert.equal(result.succeeded, 1);
+	assert.equal(calls.length, 49);
+	assert.ok(waits.reduce((sum, ms) => sum + ms, 0) >= 600_000, "retry waits must exceed the 600s claim lease");
 });
 
 test("tracking the same identity twice registers it once", async () => {
@@ -227,8 +279,8 @@ test("tracking the same identity twice registers it once", async () => {
   // before the create, which can duplicate an id tracked elsewhere — but a
   // duplicate registry entry makes one 5xx report a LEAK for a fixture whose
   // twin deleted fine. track() dedupes so the report stays truthful.
-  track("agent", "dupe@x.dev");
-  track("agent", "dupe@x.dev");
+  track("agent", "dupe@x.test");
+  track("agent", "dupe@x.test");
   assert.equal(getTracked().length, 1, "duplicate track must not double-register");
   const { client, calls } = fakeClient(() => 204);
 
@@ -241,8 +293,8 @@ test("tracking the same identity twice registers it once", async () => {
 });
 
 test("kind is part of identity — same id under two kinds stays two fixtures", async () => {
-  track("agent", "x.dev");
-  track("domain", "x.dev");
+  track("agent", "x.test");
+  track("domain", "x.test");
   assert.equal(getTracked().length, 2);
   const { client, calls } = fakeClient(() => 204);
 
@@ -259,19 +311,19 @@ test("a rejection carrying a non-Error does not abandon the remaining fixtures",
   // fixture queued behind it — silently converting a per-fixture failure into
   // an all-or-nothing one. `first` is deleted LAST (reverse order), so it is
   // the one that goes missing when isolation breaks.
-  track("agent", "first@x.dev");
-  track("agent", "nonerror@x.dev");
-  track("agent", "last@x.dev");
+  track("agent", "first@x.test");
+  track("agent", "nonerror@x.test");
+  track("agent", "last@x.test");
   const { client } = fakeClient((path) => (path.includes("nonerror") ? null : 204));
 
   const r = await cleanup(client, { attempts: 1, sleep: noSleep });
 
   assert.equal(r.succeeded, 2, "both healthy fixtures must still be deleted");
   assert.equal(r.failed.length, 1);
-  assert.equal(r.failed[0]!.id, "nonerror@x.dev");
+  assert.equal(r.failed[0]!.id, "nonerror@x.test");
   assert.deepEqual(
     getTracked().map((t) => t.id),
-    ["nonerror@x.dev"],
+    ["nonerror@x.test"],
   );
 });
 
@@ -279,7 +331,7 @@ test("a 429 Retry-After longer than the backoff floor is honored, and capped", a
   // internal/ratelimit rounds Retry-After up to a whole second of the remaining
   // sliding window. Retrying on a sub-second backoff is guaranteed to 429 again
   // and just adds load to an account that is already throttled.
-  track("agent", "throttled@x.dev");
+  track("agent", "throttled@x.test");
   const slept: number[] = [];
   const { client } = fakeClient((_p, attempt) =>
     attempt === 1
@@ -302,7 +354,7 @@ test("a 429 Retry-After longer than the backoff floor is honored, and capped", a
 });
 
 test("a Retry-After shorter than the backoff floor does not shorten the wait", async () => {
-  track("agent", "throttled@x.dev");
+  track("agent", "throttled@x.test");
   const slept: number[] = [];
   const { client } = fakeClient(() => ({ status: 429, headers: { "retry-after": "0" } }));
 
@@ -355,23 +407,23 @@ test("armLeakReporter is idempotent — one listener per signal", () => {
 });
 
 test("reportLeaks names every still-tracked fixture, once", () => {
-  track("agent", "orphan@x.dev");
-  track("domain", "orphan.x.dev");
+  track("agent", "orphan@x.test");
+  track("domain", "orphan.x.test");
   const cap = captureReporter();
 
   reportLeaks("exit");
   reportLeaks("exit"); // idempotent: a signal's exit re-runs the exit handler
 
   assert.match(cap.out(), /2 fixture\(s\) still tracked at exit/);
-  assert.match(cap.out(), /LEAKED agent orphan@x\.dev — delete manually/);
-  assert.match(cap.out(), /LEAKED domain orphan\.x\.dev — delete manually/);
+  assert.match(cap.out(), /LEAKED agent orphan@x\.test — delete manually/);
+  assert.match(cap.out(), /LEAKED domain orphan\.x\.test — delete manually/);
   // Printed exactly once despite two calls.
   assert.equal(cap.out().match(/still tracked at exit/g)?.length, 1);
 });
 
 test("reportLeaks is silent when teardown emptied the registry", () => {
-  track("agent", "cleaned@x.dev");
-  untrack("agent", "cleaned@x.dev");
+  track("agent", "cleaned@x.test");
+  untrack("agent", "cleaned@x.test");
   const cap = captureReporter();
 
   reportLeaks("exit");
@@ -410,7 +462,7 @@ test("disarm removes only our handlers, not a foreign one", () => {
 });
 
 test("a second cleanup pass retries what the first one failed", async () => {
-  track("agent", "recoverable@x.dev");
+  track("agent", "recoverable@x.test");
   const down = fakeClient(() => 500);
   const r1 = await cleanup(down.client, { attempts: 1, sleep: noSleep });
   assert.equal(r1.failed.length, 1);

@@ -309,20 +309,23 @@ relative to that base):
      domain keep sending). Teardown is a **remote SES call that can fail**, so
      it runs through the **same River queue** as provisioning: the delete tx
      *transactionally enqueues* a `deprovision-sender-identity` job (so it's
-     never lost if the SES call is down), the worker calls SES
-     `DeleteEmailIdentity` with retries/backoff, treats **NotFound as success**
-     (idempotent), and dead-letters with an alert on permanent failure. Also
-     wipe e2a's per-domain DKIM key material. **Backstop (alert-first, to avoid
-     a TOCTOU delete):** the create-side reconciler also sweeps for SES
-     identities with no backing live domain — but a naïve "list then delete"
-     races a concurrent **re-registration** of the same domain (reaper's stale
-     snapshot deletes the freshly-created identity → silent breakage). So the
-     reaper **alerts by default** and only deletes when it can re-confirm
-     liveness transactionally: take `SELECT … FOR UPDATE` on the domain row and
-     delete the SES identity in the same tx **only if** no live row exists *and*
-     the identity's e2a-owned creation tag/timestamp predates the current
-     reconcile cycle. Re-registering a deleted domain re-creates the identity
-     cleanly and the reaper must not touch it.
+     never lost if the SES call is down). Provision and deprovision jobs are
+     durable **desired-state triggers**, not stale create/delete commands: both
+     take the same per-domain PostgreSQL advisory lock, re-read the current
+     verification-token incarnation, and then converge SES to the current row
+     (verified → provision the current key; absent/unverified → delete). Status
+     writes are incarnation-guarded, so an in-flight old provision cannot write
+     through a delete/re-register race, and an old deprovision cannot delete a
+     freshly re-registered identity. Provider calls retry with River backoff and
+     treat **NotFound as success** (idempotent). Also
+     wipe e2a's per-domain DKIM key material. **Backstop:** migration 101's
+     managed-domain ledger is written before provider creation, records the
+     applied verification-token incarnation only after provider success, and
+     survives domain deletion until teardown succeeds. The hourly reaper
+     converges only this ledger, under the same advisory lock; it never deletes
+     arbitrary identities from the shared SES account. This also retries after
+     River exhausts a job's finite attempt budget. Re-registering a deleted
+     domain updates the target incarnation and installs the replacement key.
 5. **HITL: two explicit transitions, prefetch-safe.** A held draft
    (`status=pending_approval`) is resolved by a human reviewer via **two
    explicit sub-resources** — `POST …/messages/{id}/approve` and
@@ -1343,18 +1346,16 @@ Break the current `/api/v1` surface directly and move it to
   `domain.sending_verified`/`domain.sending_failed`. Unblocks
   customer-reply→reopen.
   * **River adopted** (the repo previously used ticker-goroutine workers): the
-    provision/reconcile/deprovision/reap jobs run on a River client; River's
+    desired-state sync/reconcile/reap jobs run on a River client (v2 kinds use
+    a v2 queue the old slot does not consume; legacy kinds remain registered
+    only to drain a blue/green rollout); River's
     own schema is migrated at startup (`senderidentity.Migrate`) alongside
     e2a's. The reconciler is a per-domain River job whose `MaxAttempts` bounds
     the pending→failed TTL (no infinite poll).
-  * **Deviations from the decision-4 text, deferred:** (1) the orphan reaper is
-    **alert-only** — it logs SES identities with no live domain rather than
-    deleting them; the TOCTOU-safe conditional delete (`SELECT … FOR UPDATE`
-    liveness re-confirm) is a follow-up, and the transactional teardown on
-    delete makes orphans rare. (2) The real `sesv2` provider is **not e2e-tested
+  * **Deviations from the decision-4 text, deferred:** (1) The real `sesv2` provider is **not e2e-tested
     against AWS** here — CI/tests use the in-memory `FakeProvider`; the BYODKIM
     key handed to SES is converted PKCS#1→PKCS#8 base64, to validate against
-    live SES before enabling `sender_identity.ses_region` in prod. (3) The custom
+    live SES before enabling `sender_identity.ses_region` in prod. (2) The custom
     `MAIL FROM` subdomain (SPF alignment / "remove via e2a") has **shipped**
     (Track B — `internal/mailfrom` + `PutEmailIdentityMailFromAttributes`; see
     `sender-identity-mailfrom.md`), dormant behind the same `ses_region` gate

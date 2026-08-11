@@ -298,6 +298,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 //     deliberately has no FK. Omitting it left stale dedup rows behind and made
 //     TestInboundIntake_InsertLoadDedup / _StampProcessAndFail fail on a re-run
 //     (the "insert must be new" assertions saw the previous run's rows).
+//   - sender_identity_managed_domains: deliberately survives domain deletion
+//     until asynchronous provider teardown is confirmed.
 //
 // Use DELETE for FK-less tables instead of adding them to TRUNCATE. The test suite
 // calls this helper hundreds of times; repeatedly truncating inbound_intake also
@@ -322,6 +324,7 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 		SET LOCAL lock_timeout = '`+truncateAllLockTimeout+`';
 
 		DELETE FROM inbound_intake;
+		DELETE FROM sender_identity_managed_domains;
 
 		TRUNCATE oauth_pkce_requests, oauth_refresh_tokens, oauth_access_tokens,
 		         oauth_auth_codes, oauth_clients,
