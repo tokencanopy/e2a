@@ -257,8 +257,8 @@ describe("scheduled send help", () => {
 });
 
 describe("quoted-history reply help", () => {
-  it("labels --quote-history as experimental", () => {
-    expect(USAGE).toMatch(/--quote-history[\s\S]*experimental[\s\S]*may change or be removed/i);
+  it("labels --quote-history as beta", () => {
+    expect(USAGE).toMatch(/--quote-history[\s\S]*beta[\s\S]*may change before stable/i);
   });
 });
 

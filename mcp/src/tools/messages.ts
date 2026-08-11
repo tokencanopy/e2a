@@ -241,7 +241,7 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .boolean()
           .optional()
           .describe(
-            "Experimental (may change or be removed before stable): if true, the server appends the message being replied to as mail-client-style quoted history beneath the reply body — an 'On <date>, <sender> wrote:' attribution line followed by the original text ('>'-prefixed) and, when `html` is supplied, the original HTML in a blockquote. Composition happens server-side at accept time, so a held reply shows the reviewer the final quoted content. Only the body parts you supply are quoted (a text-only reply stays text-only). Defaults to false (the body is sent exactly as provided).",
+            "Beta (may change before stable): if true, the server appends the message being replied to as mail-client-style quoted history beneath the reply body — an 'On <date>, <sender> wrote:' attribution line followed by the original text ('>'-prefixed) and, when `html` is supplied, the original HTML in a blockquote. Composition happens server-side at accept time, so a held reply shows the reviewer the final quoted content. Only the body parts you supply are quoted (a text-only reply stays text-only). Defaults to false (the body is sent exactly as provided).",
           ),
         email: emailSelector,
       }),

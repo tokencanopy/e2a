@@ -661,12 +661,12 @@ class MessagesResource:
         beta, and ``wait="sent"`` requests the same bounded wait (see
         :meth:`send`).
 
-        Experimental: pass ``quote_history=True`` to have the server append
+        Beta: pass ``quote_history=True`` to have the server append
         the referenced message as mail-client-style quoted history beneath
         the reply body (an attribution line plus the '>'-quoted text, and a
         blockquote when an HTML body is supplied); when given, it wins over
         any ``quote_history`` already present in ``body``. This option may
-        change or be removed before it is declared stable.
+        change before it is declared stable.
         """
         req = _coerce(ReplyRequest, _reply_to_union(body))
         if unsubscribe is not None:

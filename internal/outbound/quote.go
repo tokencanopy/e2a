@@ -6,7 +6,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/mailparse"
 )
 
-// EXPERIMENTAL: reply quote-history composition. Generalizes the forward
+// BETA: reply quote-history composition. Generalizes the forward
 // quote block (forward.go) to the mail-client reply shape: the caller's
 // reply body on top, an "On <date>, <from> wrote:" attribution line, then
 // the parent body as a quote (">"-prefixed text / blockquote HTML). Reuses

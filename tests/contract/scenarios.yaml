@@ -2817,7 +2817,7 @@ scenarios:
 
   - name: reply_quote_history
     description: >
-      Experimental quote_history on reply: when true, the server composes the
+      Beta quote_history on reply: when true, the server composes the
       referenced message beneath the caller's text as mail-client-style quoted
       history (an attribution line plus the '>'-prefixed original body) at
       accept time, so the stored outbound row already carries the final

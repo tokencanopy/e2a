@@ -449,14 +449,14 @@ describe("e2a MCP server", () => {
     }
   });
 
-  it("labels reply_to_message's quote_history as experimental with the server default", async () => {
+  it("labels reply_to_message's quote_history as beta with the server default", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t]));
     const properties = (byName.get("reply_to_message")?.inputSchema as {
       properties?: Record<string, { description?: string }>;
     })?.properties ?? {};
     const description = properties.quote_history?.description ?? "";
-    expect(description).toMatch(/experimental.*may change or be removed/i);
+    expect(description).toMatch(/beta.*may change before stable/i);
     expect(description).toMatch(/quoted history/i);
     expect(description).toMatch(/defaults to false/i);
   });
@@ -1214,7 +1214,7 @@ describe("e2a MCP server", () => {
     );
   });
 
-  it("reply_to_message maps the experimental quote_history flag to quoteHistory", async () => {
+  it("reply_to_message maps the beta quote_history flag to quoteHistory", async () => {
     await client.callTool({
       name: "reply_to_message",
       arguments: { message_id: "msg_in", text: "thanks", quote_history: true },

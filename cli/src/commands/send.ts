@@ -218,7 +218,7 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
       replyTo: replyToArg(opts.replyTo),
       attachments: readAttachments(opts.attach),
       sendAt,
-      // Experimental server-side quoted history. Absent-or-false stays off the
+      // Beta server-side quoted history. Absent-or-false stays off the
       // wire so the request matches the documented default exactly.
       quoteHistory: opts.quoteHistory || undefined,
     },

@@ -452,7 +452,7 @@ describe("E2AClient", () => {
     expect(result.scheduledAt).toEqual(sendAt);
   });
 
-  it("messages.reply serializes the experimental quoteHistory flag", async () => {
+  it("messages.reply serializes the beta quoteHistory flag", async () => {
     globalThis.fetch = mockFetch(200, { message_id: "msg_quoted_reply", status: "sent" });
 
     await client.messages.reply("bot@test.dev", "msg_1", {

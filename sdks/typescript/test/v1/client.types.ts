@@ -28,7 +28,7 @@ import type { InboundEmail } from "../../src/v1/inbound.js";
 const senderFilter: ListMessagesParams = { from_: "alice@example.com" };
 void senderFilter;
 
-// Experimental: quoteHistory is an optional boolean on reply input.
+// Beta: quoteHistory is an optional boolean on reply input.
 const quotedReply: ReplyInput = { text: "ok", quoteHistory: true };
 void quotedReply;
 

@@ -120,7 +120,7 @@ Usage:
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
   e2a reply <message-id> [options]  Reply in-thread (same body options as send)
-        --quote-history            Experimental (may change or be removed): the server appends the
+        --quote-history            Beta (may change before stable): the server appends the
                                    original message beneath the reply body, mail-client style
                                    ("On <date>, <sender> wrote:" + '>'-quoted text / blockquote HTML)
   e2a messages list [options]       List messages, oldest first

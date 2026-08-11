@@ -793,7 +793,7 @@ async def test_forward_threads_managed_unsubscribe(httpx_mock):
 
 @pytest.mark.anyio
 async def test_reply_threads_quote_history(httpx_mock):
-    # Experimental: the quote_history kwarg lands on the generated request
+    # Beta: the quote_history kwarg lands on the generated request
     # model and serializes onto the wire.
     httpx_mock.add_response(json={"message_id": "msg_q1", "status": "sent"})
     async with _client() as c:
