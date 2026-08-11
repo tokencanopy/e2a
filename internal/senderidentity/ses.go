@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
@@ -35,13 +36,15 @@ type sesAPI interface {
 // identities are never adopted or mutated; IAM independently applies the same
 // resource-tag condition to close the client-side check/mutation race.
 type SESProvider struct {
-	api    sesAPI
-	region string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
+	api                sesAPI
+	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
+	deleteConfirmDelay func(attempt int) time.Duration
 }
 
 const (
 	managedIdentityTagKey   = "e2a-managed"
 	managedIdentityTagValue = "sender-identity-v1"
+	deleteConfirmAttempts   = 6
 )
 
 // NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL FROM
@@ -183,18 +186,42 @@ func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 		}
 		return err
 	}
-	// DELETE success is followed by an absence read so the HTTP domain-delete
-	// boundary can safely release DNS. If SES is briefly eventually consistent,
-	// the caller retries while the database row and DNS remain intact.
-	_, err = p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
-	if err != nil {
-		var notFound *ststypes.NotFoundException
-		if errors.As(err, &notFound) {
-			return nil
+	// DELETE success is followed by bounded absence polling so the HTTP
+	// domain-delete boundary can safely release DNS without false-red failures
+	// during normal SES eventual consistency. The outer job/reaper remains the
+	// durable retry path if this short confirmation window is exhausted.
+	for attempt := 0; attempt < deleteConfirmAttempts; attempt++ {
+		_, err = p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+		if err != nil {
+			var notFound *ststypes.NotFoundException
+			if errors.As(err, &notFound) {
+				return nil
+			}
+			return err
 		}
-		return err
+		if attempt+1 < deleteConfirmAttempts {
+			delay := p.confirmDelay(attempt)
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
 	}
 	return errors.New("senderidentity: provider identity still present after delete")
+}
+
+func (p *SESProvider) confirmDelay(attempt int) time.Duration {
+	if p.deleteConfirmDelay != nil {
+		return p.deleteConfirmDelay(attempt)
+	}
+	delay := 100 * time.Millisecond * time.Duration(1<<attempt)
+	if delay > time.Second {
+		return time.Second
+	}
+	return delay
 }
 
 func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {

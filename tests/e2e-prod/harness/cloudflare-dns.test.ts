@@ -65,7 +65,7 @@ test("ambiguous create lookup retries when Cloudflare has not converged", async 
 	);
 });
 
-test("ambiguous create lookup filters by content and comment", async () => {
+test("ambiguous create lookup filters by run comment", async () => {
 	const deleted: string[] = [];
 	const client = new CloudflareDnsClient("zone", "token", async (input, init) => {
 		const url = String(input);
@@ -79,5 +79,27 @@ test("ambiguous create lookup filters by content and comment", async () => {
 		return json({ success: true, result: {} });
 	});
 	await client.delete({ type: "TXT", name: "shared.fixture.test", content: "token", comment: "temporary" });
+	assert.deepEqual(deleted, ["ours"]);
+});
+
+test("ambiguous create lookup tolerates canonicalized content when the run comment matches", async () => {
+	const deleted: string[] = [];
+	const client = new CloudflareDnsClient("zone", "token", async (input, init) => {
+		const url = String(input);
+		if (url.includes("dns_records?")) {
+			return json({ success: true, result: [
+				{ id: "foreign", content: "10 old.example.test", comment: "another run" },
+				{ id: "ours", content: "10 canonicalized.example.test.", comment: "run-123" },
+			] });
+		}
+		if (init?.method === "DELETE") deleted.push(url.split("/").at(-1)!);
+		return json({ success: true, result: {} });
+	});
+	await client.delete({
+		type: "MX",
+		name: "bounce.fixture.test",
+		content: "10 canonicalized.example.test",
+		comment: "run-123",
+	});
 	assert.deepEqual(deleted, ["ours"]);
 });

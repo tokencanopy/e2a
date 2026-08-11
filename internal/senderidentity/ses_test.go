@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
@@ -223,14 +224,16 @@ func TestPKCS8Base64(t *testing.T) {
 // stubSESAPI implements sesAPI; only the methods under test return real
 // behavior, the rest panic if unexpectedly called.
 type stubSESAPI struct {
-	getErr     error
-	delErr     error
-	createErr  error
-	putDkimErr error
-	putErr     error
-	unmanaged  bool
-	deleted    bool
-	deleteLags bool
+	getErr          error
+	delErr          error
+	createErr       error
+	putDkimErr      error
+	putErr          error
+	unmanaged       bool
+	deleted         bool
+	deleteLags      bool
+	deleteLagReads  int
+	deleteRequested bool
 
 	// getOut, when set, is what GetEmailIdentity returns (so Status tests can
 	// drive the SES axes). Nil ⇒ an empty output.
@@ -267,6 +270,13 @@ func (s *stubSESAPI) PutEmailIdentityMailFromAttributes(ctx context.Context, in 
 }
 
 func (s *stubSESAPI) GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error) {
+	if s.deleteRequested {
+		if s.deleteLagReads > 0 {
+			s.deleteLagReads--
+		} else {
+			s.deleted = true
+		}
+	}
 	if s.deleted {
 		return nil, &ststypes.NotFoundException{}
 	}
@@ -290,7 +300,11 @@ func (s *stubSESAPI) DeleteEmailIdentity(ctx context.Context, in *sesv2.DeleteEm
 		return nil, s.delErr
 	}
 	if !s.deleteLags {
-		s.deleted = true
+		if s.deleteLagReads > 0 {
+			s.deleteRequested = true
+		} else {
+			s.deleted = true
+		}
 	}
 	return &sesv2.DeleteEmailIdentityOutput{}, nil
 }
@@ -467,8 +481,21 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 
 	t.Run("Deprovision waits for confirmed absence", func(t *testing.T) {
 		p := NewSESProvider(&stubSESAPI{deleteLags: true}, "us-east-1")
+		p.deleteConfirmDelay = func(int) time.Duration { return 0 }
 		if err := p.Deprovision(context.Background(), "example.com"); err == nil {
 			t.Fatal("expected a retry while GetEmailIdentity still reports the identity")
+		}
+	})
+
+	t.Run("Deprovision absorbs brief eventual consistency", func(t *testing.T) {
+		stub := &stubSESAPI{deleteLagReads: 2}
+		p := NewSESProvider(stub, "us-east-1")
+		p.deleteConfirmDelay = func(int) time.Duration { return 0 }
+		if err := p.Deprovision(context.Background(), "example.com"); err != nil {
+			t.Fatalf("expected bounded confirmation to observe absence, got %v", err)
+		}
+		if stub.deleteLagReads != 0 || !stub.deleted {
+			t.Fatalf("delete confirmation did not exhaust simulated lag: %+v", stub)
 		}
 	})
 }

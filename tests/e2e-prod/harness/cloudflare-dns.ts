@@ -102,8 +102,11 @@ export class CloudflareDnsClient {
     }
 		const matches = envelope.result.filter((record) => {
 			const candidate = record as { id: string; content?: string; comment?: string };
-			return (ref.content === undefined || candidate.content === ref.content) &&
-				(ref.comment === undefined || candidate.comment === ref.comment);
+			// The per-run comment is the ownership marker. Prefer it over content:
+			// Cloudflare may canonicalize MX/TXT content between create and list.
+			// Content remains the fallback for legacy descriptors without comments.
+			if (ref.comment !== undefined) return candidate.comment === ref.comment;
+			return ref.content === undefined || candidate.content === ref.content;
 		});
 		const ids = matches.map((record) => record.id).filter(Boolean);
 		if (ids.length === 0) {
