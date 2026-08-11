@@ -38,18 +38,16 @@ type Manager struct {
 	enq      jobs.Enqueuer
 }
 
-// DeprovisionBeforeDelete makes the HTTP domain-delete success boundary mean
-// that the provider identity is already confirmed absent. The database delete
-// runs under the same per-domain mutation lock, so a current-version provision
-// worker cannot recreate the identity between provider teardown and commit.
-// If provider teardown fails (including an unowned identity), deleteFn is not
-// called and the domain/DNS remain intact for a safe retry.
-func (m *Manager) DeprovisionBeforeDelete(ctx context.Context, domain string, deleteFn func(context.Context) error) error {
+// DeleteWithProviderCleanup makes the HTTP domain-delete success boundary mean
+// that the provider identity is already confirmed absent. deleteFn first
+// performs the guarded database DELETE, then invokes its cleanup callback
+// inside that still-open transaction. This ordering prevents an agent-create
+// race from deleting SES under a domain whose DB delete is FK-blocked.
+func (m *Manager) DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error {
 	return m.store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
-		if err := m.provider.Deprovision(lockedCtx, domain); err != nil {
-			return err
-		}
-		return deleteFn(lockedCtx)
+		return deleteFn(lockedCtx, func(deleteCtx context.Context) error {
+			return m.provider.Deprovision(deleteCtx, domain)
+		})
 	})
 }
 

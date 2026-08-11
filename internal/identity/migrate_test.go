@@ -135,6 +135,22 @@ func TestAgentPurgeMigrationAddsBoundedLookupIndexes(t *testing.T) {
 	}
 }
 
+func TestSenderIdentityMigrationInstallsTriggerBeforeBackfill(t *testing.T) {
+	sql, err := migrations.FS.ReadFile("101_sender_identity_managed_domains.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(sql)
+	triggerPos := strings.Index(text, "CREATE TRIGGER domains_track_sender_identity_managed")
+	backfillPos := strings.Index(text, "INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation)\nSELECT")
+	if triggerPos < 0 || backfillPos < 0 {
+		t.Fatalf("migration is missing trigger or backfill")
+	}
+	if triggerPos > backfillPos {
+		t.Fatalf("sender-identity trigger must be installed before the legacy backfill")
+	}
+}
+
 // stubFS builds an fs.FS with the given filename → SQL body mapping.
 // Order isn't preserved by MapFS but RunMigrations sorts by filename.
 func stubFS(files map[string]string) fstest.MapFS {

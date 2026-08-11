@@ -13,20 +13,11 @@ CREATE TABLE IF NOT EXISTS sender_identity_managed_domains (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Adopt provider work already recorded by the legacy release. Restrict this
--- to customer-owned rows and actual sender-identity status: verified alone is
--- not provider intent (self-hosts may have this feature disabled, and the
--- built-in shared domain has no per-customer DKIM key).
-INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation)
-SELECT domain, verification_token, verification_token
-  FROM domains
- WHERE user_id IS NOT NULL AND sending_status <> 'none'
-ON CONFLICT (domain) DO NOTHING;
-
 -- Migration 101 runs while the old blue/green slot is still live. That binary
--- does not know about the ledger, so a one-time backfill alone has a race: it
--- may finish a provision and write sending_status after the SELECT above.
--- Capture that feature-specific transition independently of worker version.
+-- does not know about the ledger. Install the trigger before the backfill;
+-- CREATE TRIGGER's table lock is held until this migration transaction commits,
+-- so an old worker cannot slip a status transition between those two steps.
+-- Capture the feature-specific transition independently of worker version.
 -- The provider-side ownership tag remains the authority for mutation/deletion;
 -- a ledger row alone can never authorize touching an unrelated SES identity.
 CREATE OR REPLACE FUNCTION track_sender_identity_managed_domain()
@@ -56,3 +47,13 @@ CREATE TRIGGER domains_track_sender_identity_managed
 AFTER INSERT OR UPDATE OF sending_status, verification_token ON domains
 FOR EACH ROW
 EXECUTE FUNCTION track_sender_identity_managed_domain();
+
+-- Adopt provider work already recorded by the legacy release. Restrict this
+-- to customer-owned rows and actual sender-identity status: verified alone is
+-- not provider intent (self-hosts may have this feature disabled, and the
+-- built-in shared domain has no per-customer DKIM key).
+INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation)
+SELECT domain, verification_token, verification_token
+  FROM domains
+ WHERE user_id IS NOT NULL AND sending_status <> 'none'
+ON CONFLICT (domain) DO NOTHING;

@@ -29,12 +29,11 @@ type fakeSenderIdentity struct {
 	providerCleaned []string
 }
 
-func (f *fakeSenderIdentity) DeprovisionBeforeDelete(ctx context.Context, domain string, deleteFn func(context.Context) error) error {
-	f.providerCleaned = append(f.providerCleaned, domain)
-	if f.deprovisionErr != nil {
+func (f *fakeSenderIdentity) DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error {
+	return deleteFn(ctx, func(context.Context) error {
+		f.providerCleaned = append(f.providerCleaned, domain)
 		return f.deprovisionErr
-	}
-	return deleteFn(ctx)
+	})
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, _ string) error {
@@ -152,6 +151,31 @@ func TestBuildDepsDeleteDomainHookErrorRollsBack(t *testing.T) {
 	// the domain delete too — the row must still be there.
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("domain row gone after rolled-back delete: %v", err)
+	}
+}
+
+func TestBuildDepsDeleteDomainFKFailureDoesNotTouchProvider(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	fake := &fakeSenderIdentity{}
+	p.SenderIdentity = fake
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "delete-race@example.com", "Owner", "delete-race-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "delete-race.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if _, err := store.CreateAgent(ctx, "bot@"+domain, domain, "Bot", "", "", user.ID); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := deps.DeleteDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainHasAgents) {
+		t.Fatalf("DeleteDomain error = %v, want ErrDomainHasAgents", err)
+	}
+	if len(fake.providerCleaned) != 0 {
+		t.Fatalf("provider touched before FK-safe DB delete: %v", fake.providerCleaned)
 	}
 }
 

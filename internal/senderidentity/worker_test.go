@@ -285,7 +285,7 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 	})
 }
 
-func TestManagerDeprovisionBeforeDelete(t *testing.T) {
+func TestManagerDeleteWithProviderCleanup(t *testing.T) {
 	const domain = "delete-boundary.example.test"
 	t.Run("provider failure preserves database state", func(t *testing.T) {
 		store := newFakeStore()
@@ -294,7 +294,10 @@ func TestManagerDeprovisionBeforeDelete(t *testing.T) {
 		provider.SetDeprovisionErr(errors.New("ses unavailable"))
 		manager := NewManager(store, provider, nil, Config{})
 		deleted := false
-		err := manager.DeprovisionBeforeDelete(context.Background(), domain, func(context.Context) error {
+		err := manager.DeleteWithProviderCleanup(context.Background(), domain, func(ctx context.Context, cleanup func(context.Context) error) error {
+			if err := cleanup(ctx); err != nil {
+				return err // transaction rolls back; model that by leaving deleted false
+			}
 			deleted = true
 			return nil
 		})
@@ -310,7 +313,10 @@ func TestManagerDeprovisionBeforeDelete(t *testing.T) {
 		provider.SeedIdentity(domain)
 		manager := NewManager(store, provider, nil, Config{})
 		providerAbsentInCallback := false
-		err := manager.DeprovisionBeforeDelete(context.Background(), domain, func(context.Context) error {
+		err := manager.DeleteWithProviderCleanup(context.Background(), domain, func(ctx context.Context, cleanup func(context.Context) error) error {
+			if err := cleanup(ctx); err != nil {
+				return err
+			}
 			identities, _ := provider.List(context.Background())
 			providerAbsentInCallback = len(identities) == 0
 			store.deleteDomain(domain)

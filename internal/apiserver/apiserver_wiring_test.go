@@ -56,11 +56,8 @@ func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, d
 	return f.deprovisionErr
 }
 
-func (f *fakeSenderIdentity) DeprovisionBeforeDelete(ctx context.Context, _ string, deleteFn func(context.Context) error) error {
-	if f.deprovisionErr != nil {
-		return f.deprovisionErr
-	}
-	return deleteFn(ctx)
+func (f *fakeSenderIdentity) DeleteWithProviderCleanup(ctx context.Context, _ string, deleteFn func(context.Context, func(context.Context) error) error) error {
+	return deleteFn(ctx, func(context.Context) error { return f.deprovisionErr })
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {

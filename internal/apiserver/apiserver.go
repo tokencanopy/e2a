@@ -103,7 +103,7 @@ type SenderIdentityEnqueuer interface {
 	EnqueueProvision(ctx context.Context, domain string) error
 	EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain string) error
 	EnqueueDeprovisionTx(ctx context.Context, tx pgx.Tx, domain string) error
-	DeprovisionBeforeDelete(ctx context.Context, domain string, deleteFn func(context.Context) error) error
+	DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error
 }
 
 // BuildDeps maps Params into the httpapi dependency set. Kept as the single
@@ -335,8 +335,11 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 		return p.Store.DeleteDomain
 	}
 	return func(ctx context.Context, domain, userID string) error {
-		return p.SenderIdentity.DeprovisionBeforeDelete(ctx, domain, func(lockedCtx context.Context) error {
+		return p.SenderIdentity.DeleteWithProviderCleanup(ctx, domain, func(lockedCtx context.Context, deprovision func(context.Context) error) error {
 			return p.Store.DeleteDomainTx(lockedCtx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+				if err := deprovision(ctx); err != nil {
+					return err
+				}
 				return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
 			})
 		})
