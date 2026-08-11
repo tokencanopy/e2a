@@ -119,7 +119,12 @@ func TestReconcileWorker_Work(t *testing.T) {
 		prov := NewFakeProvider()
 		prov.SetStatus(domain, Result{Status: StatusVerified})
 		firer := &recordingFirer{}
-		w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
+		baseFire := firer.fire()
+		firedWhileLocked := false
+		w := &ReconcileWorker{store: store, provider: prov, fire: func(ctx context.Context, domain, userID string, status Status, errMsg string) {
+			firedWhileLocked = store.mutationHeld()
+			baseFire(ctx, domain, userID, status, errMsg)
+		}}
 
 		if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
 			t.Fatalf("Work returned error: %v", err)
@@ -131,6 +136,9 @@ func TestReconcileWorker_Work(t *testing.T) {
 		ev, ok := firer.last()
 		if !ok || ev.Status != StatusVerified || ev.UserID != owner {
 			t.Fatalf("expected fired verified for owner, got %+v ok=%v", ev, ok)
+		}
+		if firedWhileLocked {
+			t.Fatal("event fired while the sender-identity mutation lock was held")
 		}
 	})
 

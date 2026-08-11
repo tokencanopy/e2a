@@ -13,6 +13,7 @@ import (
 type fakeStore struct {
 	mu         sync.Mutex
 	mutationMu sync.Mutex
+	mutationOn bool
 
 	// status holds the current sending status per domain. Absence ⇒ row gone.
 	status map[string]Status
@@ -118,7 +119,21 @@ func (s *fakeStore) SendingProvisionInputs(ctx context.Context, domain string) (
 func (s *fakeStore) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	s.mu.Lock()
+	s.mutationOn = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.mutationOn = false
+		s.mu.Unlock()
+	}()
 	return fn(ctx)
+}
+
+func (s *fakeStore) mutationHeld() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mutationOn
 }
 
 func (s *fakeStore) LoadSendingIdentityState(ctx context.Context, domain string) (SendingIdentityState, error) {

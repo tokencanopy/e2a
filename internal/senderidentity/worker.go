@@ -188,6 +188,7 @@ func (w *ReconcileV2Worker) Work(ctx context.Context, job *river.Job[ReconcileV2
 
 func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, attempt, maxAttempt int, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int) error {
 	var repairMissingIdentity bool
+	var out syncOutcome
 	err := store.WithSendingIdentityMutationLock(ctx, domain, func(ctx context.Context) error {
 		state, err := store.LoadSendingIdentityState(ctx, domain)
 		if err != nil {
@@ -213,8 +214,12 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 		}
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
-			if err := setFailedFire(ctx, store, fire, domain, state, reason); err != nil {
+			changed, err := setFailedStatus(ctx, store, domain, state, reason)
+			if err != nil {
 				return err
+			}
+			if changed {
+				out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			}
 			return store.ForgetSendingIdentityManaged(ctx, domain)
 		}
@@ -224,7 +229,12 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			// job and strand the domain in `pending` forever. Mark failed so the
 			// TTL is absolute even when the final poll errors.
 			if attempt >= maxAttempt {
-				return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
+				const reason = "verification timed out"
+				changed, err := setFailedStatus(ctx, store, domain, state, reason)
+				if changed {
+					out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
+				}
+				return err
 			}
 			return err // retry (consumes an attempt)
 		}
@@ -237,7 +247,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 				}
 				return err
 			}
-			fireOwner(ctx, fire, domain, state.Owner, StatusVerified, "")
+			out = syncOutcome{changed: true, owner: state.Owner, status: StatusVerified}
 			return nil
 		case StatusFailed:
 			if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusFailed, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
@@ -246,7 +256,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 				}
 				return err
 			}
-			fireOwner(ctx, fire, domain, state.Owner, StatusFailed, res.Error)
+			out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: res.Error}
 			return nil
 		default: // still pending
 			if err := store.TouchSendingChecked(ctx, domain, state.Incarnation); err != nil {
@@ -256,13 +266,21 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 				return err
 			}
 			if attempt >= maxAttempt {
-				return setFailedFire(ctx, store, fire, domain, state, "verification timed out")
+				const reason = "verification timed out"
+				changed, err := setFailedStatus(ctx, store, domain, state, reason)
+				if changed {
+					out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
+				}
+				return err
 			}
 			return errStillPending
 		}
 	})
 	if err != nil {
 		return err
+	}
+	if out.changed {
+		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 	}
 	if repairMissingIdentity {
 		// Re-enter through the normal mutation helper only after releasing this
@@ -429,19 +447,20 @@ func convergeWorkerIdentity(ctx context.Context, domain string, store Store, pro
 	return err
 }
 
-// setFailedFire writes a failed status and fires domain.sending_failed.
-func setFailedFire(ctx context.Context, store Store, fire EventFirer, domain string, state SendingIdentityState, reason string) error {
+// setFailedStatus writes a failed status and reports whether the incarnation
+// still existed. Event publication must happen after the mutation lock is
+// released because the production firer opens another database transaction.
+func setFailedStatus(ctx context.Context, store Store, domain string, state SendingIdentityState, reason string) (bool, error) {
 	// Terminal failures here (no key material, identity not found at provider,
 	// verification timed out) carry no per-axis signal — persist empty axes so
 	// the read path falls back to the rollup (all three records read failed).
 	if err := store.SetSendingStatus(ctx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
-	fireOwner(ctx, fire, domain, state.Owner, StatusFailed, reason)
-	return nil
+	return true, nil
 }
 
 // fireOwner fires the event for the incarnation snapshot (best-effort).
