@@ -105,9 +105,14 @@ test("plugin CI is consolidated into parallel package and skill lanes", async ()
 
 test("consolidated plugin CI preserves release gates and fixture isolation", async () => {
   const workflow = await readFile(".github/workflows/plugin-tests.yml", "utf8");
+  const pullRequestVersionGate = workflow.indexOf("name: Require plugin version bumps in pull requests");
+  const pushVersionGate = workflow.indexOf("name: Require plugin version bumps pushed to main");
+  const runtimeInstall = workflow.indexOf("name: Install email-evals runtime dependencies");
 
   assert.match(workflow, /github\.event\.pull_request\.base\.sha/);
   assert.match(workflow, /github\.event\.before/);
+  assert.ok(pullRequestVersionGate >= 0 && pullRequestVersionGate < runtimeInstall);
+  assert.ok(pushVersionGate >= 0 && pushVersionGate < runtimeInstall);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/runtime-skill/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/templates\/workflows\/feedback-triage\.yml\.tmpl/);
   assert.match(workflow, /plugins\/e2a-labs\/skills\/agentify\/examples\/e2a\/autonomous-repo\.config\.yml/);
