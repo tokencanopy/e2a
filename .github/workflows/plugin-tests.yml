@@ -32,6 +32,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+      # The version-bump gate diffs the base against the working tree, so it
+      # must run before anything that mutates tracked files. In particular
+      # `npm ci` inside the vendored email-evals runtime rewrites its tracked
+      # node_modules on Linux (platform-specific esbuild binaries), which the
+      # gate would otherwise misread as an unbumped plugin change.
+      - name: Require plugin version bumps in pull requests
+        if: github.event_name == 'pull_request'
+        env:
+          PLUGIN_VERSION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
+      - name: Require plugin version bumps pushed to main
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          PLUGIN_VERSION_BASE: ${{ github.event.before }}
+        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
       - run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
       - name: Install email-evals runtime dependencies
         run: npm ci --ignore-scripts --prefix plugins/e2a/skills/email-evals/runtime
@@ -45,17 +60,6 @@ jobs:
         run: |
           claude plugin validate --strict plugins/e2a
           claude plugin validate --strict plugins/e2a-labs
-      - name: Require plugin version bumps in pull requests
-        if: github.event_name == 'pull_request'
-        env:
-          PLUGIN_VERSION_BASE: ${{ github.event.pull_request.base.sha }}
-        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
-      - name: Require plugin version bumps pushed to main
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        env:
-          PLUGIN_VERSION_BASE: ${{ github.event.before }}
-        run: node scripts/check-plugin-version-bump.mjs "$PLUGIN_VERSION_BASE"
-
   agentify:
     name: Agentify deterministic suite
     runs-on: ubuntu-latest
