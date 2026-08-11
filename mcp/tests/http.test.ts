@@ -472,7 +472,7 @@ describe("HTTP MCP server", () => {
 
     const { client, transport } = await connect();
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(20);
+    expect(names.size).toBe(21);
     expect(names.has("send_message")).toBe(true); // runtime present
     expect(names.has("send_email")).toBe(true); // deprecated runtime alias
     expect(names.has("get_attachment_data")).toBe(true); // deprecated runtime alias

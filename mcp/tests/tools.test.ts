@@ -23,6 +23,7 @@ import { registerApiKeyTools } from "../src/tools/apikeys.js";
 import { registerLegacyTools } from "../src/tools/legacy.js";
 import { registerContactTools } from "../src/tools/contacts.js";
 import { registerSuppressionTools } from "../src/tools/suppressions.js";
+import { registerMetricsTools } from "../src/tools/metrics.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -120,6 +121,29 @@ function makeStubClient(
     getOutreachWithETag: vi.fn(async (address: string) => ({ data: { address, stage: "prospect" }, etag: '"outreach-v1"' })),
     setOutreach: vi.fn(async (address: string, body: Record<string, unknown>) => ({ address, ...body })),
     deleteOutreach: vi.fn(async (address: string) => ({ deleted: true, address })),
+    getAgentMetrics: vi.fn(async () => ({
+      agentEmail: "bot@example.com",
+      start: new Date("2026-07-09T00:00:00Z"),
+      end: new Date("2026-08-08T00:00:00Z"),
+      messagesInWindow: 10,
+      messagesWithLifecycle: 10,
+      reconstructedObservations: 0,
+      summary: { accepted: 10, submitted: 8, delivered: 6 },
+      rates: { deliveredRate: 0.6, bounceRate: null, complaintRate: null, suppressionBlockRate: 0 },
+      counters: [],
+    })),
+    getAccountMetrics: vi.fn(async () => ({
+      start: new Date("2026-07-09T00:00:00Z"),
+      end: new Date("2026-08-08T00:00:00Z"),
+      messagesInWindow: 10,
+      messagesWithLifecycle: 10,
+      reconstructedObservations: 0,
+      summary: { accepted: 10, submitted: 8, delivered: 6 },
+      rates: { deliveredRate: 0.6, bounceRate: null, complaintRate: null, suppressionBlockRate: 0 },
+      counters: [],
+      agents: [],
+      agentsTruncated: false,
+    })),
     listSuppressions: vi.fn(async () => ({
       items: [{
         address: "gone@example.net",
@@ -539,7 +563,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(76);
+    expect(frozenToolNames).toHaveLength(78);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -569,9 +593,10 @@ describe("e2a MCP server", () => {
     registerApiKeyTools(recorder, stub);
     registerContactTools(recorder, stub);
     registerSuppressionTools(recorder, stub);
+    registerMetricsTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(76);
+    expect(names).toHaveLength(78);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -580,15 +605,15 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
-    expect(RUNTIME_TOOLS.size).toBe(20);
-    expect(ADMIN_TOOLS.size).toBe(56);
-    expect(toolNamesForScope("account").size).toBe(76);
+    expect(RUNTIME_TOOLS.size).toBe(21);
+    expect(ADMIN_TOOLS.size).toBe(57);
+    expect(toolNamesForScope("account").size).toBe(78);
   });
 
-  it("account scope exposes all 76 canonical and compatibility tools", async () => {
+  it("account scope exposes all 78 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(76);
+    expect(tools).toHaveLength(78);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -598,7 +623,7 @@ describe("e2a MCP server", () => {
   it("agent scope exposes runtime inbox and outreach tools", async () => {
     const ag = await connect(makeStubClient({ scope: "agent" }));
     const names = new Set((await ag.listTools()).tools.map((t) => t.name));
-    expect(names.size).toBe(20);
+    expect(names.size).toBe(21);
     // Runtime tools present: an agent can send and read its own mailbox, but
     // account review discovery and decisions stay with the account owner.
     for (const n of [
@@ -1902,6 +1927,9 @@ describe("e2a MCP server", () => {
   });
 
   it("restore_agent restores the requested trashed agent", async () => {
+    const restoreTool = (await client.listTools()).tools.find((tool) => tool.name === "restore_agent");
+    expect(restoreTool?.description).toContain("purge_in_progress");
+
     const res = await client.callTool({
       name: "restore_agent",
       arguments: { email: "bot@example.com" },

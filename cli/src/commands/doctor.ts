@@ -911,6 +911,9 @@ interface WebhookLike {
   enabled: boolean;
   events: string[];
   autoDisabledAt?: Date;
+  // Why the server auto-disabled it (e.g. "HTTP 404"). Open set; absent
+  // unless currently auto-disabled.
+  autoDisabledReason?: string;
   lastDeliveredAt?: Date;
 }
 
@@ -994,7 +997,13 @@ async function checkOneWebhook(ctx: Ctx, wh: WebhookLike): Promise<void> {
   if (wh.autoDisabledAt) {
     rec.fail("webhook.config", "Webhook configuration", "webhook_auto_disabled", "config", `${wh.id}: auto-disabled after repeated delivery failures`, {
       target,
-      evidence: { id: wh.id, auto_disabled_at: new Date(wh.autoDisabledAt).toISOString() },
+      evidence: {
+        id: wh.id,
+        auto_disabled_at: new Date(wh.autoDisabledAt).toISOString(),
+        // The concrete failure the breaker observed (e.g. "HTTP 404") —
+        // the first question anyone debugging this asks.
+        ...(wh.autoDisabledReason ? { auto_disabled_reason: wh.autoDisabledReason } : {}),
+      },
       remediation: "fix the receiving endpoint, then re-enable the webhook (dashboard or MCP `update_webhook`)",
     });
   } else if (!wh.enabled) {

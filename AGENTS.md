@@ -57,7 +57,7 @@ is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
 | MCP server | `mcp/` | TypeScript, Express | `@e2a/mcp-server` (hosted-only; npm publish retired) |
 | Web dashboard | `web/` | Next.js 16 App Router, React 19, Tailwind CSS 4, static export | private |
 | Design system | `design-system/` | React + tsup + Storybook | `@e2a/ui` ("Loft", consumed via `file:` dep) |
-| Agent plugin | `plugins/e2a/` | Markdown skills + manifests | Claude / Codex / Cursor marketplaces |
+| Agent plugins | `plugins/e2a/`, `plugins/e2a-labs/` | Markdown skills + manifests | Core: Claude / Codex / Cursor; Labs: Claude / Codex |
 
 Toolchain versions: `go.mod` declares Go 1.25; CI and the Dockerfiles build
 with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
@@ -374,14 +374,15 @@ manually on every API change even though the template won't remind you.
   Go e2e, web, ts-sdk, agent-framework-examples, adk-cloud-webhook-example,
   ts-contract, cli, mcp, spec gates, python-sdk, python-contract,
   generated-code freshness, design-system dist freshness, SDK-version-sync,
-  plugin manifests, repo text integrity, SDK operation coverage, test
-  harnesses).
+  repo text integrity, SDK operation coverage, test harnesses).
 - `tests/e2e-prod/` is a production smoke harness — not part of local dev.
-- Two more CI workflows cover the `plugins/e2a/skills/agentify` framework:
-  `.github/workflows/agentify-test.yml` (deterministic script/addon/config
-  self-tests, every PR touching it) and `agentify-lane-fixtures.yml`
-  (golden-fixture lane tests driving `claude -p` over a mocked world; skips
-  without `CLAUDE_CODE_OAUTH_TOKEN`).
+- Plugin CI is consolidated in `.github/workflows/plugin-tests.yml`: package,
+  manifest, and version checks; parallel deterministic Agentify, Autopilot, and
+  Tether suites; and golden-fixture lane tests driving `claude -p` over a
+  mocked world. It runs on every PR and main push so the version gate fails
+  closed even for very large diffs. The model layer runs only for
+  fixture-relevant changes and skips without `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY`.
 
 ## Conventions
 

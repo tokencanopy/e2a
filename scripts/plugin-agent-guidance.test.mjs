@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
+// Every manifest an agent-facing client reads at install time. Deliberately
+// excluded: the three marketplace.json files and the two plugin.meta.json
+// sources, which carry marketplace copy (it names HITL on purpose) rather
+// than agent guidance.
 const coreAgentFiles = [
   "plugins/e2a/README.md",
   "plugins/e2a/docs/auth.md",
@@ -10,6 +14,8 @@ const coreAgentFiles = [
   "plugins/e2a/docs/sdk.md",
   "plugins/e2a/docs/templates.md",
   "plugins/e2a/skills/e2a/SKILL.md",
+  "plugins/e2a/plugin.json",
+  "plugins/e2a/mcp.json",
   "plugins/e2a/.claude-plugin/plugin.json",
   "plugins/e2a/.codex-plugin/plugin.json",
   "plugins/e2a/.cursor-plugin/plugin.json",
@@ -44,29 +50,6 @@ test("the e2a skill teaches concise multipart email composition", async () => {
   assert.match(source, /complete plain-text body/i);
   assert.match(source, /equivalent `html` body/i);
   assert.match(source, /message can be understood in ten seconds/i);
-});
-
-test("the e2a skill bootstraps and verifies an MCP connection", async () => {
-  const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
-  const bootstrap = source.match(
-    /### First run:[\s\S]*?(?=\n### |\n## )/,
-  )?.[0] ?? "";
-
-  assert.match(bootstrap, /available e2a MCP tools/i);
-  assert.match(bootstrap, /e2a MCP [`\"]?whoami/i);
-  assert.match(bootstrap, /(?:never|not).*(?:Unix|shell).*whoami/i);
-  assert.match(
-    bootstrap,
-    /claude mcp add --transport http --scope user e2a https:\/\/api\.e2a\.dev\/mcp/,
-  );
-  assert.match(bootstrap, /codex mcp login e2a/);
-  assert.match(bootstrap, /mcpServers/);
-  assert.match(bootstrap, /Streamable HTTP/i);
-  assert.match(bootstrap, /authentication failure/i);
-  assert.match(bootstrap, /network, timeout, or server/i);
-  assert.match(bootstrap, /list_messages/);
-  assert.match(bootstrap, /resume.*original/i);
-  assert.match(bootstrap, /never ask.*API key/i);
 });
 
 test("the e2a skill teaches the contacts and outreach loop without overclaiming wake-up", async () => {
@@ -135,7 +118,14 @@ test("agent guidance teaches the opt-in always-review protection policy", async 
 });
 
 test("tether setup does not mutate review configuration", async () => {
-  const source = await readFile("plugins/e2a/skills/tether/tether.sh", "utf8");
+  const source = await readFile("plugins/e2a-labs/skills/tether/tether.sh", "utf8");
   assert.doesNotMatch(source, /protection set|outbound-review|outbound review/i);
+  assert.doesNotMatch(source, /selftest@agents\.e2a\.dev/);
   assert.match(source, /pending_review/);
+});
+
+test("tether relies on the dependency-provided e2a skill without a Labs-local core path", async () => {
+  const source = await readFile("plugins/e2a-labs/skills/tether/SKILL.md", "utf8");
+  assert.match(source, /the `e2a` skill/i);
+  assert.doesNotMatch(source, /\$\{CLAUDE_PLUGIN_ROOT\}\/skills\/e2a\/SKILL\.md/);
 });

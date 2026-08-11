@@ -19,9 +19,12 @@ index.ts
 middleware.ts
 models/APIKeyExportEntry.ts
 models/APIKeyView.ts
+models/AccountMetricsView.ts
 models/AccountUserView.ts
 models/AccountView.ts
 models/AgentIdentity.ts
+models/AgentMetricsGroupView.ts
+models/AgentMetricsView.ts
 models/AgentSuppressionAddedData.ts
 models/AgentSuppressionView.ts
 models/AgentView.ts
@@ -96,6 +99,10 @@ models/MessageLifecycleTransition.ts
 models/MessageParsedView.ts
 models/MessageSummaryView.ts
 models/MessageView.ts
+models/MetricsBucketView.ts
+models/MetricsCounterView.ts
+models/MetricsRatesView.ts
+models/MetricsSummaryView.ts
 models/OAuthConnectionEntry.ts
 models/ObjectSerializer.ts
 models/PageAPIKeyView.ts
@@ -173,8 +180,10 @@ models/ValidateTemplateResponse.ts
 models/ValidationErrorDetails.ts
 models/VerifyDomainView.ts
 models/WebhookDeliveryView.ts
+models/WebhookEndpointMetricsView.ts
 models/WebhookFiltersRequest.ts
 models/WebhookFiltersView.ts
+models/WebhookMetricsView.ts
 models/WebhookView.ts
 models/all.ts
 rxjsStub.ts

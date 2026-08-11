@@ -9,7 +9,7 @@ import { useUnreadCount } from "../hooks/useUnreadCount";
 import { ThemeToggle } from "./ThemeToggle";
 import { TokenCanopyGlyph } from "./TokenCanopyBadge";
 
-type IconKey = "plus" | "grid" | "user" | "clock" | "globe" | "key" | "settings" | "msg" | "shield" | "card" | "doc" | "trash";
+type IconKey = "plus" | "grid" | "user" | "clock" | "globe" | "key" | "settings" | "msg" | "shield" | "card" | "doc" | "trash" | "chart";
 
 const ICONS: Record<IconKey, ReactNode> = {
   plus: (
@@ -36,6 +36,15 @@ const ICONS: Record<IconKey, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="9.5" />
       <polyline points="12 6.5 12 12 16 14" />
+    </>
+  ),
+  chart: (
+    <>
+      <path d="M4 20V4" />
+      <path d="M4 20h16" />
+      <path d="M8.5 20v-6" />
+      <path d="M13 20V9" />
+      <path d="M17.5 20v-9.5" />
     </>
   ),
   globe: (
@@ -123,6 +132,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: "clock",
     matchPrefix: true,
   },
+  // Delivery health sits with the other check-in surfaces (Inboxes, Pending)
+  // rather than down in the configuration block. Named "Metrics" to match
+  // /v1/metrics, `e2a metrics`, and the MCP tools — one word everywhere. Not
+  // "Dashboard": /dashboard is a retired redirect to /inboxes.
+  { href: "/metrics", label: "Metrics", icon: "chart" },
   {
     href: "/contacts",
     label: "Contacts",

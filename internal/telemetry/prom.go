@@ -33,6 +33,7 @@ type Prom struct {
 	whAttempts         *prometheus.CounterVec
 	whAttemptDur       prometheus.Histogram
 	whTerminal         *prometheus.CounterVec
+	whNotify           *prometheus.CounterVec
 	whExpiredPending   prometheus.Counter
 	whFanOutRescued    prometheus.Counter
 	whDeliveryRescued  prometheus.Counter
@@ -95,9 +96,13 @@ var (
 		"webhook_deleted", "skipped_disabled")
 	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
 	whScopeSet    = set("initial", "replay", "test", "unknown")
-	wsReasonSet   = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
-	wsRejectSet   = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
-	inboundSet    = set("processed", "noop", "failed_recipient_gone",
+	// Health-notification labels (internal/webhooknotify). A job carrying
+	// an unrecognized kind collapses to "other" like every other enum.
+	whNotifyKindSet    = set("warning", "disabled")
+	whNotifyOutcomeSet = set("sent", "permanent", "outage", "retryable", "skipped")
+	wsReasonSet        = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
+	wsRejectSet        = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
+	inboundSet         = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
 	stateSet = set("available", "running", "retryable", "scheduled")
@@ -251,6 +256,10 @@ func NewProm(build string) *Prom {
 			Name: "e2a_webhook_delivery_terminal_total",
 			Help: "Webhook deliveries reaching a terminal state, split by e2a- versus endpoint-attributable outcome and delivery scope.",
 		}, []string{"outcome", "scope"}),
+		whNotify: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_webhook_notify_total",
+			Help: "Webhook health-notification (warning/disabled email) job outcomes, by notification kind and send outcome; skipped = a staleness guard decided not to send.",
+		}, []string{"kind", "outcome"}),
 		whExpiredPending: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_webhook_deliveries_expired_pending_total",
 			Help: "Delivery rows that hit their retention TTL still pending and were marked failed by the janitor.",
@@ -376,7 +385,7 @@ func NewProm(build string) *Prom {
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
 		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
-		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
+		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
@@ -460,6 +469,10 @@ func (p *Prom) WebhookTerminal(outcome, scope string, count int) {
 	if count > 0 {
 		p.whTerminal.WithLabelValues(enum(whTerminalSet, outcome), enum(whScopeSet, scope)).Add(float64(count))
 	}
+}
+
+func (p *Prom) WebhookNotify(kind, outcome string) {
+	p.whNotify.WithLabelValues(enum(whNotifyKindSet, kind), enum(whNotifyOutcomeSet, outcome)).Inc()
 }
 
 func (p *Prom) WebhookExpiredPending(count int) {

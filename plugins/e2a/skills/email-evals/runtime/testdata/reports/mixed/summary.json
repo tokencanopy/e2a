@@ -1,0 +1,16 @@
+{
+  "runId": "run_20260808T120000_0123abcd",
+  "status": "fail",
+  "complete": true,
+  "startedAt": "2026-08-08T12:00:00.000Z",
+  "completedAt": "2026-08-08T12:00:02.000Z",
+  "counts": { "total": 2, "passed": 0, "failed": 1, "errors": 1 },
+  "durations": { "preflightMs": 0, "executionMs": 2000, "gradingMs": 0, "reportingMs": 0, "totalMs": 2000 },
+  "capabilities": ["message_action"],
+  "versions": { "runner": "0.1.0", "sdk": "5.6.0", "suite": 1, "evidence": 1 },
+  "suite": { "name": "synthetic-suite", "version": 1, "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "executionDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  "cases": [
+    { "id": "failed-case", "status": "fail", "assertions": [{ "id": "recipients.to", "status": "fail", "code": "missing_recipient" }], "primaryError": { "code": "assertions_failed", "origin": "grader" }, "secondaryErrors": [] },
+    { "id": "error-case", "status": "error", "assertions": [{ "id": "body.required_facts", "status": "error", "code": "missing_plain_text_evidence" }], "primaryError": { "code": "required_evidence_unavailable", "origin": "grader" }, "secondaryErrors": [] }
+  ]
+}

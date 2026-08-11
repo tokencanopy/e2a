@@ -50,6 +50,51 @@ export const posts: Post[] = [
     author: "e2a",
     readingMinutes: 7,
   },
+  {
+    slug: "build-ecommerce-agent-with-email",
+    title: "Build an e-commerce agent that handles order email",
+    description:
+      "Connect an AI agent to customer order email: look up order context, answer delivery questions, keep replies threaded, and hold refunds for human approval.",
+    date: "2026-08-08",
+    author: "e2a",
+    readingMinutes: 6,
+  },
+  {
+    slug: "build-sales-agent-with-email",
+    title: "Build a sales follow-up agent with authenticated email",
+    description:
+      "Give a sales agent its own inbox, connect replies to CRM context, send personalized follow-ups, and add a human approval step for sensitive outreach.",
+    date: "2026-08-08",
+    author: "e2a",
+    readingMinutes: 6,
+  },
+  {
+    slug: "build-recruiting-agent-with-email",
+    title: "Build a recruiting agent that coordinates candidates by email",
+    description:
+      "Connect a recruiting agent to candidate email, ATS and calendar context, interview coordination, and human approval for high-impact messages.",
+    date: "2026-08-08",
+    author: "e2a",
+    readingMinutes: 6,
+  },
+  {
+    slug: "build-voice-follow-up-agent-with-email",
+    title: "Build a voice follow-up agent with email",
+    description:
+      "Turn a completed voice call into an authenticated email follow-up, receive replies, preserve call context, and route commitments through approval.",
+    date: "2026-08-08",
+    author: "e2a",
+    readingMinutes: 5,
+  },
+  {
+    slug: "build-procurement-agent-with-email",
+    title: "Build a procurement agent that coordinates with vendors",
+    description:
+      "Connect vendor email to purchase-order context, extract updates, follow up on missing information, and hold commitments for human approval.",
+    date: "2026-08-08",
+    author: "e2a",
+    readingMinutes: 5,
+  },
 ];
 
 export function getPost(slug: string): Post | undefined {

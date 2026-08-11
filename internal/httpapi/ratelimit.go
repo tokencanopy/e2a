@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -35,6 +36,62 @@ var pollLimitedOps = map[string]bool{
 	"listMessages": true, "getMessage": true,
 	"listConversations": true, "getConversation": true,
 	"listWebhooks": true, "getWebhook": true, "listWebhookDeliveries": true,
+}
+
+// destructiveOps are mutations whose server-side cost is unbounded by the
+// request: the row named in the path is cheap, but the cascade behind it scales
+// with everything the caller has ever accumulated under it. Nothing else in the
+// API lets one call do an unbounded amount of write work.
+//
+// These are governed by a per-account CONCURRENCY cap rather than a rate
+// limiter. The hazard is not request frequency — it is several expensive
+// cascades running at once, each holding a pooled connection while it works.
+// Six concurrent permanent agent deletes were enough to saturate the pool,
+// starve the readiness probe, and take an entire slot out of the load balancer.
+// A rate limiter sized to allow legitimate bulk cleanup would not have stopped
+// that; a concurrency cap does, while still letting a caller delete as much as
+// they like sequentially.
+// The set is every delete whose cost scales with accumulated data rather than
+// with the request. The rest of the delete surface (deleteMessage, deleteApiKey,
+// deleteContact, deleteTemplate, deleteWebhook, deleteSuppression,
+// deleteAgentSuppression, deleteEngagement) removes a bounded number of rows and
+// is deliberately left uncapped.
+var destructiveOps = map[string]bool{
+	// Cascades every message the agent ever received.
+	"deleteAgent": true,
+	// Cascades the agents registered under the domain.
+	"deleteDomain": true,
+	// The largest cascade in the API, and all of it in ONE transaction: it
+	// counts across nine tables (including a join over every message), locks
+	// every agent the account owns with SELECT ... FOR UPDATE, cancels each
+	// linked durable send, then deletes. Strictly worse than deleteAgent.
+	"deleteAccount": true,
+	// Bulk-deletes every contact in the batch in a single statement; the batch
+	// is as large as whatever was imported.
+	"deleteImportBatch": true,
+}
+
+// maxConcurrentDestructive is the per-account in-flight ceiling for
+// destructiveOps. Two keeps sequential cleanup (the e2e harness, a customer
+// draining an account) at full speed while bounding the blast radius.
+const maxConcurrentDestructive = 2
+
+// acquireDestructive reserves an in-flight slot for userID, reporting false
+// when the account is already at its ceiling.
+func (s *Server) acquireDestructive(userID string) bool {
+	v, _ := s.destructiveInFlight.LoadOrStore(userID, new(int64))
+	n := v.(*int64)
+	if atomic.AddInt64(n, 1) > maxConcurrentDestructive {
+		atomic.AddInt64(n, -1)
+		return false
+	}
+	return true
+}
+
+func (s *Server) releaseDestructive(userID string) {
+	if v, ok := s.destructiveInFlight.Load(userID); ok {
+		atomic.AddInt64(v.(*int64), -1)
+	}
 }
 
 // rateLimit is the Huma middleware that enforces the per-user poll limiter on
@@ -103,6 +160,40 @@ func (s *Server) rateLimit(ctx huma.Context, next func(huma.Context)) {
 			}
 		}
 		snap, key = s.deps.RegLimit, clientIP(r)
+	case destructiveOps[op.OperationID]:
+		r := RequestFromContext(ctx.Context())
+		if r == nil {
+			next(ctx)
+			return
+		}
+		p, err := s.resolvePrincipal(r)
+		if err != nil {
+			// Unauthenticated: let the handler emit the canonical 401 rather
+			// than masking a missing credential as a concurrency decision.
+			next(ctx)
+			return
+		}
+		ctx = huma.WithContext(ctx, withPrincipal(ctx.Context(), p))
+		// Deliberately NOT exempt for ClassSystem/ClassInternal, unlike every
+		// other limiter here. Those exemptions exist because the rate limiters
+		// bound user abuse, and trusted first-party traffic is not abuse. This
+		// cap is not about abuse — it protects the instance from itself, and
+		// the outage that motivated it was caused by an internal-class client.
+		// Exempting the classes most likely to run bulk operations would leave
+		// the actual failure mode wide open.
+		if !s.acquireDestructive(p.User.ID) {
+			ctx.SetHeader("Retry-After", "1")
+			writeEnvelope(ctx, NewError(http.StatusTooManyRequests, "rate_limited",
+				"too many concurrent delete operations for this account").
+				WithDetails(map[string]any{
+					"retry_after_seconds": 1,
+					"max_concurrent":      maxConcurrentDestructive,
+				}))
+			return
+		}
+		defer s.releaseDestructive(p.User.ID)
+		next(ctx)
+		return
 	default:
 		next(ctx)
 		return

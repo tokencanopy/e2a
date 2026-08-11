@@ -1,0 +1,5 @@
+id: no-envelope
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: reply, count: 1 }
+  recipients: { to: { exactly: ["${E2A_EVAL_ACTOR}"] }, cc: { exactly: [] }, bcc: { exactly: [] } }

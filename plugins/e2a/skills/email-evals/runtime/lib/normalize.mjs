@@ -1,0 +1,463 @@
+import { addressParser } from "postal-mime";
+
+const MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
+const durationPattern = /^(0|[1-9][0-9]*)(ms|s|m|h)$/;
+// RFC address-list syntax separators cannot occur in an unquoted addr-spec.
+// Apostrophes, braces, plus, hyphen, and the rest of RFC atext deliberately
+// are not separators. Scanning maximal spans once prevents both quadratic
+// regex retry behavior and prefix replacement inside a longer mailbox.
+const MAILBOX_TEXT_BOUNDARIES = new Set(["<", ">", ",", ";", ":"]);
+
+function mailboxTextBoundary(character, state) {
+  if (state.quoted || state.commentDepth > 0 || state.domainLiteral) return false;
+  if (character === ")") return true;
+  return MAILBOX_TEXT_BOUNDARIES.has(character) || /\s/u.test(character)
+    || character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f;
+}
+
+function scanMailboxText(value, visit) {
+  let cursor = 0;
+  while (cursor < value.length) {
+    const boundaryState = { quoted: false, commentDepth: 0, domainLiteral: false };
+    if (mailboxTextBoundary(value[cursor], boundaryState)) {
+      visit({ boundary: value[cursor] });
+      cursor += 1;
+      continue;
+    }
+    const start = cursor;
+    const state = { quoted: false, commentDepth: 0, domainLiteral: false, escaped: false };
+    let containsAt = false;
+    while (cursor < value.length && !mailboxTextBoundary(value[cursor], state)) {
+      const character = value[cursor];
+      if (character === "@") containsAt = true;
+      if (state.escaped) {
+        state.escaped = false;
+      } else if (character === "\\" && (state.quoted || state.commentDepth > 0 || state.domainLiteral)) {
+        state.escaped = true;
+      } else if (state.commentDepth > 0) {
+        if (character === "(") state.commentDepth += 1;
+        if (character === ")") state.commentDepth -= 1;
+      } else if (state.quoted) {
+        if (character === "\"") state.quoted = false;
+      } else if (state.domainLiteral) {
+        if (character === "]") state.domainLiteral = false;
+      } else if (character === "(") {
+        state.commentDepth = 1;
+      } else if (character === "\"") {
+        state.quoted = true;
+      } else if (character === "[") {
+        state.domainLiteral = true;
+      }
+      cursor += 1;
+    }
+    const candidate = value.slice(start, cursor);
+    if (!containsAt) {
+      visit({ candidate, mailbox: null, unsafe: false });
+      continue;
+    }
+    try {
+      visit({ candidate, mailbox: normalizeMailbox(candidate), unsafe: false });
+    } catch (error) {
+      if (error instanceof NormalizationError) {
+        // An invalid maximal span may contain multiple adjacent valid
+        // mailboxes. Fail closed rather than leak either half while trying to
+        // guess a split that could corrupt a longer valid addr-spec.
+        visit({ candidate, mailbox: null, unsafe: true });
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+export class NormalizationError extends Error {
+  constructor(code, message = "Invalid normalized value") {
+    super(message);
+    this.name = "NormalizationError";
+    this.code = code;
+  }
+}
+
+function isControl(character) {
+  const code = character.charCodeAt(0);
+  return code <= 0x1f || code === 0x7f;
+}
+
+function consumeCfws(value, start = 0) {
+  let cursor = start;
+  while (cursor < value.length) {
+    if (value[cursor] === " " || value[cursor] === "\t") {
+      cursor += 1;
+      continue;
+    }
+    if (value[cursor] !== "(") break;
+    let depth = 1;
+    let escaped = false;
+    cursor += 1;
+    while (cursor < value.length && depth > 0) {
+      const character = value[cursor];
+      if (isControl(character) && character !== "\t") return -1;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "(") depth += 1;
+      else if (character === ")") depth -= 1;
+      cursor += 1;
+    }
+    if (depth > 0 || escaped) return -1;
+  }
+  return cursor;
+}
+
+function isCfws(value) {
+  return consumeCfws(value) === value.length;
+}
+
+function trimFws(value) {
+  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+function sourceMailboxSyntax(value) {
+  const source = trimFws(value);
+  let quoted = false;
+  let escaped = false;
+  let commentDepth = 0;
+  let angleStart = -1;
+  let angleEnd = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted) {
+      if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (commentDepth > 0) {
+      if (character === "\\") escaped = true;
+      else if (character === "(") commentDepth += 1;
+      else if (character === ")") commentDepth -= 1;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "(") commentDepth = 1;
+    else if (character === ")") return null;
+    else if (character === "<") {
+      if (angleStart !== -1 || angleEnd !== -1) return null;
+      angleStart = index;
+    } else if (character === ">") {
+      if (angleStart === -1 || angleEnd !== -1) return null;
+      angleEnd = index;
+    }
+  }
+  if (quoted || escaped || commentDepth > 0) return null;
+  if (angleStart === -1) return angleEnd === -1 ? { addressSpec: source, displayPrefix: null } : null;
+  if (angleEnd < angleStart || !isCfws(source.slice(angleEnd + 1))) return null;
+  return {
+    addressSpec: trimFws(source.slice(angleStart + 1, angleEnd)),
+    displayPrefix: source.slice(0, angleStart),
+  };
+}
+
+function quotedAddressSpec(value) {
+  if (typeof value !== "string") return null;
+  let cursor = consumeCfws(value);
+  if (cursor < 0 || value[cursor] !== '"') return null;
+  let decoded = "";
+  let escaped = false;
+  let closing = -1;
+  for (let index = cursor + 1; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      if (isControl(character)) return null;
+      decoded += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      closing = index;
+      break;
+    } else {
+      if (isControl(character)) return null;
+      decoded += character;
+    }
+  }
+  if (closing === -1 || escaped) return null;
+  cursor = consumeCfws(value, closing + 1);
+  if (cursor < 0 || value[cursor] !== "@") return null;
+  cursor = consumeCfws(value, cursor + 1);
+  if (cursor < 0 || cursor >= value.length) return null;
+  const domainStart = cursor;
+  const domainLiteral = value[cursor] === "[";
+  if (domainLiteral) {
+    let domainEscaped = false;
+    let domainClosed = false;
+    cursor += 1;
+    while (cursor < value.length) {
+      const character = value[cursor];
+      if (isControl(character)) return null;
+      if (domainEscaped) domainEscaped = false;
+      else if (character === "\\") domainEscaped = true;
+      else if (character === "]") { cursor += 1; domainClosed = true; break; }
+      cursor += 1;
+    }
+    if (!domainClosed || domainEscaped) return null;
+  } else {
+    while (cursor < value.length && value[cursor] !== " " && value[cursor] !== "\t" && value[cursor] !== "(") cursor += 1;
+  }
+  const domain = value.slice(domainStart, cursor);
+  if (!domain || /[\u0000-\u001f\u007f@<>,;"]/u.test(domain)) return null;
+  if (!domainLiteral && /[\[\]()]/u.test(domain)) return null;
+  cursor = consumeCfws(value, cursor);
+  if (cursor !== value.length) return null;
+  const canonicalLocal = decoded.toLowerCase().replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  return {
+    address: `"${canonicalLocal}"@${domain.toLowerCase()}`,
+    parserLocal: decoded.trim().toLowerCase(),
+    domain: domain.toLowerCase(),
+  };
+}
+
+const STRICT_ATEXT = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]$/u;
+
+function consumeStrictDotAtom(value, start) {
+  let cursor = start;
+  let segment = 0;
+  let total = 0;
+  while (cursor < value.length) {
+    const character = value[cursor];
+    if (STRICT_ATEXT.test(character)) {
+      segment += 1;
+      total += 1;
+      cursor += 1;
+      continue;
+    }
+    if (character === "." && segment > 0 && STRICT_ATEXT.test(value[cursor + 1] ?? "")) {
+      segment = 0;
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  return total > 0 && segment > 0 ? cursor : -1;
+}
+
+function consumeStrictDomain(value, start) {
+  if (value[start] !== "[") return consumeStrictDotAtom(value, start);
+  let cursor = start + 1;
+  let content = 0;
+  let escaped = false;
+  while (cursor < value.length) {
+    const character = value[cursor];
+    if (escaped) {
+      if (isControl(character)) return -1;
+      escaped = false;
+      content += 1;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "]") {
+      return content > 0 ? cursor + 1 : -1;
+    } else {
+      if (isControl(character) || character === "[") return -1;
+      content += 1;
+    }
+    cursor += 1;
+  }
+  return -1;
+}
+
+function strictUnquotedAddressSpec(value) {
+  let cursor = consumeCfws(value);
+  if (cursor < 0) return null;
+  const localStart = cursor;
+  cursor = consumeStrictDotAtom(value, cursor);
+  if (cursor < 0) return null;
+  const local = value.slice(localStart, cursor).toLowerCase();
+  cursor = consumeCfws(value, cursor);
+  if (cursor < 0 || value[cursor] !== "@") return null;
+  cursor = consumeCfws(value, cursor + 1);
+  if (cursor < 0) return null;
+  const domainStart = cursor;
+  cursor = consumeStrictDomain(value, cursor);
+  if (cursor < 0) return null;
+  const domain = value.slice(domainStart, cursor).toLowerCase();
+  cursor = consumeCfws(value, cursor);
+  return cursor === value.length ? `${local}@${domain}` : null;
+}
+
+function strictDisplayPrefix(value) {
+  // Deliberately accept a conservative RFC phrase subset: ASCII atoms or
+  // quoted strings separated by folding whitespace. Anything outside this
+  // grammar is rejected rather than delegated to a permissive parser.
+  let cursor = 0;
+  let words = 0;
+  const whitespace = () => {
+    const start = cursor;
+    while (value[cursor] === " " || value[cursor] === "\t") cursor += 1;
+    return cursor > start;
+  };
+  whitespace();
+  while (cursor < value.length) {
+    if (value[cursor] === '"') {
+      cursor += 1;
+      let closed = false;
+      while (cursor < value.length) {
+        const character = value[cursor];
+        if (character === '"') { cursor += 1; closed = true; break; }
+        if (character === "\\") {
+          cursor += 1;
+          if (cursor >= value.length || value.charCodeAt(cursor) < 0x20 || value.charCodeAt(cursor) > 0x7e) return false;
+          cursor += 1;
+          continue;
+        }
+        const code = value.charCodeAt(cursor);
+        if (code < 0x20 || code > 0x7e) return false;
+        cursor += 1;
+      }
+      if (!closed) return false;
+    } else {
+      const start = cursor;
+      while (cursor < value.length && /[A-Za-z0-9!#$%&'*+\-./=?^_`{|}~]/.test(value[cursor])) cursor += 1;
+      if (cursor === start) return false;
+    }
+    words += 1;
+    if (cursor === value.length) break;
+    if (!whitespace()) return false;
+  }
+  return words > 0;
+}
+
+function parsedAddressParts(value) {
+  const quoted = quotedAddressSpec(value);
+  if (quoted) return { local: quoted.parserLocal, domain: quoted.domain };
+  const address = value.trim().toLowerCase();
+  const at = address.lastIndexOf("@");
+  if (at < 0 || at === address.length - 1 || /[\r\n]/.test(address.slice(at + 1))) return null;
+  return { local: address.slice(0, at), domain: address.slice(at + 1) };
+}
+
+function normalizedMailbox(entry, syntax, quoted) {
+  if (!entry || typeof entry.address !== "string" || !entry.address || /[\r\n]/.test(entry.address)) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const addressStart = consumeCfws(syntax.addressSpec);
+  if (addressStart >= 0 && syntax.addressSpec[addressStart] === '"') {
+    const parsed = parsedAddressParts(entry.address);
+    if (!quoted || !parsed || parsed.local !== quoted.parserLocal || parsed.domain !== quoted.domain) {
+      throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+    }
+    return { address: quoted.address, displayName: entry.name || undefined };
+  }
+  const address = entry.address.trim().toLowerCase();
+  const at = address.lastIndexOf("@");
+  if (at <= 0 || at === address.length - 1 || address.indexOf("@") !== at || /\s/.test(address)) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  return { address, displayName: entry.name || undefined };
+}
+
+export function normalizeMailbox(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\r\n]/.test(value)) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const syntax = sourceMailboxSyntax(value);
+  if (syntax === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  const addressStart = consumeCfws(syntax.addressSpec);
+  const sourceIsQuoted = addressStart >= 0 && syntax.addressSpec[addressStart] === '"';
+  const quoted = sourceIsQuoted ? quotedAddressSpec(syntax.addressSpec) : null;
+  if (sourceIsQuoted && !quoted) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  const parserSource = quoted
+    ? syntax.displayPrefix === null ? quoted.address : `${syntax.displayPrefix}<${quoted.address}>`
+    : value;
+  const parsed = addressParser(parserSource, { flatten: true });
+  if (parsed.length !== 1) throw new NormalizationError("invalid_mailbox", "Expected exactly one mailbox");
+  return normalizedMailbox(parsed[0], syntax, quoted);
+}
+
+/** Strict header mailbox parser that proves the complete source was consumed. */
+export function normalizeMailboxHeader(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\r\n]/.test(value)) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const syntax = sourceMailboxSyntax(value);
+  if (syntax === null || (syntax.displayPrefix !== null && !strictDisplayPrefix(syntax.displayPrefix))) {
+    throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  }
+  const addressStart = consumeCfws(syntax.addressSpec);
+  const quoted = addressStart >= 0 && syntax.addressSpec[addressStart] === '"'
+    ? quotedAddressSpec(syntax.addressSpec) : null;
+  const exactAddress = quoted?.address ?? strictUnquotedAddressSpec(syntax.addressSpec);
+  if (exactAddress === null) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  if (quoted) {
+    const domainStart = quoted.address.lastIndexOf("@") + 1;
+    if (consumeStrictDomain(quoted.address, domainStart) !== quoted.address.length) {
+      throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+    }
+  }
+  const normalized = normalizeMailbox(value);
+  if (normalized.address !== exactAddress) throw new NormalizationError("invalid_mailbox", "Invalid mailbox");
+  return normalized;
+}
+
+/** Replace parser-valid mailbox tokens in free text without matching address prefixes. */
+export function replaceMailboxText(value, replacer) {
+  if (typeof value !== "string" || typeof replacer !== "function") return value;
+  const chunks = [];
+  scanMailboxText(value, ({ boundary, candidate, mailbox, unsafe }) => {
+    if (boundary !== undefined) chunks.push(boundary);
+    else if (unsafe) chunks.push("[REDACTED:address]");
+    else if (mailbox) chunks.push(replacer(mailbox, candidate));
+    else chunks.push(candidate);
+  });
+  return chunks.join("");
+}
+
+export function mailboxAddressesInText(value) {
+  const addresses = [];
+  if (typeof value !== "string") return addresses;
+  scanMailboxText(value, ({ mailbox }) => {
+    if (mailbox) addresses.push(mailbox.address);
+  });
+  return addresses;
+}
+
+export function containsMailboxText(value) {
+  if (typeof value !== "string") return false;
+  let found = false;
+  scanMailboxText(value, ({ mailbox, unsafe }) => {
+    if (mailbox || unsafe) found = true;
+  });
+  return found;
+}
+
+export function normalizeAddressSet(values) {
+  if (!Array.isArray(values)) throw new NormalizationError("invalid_address_set", "Expected an address list");
+  const source = values.map((value) => normalizeMailbox(value).address);
+  const seen = new Set();
+  for (const address of source) {
+    if (seen.has(address)) throw new NormalizationError("duplicate_address", "Duplicate address");
+    seen.add(address);
+  }
+  return [...seen].sort();
+}
+
+export function parseDuration(value) {
+  if (typeof value !== "string") throw new NormalizationError("invalid_duration", "Invalid duration");
+  const match = value.match(durationPattern);
+  if (!match) throw new NormalizationError("invalid_duration", "Invalid duration");
+  const amount = Number(match[1]);
+  const scale = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[match[2]];
+  const milliseconds = amount * scale;
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0 || milliseconds > MAX_DURATION_MS) {
+    throw new NormalizationError("invalid_duration", "Invalid duration");
+  }
+  return milliseconds;
+}
+
+export function normalizeMessageId(value) {
+  if (typeof value !== "string") throw new NormalizationError("invalid_message_id", "Invalid Message-ID");
+  return value.trim().replace(/^<|>$/g, "");
+}
+
+export const durationBounds = Object.freeze({ maxMs: MAX_DURATION_MS });

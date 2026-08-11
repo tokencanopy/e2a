@@ -52,6 +52,97 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 
+  it("messages.getMetrics keeps rates null without outward traffic and numeric with it", async () => {
+    const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      // A brand-new agent has no traffic. Every rate must come back null, not
+      // 0 — a zero here would read as total delivery failure on a dashboard.
+      const before = await client.messages.getMetrics(email);
+      expect(before.agentEmail).toBe(email);
+      expect(before.messagesInWindow).toBe(0);
+      expect(before.counters).toEqual([]);
+      expect(before.summary.accepted).toBe(0);
+      expect(before.rates.deliveredRate).toBeNull();
+      expect(before.rates.bounceRate).toBeNull();
+      expect(before.rates.complaintRate).toBeNull();
+      expect(before.rates.suppressionBlockRate).toBeNull();
+
+      // The loopback self-send is the contract server's deterministic terminal
+      // path, so the counters below cannot race an async worker.
+      await client.messages.send(
+        email,
+        { to: [email], subject: "metrics contract", text: "self-send loopback" },
+        { wait: "sent" },
+      );
+
+      const after = await client.messages.getMetrics(email);
+      expect(after.messagesInWindow).toBeGreaterThan(0);
+      expect(after.messagesWithLifecycle).toBeGreaterThan(0);
+      expect(after.summary.accepted).toBeGreaterThan(0);
+      expect(after.counters ?? []).not.toHaveLength(0);
+      // Loopback traffic remains visible, but it never reaches a recipient
+      // server and therefore creates no outward-delivery denominator.
+      expect(after.summary.loopback).toBe(1);
+      expect(after.rates.deliveredRate).toBeNull();
+
+      // The contract server intentionally does not start its outbound worker.
+      // A queued external send is therefore deterministic while still creating
+      // the outward denominator needed to prove numeric SDK decoding.
+      const queued = await client.messages.send(email, {
+        to: ["recipient@example.net"],
+        subject: "metrics outward contract",
+        text: "queued external send",
+      });
+      expect(queued.status).toBe("accepted");
+
+      const afterOutward = await client.messages.getMetrics(email);
+      expect(afterOutward.summary.accepted).toBe(2);
+      expect(afterOutward.summary.loopback).toBe(1);
+      expect(afterOutward.rates.deliveredRate).toBe(0);
+
+      // An explicit window is echoed back verbatim, so a caller can tell which
+      // cohort a number describes rather than inferring it from wall clock.
+      const start = new Date("2026-07-01T00:00:00Z");
+      const end = new Date("2026-07-08T00:00:00Z");
+      const windowed = await client.messages.getMetrics(email, { start, end });
+      expect(windowed.start.toISOString()).toBe(start.toISOString());
+      expect(windowed.end.toISOString()).toBe(end.toISOString());
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
+
+  it("account.metrics rolls up every agent and can break down by agent", async () => {
+    const email = `${slug("sdkc-acct")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      await client.messages.send(
+        email,
+        { to: [email], subject: "account metrics", text: "self-send loopback" },
+        { wait: "sent" },
+      );
+
+      // Absolute counts belong to the whole shared account, so assert the
+      // contract instead: totals present, and this agent visible once broken
+      // down. Both must hold no matter what else is on the account.
+      const totals = await client.account.metrics();
+      expect(totals.agentsTruncated).toBe(false);
+      expect(totals.messagesInWindow).toBeGreaterThan(0);
+      expect(totals.summary.accepted).toBeGreaterThan(0);
+      expect(totals.agents ?? []).toHaveLength(0);
+
+      const broken = await client.account.metrics({ groupBy: "agent" });
+      const mine = (broken.agents ?? []).find((a) => a.agentEmail === email);
+      expect(mine, "this agent must appear in the per-agent breakdown").toBeDefined();
+      expect(mine!.summary.accepted).toBeGreaterThan(0);
+      // The per-agent slice must never exceed the account it belongs to.
+      expect(mine!.summary.accepted).toBeLessThanOrEqual(totals.summary.accepted);
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
+
   it("agents.delete with permanent: true removes the agent immediately", async () => {
     const email = `${slug("sdkc-del")}@agents.e2a.dev`;
     await client.agents.create({ email });

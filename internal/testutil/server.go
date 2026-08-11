@@ -191,6 +191,7 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	}
 	smtpRelay := outbound.NewSMTPRelay(outboundCfg)
 	sender := outbound.NewSender(smtpRelay, fromDomain)
+	sender.SetSendingStatusLookup(store)
 
 	// Webhooks-resource (PR-180) wiring, on the outbox + River delivery path.
 	// Events commit to webhook_events via the outbox; the OutboxWorker drains them

@@ -10,6 +10,7 @@ import Link from "next/link";
 import {
   classifyWebhookHealth,
   describeScope,
+  describeWebhookToggleError,
   HEALTH_LABEL,
   healthColor,
   type WebhookView,
@@ -523,7 +524,35 @@ function WebhookRow({
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [toggling, setToggling] = useState(false);
   const [error, setError] = useState("");
+
+  // Enable/disable via the existing PATCH. No optimistic flip: re-enable is
+  // exactly the action most likely to run against a stale row (the server
+  // may have auto-disabled it again, or the cooldown may reject the PATCH),
+  // so the row always re-reads server state via onChange.
+  const handleToggle = async () => {
+    setToggling(true);
+    setError("");
+    try {
+      const res = await fetch(`/v1/webhooks/${encodeURIComponent(webhook.id)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !webhook.enabled }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setError(describeWebhookToggleError(res.status, text));
+        return;
+      }
+      await onChange();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setToggling(false);
+    }
+  };
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -578,7 +607,7 @@ function WebhookRow({
     }
   };
 
-  const busy = deleting || rotating;
+  const busy = deleting || rotating || toggling;
   const scope = describeScope(webhook.filters);
   const health = classifyWebhookHealth(webhook, new Date());
 
@@ -591,7 +620,11 @@ function WebhookRow({
       {/* The URL is the row's entry point into the per-endpoint view. Query
           param, not a route segment — the dashboard is a static export with
           no dynamic segments. */}
-      <td className="px-4 py-3 font-mono text-[12px] break-all">
+      {/* min-w keeps auto layout from crushing this column to its break-all
+          one-character minimum when the table sits at its own min width —
+          without it the actions cell wins the space and URLs shred into
+          few-character line fragments. */}
+      <td className="px-4 py-3 font-mono text-[12px] break-all min-w-[220px]">
         <Link
           href={`/webhooks/detail?id=${encodeURIComponent(webhook.id)}`}
           className="hover:underline"
@@ -697,6 +730,36 @@ function WebhookRow({
             >
               Deliveries <span aria-hidden>→</span>
             </Link>
+            {/* Enable/disable lives in the row so recovering an
+                auto-disabled endpoint never requires the API. Label reads
+                Re-enable when e2a switched it off (that's a recovery, not a
+                preference change). */}
+            <button
+              onClick={handleToggle}
+              disabled={busy}
+              title={
+                webhook.enabled
+                  ? "Pause delivery to this endpoint without losing its configuration"
+                  : "Resume delivery to this endpoint"
+              }
+              className="px-2 py-1 text-[11px] transition disabled:opacity-50"
+              style={{
+                background: "var(--bg-panel)",
+                border: "1px solid var(--border)",
+                color: "var(--fg)",
+                borderRadius: "var(--r-sm)",
+              }}
+            >
+              {toggling
+                ? webhook.enabled
+                  ? "Disabling…"
+                  : "Enabling…"
+                : webhook.enabled
+                  ? "Disable"
+                  : webhook.auto_disabled_at
+                    ? "Re-enable"
+                    : "Enable"}
+            </button>
             <button
               onClick={handleRotate}
               disabled={busy}

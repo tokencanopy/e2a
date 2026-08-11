@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -101,7 +102,7 @@ type AgentCreateEnforcer func(ctx context.Context, userID string) error
 type (
 	// AgentDeleter deletes an agent, returning the number of message rows
 	// removed by the cascade (surfaced in the DeleteAgentResult receipt).
-	AgentDeleter func(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error)
+	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
 	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the
@@ -138,6 +139,17 @@ type Deps struct {
 	GetMessage           MessageGetter
 	ListMessages         MessageLister
 	ListMessageLifecycle MessageLifecycleLister
+	// CountAgentMetrics aggregates persisted lifecycle observations into the
+	// per-agent counter set behind GET /v1/agents/{email}/metrics. Optional —
+	// nil makes the operation answer 501 rather than an empty, misleading zero.
+	CountAgentMetrics AgentMetricsCounter
+	// CountAccountMetrics is CountAgentMetrics' account-wide sibling behind
+	// GET /v1/metrics. Optional on the same terms — nil answers 501.
+	CountAccountMetrics AccountMetricsCounter
+	// CountWebhookDeliveries backs the webhooks block on GET /v1/metrics.
+	// Optional — nil yields a zeroed block rather than failing the read, so a
+	// deployment without the subscriber store still serves email counters.
+	CountWebhookDeliveries WebhookDeliveryCounter
 	// ModifyMessageLabels applies a labels delta to a message scoped to an
 	// agent, returning the post-update set. Mirrors store.ModifyMessageLabels.
 	ModifyMessageLabels func(ctx context.Context, messageID, agentID string, add, remove []string) ([]string, error)
@@ -451,6 +463,12 @@ type Server struct {
 	Router chi.Router
 	API    huma.API
 	deps   Deps
+
+	// destructiveInFlight counts in-flight destructiveOps per account ID
+	// (values are *int64). Process-local by design: it bounds what one
+	// instance's connection pool can be asked to do at once, which is the
+	// resource actually at risk, so it needs no shared state across slots.
+	destructiveInFlight sync.Map
 }
 
 // New builds the v1 server. It installs the e2a error envelope globally,
@@ -707,6 +725,8 @@ func (s *Server) registerOperations() {
 	s.registerAgents()
 	s.registerMessages()
 	s.registerMessageLifecycle()
+	s.registerAgentMetrics()
+	s.registerAccountMetrics()
 	s.registerAttachments()
 	s.registerConversations()
 	s.registerAgentWrites()

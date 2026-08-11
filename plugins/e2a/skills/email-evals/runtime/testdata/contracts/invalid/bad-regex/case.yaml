@@ -1,0 +1,5 @@
+id: invalid-regex
+send: { subject: Synthetic, text: Synthetic }
+expect:
+  action: { kind: none, count: 0 }
+  body: { forbidden_patterns: ["["] }

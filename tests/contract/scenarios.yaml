@@ -2923,3 +2923,308 @@ scenarios:
           status: 200
           body_match:
             deleted: true
+
+  - name: agent_metrics_counters
+    description: >
+      Per-agent counter metrics: an untouched agent reports null rates rather
+      than zeros, and a held send moves the accepted/review counters while
+      leaving the downstream stages it never reached at null.
+    setup:
+      - register_domain: metrics-contract.test.dev
+      - verify_domain: metrics-contract.test.dev
+      - register_agent:
+          email: bot@metrics-contract.test.dev
+    steps:
+      # A brand-new agent has no traffic at all. Every rate must be null: a
+      # zero here would be indistinguishable from total delivery failure, which
+      # is the one reading a dashboard must never make by accident.
+      - id: metrics_before_any_traffic
+        action: request
+        method: GET
+        path: /v1/agents/bot@metrics-contract.test.dev/metrics
+        expect:
+          status: 200
+          body_contains:
+            - agent_email
+            - start
+            - end
+            - messages_in_window
+            - messages_with_lifecycle
+            - reconstructed_observations
+            - summary
+            - rates
+            - counters
+          body_match:
+            agent_email: bot@metrics-contract.test.dev
+            messages_in_window: 0
+            messages_with_lifecycle: 0
+            "counters.length": 0
+            "summary.accepted": 0
+            "summary.delivered": 0
+            "rates.delivered_rate": null
+            "rates.bounce_rate": null
+            "rates.complaint_rate": null
+            "rates.suppression_block_rate": null
+
+      - id: reject_window_wider_than_the_cap
+        action: request
+        method: GET
+        path: /v1/agents/bot@metrics-contract.test.dev/metrics?start=2026-01-01T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: reject_inverted_window
+        action: request
+        method: GET
+        path: /v1/agents/bot@metrics-contract.test.dev/metrics?start=2026-07-08T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      # Route outbound mail to review so the send produces deterministic
+      # lifecycle observations without depending on an upstream provider.
+      - id: enable_outbound_review
+        action: request
+        method: PUT
+        path: /v1/agents/bot@metrics-contract.test.dev/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+
+      - id: send_held_for_review
+        action: request
+        method: POST
+        path: /v1/agents/bot@metrics-contract.test.dev/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: metrics contract
+          text: held for review
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+
+      # The held send is accepted and on hold, so those two counters move
+      # together. Nothing was submitted, so bounce_rate stays null while
+      # delivered_rate becomes a real 0 over a denominator of 1 — the pair that
+      # proves null and zero are not being conflated.
+      - id: metrics_after_held_send
+        action: request
+        method: GET
+        path: /v1/agents/bot@metrics-contract.test.dev/metrics
+        expect:
+          status: 200
+          body_match:
+            messages_in_window: 1
+            messages_with_lifecycle: 1
+            "summary.accepted": 1
+            "summary.review_held": 1
+            "summary.submitted": 0
+            "summary.delivered": 0
+            "rates.delivered_rate": 0
+            "rates.suppression_block_rate": 0
+            "rates.bounce_rate": null
+            "rates.complaint_rate": null
+          body_array_contains:
+            counters:
+              reason_code: review.hold_created
+              stage: review
+              outcome: pending
+              retryable: false
+              observations: 1
+              messages: 1
+
+    cleanup:
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@metrics-contract.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@metrics-contract.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/metrics-contract.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: metrics-contract.test.dev
+
+  - name: account_metrics_rollup
+    description: >
+      Account-wide counter metrics: the rollup answers with the same shape as
+      the per-agent operation, and group_by=agent lists this scenario's agent in
+      the breakdown. Assertions avoid absolute counts because the rollup spans
+      every agent on the shared test account.
+    setup:
+      - register_domain: acctmetrics-contract.test.dev
+      - verify_domain: acctmetrics-contract.test.dev
+      - register_agent:
+          email: bot@acctmetrics-contract.test.dev
+    steps:
+      # Give this agent exactly one message so it is guaranteed to appear in a
+      # per-agent breakdown. Review keeps the send off any upstream provider.
+      - id: enable_outbound_review
+        action: request
+        method: PUT
+        path: /v1/agents/bot@acctmetrics-contract.test.dev/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: allowlist
+              action: review
+              allowlist: []
+            scan: {}
+          holds: {}
+        expect:
+          status: 200
+
+      - id: send_held_for_review
+        action: request
+        method: POST
+        path: /v1/agents/bot@acctmetrics-contract.test.dev/messages
+        body:
+          to:
+            - recipient@example.net
+          subject: account metrics contract
+          text: held for review
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+
+      - id: account_totals
+        action: request
+        method: GET
+        path: /v1/metrics
+        expect:
+          status: 200
+          body_contains:
+            - start
+            - end
+            - messages_in_window
+            - messages_with_lifecycle
+            - reconstructed_observations
+            - summary
+            - rates
+            - counters
+            - agents
+            - agents_truncated
+            - webhooks
+          body_match:
+            agents_truncated: false
+            # Webhook delivery is a separate fact source with its own grain and
+            # a shorter retention; it must be present and zeroed for an account
+            # with no subscribers, never absent.
+            "webhooks.deliveries": 0
+            "webhooks.endpoints_auto_disabled": 0
+            "webhooks.success_rate": null
+            "webhooks.endpoints.length": 0
+          # The rollup is account-wide; it must never leak a per-agent identity
+          # into the top level the way the per-agent operation does.
+          body_excludes:
+            - agent_email
+
+      - id: account_breakdown_lists_this_agent
+        action: request
+        method: GET
+        path: /v1/metrics?group_by=agent
+        expect:
+          status: 200
+          body_match:
+            agents_truncated: false
+          body_array_contains:
+            agents:
+              agent_email: bot@acctmetrics-contract.test.dev
+
+      - id: account_daily_buckets
+        action: request
+        method: GET
+        path: /v1/metrics?bucket=day
+        expect:
+          status: 200
+          body_contains:
+            - buckets
+          # Buckets are gap-filled across the default 30-day window, so the
+          # count does not depend on how much traffic the account has. It is 31
+          # because a 30-day window starting mid-day spans 31 UTC days; only a
+          # request landing exactly on UTC midnight would see 30.
+          body_match:
+            "buckets.length": 31
+
+      - id: buckets_absent_without_the_param
+        action: request
+        method: GET
+        path: /v1/metrics
+        expect:
+          status: 200
+          body_match:
+            "buckets.length": 0
+
+      - id: reject_unknown_bucket
+        action: request
+        method: GET
+        path: /v1/metrics?bucket=hour
+        expect:
+          status: 422
+
+      - id: reject_window_wider_than_the_cap
+        action: request
+        method: GET
+        path: /v1/metrics?start=2026-01-01T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+      - id: reject_inverted_window
+        action: request
+        method: GET
+        path: /v1/metrics?start=2026-07-08T00:00:00Z&end=2026-07-01T00:00:00Z
+        expect:
+          status: 400
+          body_match:
+            "error.code": invalid_request
+
+    cleanup:
+      - id: delete_agent_permanently
+        action: request
+        method: DELETE
+        path: /v1/agents/bot@acctmetrics-contract.test.dev?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            email: bot@acctmetrics-contract.test.dev
+
+      - id: delete_domain
+        action: request
+        method: DELETE
+        path: /v1/domains/acctmetrics-contract.test.dev?confirm=DELETE
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: acctmetrics-contract.test.dev

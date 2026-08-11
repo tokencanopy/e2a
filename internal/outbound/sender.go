@@ -572,12 +572,27 @@ func (s *Sender) applySESConfigSet(message []byte) []byte {
 // stored for the domain or when signing fails — callers proceed with
 // the unsigned message rather than failing the send.
 func (s *Sender) signMessage(message []byte, domain string) ([]byte, bool) {
-	if s.dkimLookup == nil || domain == "" {
+	return SignWithDKIM(s.dkimLookup, message, domain)
+}
+
+// SignWithDKIM is the shared sign-then-proceed step: look up a DKIM keypair
+// for the From-header domain and return a signed copy of the message.
+// Returns (nil, false) when lookup is nil, no key is stored for the domain,
+// or signing fails — callers proceed with the unsigned message rather than
+// failing the send (fail-open: a signing problem must never break mail, and
+// the zero-config self-host path has no key at all).
+//
+// Exported for senders that compose outside *Sender (webhooknotify): the
+// SMTP relay itself never DKIM-signs, and an upstream like SES only signs
+// identities it manages — a BYODKIM custom domain is signed here or not at
+// all.
+func SignWithDKIM(lookup DKIMKeyLookup, message []byte, domain string) ([]byte, bool) {
+	if lookup == nil || domain == "" {
 		return nil, false
 	}
-	selector, privKey, err := s.dkimLookup.GetDKIMKeyInternal(context.Background(), domain)
+	selector, privKey, err := lookup.GetDKIMKeyInternal(context.Background(), domain)
 	if err != nil {
-		log.Printf("[sender] dkim key lookup for %s: %v", domain, err)
+		log.Printf("[dkim-sign] key lookup for %s: %v", domain, err)
 		return nil, false
 	}
 	if selector == "" || len(privKey) == 0 {
@@ -585,7 +600,7 @@ func (s *Sender) signMessage(message []byte, domain string) ([]byte, bool) {
 	}
 	signed, err := dkim.Sign(message, domain, selector, privKey)
 	if err != nil {
-		log.Printf("[sender] dkim sign for %s failed (sending unsigned): %v", domain, err)
+		log.Printf("[dkim-sign] sign for %s failed (sending unsigned): %v", domain, err)
 		return nil, false
 	}
 	return signed, true

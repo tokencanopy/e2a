@@ -5,9 +5,12 @@ import { Observable, of, from } from '../rxjsStub.js';
 import {mergeMap, map} from  '../rxjsStub.js';
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
+import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
+import { AgentMetricsView } from '../models/AgentMetricsView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
@@ -79,6 +82,10 @@ import { MessageLifecycleTransition } from '../models/MessageLifecycleTransition
 import { MessageParsedView } from '../models/MessageParsedView.js';
 import { MessageSummaryView } from '../models/MessageSummaryView.js';
 import { MessageView } from '../models/MessageView.js';
+import { MetricsBucketView } from '../models/MetricsBucketView.js';
+import { MetricsCounterView } from '../models/MetricsCounterView.js';
+import { MetricsRatesView } from '../models/MetricsRatesView.js';
+import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
@@ -154,8 +161,10 @@ import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js'
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
+import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
 import { WebhookFiltersRequest } from '../models/WebhookFiltersRequest.js';
 import { WebhookFiltersView } from '../models/WebhookFiltersView.js';
+import { WebhookMetricsView } from '../models/WebhookMetricsView.js';
 import { WebhookView } from '../models/WebhookView.js';
 
 import { AccountApiRequestFactory, AccountApiResponseProcessor} from "../apis/AccountApi.js";
@@ -378,6 +387,46 @@ export class ObservableAccountApi {
      */
     public getAccount(_options?: ConfigurationOptions): Observable<AccountView> {
         return this.getAccountWithHttpInfo(_options).pipe(map((apiResponse: HttpInfo<AccountView>) => apiResponse.data));
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetricsWithHttpInfo(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: ConfigurationOptions): Observable<HttpInfo<AccountMetricsView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getAccountMetrics(start, end, bucket, groupBy, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getAccountMetricsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Counter metrics across every agent this account owns, aggregated from the canonical message lifecycle ledger, on the same cohort-window and denominator contract as GET /v1/agents/{email}/metrics — so an account total and the per-agent numbers under it can never disagree about what a rate means. Messages are attributed to the window by their own creation time, so bounce and complaint feedback keeps arriving for up to 72 hours and the most recent days should be read as provisional. Account-scoped credentials only; an agent-scoped credential reads its own agent through GET /v1/agents/{email}/metrics instead. Beta: account metrics may change before it is declared stable.
+     * Get account-wide delivery metrics (beta)
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     * @param [bucket] Set to \&#39;day\&#39; to also receive per-day buckets for charting. Buckets are UTC calendar days — a boundary that moved with the reader\&#39;s timezone would make two people comparing the same chart see different daily numbers.
+     * @param [groupBy] Set to \&#39;agent\&#39; to also receive a per-agent breakdown. Omit for account totals only, which is the cheaper read.
+     */
+    public getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: ConfigurationOptions): Observable<AccountMetricsView> {
+        return this.getAccountMetricsWithHttpInfo(start, end, bucket, groupBy, _options).pipe(map((apiResponse: HttpInfo<AccountMetricsView>) => apiResponse.data));
     }
 
     /**
@@ -797,7 +846,7 @@ export class ObservableAgentsApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. Returns 409 not_in_trash when the agent is not in the trash, or 409 purge_in_progress after irreversible permanent deletion has begun.
      * Restore an agent from the trash
      * @param email The agent\&#39;s full email address, e.g. support@acme.com.
      */
@@ -822,7 +871,7 @@ export class ObservableAgentsApi {
     }
 
     /**
-     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. 409 not_in_trash when the agent is not in the trash.
+     * Bring a trashed (soft-deleted) agent back into service, messages and configuration intact. Live message retention is indefinite. For each scheduled outbound message, restoring the agent before scheduled_at re-arms submission; restoring at or after scheduled_at leaves that message live with delivery_status=failed and submission canceled. For drafts still held for review, approval_expires_at is shifted forward by the time the agent spent in trash so a review hold cannot lapse while the inbox is unavailable. Returns the restored agent. Returns 409 not_in_trash when the agent is not in the trash, or 409 purge_in_progress after irreversible permanent deletion has begun.
      * Restore an agent from the trash
      * @param email The agent\&#39;s full email address, e.g. support@acme.com.
      */
@@ -1856,6 +1905,44 @@ export class ObservableMessagesApi {
      */
     public forwardMessage(email: string, id: string, forwardRequest: ForwardRequest, idempotencyKey?: string, wait?: string, _options?: ConfigurationOptions): Observable<SendResultView> {
         return this.forwardMessageWithHttpInfo(email, id, forwardRequest, idempotencyKey, wait, _options).pipe(map((apiResponse: HttpInfo<SendResultView>) => apiResponse.data));
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetricsWithHttpInfo(email: string, start?: Date, end?: Date, _options?: ConfigurationOptions): Observable<HttpInfo<AgentMetricsView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getAgentMetrics(email, start, end, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getAgentMetricsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Counter metrics for one agent over a cohort window, aggregated from the canonical message lifecycle ledger. Messages are attributed to the window by their own creation time, not by when each observation landed, so a rate never mixes numerator and denominator from different populations. The cost of that is a settling period: bounce and complaint feedback arrives for up to 72 hours, so the most recent days keep moving and should be read as provisional. Delivery means recipient-server acceptance and does not claim inbox placement. Beta: agent metrics may change before it is declared stable.
+     * Get an agent\'s delivery metrics (beta)
+     * @param email
+     * @param [start] Inclusive start of the cohort window (RFC 3339). Defaults to 30 days before end.
+     * @param [end] Exclusive end of the cohort window (RFC 3339). Defaults to now.
+     */
+    public getAgentMetrics(email: string, start?: Date, end?: Date, _options?: ConfigurationOptions): Observable<AgentMetricsView> {
+        return this.getAgentMetricsWithHttpInfo(email, start, end, _options).pipe(map((apiResponse: HttpInfo<AgentMetricsView>) => apiResponse.data));
     }
 
     /**

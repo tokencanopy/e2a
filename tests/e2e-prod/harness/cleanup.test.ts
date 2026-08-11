@@ -94,6 +94,29 @@ test("cleanup deletes every tracked fixture and empties the registry", async () 
   assert.match(calls[0]!, /confirm=DELETE/);
 });
 
+test("agent cleanup purges permanently rather than trashing", async () => {
+  track("agent", "a@x.dev");
+  track("domain", "d.x.dev");
+  const { client, calls } = fakeClient(() => 204);
+
+  await cleanup(client, { sleep: noSleep });
+
+  // Without permanent=true an agent DELETE only moves the row to the trash:
+  // messages_deleted is 0, bodies stay stored against usage.storage_bytes,
+  // and the tombstone lingers for the 30-day retention window. Fixtures are
+  // never restored, so trashing them just accumulates dead agents on the test
+  // account faster than they expire — enough of them and the account-scoped
+  // metrics queries lose their index and seq-scan the whole table.
+  const agentCall = calls.find((c) => c.startsWith("/v1/agents/"));
+  assert.ok(agentCall, "expected an agent DELETE");
+  assert.match(agentCall, /permanent=true/);
+
+  // Domains have no trash state, so they must NOT grow the parameter.
+  const domainCall = calls.find((c) => c.startsWith("/v1/domains/"));
+  assert.ok(domainCall, "expected a domain DELETE");
+  assert.doesNotMatch(domainCall, /permanent=true/);
+});
+
 test("a permanently failing fixture does not block the remaining ones", async () => {
   track("agent", "first@x.dev");
   track("agent", "doomed@x.dev");

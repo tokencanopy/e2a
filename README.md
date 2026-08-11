@@ -23,7 +23,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 
 **`/v1` is now generally available** — shipped in [**v1.5.0**](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0).
 
-[Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
+[Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Examples](#working-examples) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
 <a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a – open-source email API for agents - Give your AI agents a real, authenticated email address. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
 
@@ -95,11 +95,39 @@ You can either use the hosted instance or self-host.
 
 ## What you can build
 
+e2a is useful anywhere an AI agent needs a real inbox, persistent email
+threads, and a safe path from inbound message to outbound action. Start with a
+complete example:
+
+- [Build an AI support agent](https://e2a.dev/use-cases/support-agent) — triage customer requests, retrieve context, reply in-thread, and hold sensitive replies for approval.
+- [Build an AI receptionist](https://e2a.dev/use-cases/ai-receptionist) — answer common inquiries, route messages, and forward conversations to a human team.
+- [Build an AI scheduling agent](https://e2a.dev/use-cases/scheduling-agent) — coordinate participants, propose times, and preserve state across multi-turn replies.
+- [Build an e-commerce agent](https://e2a.dev/use-cases/ecommerce-agent) — answer order questions, handle returns, and coordinate with vendors through persistent email threads.
+- [Build a sales agent](https://e2a.dev/use-cases/sales-agent) — qualify inbound interest, personalize follow-ups, and keep every conversation moving.
+- [Build a recruiting agent](https://e2a.dev/use-cases/recruiting-agent) — coordinate candidates, schedule interviews, and keep hiring workflows in one thread.
+- [Build a voice follow-up agent](https://e2a.dev/use-cases/voice-agent) — turn a completed call into an email follow-up and keep the conversation going.
+- [Build a procurement agent](https://e2a.dev/use-cases/procurement-agent) — coordinate quotes, purchase orders, and vendor threads with human approval for commitments.
+
 - **A support inbox for your AI assistant** — give an agent `support@yourbrand.com`, receive customer mail with SPF/DKIM/DMARC already evaluated as structured evidence, and reply in-thread. Add HITL so anything sensitive waits for a human to approve before it goes out.
 - **Email between agents — yours and other organizations'** — every agent has a real, verified address, so two companies' agents can exchange mail the same way humans do: no new client, protocol, or shared platform to install.
 - **A personal concierge on your laptop** — subscribe over WebSocket (no public URL, no ngrok, no port forwarding), so a local agent can watch an inbox from behind any firewall, triage it, draft replies, and take actions.
 - **Email-triggered workflows** — turn inbound mail into structured events: order confirmations, forms, support tickets, notifications, and receipts rendered server-side from templates, with `conversation_id` correlated back to your app's state.
 - **Autopilot with human oversight** — an agent drafts outbound mail (newsletters, outreach, reports) and holds each send for one-click approval via magic-link email or the review queue, with automatic expiry policy if no one reviews in time.
+
+### Working examples
+
+**[e2a-runbooks](https://github.com/tokencanopy/e2a-runbooks)** builds several of the above as small, complete, runnable projects — one per agent framework, each demonstrating a different use case and a different part of this API:
+
+| Example | Framework | What it shows |
+| --- | --- | --- |
+| Support agent | [Mastra](https://mastra.ai) | Threading, memory, and the outbound approval gate |
+| Receptionist | [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) | `forward` to a desk allowlist, `update_labels` |
+| AI SRE | [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) | Authentication as a gate; a no-tools agent that can't touch prod |
+| Contract review | [LangChain](https://docs.langchain.com) | Attachments — including the `data`-vs-`download_url` split |
+| Escalation desk | [CrewAI](https://docs.crewai.com) | Several agent identities; cross-identity `conversation_id` |
+| Scheduling secretary | [Pydantic AI](https://ai.pydantic.dev) | Multi-turn state rebuilt from `conversations`, no database |
+
+They are examples to copy from rather than services to deploy — each says what it simplifies. For the smallest possible signed-webhook reference instead, see the [in-repo minimal examples](examples/agent-framework-webhooks/README.md).
 
 ## How it works
 

@@ -135,6 +135,9 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.WebhookAttempt("retryable_failure", "5xx", 0.2)
 	p.WebhookTerminal("delivered", "initial", 1)
 	p.WebhookTerminal("e2a_failure", "unknown", 2)
+	p.WebhookNotify("warning", "sent")
+	p.WebhookNotify("disabled", "permanent")
+	p.WebhookNotify("disabled", "skipped")
 	p.WebhookFirstAttemptLatency(12.5)
 	p.WSConnected()
 	p.WSHandshakeRejected("unauthorized")
@@ -158,6 +161,9 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="failed_cancelled"} 1`,
 		`e2a_outbound_terminal_latency_seconds_count 1`,
 		`e2a_outbound_attempts_total{outcome="success"} 1`,
+		`e2a_webhook_notify_total{kind="warning",outcome="sent"} 1`,
+		`e2a_webhook_notify_total{kind="disabled",outcome="permanent"} 1`,
+		`e2a_webhook_notify_total{kind="disabled",outcome="skipped"} 1`,
 		`e2a_outbound_rate_deferred_total 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
@@ -248,6 +254,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.OutboundTerminal("weird_new_outcome") // unknown enum
 	p.WebhookAttempt(secret, "banana", 0.1) // junk outcome + junk status class
 	p.WebhookTerminal(secret, addr, 1)      // junk outcome + scope
+	p.WebhookNotify(addr, secret)           // junk notify kind + outcome
 	p.WSDisconnected("some very long free text reason with details")
 	p.WSHandshakeRejected(addr) // raw address must not become a rejection-reason label
 	p.InboundProcess(secret, 0)
@@ -268,6 +275,7 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_outbound_terminal_total{outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="other",status_class="other"} 1`,
 		`e2a_webhook_delivery_terminal_total{outcome="other",scope="other"} 1`,
+		`e2a_webhook_notify_total{kind="other",outcome="other"} 1`,
 		`e2a_ws_disconnects_total{reason="other"} 1`,
 		`e2a_ws_handshake_rejected_total{reason="other"} 1`,
 		`e2a_inbound_process_total{outcome="other"} 1`,

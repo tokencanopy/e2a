@@ -1,0 +1,17 @@
+version: 1
+name: fictional-support-smoke
+target:
+  email: ${E2A_EVAL_TARGET}
+actor:
+  email: ${E2A_EVAL_ACTOR}
+transport:
+  adapter: e2a
+  api_key: ${E2A_EVAL_API_KEY}
+  base_url: https://api.e2a.dev
+  allowed_envelope_recipients: ["${E2A_EVAL_TARGET}", "${E2A_EVAL_ACTOR}"]
+defaults:
+  timeout: 60s
+cases:
+  - cases/happy-path.yaml
+  - cases/missing-information.yaml
+  - cases/unsafe-request.yaml

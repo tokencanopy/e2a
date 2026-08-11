@@ -1852,70 +1852,43 @@ func (s *Store) listAgentsByUser(ctx context.Context, userID string, limit int, 
 	return agents, rows.Err()
 }
 
-// DeleteAgent removes an agent and everything bound to it. It returns the
-// number of message rows removed with the agent — the messages are deleted
-// explicitly rather than left to the agent_identities → messages FK cascade.
-// Besides providing the API's deletion receipt, this ensures the storage
-// metering trigger can resolve the owning user while the agent row exists.
+// DeleteAgent permanently removes the exact agent incarnation visible when
+// the call starts. The shape decision is made under its row lock. Small work
+// remains atomic; larger work receives a durable purge token and is drained in
+// bounded committed transactions before this synchronous call returns.
 func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messagesDeleted int64, err error) {
+	var createdAt time.Time
+	if err := s.pool.QueryRow(ctx,
+		`SELECT created_at FROM agent_identities WHERE id = $1 AND user_id = $2`,
+		agentID, userID).Scan(&createdAt); errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrAgentNotFound
+	} else if err != nil {
+		return 0, err
+	}
+	return s.DeleteAgentIncarnation(ctx, agentID, userID, createdAt)
+}
+
+// DeleteAgentIncarnation permanently deletes only the incarnation previously
+// resolved by the caller. Carrying createdAt across the handler/store boundary
+// prevents a delayed request from attaching to a same-owner recreation at the
+// same address before any purge token has been claimed.
+func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
+	var token string
+	var chunked bool
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
-		var lockedID string
-		queryErr := tx.QueryRow(ctx,
-			`SELECT id FROM agent_identities WHERE id = $1 AND user_id = $2 FOR UPDATE`,
-			agentID, userID).Scan(&lockedID)
-		if errors.Is(queryErr, pgx.ErrNoRows) {
-			return ErrAgentNotFound
+		var decisionErr error
+		token, chunked, decisionErr = s.agentPurgeDecisionTx(ctx, tx, agentID, userID, createdAt)
+		if decisionErr != nil || chunked {
+			return decisionErr
 		}
-		if queryErr != nil {
-			return queryErr
-		}
-		var sending bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (
-				SELECT 1 FROM messages
-				 WHERE agent_id = $1 AND delivery_status = 'sending'
-				   AND send_claimed_at > now() - make_interval(secs => $2)
-			)`,
-			agentID, int64(OutboundSendClaimStaleWindow/time.Second),
-		).Scan(&sending); err != nil {
-			return err
-		}
-		if sending {
-			return ErrSendInProgress
-		}
-		jobRows, err := tx.Query(ctx,
-			`SELECT send_job_id
-			   FROM messages
-			  WHERE agent_id = $1
-			    AND direction = 'outbound'
-			    AND delivery_status IN ('accepted', 'sending')
-			    AND send_job_id IS NOT NULL
-			  FOR UPDATE`,
-			agentID)
-		if err != nil {
-			return err
-		}
-		jobIDs, err := scanOutboundJobIDs(jobRows)
-		if err != nil {
-			return err
-		}
-		if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
-			return err
-		}
-		msgTag, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, agentID)
-		if err != nil {
-			return err
-		}
-		messagesDeleted = msgTag.RowsAffected()
-		// Operational outreach state dies with a permanent agent deletion.
-		// Suppressions deliberately survive: consent outlives the inbox.
-		if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, agentID); err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, agentID)
-		return err
+		var deleteErr error
+		messagesDeleted, deleteErr = s.deleteAgentAtomicTx(ctx, tx, agentID, userID)
+		return deleteErr
 	})
-	return messagesDeleted, err
+	if err != nil || !chunked {
+		return messagesDeleted, err
+	}
+	return s.purgeAgentChunked(ctx, agentID, userID, token)
 }
 
 // SoftDeleteAgent moves a live agent to the trash (docs/design/
@@ -1953,11 +1926,14 @@ func (s *Store) SoftDeleteAgent(ctx context.Context, agentID, userID string) err
 func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*AgentIdentity, error) {
 	var restored *AgentIdentity
 	err := s.WithTx(ctx, func(tx pgx.Tx) error {
-		var deletedAt *time.Time
+		var (
+			deletedAt  *time.Time
+			purgeToken *string
+		)
 		err := tx.QueryRow(ctx,
-			`SELECT deleted_at FROM agent_identities
+			`SELECT deleted_at, purge_token FROM agent_identities
 			  WHERE id = $1 AND user_id = $2 FOR UPDATE`, agentID, userID,
-		).Scan(&deletedAt)
+		).Scan(&deletedAt, &purgeToken)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrAgentNotFound
 		}
@@ -1966,6 +1942,9 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*Agen
 		}
 		if deletedAt == nil {
 			return ErrNotInTrash
+		}
+		if purgeToken != nil {
+			return ErrPurgeInProgress
 		}
 		rows, err := tx.Query(ctx,
 			`SELECT id, send_job_id, scheduled_at
@@ -2060,83 +2039,78 @@ func (s *Store) RestoreAgent(ctx context.Context, agentID, userID string) (*Agen
 // inbox rather than a whole batch's worth of cascades.
 var agentPurgeBatch = 100
 
-// PurgeDeletedAgents hard-deletes agents whose trash retention has lapsed
-// (deleted_at older than TrashRetention). One agent per transaction, its
-// messages deleted explicitly BEFORE the agent row (not via ON DELETE
-// CASCADE) so the storage-metering trigger — which resolves the owning user
-// through the agent row — still reconciles account_usage; see DeleteAgent.
-// Idempotent and interruption-safe: each agent commits independently, so a
-// janitor timeout mid-backlog resumes next tick.
+// PurgeDeletedAgents claims and resumes the same bounded purge state machine
+// as explicit permanent deletion. A claimed partial purge is eligible
+// immediately; ordinary trash becomes eligible after TrashRetention.
 func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 	var total int64
+	attempted := make([]string, 0)
+	var sweepErrs []error
 	for i := 0; i < agentPurgeBatch; i++ {
-		var purged bool
+		var (
+			agentID, userID, token string
+			found                  bool
+		)
 		err := s.WithTx(ctx, func(tx pgx.Tx) error {
-			var id string
+			var purgeToken *string
 			err := tx.QueryRow(ctx,
-				`SELECT id FROM agent_identities
-				  WHERE deleted_at IS NOT NULL AND deleted_at <= now() - make_interval(secs => $1)
+				`SELECT id, user_id, purge_token FROM agent_identities
+				  WHERE (purge_token IS NOT NULL
+				     OR (deleted_at IS NOT NULL AND deleted_at <= now() - make_interval(secs => $1)))
+				    AND NOT (id = ANY($2::text[]))
 				  LIMIT 1 FOR UPDATE SKIP LOCKED`,
-				TrashRetention.Seconds()).Scan(&id)
+				TrashRetention.Seconds(), attempted).Scan(&agentID, &userID, &purgeToken)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return nil // drained
+				return nil
 			}
 			if err != nil {
 				return err
 			}
-			jobRows, err := tx.Query(ctx,
-				`SELECT send_job_id
-				   FROM messages
-				  WHERE agent_id = $1
-				    AND direction = 'outbound'
-				    AND delivery_status IN ('accepted', 'sending')
-				    AND send_job_id IS NOT NULL
-				  FOR UPDATE`,
-				id)
-			if err != nil {
+			if err := ensureNoAgentSendInProgressTx(ctx, tx, agentID); err != nil {
 				return err
 			}
-			jobIDs, err := scanOutboundJobIDs(jobRows)
-			if err != nil {
-				return err
+			if purgeToken == nil {
+				token = "pur_" + generateID()
+				_, err = tx.Exec(ctx,
+					`UPDATE agent_identities
+					    SET deleted_at = now(), purge_token = $2
+					  WHERE id = $1`,
+					agentID, token)
+				if err != nil {
+					return err
+				}
+			} else {
+				token = *purgeToken
 			}
-			if err := s.cancelOutboundJobIDsTx(ctx, tx, jobIDs); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE agent_id = $1`, id); err != nil {
-				return err
-			}
-			// Outreach state dies with the agent, in the SAME transaction.
-			//
-			// contact_engagements deliberately has no FK to agent_identities (it
-			// mirrors agent_suppressions), so nothing cascades this for us — and
-			// because agent_id IS the agent's email address, anything left behind
-			// would be inherited by a recreated agent at that address. That agent
-			// would wake up holding last campaign's stage and a past-due schedule
-			// and mail investors it never contacted.
-			//
-			// Suppressions are deliberately NOT deleted here: consent has to
-			// survive deletion and recreation. That asymmetry — operational state
-			// dies, consent persists — is the reason this is an explicit delete
-			// rather than a cascade.
-			if _, err := tx.Exec(ctx, `DELETE FROM contact_engagements WHERE agent_id = $1`, id); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `DELETE FROM agent_identities WHERE id = $1`, id); err != nil {
-				return err
-			}
-			purged = true
+			found = true
 			return nil
 		})
+		if agentID != "" {
+			attempted = append(attempted, agentID)
+		}
 		if err != nil {
-			return total, err
+			sweepErrs = append(sweepErrs, err)
+			if ctx.Err() != nil {
+				return total, errors.Join(sweepErrs...)
+			}
+			continue
 		}
-		if !purged {
-			return total, nil
+		if !found {
+			return total, errors.Join(sweepErrs...)
 		}
-		total++
+		_, completed, err := s.drainAgentChunksResult(ctx, agentID, userID, token)
+		if err != nil {
+			sweepErrs = append(sweepErrs, err)
+			if ctx.Err() != nil {
+				return total, errors.Join(sweepErrs...)
+			}
+			continue
+		}
+		if completed {
+			total++
+		}
 	}
-	return total, nil
+	return total, errors.Join(sweepErrs...)
 }
 
 // --- Messages ---
@@ -2155,6 +2129,10 @@ var TrashRetention = 30 * 24 * time.Hour
 // ErrNotInTrash is returned by restore/purge operations that target a
 // resource that exists but is not soft-deleted.
 var ErrNotInTrash = fmt.Errorf("resource is not in the trash")
+
+// ErrPurgeInProgress is returned when restore targets an agent whose
+// irreversible permanent purge has already committed its durable claim.
+var ErrPurgeInProgress = fmt.Errorf("permanent purge is already in progress")
 
 // ErrMessageHeld is returned when a trash operation targets a message that
 // is held for review (status pending_review) — the review queue is its

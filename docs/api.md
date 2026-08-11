@@ -46,6 +46,7 @@ is currently 43 GA operations and 29 beta operations:
 | Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
+| Delivery metrics — per agent and account-wide | **beta** | `getAgentMetrics`, `getAccountMetrics` |
 
 **Beta fields and capabilities on otherwise-GA operations** (property-level
 `x-stability-level: beta` in the spec — or, where only specific *values* of a
@@ -327,6 +328,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `message_not_pending` | 409 | The review hold was already resolved (approved/rejected/expired). |
 | `message_not_yet_delivered` | 409 | Reply/forward target is an outbound message still queued for provider submission. A reply cannot thread until the provider assigns its Message-ID; a forward requires the source message to have actually been sent. Retry-able: retry once it is sent, or use `wait=sent` on the original send. |
 | `not_in_trash` | 409 | Restore or permanent-delete was requested for a resource that is not currently in trash. |
+| `purge_in_progress` | 409 | Permanent agent deletion has been claimed and can no longer be reversed; retry deletion to resume it. |
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
@@ -404,6 +406,8 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `deleteEngagement` | `DELETE /v1/agents/{email}/contacts/{address}` | Contacts |
 | `deleteImportBatch` | `DELETE /v1/contacts/imports/{batch_id}` | Contacts |
 | `deleteTemplate` | `DELETE /v1/templates/{id}` | Templates |
+| `getAccountMetrics` | `GET /v1/metrics` | Delivery metrics |
+| `getAgentMetrics` | `GET /v1/agents/{email}/metrics` | Delivery metrics |
 | `getAgentProtection` | `GET /v1/agents/{email}/protection` | Protection config |
 | `getContact` | `GET /v1/contacts/{address}` | Contacts |
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
@@ -629,7 +633,8 @@ or on the deployment's shared domain (see `GET /v1/info`).
   messages and configuration intact. For drafts still held for review,
   `approval_expires_at` is shifted forward by the time the agent spent in trash
   so a review hold can't lapse while the inbox was unavailable. `409
-  not_in_trash` if the agent isn't in the trash.
+  not_in_trash` if the agent isn't in the trash; `409 purge_in_progress` once
+  irreversible permanent deletion has begun.
 - `GET/PUT /v1/agents/{email}/protection` — **(beta)** read / wholesale-replace the
   agent's protection posture: inbound/outbound trust gate, content-scan
   sensitivity, and the hold-queue mechanism (TTL + expiration action). Setting the

@@ -25,6 +25,9 @@ export type WebhookView = {
   created_at: string;
   last_delivered_at?: string;
   auto_disabled_at?: string;
+  // Why e2a auto-disabled this webhook (e.g. "HTTP 404"). Open set — show
+  // verbatim. Present only while auto-disabled; cleared on re-enable.
+  auto_disabled_reason?: string;
   signing_secret?: string;
   previous_secret_expires_at?: string;
   filters?: WebhookFiltersView | null;
@@ -172,6 +175,41 @@ export function healthColor(kind: WebhookHealthKind): string {
     default:
       return "var(--fg-subtle)";
   }
+}
+
+// Copy for the one PATCH failure that deserves its own words: re-enabling
+// inside the post-auto-disable cooldown returns 409 webhook_cooldown. That
+// state is expected product behavior, not an error the user caused — a raw
+// JSON envelope would read as breakage. Note the OpenAPI description warns
+// SDKs do not automatically retry this code; the UI must not retry either,
+// only explain.
+export const WEBHOOK_COOLDOWN_MESSAGE =
+  "This webhook was auto-disabled moments ago. Wait a few minutes, make sure the endpoint is fixed, then try again.";
+
+// describeWebhookToggleError turns a failed enable/disable PATCH into copy
+// fit for the page. Lives here (not in either page component) so the list
+// row and the detail banner cannot render the same failure differently.
+export function describeWebhookToggleError(
+  status: number,
+  bodyText: string,
+): string {
+  let code = "";
+  let message = "";
+  try {
+    const parsed = JSON.parse(bodyText) as {
+      error?: { code?: string; message?: string };
+    };
+    code = parsed.error?.code ?? "";
+    message = parsed.error?.message ?? "";
+  } catch {
+    // Non-JSON body (proxy error page, empty) — fall through to raw text.
+  }
+  if (status === 409 && (code === "webhook_cooldown" || bodyText.includes("webhook_cooldown"))) {
+    return WEBHOOK_COOLDOWN_MESSAGE;
+  }
+  // A parsed envelope renders as its human message, never the raw JSON;
+  // raw text is the last resort for non-envelope bodies.
+  return message || bodyText.trim() || `HTTP ${status}`;
 }
 
 export type WebhookScope =

@@ -65,6 +65,10 @@ ARG NEXT_PUBLIC_BILLING_API=
 # chooser) is the default. Only set this when the server runs with
 # E2A_OIDC_ENABLED=true — the OIDC route doesn't exist otherwise.
 ARG NEXT_PUBLIC_E2A_SIGN_IN_URL=
+# Empty keeps the site free of web analytics. The hosted deployment sets
+# this to the e2a.dev Umami website record id so the first-party tracker
+# loads on public marketing routes only (the dashboard excludes it).
+ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
 
 ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_SITE_NAME=$NEXT_PUBLIC_SITE_NAME \
@@ -73,7 +77,8 @@ ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=$NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION \
     NEXT_PUBLIC_PRICING_PATH=$NEXT_PUBLIC_PRICING_PATH \
     NEXT_PUBLIC_BILLING_API=$NEXT_PUBLIC_BILLING_API \
-    NEXT_PUBLIC_E2A_SIGN_IN_URL=$NEXT_PUBLIC_E2A_SIGN_IN_URL
+    NEXT_PUBLIC_E2A_SIGN_IN_URL=$NEXT_PUBLIC_E2A_SIGN_IN_URL \
+    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID
 
 COPY web ./
 RUN npm run build

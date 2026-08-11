@@ -1,6 +1,13 @@
 import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import AppLayout from "./layout";
+import AppLayout from "./AppLayoutClient";
+import { metadata } from "./layout";
+
+describe("(app) layout — search indexing", () => {
+  it("marks the authenticated app surface as private", () => {
+    expect(metadata.robots).toMatchObject({ index: false, follow: false });
+  });
+});
 
 jest.mock("next/link", () => {
   return function MockLink({ href, children, ...rest }: { href: string; children: React.ReactNode; [k: string]: unknown }) {

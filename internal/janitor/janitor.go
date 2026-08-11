@@ -153,12 +153,17 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 	// Trashed agents past TrashRetention: hard delete, messages included
 	// (docs/design/trash-soft-delete.md). Order relative to the other prunes
 	// is arbitrary — each pass is independent and idempotent.
-	if deleted, err := j.messages.PurgeDeletedAgents(ctx); err != nil {
-		log.Printf("Failed to purge trashed agents: %v", err)
-		errs = append(errs, err)
-	} else if deleted > 0 {
-		log.Printf("Purged %d trashed agent(s) past retention", deleted)
-		j.metrics.JanitorRowsDeleted("agent_identities", int(deleted))
+	deletedAgents, purgeAgentsErr := j.messages.PurgeDeletedAgents(ctx)
+	// This prune can make bounded progress past one claimed agent and still
+	// return a joined error for another. Account for committed deletions even
+	// when the sweep also reports a poison row.
+	if deletedAgents > 0 {
+		log.Printf("Purged %d trashed agent(s) past retention", deletedAgents)
+		j.metrics.JanitorRowsDeleted("agent_identities", int(deletedAgents))
+	}
+	if purgeAgentsErr != nil {
+		log.Printf("Failed to purge trashed agents: %v", purgeAgentsErr)
+		errs = append(errs, purgeAgentsErr)
 	}
 
 	if deleted, err := j.messages.DeleteExpiredUserSessions(ctx); err != nil {

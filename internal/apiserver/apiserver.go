@@ -115,8 +115,15 @@ func BuildDeps(p Params) httpapi.Deps {
 		rampSnapshot = sendramp.NewStore(p.Pool).Snapshot
 	}
 	var listMessageLifecycle httpapi.MessageLifecycleLister
+	var countAgentMetrics httpapi.AgentMetricsCounter
+	var countAccountMetrics httpapi.AccountMetricsCounter
+	var countWebhookDeliveries httpapi.WebhookDeliveryCounter
 	if p.Pool != nil {
-		listMessageLifecycle = messagelifecycle.NewStore(p.Pool).ListForMessage
+		countWebhookDeliveries = webhook.NewSubscriberStore(p.Pool).CountDeliveriesForAccount
+		lifecycleStore := messagelifecycle.NewStore(p.Pool)
+		listMessageLifecycle = lifecycleStore.ListForMessage
+		countAgentMetrics = lifecycleStore.CountByReasonCode
+		countAccountMetrics = lifecycleStore.CountByReasonCodeForAccount
 	}
 	deps := httpapi.Deps{
 		Authenticator:          p.API.AuthenticateUser,
@@ -130,6 +137,9 @@ func BuildDeps(p Params) httpapi.Deps {
 		AttachmentStore:        attachmentStore(p),
 		ListMessages:           p.Store.GetMessagesByAgent,
 		ListMessageLifecycle:   listMessageLifecycle,
+		CountAgentMetrics:      countAgentMetrics,
+		CountAccountMetrics:    countAccountMetrics,
+		CountWebhookDeliveries: countWebhookDeliveries,
 		ModifyMessageLabels:    p.Store.ModifyMessageLabels,
 
 		ListConversations: p.Store.ListConversationsByAgent,
@@ -162,7 +172,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		// Trash semantics (docs/design/trash-soft-delete.md): the default
 		// delete is soft; the hard delete sits behind ?permanent=true.
 		DeleteAgent:          p.Store.SoftDeleteAgent,
-		PermanentDeleteAgent: p.Store.DeleteAgent,
+		PermanentDeleteAgent: p.Store.DeleteAgentIncarnation,
 		RestoreAgent:         p.Store.RestoreAgent,
 		GetAgentAnyState:     p.Store.GetAgentByIDAnyState,
 		ListDeletedAgents:    p.Store.ListDeletedAgentsByUser,

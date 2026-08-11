@@ -56,6 +56,85 @@ func TestMessagesFailureProvenanceMigrationIsNullableDefaultFreeAndIdempotent(t 
 	}
 }
 
+func TestAgentPurgeMigrationAddsBoundedLookupIndexes(t *testing.T) {
+	ctx := context.Background()
+	f := newPurgeFixture(t, "purgeactiveindexplan")
+	f.seedMessages(t, 20_000, "mplan_")
+	sql, err := migrations.FS.ReadFile("100_messages_active_send_claim_idx.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := f.pool
+	if _, err := pool.Exec(ctx, string(sql)); err != nil {
+		t.Fatalf("second index migration application: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO messages
+		     (id, agent_id, direction, sender, recipient, subject,
+		      delivery_status, send_claimed_at)
+		 VALUES ('msg_active_send_plan', $1, 'outbound', $1,
+		         'recipient@example.test', 'active', 'sending', now())`, f.agentID); err != nil {
+		t.Fatalf("seed active send: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `ANALYZE messages`); err != nil {
+		t.Fatalf("analyze messages: %v", err)
+	}
+
+	var definition string
+	if err := pool.QueryRow(ctx,
+		`SELECT indexdef FROM pg_indexes
+		  WHERE schemaname = 'public' AND indexname = 'messages_active_send_claim_idx'`,
+	).Scan(&definition); err != nil {
+		t.Fatalf("read active-send index: %v", err)
+	}
+	for _, fragment := range []string{
+		"(agent_id, send_claimed_at)",
+		"delivery_status = 'sending'",
+		"send_claimed_at IS NOT NULL",
+	} {
+		if !strings.Contains(definition, fragment) {
+			t.Fatalf("active-send index %q does not contain %q", definition, fragment)
+		}
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SET enable_seqscan = off`); err != nil {
+		t.Fatalf("disable sequential scan: %v", err)
+	}
+	defer func() { _, _ = conn.Exec(context.Background(), `RESET enable_seqscan`) }()
+	rows, err := conn.Query(ctx,
+		`EXPLAIN (COSTS OFF)
+		 SELECT EXISTS (
+		     SELECT 1 FROM messages
+		      WHERE agent_id = $1
+		        AND delivery_status = 'sending'
+		        AND send_claimed_at > now() - make_interval(secs => 300)
+		 )`, f.agentID)
+	if err != nil {
+		t.Fatalf("explain active-send guard: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	if !strings.Contains(plan.String(), "messages_active_send_claim_idx") {
+		t.Fatalf("active-send guard did not use bounded partial index:\n%s", plan.String())
+	}
+}
+
 // stubFS builds an fs.FS with the given filename → SQL body mapping.
 // Order isn't preserved by MapFS but RunMigrations sorts by filename.
 func stubFS(files map[string]string) fstest.MapFS {

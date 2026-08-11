@@ -33,6 +33,13 @@ export const FEEDBACK_EMAIL = process.env.NEXT_PUBLIC_FEEDBACK_EMAIL || "";
 export const GOOGLE_SITE_VERIFICATION =
   process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
 
+// Umami web analytics (self-hosted at umami.tokencanopy.com). The e2a.dev
+// website record id, created in the Umami dashboard. Empty in the OSS
+// build and for self-hosters (no tracking); the hosted deployment bakes in
+// NEXT_PUBLIC_UMAMI_WEBSITE_ID at image build time. The tracker is gated to
+// public marketing routes only — the authenticated dashboard is not tracked.
+export const UMAMI_WEBSITE_ID = process.env.NEXT_PUBLIC_UMAMI_WEBSITE_ID || "";
+
 // Site-relative path of the pricing page, when the deployment has one.
 //
 // Pricing is NOT part of this app. The hosted deployment serves it from the

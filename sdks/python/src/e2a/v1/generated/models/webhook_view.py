@@ -29,6 +29,7 @@ class WebhookView(BaseModel):
     WebhookView
     """ # noqa: E501
     auto_disabled_at: Optional[datetime] = None
+    auto_disabled_reason: Optional[StrictStr] = Field(default=None, description="Why e2a auto-disabled this webhook — the delivery failure observed when the breaker tripped (e.g. \"HTTP 404\"). Open set: treat as a short human-readable string and tolerate unknown values. Present only while the webhook is auto-disabled; cleared on re-enable.")
     created_at: datetime
     description: StrictStr
     enabled: StrictBool
@@ -38,7 +39,7 @@ class WebhookView(BaseModel):
     last_delivered_at: Optional[datetime] = None
     url: StrictStr
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["auto_disabled_at", "created_at", "description", "enabled", "events", "filters", "id", "last_delivered_at", "url"]
+    __properties: ClassVar[List[str]] = ["auto_disabled_at", "auto_disabled_reason", "created_at", "description", "enabled", "events", "filters", "id", "last_delivered_at", "url"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -102,6 +103,7 @@ class WebhookView(BaseModel):
 
         _obj = cls.model_validate({
             "auto_disabled_at": obj.get("auto_disabled_at"),
+            "auto_disabled_reason": obj.get("auto_disabled_reason"),
             "created_at": obj.get("created_at"),
             "description": obj.get("description"),
             "enabled": obj.get("enabled"),

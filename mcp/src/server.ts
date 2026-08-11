@@ -11,6 +11,7 @@ import { registerApiKeyTools } from "./tools/apikeys.js";
 import { registerLegacyTools } from "./tools/legacy.js";
 import { registerContactTools } from "./tools/contacts.js";
 import { registerSuppressionTools } from "./tools/suppressions.js";
+import { registerMetricsTools } from "./tools/metrics.js";
 import { toolNamesForScope } from "./tools/tiers.js";
 import { resolveServerVersion } from "./version.js";
 
@@ -125,6 +126,7 @@ export function buildServer({
   registerApiKeyTools(server, client);
   registerContactTools(server, client);
   registerSuppressionTools(server, client);
+  registerMetricsTools(server, client);
   registerLegacyTools(server, client);
   return server;
 }

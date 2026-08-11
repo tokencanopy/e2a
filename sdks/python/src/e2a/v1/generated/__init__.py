@@ -40,9 +40,12 @@ __all__ = [
     "ApiException",
     "APIKeyExportEntry",
     "APIKeyView",
+    "AccountMetricsView",
     "AccountUserView",
     "AccountView",
     "AgentIdentity",
+    "AgentMetricsGroupView",
+    "AgentMetricsView",
     "AgentSuppressionAddedData",
     "AgentSuppressionView",
     "AgentView",
@@ -117,6 +120,10 @@ __all__ = [
     "MessageParsedView",
     "MessageSummaryView",
     "MessageView",
+    "MetricsBucketView",
+    "MetricsCounterView",
+    "MetricsRatesView",
+    "MetricsSummaryView",
     "OAuthConnectionEntry",
     "PageAPIKeyView",
     "PageAgentSuppressionView",
@@ -193,8 +200,10 @@ __all__ = [
     "ValidationErrorDetails",
     "VerifyDomainView",
     "WebhookDeliveryView",
+    "WebhookEndpointMetricsView",
     "WebhookFiltersRequest",
     "WebhookFiltersView",
+    "WebhookMetricsView",
     "WebhookView",
 ]
 
@@ -225,9 +234,12 @@ from e2a.v1.generated.exceptions import ApiException as ApiException
 # import models into sdk package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry as APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView as APIKeyView
+from e2a.v1.generated.models.account_metrics_view import AccountMetricsView as AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView as AccountUserView
 from e2a.v1.generated.models.account_view import AccountView as AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity as AgentIdentity
+from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupView as AgentMetricsGroupView
+from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView as AgentMetricsView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData as AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView as AgentSuppressionView
 from e2a.v1.generated.models.agent_view import AgentView as AgentView
@@ -302,6 +314,10 @@ from e2a.v1.generated.models.message_lifecycle_transition import MessageLifecycl
 from e2a.v1.generated.models.message_parsed_view import MessageParsedView as MessageParsedView
 from e2a.v1.generated.models.message_summary_view import MessageSummaryView as MessageSummaryView
 from e2a.v1.generated.models.message_view import MessageView as MessageView
+from e2a.v1.generated.models.metrics_bucket_view import MetricsBucketView as MetricsBucketView
+from e2a.v1.generated.models.metrics_counter_view import MetricsCounterView as MetricsCounterView
+from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView as MetricsRatesView
+from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView as MetricsSummaryView
 from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry as OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView as PageAPIKeyView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView as PageAgentSuppressionView
@@ -378,7 +394,9 @@ from e2a.v1.generated.models.validate_template_response import ValidateTemplateR
 from e2a.v1.generated.models.validation_error_details import ValidationErrorDetails as ValidationErrorDetails
 from e2a.v1.generated.models.verify_domain_view import VerifyDomainView as VerifyDomainView
 from e2a.v1.generated.models.webhook_delivery_view import WebhookDeliveryView as WebhookDeliveryView
+from e2a.v1.generated.models.webhook_endpoint_metrics_view import WebhookEndpointMetricsView as WebhookEndpointMetricsView
 from e2a.v1.generated.models.webhook_filters_request import WebhookFiltersRequest as WebhookFiltersRequest
 from e2a.v1.generated.models.webhook_filters_view import WebhookFiltersView as WebhookFiltersView
+from e2a.v1.generated.models.webhook_metrics_view import WebhookMetricsView as WebhookMetricsView
 from e2a.v1.generated.models.webhook_view import WebhookView as WebhookView
 

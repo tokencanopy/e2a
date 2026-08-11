@@ -16,6 +16,19 @@
       },
       "category": "Productivity",
       "description": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log."
+    },
+    {
+      "name": "e2a-labs",
+      "source": {
+        "source": "local",
+        "path": "./plugins/e2a-labs"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity",
+      "description": "Experimental Agentify, Autopilot, and Tether workflows for e2a. Install core e2a first for MCP tools and authentication."
     }
   ]
 }

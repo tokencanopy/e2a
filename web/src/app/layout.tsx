@@ -7,6 +7,7 @@ import "./globals.css";
 import { AuthProvider } from "./components/AuthProvider";
 import { ThemeProvider } from "./components/ThemeProvider";
 import { JsonLd } from "./components/JsonLd";
+import { UmamiTracker } from "./components/UmamiTracker";
 import { SITE_URL, SITE_NAME, GOOGLE_SITE_VERIFICATION } from "../lib/site";
 import { organization, softwareApplication, website } from "../lib/jsonld";
 
@@ -115,6 +116,7 @@ export default function RootLayout({
     >
       <body className="min-h-screen flex flex-col">
         <JsonLd data={rootJsonLd} />
+        <UmamiTracker />
         <AuthProvider>
           <ThemeProvider>
             {children}

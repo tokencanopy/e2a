@@ -245,6 +245,32 @@ async def test_messages_extended_surface_conversations_and_inbound_facade():
             assert lifecycle.items[0].message_id == found.id
             mark_covered("messages.get_lifecycle")
 
+            metrics = await client.messages.get_metrics(email)
+            assert metrics.agent_email == email
+            # This agent has just sent and received, so the ledger must have
+            # counted something; an empty aggregate here means the metrics read
+            # is not seeing the same traffic every other assertion above did.
+            assert metrics.messages_in_window > 0
+            assert metrics.messages_with_lifecycle > 0
+            assert metrics.counters, "expected at least one reason-code tally"
+            assert metrics.summary.accepted > 0
+            # A denominator exists now, so the rate is a real number. It stays
+            # None only when there is no traffic at all.
+            assert metrics.rates.delivered_rate is not None
+            assert metrics.end > metrics.start
+            mark_covered("messages.get_metrics")
+
+            # Account rollup: absolute counts span the whole account, so assert
+            # the relationship instead — this agent must appear in the
+            # breakdown and can never exceed the account it belongs to.
+            account_metrics = await client.account.metrics(group_by="agent")
+            assert account_metrics.messages_in_window > 0
+            assert account_metrics.agents_truncated is False
+            mine = [a for a in (account_metrics.agents or []) if a.agent_email == email]
+            assert mine, "this agent must appear in the per-agent breakdown"
+            assert mine[0].summary.accepted <= account_metrics.summary.accepted
+            mark_covered("account.metrics")
+
             labeled = await client.messages.update_labels(email, found.id, {"add_labels": ["cov-test"]})
             assert "cov-test" in labeled.labels
             assert labeled.message_id == found.id

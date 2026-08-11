@@ -1,0 +1,118 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("build-recruiting-agent-with-email");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: { card: "summary_large_image", title: post.title, description: post.description },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Build a recruiting agent that coordinates candidates by email
+
+Recruiting teams already coordinate much of the candidate journey through email: answering questions, proposing interview times, sending reminders, and following up after a conversation. An AI agent can reduce the repetitive work while leaving high-impact decisions with people.
+
+This walkthrough shows the integration boundary. Your ATS and calendar remain the source of truth; e2a gives the recruiting agent a real inbox, authenticated inbound delivery, threaded replies, and an approval path for sensitive messages.
+
+See the complete [recruiting agent use case](/use-cases/recruiting-agent) for the workflow overview.
+
+## The workflow
+
+1. A candidate replies to `hiring@example.com` or sends a hiring question.
+2. e2a delivers the message with structured sender-authentication evidence.
+3. The agent retrieves the candidate, role, and hiring-stage context from the ATS.
+4. It answers a routine question or coordinates an interview.
+5. Rejections, offers, and sensitive updates wait for human approval.
+6. The agent follows up in the same conversation and updates the hiring system.
+
+## Receive candidate email
+
+The Python SDK can listen for inbound mail over WebSocket. The same workflow can use a signed webhook, REST polling, or MCP when the agent runs locally:
+
+```python
+from e2a.v1 import AsyncE2AClient
+
+async with AsyncE2AClient(api_key="e2a_...") as client:
+    async for event in client.listen("hiring@example.com"):
+        if event.type != "email.received":
+            continue
+
+        message = event.data
+        candidate = await ats.lookup_by_email(message["header_from"])
+```
+
+Use the authentication evidence as an input to your policy. A passing domain authentication result does not prove that the message content is safe or that a particular person authored it.
+
+## Coordinate an interview
+
+The agent can connect the email to the ATS and calendar, then reply with the next available options:
+
+```python
+        slots = await calendar.find_open_slots(
+            interviewer=candidate.interviewer,
+            constraints=candidate.preferences,
+        )
+        reply = await recruiting_agent.compose_schedule(
+            candidate=candidate,
+            slots=slots,
+            conversation_id=message["conversation_id"],
+        )
+
+        await client.messages.reply(
+            message["delivered_to"],
+            message["message_id"],
+            {"text": reply},
+        )
+```
+
+The `conversation_id` connects the email exchange to your agent's session or workflow state. e2a handles the email reply headers and recipient routing; your application decides which slots are actually available.
+
+## Keep high-impact messages with a human
+
+Candidate communication can materially affect a person's opportunity, so start with a narrow approval policy. Hold messages such as:
+
+- Rejections or disposition updates
+- Offers and compensation details
+- Changes to an interview process
+- Requests for sensitive personal information
+- Messages to an unfamiliar recipient
+
+e2a's per-agent human-in-the-loop queue lets a reviewer approve, edit, or reject a held message through the dashboard, API, SDK, CLI, MCP tools, or a secure review link.
+
+Approval is a communication safeguard, not an employment-policy engine. Keep authorization, retention, access control, and hiring decisions in the systems and policies your organization already uses.
+
+## Connect the hiring workflow
+
+Once the basic loop works, add explicit application actions:
+
+1. Parse the candidate's reply into a typed intent.
+2. Validate that intent against the current ATS stage and recruiter policy.
+3. Ask for human approval when the action changes candidate status or sends a high-impact message.
+4. Write the approved state change to the ATS.
+5. Reply in-thread and record the conversation identifier for later turns.
+
+This keeps the agent's tools narrow and makes each workflow transition auditable.
+
+## What to build next
+
+- Start with one recruiting inbox and one role-specific workflow.
+- Add the [scheduling agent pattern](/use-cases/scheduling-agent) for multi-turn coordination.
+- Use [MCP](/mcp) for a local recruiting assistant or [SDKs](/docs) for a hosted service.
+- Enable [human-in-the-loop approval](/blog/human-in-the-loop-for-agent-email) before connecting production candidate communication.
+
+The goal is not to replace the ATS or recruiter. It is to give the agent a trustworthy email boundary so it can handle the coordination work while people retain control of consequential decisions.

@@ -2,13 +2,24 @@
 
 Gives an AI coding agent a real, authenticated email inbox. Installing this
 plugin registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
-Streamable HTTP + OAuth 2.1) and an **operate-well skill** so the agent can send
-and receive email, reply in-thread, manage agents and custom domains, and work
-with attachments.
+Streamable HTTP + OAuth 2.1) and five stable skills for setup, application
+integration, diagnosis, evaluation, and everyday inbox operation. Installing core supplies
+the MCP connection used by both core and the optional Labs workflows.
 
 After installation, authorize e2a through your client's MCP flow (Claude Code:
 run `/mcp`; Codex CLI: `codex mcp login e2a`) — no API key to paste. For
 headless/CI, an account API key works too; see [`clients/`](./clients).
+
+With an e2a inbox, developers can build [support agents](https://e2a.dev/use-cases/support-agent),
+[AI receptionists](https://e2a.dev/use-cases/ai-receptionist),
+[scheduling agents](https://e2a.dev/use-cases/scheduling-agent),
+[e-commerce agents](https://e2a.dev/use-cases/ecommerce-agent),
+[sales agents](https://e2a.dev/use-cases/sales-agent),
+[recruiting agents](https://e2a.dev/use-cases/recruiting-agent),
+[voice follow-up agents](https://e2a.dev/use-cases/voice-agent), and
+[procurement agents](https://e2a.dev/use-cases/procurement-agent) that receive
+real email, keep conversation state, and reply safely. See the complete
+[use-case catalog](https://e2a.dev/use-cases).
 
 ## Install
 
@@ -48,8 +59,9 @@ Remote servers take `url` only — `type`/`transport` are stdio-only in Cursor.
 On first use Cursor registers itself via OAuth Dynamic Client Registration and
 opens your browser; there is no API key to paste and no `auth` block to fill in.
 
-Cursor gets the MCP server this way rather than the plugin, so it does not pick
-up the skill — the tools work, the operating guidance doesn't come with them.
+Cursor lists core and receives its MCP configuration and canonical setup
+documentation. Labs is not listed, so Labs skills are unavailable in Cursor.
+Install Labs only in Claude Code or Codex.
 
 This file used to recommend two things that don't work, so they're worth naming
 before someone re-adds them: a bare `/add-plugin e2a` resolves only against
@@ -69,10 +81,13 @@ in [`clients/`](./clients); the full per-client guide is at
 
 ```
 plugins/e2a/
-├── .claude-plugin/plugin.json   # Claude Code manifest
-├── .codex-plugin/plugin.json    # Codex manifest (skills + mcpServers + interface)
-├── .cursor-plugin/plugin.json   # Cursor manifest
-├── .mcp.json                    # the hosted MCP server (single source of truth)
+├── plugin.meta.json             # SOURCE OF TRUTH — every manifest below is generated from it
+├── plugin.json                  # Agent Plugins v1 portable manifest (generated)
+├── mcp.json                     # Agent Plugins v1 portable MCP config (generated)
+├── .claude-plugin/plugin.json   # Claude Code manifest (generated)
+├── .codex-plugin/plugin.json    # Codex manifest, skills + mcpServers + interface (generated)
+├── .cursor-plugin/plugin.json   # Cursor manifest (generated)
+├── .mcp.json                    # the hosted MCP server, legacy clients (generated)
 ├── assets/icon.svg
 ├── docs/                        # canonical agent docs mirrored at e2a.dev
 │   ├── setup.md                 # connect guide + first-inbox workflow
@@ -80,12 +95,21 @@ plugins/e2a/
 │   ├── sdk.md                   # SDK + webhook integration guide
 │   ├── templates.md             # email-template guide
 │   └── llms.txt                 # machine-readable hosted docs index
-├── skills/e2a/SKILL.md          # the "operate-well" skill (surfaces as /e2a)
-├── skills/agentify/SKILL.md     # deploy the autonomous-repo feedback loop (/agentify)
-├── skills/tether/SKILL.md       # email handoff for long-running sessions (/tether)
-├── skills/autopilot/SKILL.md    # policy-first, always-on local email agent (/autopilot)
+├── skills/                      # five stable skills
+│   ├── e2a/SKILL.md             # everyday inbox operation
+│   ├── e2a-setup/SKILL.md       # MCP, OAuth, inbox, and domain readiness
+│   ├── e2a-integrate/SKILL.md   # SDK or REST application integration
+│   ├── e2a-doctor/SKILL.md      # evidence-backed diagnosis and repair
+│   └── email-evals/SKILL.md     # deterministic synthetic email-agent evaluation (/email-evals)
 └── clients/                     # manual paste-in configs for non-plugin clients
 ```
+
+`/email-evals` guides synthetic, deterministic email-agent cases through
+contained validation, explicit approval, and report-driven iteration.
+
+Experimental autonomous workflows (`/agentify`, `/autopilot`, and `/tether`)
+live in the separate [`e2a-labs`](../e2a-labs/) package. Install core e2a
+first: it remains the sole owner of the hosted MCP connection.
 
 The marketplace manifests that expose this plugin live at the repo root:
 `.claude-plugin/marketplace.json`, `.cursor-plugin/marketplace.json`, and
@@ -93,7 +117,7 @@ The marketplace manifests that expose this plugin live at the repo root:
 
 ## Developing
 
-The skill is authored in `skills/<name>/SKILL.md` with YAML frontmatter:
+Skills are authored in `skills/<name>/SKILL.md` with YAML frontmatter:
 
 ```markdown
 ---
@@ -110,11 +134,18 @@ version: 12
 - `description` (required) — write it as "Use when…"; this is how Claude Code
   decides to load the skill. ≤1024 chars.
 
-`node scripts/validate-plugin.mjs` (run by the **Plugin manifests** CI job)
-validates every manifest parses, that the version is identical across all
-Claude/Codex/Cursor manifests, that marketplace `source` paths resolve, and that
-each `SKILL.md` satisfies Claude Code's frontmatter constraints. A change that
-wouldn't load fails CI.
+`node scripts/validate-plugin.mjs` (run by the **Plugin tests / Package and
+manifests** CI job)
+validates both plugin packages independently: their exact client manifest sets,
+per-package manifest versions, marketplace `source` paths, sole core ownership
+of the MCP server, and every `SKILL.md` frontmatter. It also regenerates every
+manifest and fails if one drifted from the per-package `plugin.meta.json`,
+checks each package's Agent Plugins v1 portable manifest against the closed v1
+schemas, and rejects any skill file interpolating a client-specific path
+variable such as `${CLAUDE_PLUGIN_ROOT}` (those expand on one client and land
+as literal text everywhere else).
+`node --test scripts/validate-plugin.test.mjs` covers those guards against
+fixture trees. A change that wouldn't load fails CI.
 
 Agent-facing Markdown is authored in `docs/`. Run
 `node ../../scripts/sync-agent-docs.mjs` from this directory (or
@@ -123,9 +154,19 @@ committed `web/public/` mirrors. The repository-integrity CI job runs the same
 script with `--check` and fails if a hosted mirror drifts from its canonical
 source.
 
-When bumping the plugin version, update `.claude-plugin/plugin.json` (the source
-of truth) **and** the other manifests + marketplace metadata to match — the
-validator fails on drift.
+**Never hand-edit a manifest.** The portable pair, the client manifests,
+`.mcp.json`, and the three root `marketplace.json` files are all generated.
+Edit the package's `plugin.meta.json` (`plugins/e2a/plugin.meta.json` or
+`plugins/e2a-labs/plugin.meta.json`), then run:
+
+```bash
+node scripts/generate-plugin-manifests.mjs
+```
+
+and commit the source together with whatever it regenerated. Editing a generated
+file directly fails CI, naming the file to fix. That includes version bumps:
+change `version` in the package's `plugin.meta.json` and regenerate. Marketplace
+metadata always follows the core version; Labs is independently versioned.
 
 ## Reference
 

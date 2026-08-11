@@ -824,3 +824,125 @@ export async function listWebhookDeliveries(
     next_cursor: page.next_cursor ?? null,
   };
 }
+
+// ── Metrics ──────────────────────────────────────────────
+
+// Wire shapes for GET /v1/metrics (beta). Snake_case because these mirror the
+// JSON exactly — the dashboard reads the REST surface directly rather than
+// through the TS SDK, so there is no camelCase mapping layer to hide behind.
+export type MetricsSummary = {
+  accepted: number;
+  submitted: number;
+  delivered: number;
+  bounced_hard: number;
+  bounced_soft: number;
+  bounced_undetermined: number;
+  complained: number;
+  suppressed: number;
+  send_failed: number;
+  loopback: number;
+  received: number;
+  dmarc_pass: number;
+  dmarc_fail: number;
+  dmarc_none: number;
+  dmarc_error: number;
+  review_held: number;
+  review_approved: number;
+  review_rejected: number;
+  review_expired_approved: number;
+  review_expired_rejected: number;
+};
+
+// Every rate is null — never 0 — when its denominator is zero. The UI must
+// keep that distinction: 0% reads as total failure, null means no traffic.
+export type MetricsRates = {
+  delivered_rate: number | null;
+  bounce_rate: number | null;
+  complaint_rate: number | null;
+  suppression_block_rate: number | null;
+};
+
+export type MetricsCounter = {
+  reason_code: string;
+  stage: string;
+  outcome: string;
+  retryable: boolean;
+  observations: number;
+  messages: number;
+};
+
+export type AgentMetricsGroup = {
+  agent_email: string;
+  messages_in_window: number;
+  messages_with_lifecycle: number;
+  reconstructed_observations: number;
+  summary: MetricsSummary;
+  rates: MetricsRates;
+  counters: MetricsCounter[] | null;
+};
+
+export type WebhookEndpointMetrics = {
+  webhook_id: string;
+  url_host: string;
+  deliveries: number;
+  delivered: number;
+  pending: number;
+  endpoint_rejected: number;
+  no_response: number;
+  success_rate: number | null;
+  last_status_code: number | null;
+  enabled: boolean;
+  auto_disabled_at: string | null;
+  auto_disable_reason: string;
+};
+
+export type WebhookMetrics = {
+  deliveries: number;
+  delivered: number;
+  pending: number;
+  endpoint_rejected: number;
+  no_response: number;
+  success_rate: number | null;
+  window_exceeds_retention: boolean;
+  endpoints_auto_disabled: number;
+  endpoints: WebhookEndpointMetrics[] | null;
+  endpoints_truncated: boolean;
+};
+
+export type MetricsBucket = {
+  day: string;
+  summary: MetricsSummary;
+  rates: MetricsRates;
+};
+
+export type AccountMetrics = {
+  start: string;
+  end: string;
+  messages_in_window: number;
+  messages_with_lifecycle: number;
+  reconstructed_observations: number;
+  summary: MetricsSummary;
+  rates: MetricsRates;
+  counters: MetricsCounter[] | null;
+  agents: AgentMetricsGroup[] | null;
+  agents_truncated: boolean;
+  webhooks: WebhookMetrics;
+  buckets: MetricsBucket[] | null;
+};
+
+// GET /v1/metrics. `groupByAgent` adds the per-inbox breakdown, which is what
+// lets one request feed both the headline tiles and the by-inbox table.
+export async function getAccountMetrics(opts: {
+  start?: Date;
+  end?: Date;
+  groupByAgent?: boolean;
+  bucketByDay?: boolean;
+} = {}): Promise<AccountMetrics> {
+  const params = new URLSearchParams();
+  if (opts.start) params.set("start", opts.start.toISOString());
+  if (opts.end) params.set("end", opts.end.toISOString());
+  if (opts.groupByAgent) params.set("group_by", "agent");
+  if (opts.bucketByDay) params.set("bucket", "day");
+  const qs = params.toString();
+  return request<AccountMetrics>("/v1/metrics" + (qs ? "?" + qs : ""));
+}

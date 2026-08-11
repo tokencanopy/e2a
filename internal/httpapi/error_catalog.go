@@ -59,6 +59,7 @@ var errorCodeCatalog = []errorCodeContract{
 	// send worker submits, the identical reply/forward succeeds.
 	{Code: "message_not_yet_delivered", Status: "409", Family: "state", Retryable: true},
 	{Code: "not_in_trash", Status: "409", Family: "state"},
+	{Code: "purge_in_progress", Status: "409", Family: "state"},
 	{Code: "send_in_progress", Status: "409", Family: "state"},
 	{Code: "webhook_disabled", Status: "409", Family: "state"},
 	{Code: "webhook_cooldown", Status: "409", Family: "state"},

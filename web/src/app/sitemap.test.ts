@@ -2,6 +2,10 @@
 // env vars at module load (Next.js inlines them at build time). Each scenario
 // therefore re-imports the module tree fresh.
 
+// Module marker: keeps the top-level ENV_KEY file-scoped (two test files
+// declare the same const name; script-scope files would collide as globals).
+export {};
+
 const ENV_KEY = "NEXT_PUBLIC_PRICING_PATH";
 
 function loadSitemap(): () => Array<{ url: string; priority?: number }> {
@@ -51,6 +55,34 @@ describe("sitemap", () => {
     for (const post of posts) {
       expect(found.some((u) => u.endsWith(`/blog/${post.slug}`))).toBe(true);
     }
+  });
+
+  it("includes the use-case hub and every published use-case page", () => {
+    delete process.env[ENV_KEY];
+    const found = urls();
+    for (const slug of [
+      "support-agent",
+      "ai-receptionist",
+      "scheduling-agent",
+      "ecommerce-agent",
+      "sales-agent",
+      "recruiting-agent",
+      "voice-agent",
+      "procurement-agent",
+    ]) {
+      expect(found).toContain(`http://localhost:3000/use-cases/${slug}`);
+    }
+    expect(found).toContain("http://localhost:3000/use-cases");
+  });
+
+  it("includes the canonical email API category page", () => {
+    delete process.env[ENV_KEY];
+    expect(urls()).toContain("http://localhost:3000/email-api-for-ai-agents");
+  });
+
+  it("includes the e2a comparison page", () => {
+    delete process.env[ENV_KEY];
+    expect(urls()).toContain("http://localhost:3000/compare/e2a-vs-agentmail");
   });
 
   it("emits no duplicate URLs", () => {

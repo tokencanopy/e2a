@@ -1,0 +1,47 @@
+{
+  "$comment": "Single source of truth for every generated e2a-labs plugin manifest. Edit this file, then run `node scripts/generate-plugin-manifests.mjs`. Never hand-edit a generated manifest — scripts/validate-plugin.mjs regenerates and fails CI on drift. Labs owns no MCP configuration: the core e2a plugin is the sole owner, so this source has no `mcp` block and generates no mcp.json/.mcp.json.",
+
+  "name": "e2a-labs",
+  "displayName": "e2a Labs",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "homepage": "https://e2a.dev",
+  "repository": "https://github.com/tokencanopy/e2a",
+  "icon": "./assets/icon.svg",
+
+  "author": {
+    "name": "TokenCanopy",
+    "url": "https://e2a.dev",
+    "email": "support@e2a.dev"
+  },
+
+  "keywords": ["email", "agents", "automation", "experimental"],
+
+  "descriptions": {
+    "$comment": "`manifest` serves the Claude manifest and the portable plugin.json; `codex` is the Codex manifest variant. Both marketplace variants describe the package for listing pages.",
+    "manifest": "Experimental autonomous workflows for the e2a agent email gateway. Requires the core e2a plugin for MCP tools and authentication.",
+    "codex": "Experimental autonomous workflows for e2a. Install the core e2a plugin first; it supplies the MCP connection and authentication.",
+    "marketplaceLong": "Experimental Agentify, Autopilot, and Tether workflows for e2a. Requires the core e2a plugin for MCP tools and authentication.",
+    "marketplaceShort": "Experimental Agentify, Autopilot, and Tether workflows for e2a. Install core e2a first for MCP tools and authentication."
+  },
+
+  "dependencies": ["e2a"],
+
+  "codexInterface": {
+    "shortDescription": "Experimental e2a autonomous workflows",
+    "longDescription": "Experimental Agentify, Autopilot, and Tether workflows. Requires the core e2a plugin, which supplies the hosted MCP connection and authentication.",
+    "developerName": "TokenCanopy",
+    "category": "Productivity"
+  },
+
+  "marketplaces": {
+    "claude": {
+      "category": "productivity"
+    },
+    "agents": {
+      "category": "Productivity"
+    }
+  },
+
+  "source": "./plugins/e2a-labs"
+}

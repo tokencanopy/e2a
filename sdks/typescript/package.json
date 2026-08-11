@@ -1,7 +1,7 @@
 {
   "name": "@e2a/sdk",
   "version": "5.6.0",
-  "description": "TypeScript SDK for e2a — email for AI agents",
+  "description": "TypeScript SDK for e2a — build AI agents with authenticated email",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "type": "module",
@@ -37,7 +37,15 @@
     "agent",
     "e2a",
     "webhook",
-    "ai"
+    "ai",
+    "support-agent",
+    "receptionist",
+    "scheduling",
+    "ecommerce",
+    "sales",
+    "recruiting",
+    "voice-agent",
+    "procurement"
   ],
   "author": "TokenCanopy <josh@tokencanopy.com>",
   "license": "Apache-2.0",
@@ -51,7 +59,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "ws": "^8.21.0"
+    "ws": "^8.21.2"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

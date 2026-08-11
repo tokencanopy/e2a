@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 // SubscriberDelivery is one row in webhook_subscriber_deliveries.
@@ -92,8 +94,13 @@ func (s *SubscriberStore) MarkDeliveredIfPending(ctx context.Context, deliveryID
 		}
 		return false, fmt.Errorf("mark delivered: %w", err)
 	}
+	// warn_notified_at is cleared alongside the bump: a successful delivery
+	// ends the degradation episode, re-arming the early-warning email for a
+	// later one. Without this, a webhook that recovered once would be
+	// permanently unwarnable (the one easy-to-miss coupling called out in
+	// docs/design/2026-08-08-webhook-health-notifications.md).
 	if _, err := tx.Exec(ctx,
-		`UPDATE webhooks SET last_delivered_at = now() WHERE id = $1`,
+		`UPDATE webhooks SET last_delivered_at = now(), warn_notified_at = NULL WHERE id = $1`,
 		webhookID,
 	); err != nil {
 		return false, fmt.Errorf("bump last_delivered_at: %w", err)
@@ -278,11 +285,11 @@ func (s *SubscriberStore) DeleteExpiredSubscriberDeliveries(ctx context.Context)
 	for {
 		tag, err := s.pool.Exec(ctx,
 			`UPDATE webhook_subscriber_deliveries
-			    SET status = 'failed', last_error = 'expired before delivery'
+			    SET status = 'failed', last_error = $2
 			  WHERE ctid IN (
 			   SELECT ctid FROM webhook_subscriber_deliveries
 			    WHERE expires_at <= now() AND status = 'pending' LIMIT $1)`,
-			expiredDeleteBatch)
+			expiredDeleteBatch, identity.LastErrorExpiredBeforeDelivery)
 		if err != nil {
 			return deleted, marked, err
 		}

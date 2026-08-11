@@ -148,10 +148,26 @@ type Metrics interface {
 
 	// WebhookTerminal records terminal delivery outcomes after the terminal
 	// database transition succeeds. outcome ∈ {delivered, e2a_failure,
-	// endpoint_failure, excluded}; scope ∈ {initial, replay, test, unknown}.
+	// endpoint_failure, excluded, webhook_disabled}; scope ∈ {initial,
+	// replay, test, unknown}. webhook_disabled = the delivery exhausted the
+	// disabled-webhook snooze budget (MaxDisabledSnoozes) and was written
+	// terminally failed ("webhook disabled").
 	// The hosted SLO uses initial + unknown and excludes endpoint_failure:
 	// customer endpoint behavior must not burn e2a's error budget.
 	WebhookTerminal(outcome, scope string, count int)
+
+	// WebhookNotify records one webhook health-notification job outcome
+	// (internal/webhooknotify — the WARNING / DISABLED emails that tell an
+	// owner their endpoint is failing). kind ∈ {warning, disabled};
+	// outcome ∈ {sent, permanent, outage, retryable, skipped}. skipped is
+	// a staleness guard deciding NOT to send (webhook deleted, re-enabled,
+	// recovered, unknown kind) and is counted separately from the failure
+	// outcomes on purpose: without it, a drop in sends cannot be told
+	// apart from a send path that has died. A sustained permanent rate is
+	// the alert — it means the notifier that reports broken webhooks is
+	// itself broken (bad owner address, relay policy change, rotated
+	// credential), and today that is visible only in logs.
+	WebhookNotify(kind, outcome string)
 
 	// WebhookExpiredPending counts delivery rows that reached their
 	// retention TTL while still 'pending' and were marked terminally
@@ -257,6 +273,7 @@ func (NoOp) OutboundAttempt(string, float64)              {}
 func (NoOp) OutboundRateDeferred()                        {}
 func (NoOp) WebhookAttempt(string, string, float64)       {}
 func (NoOp) WebhookTerminal(string, string, int)          {}
+func (NoOp) WebhookNotify(string, string)                 {}
 func (NoOp) WebhookExpiredPending(int)                    {}
 func (NoOp) WebhookFanOutRescued(int)                     {}
 func (NoOp) WebhookDeliveryRescued(int)                   {}
@@ -387,6 +404,10 @@ func (l *Log) WebhookTerminal(outcome, scope string, count int) {
 	if count > 0 {
 		log.Printf("[metrics] event=webhook.terminal outcome=%s scope=%s count=%d", outcome, scope, count)
 	}
+}
+
+func (l *Log) WebhookNotify(kind, outcome string) {
+	log.Printf("[metrics] event=webhook.notify kind=%s outcome=%s", kind, outcome)
 }
 
 func (l *Log) WebhookExpiredPending(count int) {

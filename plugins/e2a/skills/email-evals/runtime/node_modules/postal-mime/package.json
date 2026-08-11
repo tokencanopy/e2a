@@ -1,0 +1,51 @@
+{
+    "name": "postal-mime",
+    "version": "2.7.5",
+    "description": "Email parser for Node.js and browser environments",
+    "main": "./dist/postal-mime.cjs",
+    "module": "./src/postal-mime.js",
+    "exports": {
+        ".": {
+            "types": "./postal-mime.d.ts",
+            "import": "./src/postal-mime.js",
+            "require": "./dist/postal-mime.cjs"
+        }
+    },
+    "type": "module",
+    "types": "postal-mime.d.ts",
+    "scripts": {
+        "build": "node scripts/build-cjs.js",
+        "test": "npm run lint && npm run type-check && node --test",
+        "lint": "eslint",
+        "type-check": "tsc --noEmit",
+        "update": "rm -rf node_modules package-lock.json && ncu -u && npm install",
+        "format": "prettier --write \"**/*.{js,mjs,json}\" --ignore-path .prettierignore",
+        "format:check": "prettier --check \"**/*.{js,mjs,json}\" --ignore-path .prettierignore",
+        "prepublishOnly": "npm run build"
+    },
+    "keywords": [
+        "mime",
+        "email"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/postalsys/postal-mime.git"
+    },
+    "bugs": {
+        "url": "https://github.com/postalsys/postal-mime/issues"
+    },
+    "homepage": "https://postal-mime.postalsys.com",
+    "author": "Andris Reinman",
+    "license": "MIT-0",
+    "devDependencies": {
+        "@types/node": "25.5.0",
+        "cross-blob": "3.0.2",
+        "cross-env": "10.1.0",
+        "esbuild": "0.27.4",
+        "eslint": "8.57.0",
+        "eslint-cli": "1.1.1",
+        "iframe-resizer": "4.3.6",
+        "prettier": "3.8.1",
+        "typescript": "5.9.3"
+    }
+}

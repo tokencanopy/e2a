@@ -2,6 +2,8 @@ import {
   classifyDelivery,
   classifyWebhookHealth,
   describeScope,
+  describeWebhookToggleError,
+  WEBHOOK_COOLDOWN_MESSAGE,
 } from "./webhooks";
 
 describe("classifyWebhookHealth", () => {
@@ -233,5 +235,37 @@ describe("describeScope", () => {
       scoped: true,
       parts: ["a@example.com", "2 conversations", "labels: urgent"],
     });
+  });
+});
+
+describe("describeWebhookToggleError", () => {
+  it("maps 409 webhook_cooldown to the friendly cooldown copy", () => {
+    const body = JSON.stringify({
+      error: { code: "webhook_cooldown", message: "wait before re-enabling" },
+    });
+    expect(describeWebhookToggleError(409, body)).toBe(
+      WEBHOOK_COOLDOWN_MESSAGE,
+    );
+  });
+
+  it("renders other envelope errors as their message, not raw JSON", () => {
+    const body = JSON.stringify({
+      error: { code: "webhook_disabled", message: "webhook is disabled" },
+    });
+    expect(describeWebhookToggleError(409, body)).toBe("webhook is disabled");
+  });
+
+  it("falls back to the raw body for other failures", () => {
+    expect(describeWebhookToggleError(500, "boom")).toBe("boom");
+  });
+
+  it("falls back to the status when the body is empty", () => {
+    expect(describeWebhookToggleError(502, "")).toBe("HTTP 502");
+  });
+
+  it("survives a non-JSON body (proxy error page)", () => {
+    expect(describeWebhookToggleError(409, "<html>gateway</html>")).toBe(
+      "<html>gateway</html>",
+    );
   });
 });
