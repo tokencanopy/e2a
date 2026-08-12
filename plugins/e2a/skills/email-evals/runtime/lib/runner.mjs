@@ -945,12 +945,12 @@ function trustedReplayExpectation(testCase, storedExpectation) {
   const sourceBody = testCase?.expect?.body;
   const targetBody = rebuilt?.body;
   if (!sourceBody || !targetBody || !Array.isArray(targetBody.forbiddenPatterns)) return rebuilt;
-  const descriptor = Object.getOwnPropertyDescriptor(sourceBody, "forbiddenPatternRegexes");
+  const descriptor = Object.getOwnPropertyDescriptor(sourceBody, "forbiddenPatternPatterns");
   if (descriptor && !descriptor.enumerable && Object.hasOwn(descriptor, "value")
     && Array.isArray(descriptor.value) && descriptor.value.length === targetBody.forbiddenPatterns.length) {
     // This state comes only from the caller-provided trusted resolved suite.
     // Stored artifacts can neither supply nor override executable grader state.
-    Object.defineProperty(targetBody, "forbiddenPatternRegexes", { value: descriptor.value });
+    Object.defineProperty(targetBody, "forbiddenPatternPatterns", { value: descriptor.value });
   }
   return rebuilt;
 }

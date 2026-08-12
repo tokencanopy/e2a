@@ -257,7 +257,7 @@ test("regrade ignores historical grader outcomes and applies current trusted ass
   assert.ok(regraded.cases[0].assertions.length > 0);
 });
 
-test("loader-produced hidden grader state and its exact throwing boundary survive replay", async () => {
+test("loader-produced hidden RE2 pattern state is frozen and replay-safe", async () => {
   const fixtureRoot = await root();
   await mkdir(path.join(fixtureRoot, "cases"));
   await writeFile(path.join(fixtureRoot, "suite.yaml"), `
@@ -291,25 +291,17 @@ expect:
     environment: { E2A_EVAL_API_KEY: "synthetic-credential" },
     trustedOrigin: "https://api.example.test",
   });
-  const compiled = loaded.cases[0].expect.body.forbiddenPatternRegexes[0];
-  Object.defineProperty(compiled, "exec", {
-    configurable: true,
-    value() { throw new Error("Synthetic trusted compiled-state failure"); },
-  });
+  const pattern = loaded.cases[0].expect.body.forbiddenPatternPatterns[0];
+  assert.equal(Object.isFrozen(pattern), true);
+  assert.equal(pattern.test("blocked-42"), true);
+  assert.throws(() => Object.defineProperty(pattern, "test", { value() { return false; } }), TypeError);
 
   const original = await runSuite({ suite: loaded, adapter: adapter(), outputRoot: await root(), runId: RUN_ID });
-  assert.equal(original.cases[0].primaryError.code, "grader_threw");
-  assert.equal(original.cases[0].primaryError.boundary, "content");
-  assert.doesNotMatch(await readFile(original.files.cases, "utf8"), /forbiddenPatternRegexes|compiled-state failure/);
+  assert.equal(original.cases[0].primaryError, null);
+  assert.doesNotMatch(await readFile(original.files.cases, "utf8"), /forbiddenPatternPatterns/);
 
   const regraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) });
-  assert.deepEqual(regraded.cases[0].primaryError, original.cases[0].primaryError);
-
-  const forgedBoundary = (await readFile(original.files.cases, "utf8")).trimEnd().split("\n").map(JSON.parse);
-  forgedBoundary[0].primaryError.boundary = "core";
-  await writeAuthenticatedRecords(original.files.cases, forgedBoundary, loaded);
-  const boundaryRegraded = await regradeRun({ suite: loaded, runDirectory: path.dirname(original.files.cases) });
-  assert.equal(boundaryRegraded.cases[0].primaryError.boundary, "content");
+  assert.equal(regraded.cases[0].primaryError, null);
 });
 
 test("direct run rejects oversized resolved identifiers before preflight or send", async () => {
