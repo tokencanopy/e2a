@@ -25,8 +25,11 @@ const WINDOW_NOTE =
 
 const RATES_NOTE =
   "Every value in `rates` is null — never 0 — when its denominator is zero, so 'no traffic' stays " +
-  "distinguishable from 'everything failed'. Denominators are fixed by the server: delivered/accepted, " +
-  "bounced/submitted, complained/delivered, suppressed/accepted. " +
+  "distinguishable from 'everything failed'. Formulas are fixed by the server: " +
+  "`delivered_rate = delivered / (accepted - loopback)`; " +
+  "`bounce_rate = (bounced_hard + bounced_soft + bounced_undetermined) / (submitted - loopback)`; " +
+  "`complaint_rate = complained / delivered`; " +
+  "`suppression_block_rate = suppressed / (accepted - loopback)`. " +
   "`delivered` means a recipient server accepted the message; it does NOT claim inbox placement.";
 
 const COVERAGE_NOTE =

@@ -6,7 +6,15 @@ describe("metric help", () => {
     expect(METRIC_HELP.submitted).toMatch(
       /upstream provider or the local loopback path/i,
     );
-    expect(METRIC_HELP.submitted).toMatch(/submitted minus loopback/i);
+    expect(METRIC_HELP.submitted).toMatch(
+      /bounce rate uses submitted minus loopback/i,
+    );
+    expect(METRIC_HELP.submitted).toMatch(
+      /complaint rate is complained divided by delivered/i,
+    );
+    expect(METRIC_HELP.submitted).not.toMatch(
+      /provider-outcome rates use submitted minus loopback/i,
+    );
     expect(METRIC_HELP.deliveredRate).toMatch(
       /delivered.*accepted minus loopback/i,
     );

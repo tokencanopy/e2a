@@ -25,7 +25,7 @@ export const METRIC_HELP = {
   accepted:
     "Messages e2a accepted from your agents. External-delivery rates use Accepted minus Loopback, so local agent-to-agent delivery never counts as an external success or failure.",
   submitted:
-    "Messages an upstream provider or the local loopback path accepted for delivery. Provider-outcome rates use Submitted minus Loopback; the remaining gap from Accepted is mail stopped before submission.",
+    "Messages an upstream provider or the local loopback path accepted for delivery. The Bounce rate uses Submitted minus Loopback; the Complaint rate is Complained divided by Delivered. The remaining gap from Accepted is mail stopped before submission.",
   delivered:
     "Messages a recipient's mail server accepted. This is server acceptance, not inbox placement — no email provider can tell you whether a message landed in the inbox or in spam.",
   bounced:
