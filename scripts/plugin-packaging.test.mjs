@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { access, readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 const require = createRequire(import.meta.url);
 const { parse: parseYaml } = require("../plugins/e2a/skills/email-evals/runtime/node_modules/yaml");
+const execFileAsync = promisify(execFile);
+
+// The distributable is the tracked package tree. This excludes Git metadata and
+// ignored local build inputs such as a freshly installed runtime/node_modules.
+const walkFiles = async (directory) => {
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--", directory]);
+  return stdout.split("\0").filter(Boolean);
+};
+
+const directoryBytes = async (directory) => {
+  const files = await walkFiles(directory);
+  const sizes = await Promise.all(files.map(async (file) => {
+    const { stdout } = await execFileAsync("git", ["cat-file", "-s", `:${file}`]);
+    return Number(stdout.trim());
+  }));
+  return sizes.reduce((total, size) => total + size, 0);
+};
 
 const skillNames = async (plugin) => (await readdir(`plugins/${plugin}/skills`, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
@@ -66,6 +86,15 @@ test("core Codex description advertises every stable capability", async () => {
   assert.match(codex.interface.longDescription, /inbox operation/i);
   assert.match(codex.interface.longDescription, /diagnosis/i);
   assert.match(codex.interface.longDescription, /evaluation/i);
+});
+
+test("plugin distributables omit build dependencies and native binaries", async () => {
+  for (const plugin of ["e2a", "e2a-labs"]) {
+    const files = await walkFiles(`plugins/${plugin}`);
+    assert.equal(files.some((file) => file.split(path.sep).includes("node_modules")), false);
+    assert.equal(files.some((file) => /(?:\.node|\/esbuild(?:\.exe)?)$/.test(file)), false);
+  }
+  assert.ok(await directoryBytes("plugins/e2a") < 5 * 1024 * 1024);
 });
 
 test("Labs tracks the core plugin without requiring release tags", async () => {
