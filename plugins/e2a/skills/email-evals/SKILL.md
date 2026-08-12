@@ -46,8 +46,14 @@ Use dedicated actor and target agents only. Do not infer, broaden, or repair pro
 
 After gathering sufficient answers, scaffold the suite:
 
+Resolve the absolute directory containing this loaded `SKILL.md` resource.
+For the tool call, set `EMAIL_EVALS_LAUNCHER` to the absolute path formed by
+joining that resource directory with `email-evals.sh`. This is an agent-local
+value, not a persisted environment variable. Do not derive it from the user's
+current directory or a client-specific plugin-root variable.
+
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh scaffold --root <suite-root> --name <suite-name> --target-env <target-env> --actor-env <actor-env>
+"$EMAIL_EVALS_LAUNCHER" scaffold --root <suite-root> --name <suite-name> --target-env <target-env> --actor-env <actor-env>
 ```
 
 Edit the generated `suite.yaml` and case YAML files to reflect the answers. The
@@ -60,9 +66,15 @@ Then verify the checked-in, single-file plugin runtime bundle and validate the
 suite. Setup performs no package installation and never copies or executes
 JavaScript or dependencies beneath the suite root:
 
+Resolve the absolute directory containing this loaded `SKILL.md` resource.
+For the tool call, set `EMAIL_EVALS_LAUNCHER` to the absolute path formed by
+joining that resource directory with `email-evals.sh`. This is an agent-local
+value, not a persisted environment variable. Do not derive it from the user's
+current directory or a client-specific plugin-root variable.
+
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh setup --root <suite-root>
-plugins/e2a/skills/email-evals/email-evals.sh validate --suite <suite-root>/suite.yaml
+"$EMAIL_EVALS_LAUNCHER" setup --root <suite-root>
+"$EMAIL_EVALS_LAUNCHER" validate --suite <suite-root>/suite.yaml
 ```
 
 Show the complete alias-only dry-run plan, its `approvalDigest`, and any
@@ -82,8 +94,14 @@ Ask for explicit user approval immediately before `run`, because it sends real e
 
 Only after that approval, run:
 
+Resolve the absolute directory containing this loaded `SKILL.md` resource.
+For the tool call, set `EMAIL_EVALS_LAUNCHER` to the absolute path formed by
+joining that resource directory with `email-evals.sh`. This is an agent-local
+value, not a persisted environment variable. Do not derive it from the user's
+current directory or a client-specific plugin-root variable.
+
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh run --suite <suite-root>/suite.yaml --approval-digest <approvalDigest-from-validate>
+"$EMAIL_EVALS_LAUNCHER" run --suite <suite-root>/suite.yaml --approval-digest <approvalDigest-from-validate>
 ```
 
 If the suite, resolved mailbox identities, custom origin, protection posture,
@@ -97,8 +115,14 @@ Read the generated `report.md`. Summarize deterministic failures without hiding 
 
 When only assertions changed, use `regrade` instead of `run`; regrade performs no sends:
 
+Resolve the absolute directory containing this loaded `SKILL.md` resource.
+For the tool call, set `EMAIL_EVALS_LAUNCHER` to the absolute path formed by
+joining that resource directory with `email-evals.sh`. This is an agent-local
+value, not a persisted environment variable. Do not derive it from the user's
+current directory or a client-specific plugin-root variable.
+
 ```sh
-plugins/e2a/skills/email-evals/email-evals.sh regrade --suite <suite-root>/suite.yaml --run <run-dir>
+"$EMAIL_EVALS_LAUNCHER" regrade --suite <suite-root>/suite.yaml --run <run-dir>
 ```
 
 Regrade accepts a changed full-suite digest only when the execution digest is

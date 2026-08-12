@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 const skillFile = "plugins/e2a/skills/email-evals/SKILL.md";
@@ -385,22 +387,22 @@ test("email-evals skill preserves the safe authoring and run sequence", async ()
   assert.match(source, /actor.*allowlist\/block\s*\[target\]/i);
   assert.match(source, /target.*allowlist\/block\s*\[actor, probes\.\.\.\]/i);
 
-  assert.match(source, /email-evals\.sh scaffold --root <suite-root> --name <suite-name> --target-env <[^>]+> --actor-env <[^>]+>/);
+  assert.match(source, /\$EMAIL_EVALS_LAUNCHER" scaffold --root <suite-root> --name <suite-name> --target-env <[^>]+> --actor-env <[^>]+>/);
   assert.match(source, /credential name is fixed outside suite authority/i);
   assert.match(source, /never copies or executes\s+JavaScript or dependencies\s+beneath the suite root/i);
   assert.match(source, /--trusted-origin <origin>/);
-  assert.match(source, /email-evals\.sh setup --root <suite-root>/);
-  assert.match(source, /email-evals\.sh validate --suite <suite-root>\/suite\.yaml/);
+  assert.match(source, /\$EMAIL_EVALS_LAUNCHER" setup --root <suite-root>/);
+  assert.match(source, /\$EMAIL_EVALS_LAUNCHER" validate --suite <suite-root>\/suite\.yaml/);
   assert.match(source, /show the complete alias-only dry-run plan[\s\S]*protection failures/i);
   assert.match(source, /`approvalDigest`/);
-  assert.match(source, /email-evals\.sh run --suite <suite-root>\/suite\.yaml --approval-digest <approvalDigest-from-validate>/);
+  assert.match(source, /\$EMAIL_EVALS_LAUNCHER" run --suite <suite-root>\/suite\.yaml --approval-digest <approvalDigest-from-validate>/);
   assert.match(source, /request fresh approval/i);
   assert.match(source, /ask for explicit user approval immediately before.*`?run`?/is);
   assert.match(source, /sends real email between the dedicated agents/i);
   const scaffoldFlow = source.match(/## Scaffold, edit, and validate\n([\s\S]*?)(?=\n## )/)?.[1] ?? "";
-  assertBefore(scaffoldFlow, "email-evals.sh scaffold", "email-evals.sh setup");
-  assertBefore(scaffoldFlow, "email-evals.sh setup", "email-evals.sh validate");
-  assertBefore(scaffoldFlow, "email-evals.sh validate", "dry-run plan");
+  assertBefore(scaffoldFlow, "$EMAIL_EVALS_LAUNCHER\" scaffold", "$EMAIL_EVALS_LAUNCHER\" setup");
+  assertBefore(scaffoldFlow, "$EMAIL_EVALS_LAUNCHER\" setup", "$EMAIL_EVALS_LAUNCHER\" validate");
+  assertBefore(scaffoldFlow, "$EMAIL_EVALS_LAUNCHER\" validate", "dry-run plan");
   assertBefore(source, "## Scaffold, edit, and validate", "## Request approval immediately before sending");
   assertBefore(source, "dry-run plan", "explicit user approval");
 
@@ -413,6 +415,62 @@ test("email-evals skill preserves the safe authoring and run sequence", async ()
     "no semantic judge", "no deep HTML equivalence", "no scheduled-send proof",
     "no full review/bounce/complaint matrix",
   ]) assert.match(source, new RegExp(limitation, "i"));
+});
+
+test("email-evals resolves its launcher from the loaded skill directory", async () => {
+  const skill = await readFile(skillFile, "utf8");
+  assert.doesNotMatch(skill, /plugins\/e2a\/skills\/email-evals\/email-evals\.sh/);
+  assert.doesNotMatch(skill, /(?:CLAUDE|CODEX|CURSOR)_PLUGIN_ROOT/);
+  assert.match(skill, /absolute directory containing this loaded `SKILL\.md`/);
+  assert.match(skill, /EMAIL_EVALS_LAUNCHER/);
+});
+
+test("email-evals launches from a clean-room installed plugin", async () => {
+  const cleanRoom = await mkdtemp(path.join(await realpath(tmpdir()), "email-evals-clean-room-"));
+  const installRoot = path.join(cleanRoom, "installed-plugin");
+  const unrelatedProject = path.join(cleanRoom, "unrelated-project");
+  const installedPlugin = path.join(installRoot, "e2a");
+  const skillResource = path.join(installedPlugin, "skills", "email-evals", "SKILL.md");
+  const suiteRoot = path.join(unrelatedProject, "evals", "email");
+  const environment = {
+    PATH: process.env.PATH ?? "",
+    TMPDIR: await realpath(tmpdir()),
+    E2A_EVAL_API_KEY: "synthetic-key.test",
+    E2A_EVAL_TARGET: "target@eval.test",
+    E2A_EVAL_ACTOR: "actor@eval.test",
+  };
+
+  try {
+    await cp(path.join(process.cwd(), "plugins", "e2a"), installedPlugin, { recursive: true });
+    await mkdir(unrelatedProject, { recursive: true });
+    const loadedSkill = await readFile(skillResource, "utf8");
+    assert.match(loadedSkill, /EMAIL_EVALS_LAUNCHER/);
+    const launcher = path.join(path.dirname(skillResource), "email-evals.sh");
+
+    const invoke = (args) => spawnSync(launcher, args, {
+      cwd: unrelatedProject,
+      env: environment,
+      encoding: "utf8",
+    });
+    const help = invoke(["--help"]);
+    assert.equal(help.status, 0, help.stderr);
+
+    const scaffold = invoke([
+      "scaffold", "--root", suiteRoot, "--name", "fictional-support-smoke",
+      "--target-env", "E2A_EVAL_TARGET", "--actor-env", "E2A_EVAL_ACTOR",
+    ]);
+    assert.equal(scaffold.status, 0, scaffold.stderr);
+
+    const setup = invoke(["setup", "--root", suiteRoot]);
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const validate = invoke(["validate", "--suite", path.join(suiteRoot, "suite.yaml")]);
+    assert.notEqual(validate.status, 127, validate.stderr);
+    assert.notEqual(validate.status, null, "validate did not spawn");
+    assert.doesNotMatch(validate.stderr, /(?:No such file|launcher failure)/i);
+  } finally {
+    await rm(cleanRoom, { recursive: true, force: true });
+  }
 });
 
 test("templates and skill contain only synthetic email identities", async () => {
