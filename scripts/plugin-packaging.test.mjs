@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { access, readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -91,7 +90,7 @@ test("core Codex description advertises every stable capability", async () => {
 test("plugin distributables omit build dependencies and native binaries", async () => {
   for (const plugin of ["e2a", "e2a-labs"]) {
     const files = await walkFiles(`plugins/${plugin}`);
-    assert.equal(files.some((file) => file.split(path.sep).includes("node_modules")), false);
+    assert.equal(files.some((file) => file.split("/").includes("node_modules")), false);
     assert.equal(files.some((file) => /(?:\.node|\/esbuild(?:\.exe)?)$/.test(file)), false);
   }
   assert.ok(await directoryBytes("plugins/e2a") < 5 * 1024 * 1024);
