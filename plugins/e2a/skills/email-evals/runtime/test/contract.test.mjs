@@ -81,6 +81,20 @@ test("unsupported regex syntax fails as invalid_regex at its YAML pointer before
   );
 });
 
+test("unsupported subject regex syntax fails at the scalar YAML pointer before execution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-unsupported-subject-regex-"));
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    "  action: { kind: none, count: 0 }", "  subject:", "    regex: '(a+)\\1'", "",
+  ].join("\n") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error"
+      && error.code === "invalid_regex"
+      && error.details?.path === "/expect/subject/regex",
+  );
+});
+
 test("digest uses the unresolved alias-safe contract, not an API-key value", async () => {
   const first = await loadSuite(fixture("contracts/valid/suite.yaml"), { environment: validEnvironment });
   const second = await loadSuite(fixture("contracts/valid/suite.yaml"), {
