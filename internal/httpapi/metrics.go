@@ -32,8 +32,8 @@ type MetricsCounterView struct {
 // (distinct messages, never attempts) so every value shares one denominator
 // basis and no stage can exceed the stage above it because of retries.
 type MetricsSummaryView struct {
-	Accepted            int64 `json:"accepted" doc:"Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here."`
-	Submitted           int64 `json:"submitted" doc:"Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate."`
+	Accepted            int64 `json:"accepted" doc:"Outbound messages e2a accepted from the send API. External-delivery rates use accepted minus loopback as their denominator. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here."`
+	Submitted           int64 `json:"submitted" doc:"Messages an upstream provider or the loopback path accepted for delivery. Provider-outcome rates use submitted minus loopback as their denominator."`
 	Delivered           int64 `json:"delivered" doc:"Messages a recipient server accepted. This is recipient-server acceptance, NOT inbox placement — no email provider exposes the latter."`
 	BouncedHard         int64 `json:"bounced_hard" doc:"Permanent bounces. These add the recipient to the suppression list."`
 	BouncedSoft         int64 `json:"bounced_soft" doc:"Transient bounces."`
