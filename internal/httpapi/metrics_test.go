@@ -103,6 +103,7 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 			metricsCount(messagelifecycle.ReasonSubmissionUpstreamAccepted, 8, 8),
 			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 6, 6),
 			metricsCount(messagelifecycle.ReasonDeliveryPermanentBounce, 2, 2),
+			metricsCount(messagelifecycle.ReasonComplaintRecipientReported, 1, 1),
 		},
 	})
 
@@ -129,6 +130,9 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 	// comparable to the provider thresholds that trigger account review.
 	if got := rates["bounce_rate"].(float64); got != 0.25 {
 		t.Errorf("bounce_rate = %v, want 0.25 (2 bounced / 8 submitted)", got)
+	}
+	if got := rates["complaint_rate"].(float64); got != 1.0/6.0 {
+		t.Errorf("complaint_rate = %v, want %v (1 complaint / 6 delivered)", got, 1.0/6.0)
 	}
 
 	// The retried code must still expose its attempt count in counters[].

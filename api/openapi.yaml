@@ -3344,7 +3344,7 @@ components:
           format: int64
           type: integer
         submitted:
-          description: Messages an upstream provider or the loopback path accepted for delivery. Provider-outcome rates use submitted minus loopback as their denominator.
+          description: Messages an upstream provider or the loopback path accepted for delivery. The bounce rate uses submitted minus loopback as its denominator; complaint rate is complained ÷ delivered.
           format: int64
           type: integer
         suppressed:
