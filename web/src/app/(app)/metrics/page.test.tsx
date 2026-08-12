@@ -242,7 +242,9 @@ describe("metric tooltips", () => {
 
     await userEvent.click(trigger);
     const tip = screen.getByRole("tooltip");
-    expect(within(tip).getByText(/share of what was actually submitted/)).toBeInTheDocument();
+    expect(
+      within(tip).getByText(/bounces divided by submitted minus loopback/i),
+    ).toBeInTheDocument();
   });
 
   it("is reachable by keyboard, not hover only", async () => {

@@ -6,26 +6,26 @@
 // if a definition changes on the server, it changes here in the same PR.
 //
 // Every rate definition NAMES ITS DENOMINATOR, because delivered_rate is over
-// accepted while bounce_rate is over submitted. Two numbers on one page that
-// don't reconcile is the fastest way to lose trust in all of them, and the
-// denominators are the reconciliation.
+// accepted minus loopback while bounce_rate is over submitted minus loopback.
+// Two numbers on one page that don't reconcile is the fastest way to lose
+// trust in all of them, and the denominators are the reconciliation.
 
 export const METRIC_HELP = {
   // ── Rates ──────────────────────────────────────────────
   deliveredRate:
-    "Of everything your agents asked to send OUTWARD, the share a recipient server accepted. Mail stopped by your own review or suppression list still counts against it — this is the honest 'did my mail arrive' number. Mail that actually went agent-to-agent is excluded — it never reaches a recipient server, so it can neither succeed nor fail on this measure. A send stopped before it went anywhere (review-rejected, cancelled) stays in the denominator whether its recipient was local or remote, exactly as a rejected external send does.",
+    "Delivered divided by Accepted minus Loopback. This measures outward sends only; local agent-to-agent delivery is excluded because it reaches no recipient server.",
   bounceRate:
-    "Bounced mail as a share of what was actually submitted to a provider — not of everything accepted, and not counting agent-to-agent mail. That denominator is deliberate: it matches the basis mailbox providers use for the thresholds that can put a sending account under review.",
+    "Hard, soft, and undetermined bounces divided by Submitted minus Loopback. This measures only mail actually submitted to an upstream provider.",
   complaintRate:
-    "Recipients who marked a message as spam, as a share of delivered mail. Mailbox providers compute spam rate over delivered mail, so this denominator matches theirs. This is the number most likely to get sending paused, so the threshold is far lower than it looks.",
+    "Complaints divided by Delivered. Local agent-to-agent delivery is excluded because it cannot produce provider complaint feedback.",
   suppressionBlockRate:
-    "The share of requested sends that never left e2a because the recipient was on a suppression list. These produce no bounce and no reply, so nothing else on this page will flag them — watch this for silent losses.",
+    "Suppressed sends divided by Accepted minus Loopback. This is the share of requested outward sends that never left e2a because the recipient was suppressed.",
 
   // ── Funnel stages ──────────────────────────────────────
   accepted:
-    "Outbound messages e2a accepted from the send API. Counts sends only — the arriving copy of agent-to-agent mail is counted under Received instead.",
+    "Messages e2a accepted from your agents. External-delivery rates use Accepted minus Loopback, so local agent-to-agent delivery never counts as an external success or failure.",
   submitted:
-    "Messages an upstream provider accepted for delivery. The gap between Accepted and Submitted is mail your own policy stopped: held for review, blocked by suppression, or failed before send.",
+    "Messages an upstream provider or the local loopback path accepted for delivery. Provider-outcome rates use Submitted minus Loopback; the remaining gap from Accepted is mail stopped before submission.",
   delivered:
     "Messages a recipient's mail server accepted. This is server acceptance, not inbox placement — no email provider can tell you whether a message landed in the inbox or in spam.",
   bounced:
