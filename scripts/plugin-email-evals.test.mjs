@@ -488,7 +488,7 @@ test("templates and skill contain only synthetic email identities", async () => 
 test("all plugin manifests release email-evals together without changing discovery conventions", async () => {
   for (const file of manifestFiles) {
     const manifest = JSON.parse(await readFile(file, "utf8"));
-    assert.equal(manifest.version ?? manifest.metadata?.version, "0.9.0", file);
+    assert.equal(manifest.version ?? manifest.metadata?.version, "0.9.1", file);
   }
 
   const claude = JSON.parse(await readFile(manifestFiles[0], "utf8"));

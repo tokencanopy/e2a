@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "e2a plugins for Claude Code — authenticated email for AI agents",
-    "version": "0.9.0"
+    "version": "0.9.1"
   },
   "plugins": [
     {
