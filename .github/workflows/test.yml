@@ -194,6 +194,8 @@ jobs:
           node-version: "22"
           cache: "npm"
       - run: npm ci
+      - run: npm run verify:umami
+      - run: npm run test:umami-updater
       - run: npm run lint
       - run: npm run test:coverage
       - run: npm run build
