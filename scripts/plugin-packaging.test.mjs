@@ -4,6 +4,7 @@ import { access, readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { unexpectedPluginPackagePaths } from "./plugin-package-policy.mjs";
 
 const require = createRequire(import.meta.url);
 const { parse: parseYaml } = require("../plugins/e2a/skills/email-evals/runtime/node_modules/yaml");
@@ -90,10 +91,26 @@ test("core Codex description advertises every stable capability", async () => {
 test("plugin distributables omit build dependencies and native binaries", async () => {
   for (const plugin of ["e2a", "e2a-labs"]) {
     const files = await walkFiles(`plugins/${plugin}`);
+    assert.deepEqual(unexpectedPluginPackagePaths(plugin, files), []);
     assert.equal(files.some((file) => file.split("/").includes("node_modules")), false);
     assert.equal(files.some((file) => /(?:\.node|\/esbuild(?:\.exe)?)$/.test(file)), false);
   }
   assert.ok(await directoryBytes("plugins/e2a") < 5 * 1024 * 1024);
+});
+
+test("plugin package allowlists reject caches and undeclared runtime files", () => {
+  const syntheticCorePaths = [
+    "plugins/e2a/.npm/_cacache/index-v5/example",
+    "plugins/e2a/.yarn/cache/example-package.zip",
+    "plugins/e2a/skills/email-evals/runtime/lib/undeclared-runtime.mjs",
+  ];
+  const syntheticLabsPaths = [
+    "plugins/e2a-labs/.pnpm-store/v3/files/example",
+    "plugins/e2a-labs/skills/autopilot/runtime-cache.json",
+  ];
+
+  assert.deepEqual(unexpectedPluginPackagePaths("e2a", syntheticCorePaths), syntheticCorePaths);
+  assert.deepEqual(unexpectedPluginPackagePaths("e2a-labs", syntheticLabsPaths), syntheticLabsPaths);
 });
 
 test("Labs tracks the core plugin without requiring release tags", async () => {

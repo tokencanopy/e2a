@@ -26,6 +26,28 @@ run_renderer() {
 }
 
 section "target symlink rejection"
+for spelling in plain trailing-slash; do
+  for force in no yes; do
+    outside=$(mktemp -d)
+    link_parent=$(mktemp -d)
+    printf 'sentinel\n' > "$outside/sentinel"
+    chmod 640 "$outside/sentinel"
+    outside_mode=$(file_mode "$outside/sentinel")
+    ln -s "$outside" "$link_parent/target-root"
+    target_root="$link_parent/target-root"
+    [ "$spelling" = plain ] || target_root="$target_root/"
+    args=(--to "$target_root")
+    [ "$force" = no ] || args+=(--force)
+    if run_renderer "${args[@]}" >/dev/null 2>&1; then
+      echo "FAIL: symbolic-link target root was accepted (spelling=$spelling force=$force)"; fail=1
+    fi
+    [ "$(cat "$outside/sentinel")" = sentinel ] || { echo "FAIL: outside root sentinel changed (spelling=$spelling force=$force)"; fail=1; }
+    [ "$(file_mode "$outside/sentinel")" = "$outside_mode" ] || { echo "FAIL: outside root sentinel mode changed (spelling=$spelling force=$force)"; fail=1; }
+    [ ! -e "$outside/autonomous-repo.config.yml" ] || { echo "FAIL: symbolic-link target root was populated (spelling=$spelling force=$force)"; fail=1; }
+    rm -rf "$link_parent" "$outside"
+  done
+done
+
 outside=$(mktemp -d)
 target=$(mktemp -d)
 printf 'sentinel\n' > "$outside/sentinel"

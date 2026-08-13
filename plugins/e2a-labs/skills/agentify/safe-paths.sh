@@ -14,8 +14,13 @@ safe_die() {
 }
 
 safe_paths_init() { # target-root
-  local target_root=$1 canonical
+  local target_root=$1 target_root_entry canonical
   [ -z "${SAFE_TARGET_ROOT+x}" ] || safe_die "safe target root is already initialized"
+  target_root_entry=$target_root
+  while [ "$target_root_entry" != / ] && [[ "$target_root_entry" == */ ]]; do
+    target_root_entry=${target_root_entry%/}
+  done
+  [ ! -L "$target_root_entry" ] || safe_die "target root is a symbolic link: $target_root"
   [ -d "$target_root" ] || safe_die "target root is not an existing directory: $target_root"
   canonical=$(cd -- "$target_root" && pwd -P)
   readonly SAFE_TARGET_ROOT="$canonical"

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { execFile, spawnSync } from "node:child_process";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const skillFile = "plugins/e2a/skills/email-evals/SKILL.md";
 const templateDirectory = "plugins/e2a/skills/email-evals/templates";
@@ -34,6 +38,44 @@ const authoringPromptFields = [
 const authoringPromptsStart = "<!-- email-evals:authoring-prompts:start -->";
 const authoringPromptsEnd = "<!-- email-evals:authoring-prompts:end -->";
 const fieldMarker = (field) => `<!-- email-evals:field=${field} -->`;
+
+async function installTrackedCorePlugin(destination) {
+  const listing = spawnSync("git", ["ls-files", "-z", "--stage", "--", "plugins/e2a"], {
+    encoding: "utf8",
+  });
+  assert.equal(listing.status, 0, listing.stderr);
+  const entries = listing.stdout.split("\0").filter(Boolean);
+  assert.ok(entries.length > 0, "tracked plugin file list is non-empty");
+
+  for (const entry of entries) {
+    const separator = entry.indexOf("\t");
+    assert.notEqual(separator, -1, `malformed git index entry: ${entry}`);
+    const [mode] = entry.slice(0, separator).split(" ");
+    assert.match(mode, /^100(?:644|755)$/, `unsupported tracked plugin mode: ${mode}`);
+    const source = entry.slice(separator + 1);
+    const relative = source.slice("plugins/e2a/".length);
+    assert.ok(relative && !relative.startsWith("../"), `unsafe tracked plugin path: ${source}`);
+    const target = path.join(destination, relative);
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(source, target);
+    await chmod(target, mode === "100755" ? 0o755 : 0o644);
+  }
+}
+
+async function listenLoopback(server) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function closeServer(server) {
+  if (!server.listening) return;
+  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
 /**
  * Compact terminal question-punctuation set: Unicode Other Punctuation (Po)
  * characters whose names identify standalone question marks or question/
@@ -439,36 +481,109 @@ test("email-evals launches from a clean-room installed plugin", async () => {
     E2A_EVAL_TARGET: "target@eval.test",
     E2A_EVAL_ACTOR: "actor@eval.test",
   };
+  const requests = [];
+  const server = createServer((request, response) => {
+    const parsed = new URL(request.url ?? "/", "http://127.0.0.1");
+    requests.push({
+      method: request.method,
+      pathname: parsed.pathname,
+      authorization: request.headers.authorization,
+    });
+    const match = parsed.pathname.match(/^\/v1\/agents\/([^/]+)(\/protection)?$/);
+    const email = match ? decodeURIComponent(match[1]) : null;
+    const knownAgent = email === environment.E2A_EVAL_ACTOR || email === environment.E2A_EVAL_TARGET;
+    if (request.method !== "GET" || !match || !knownAgent
+      || request.headers.authorization !== `Bearer ${environment.E2A_EVAL_API_KEY}`) {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ code: "not_found", message: "synthetic route not found" }));
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "application/json" });
+    if (match[2]) {
+      const peer = email === environment.E2A_EVAL_ACTOR
+        ? environment.E2A_EVAL_TARGET : environment.E2A_EVAL_ACTOR;
+      response.end(JSON.stringify({
+        holds: {},
+        inbound: { gate: { policy: "open" }, scan: {} },
+        outbound: {
+          gate: { policy: "allowlist", action: "block", allowlist: [peer] },
+          scan: {},
+        },
+      }));
+      return;
+    }
+    response.end(JSON.stringify({
+      created_at: "2026-01-01T00:00:00.000Z",
+      domain: "eval.test",
+      domain_verified: true,
+      email,
+      name: email === environment.E2A_EVAL_ACTOR ? "Synthetic Actor" : "Synthetic Target",
+      registered_domain: "eval.test",
+    }));
+  });
 
   try {
-    await cp(path.join(process.cwd(), "plugins", "e2a"), installedPlugin, { recursive: true });
+    const trustedOrigin = await listenLoopback(server);
+    await installTrackedCorePlugin(installedPlugin);
     await mkdir(unrelatedProject, { recursive: true });
     const loadedSkill = await readFile(skillResource, "utf8");
     assert.match(loadedSkill, /EMAIL_EVALS_LAUNCHER/);
     const launcher = path.join(path.dirname(skillResource), "email-evals.sh");
+    assert.notEqual((await stat(launcher)).mode & 0o111, 0, "tracked launcher stays executable");
+    await assert.rejects(
+      lstat(path.join(installedPlugin, "skills", "email-evals", "runtime", "node_modules")),
+      (error) => error?.code === "ENOENT",
+    );
 
-    const invoke = (args) => spawnSync(launcher, args, {
+    const invoke = (args) => execFileAsync(launcher, args, {
       cwd: unrelatedProject,
       env: environment,
       encoding: "utf8",
     });
-    const help = invoke(["--help"]);
-    assert.equal(help.status, 0, help.stderr);
+    const help = await invoke(["--help"]);
+    assert.match(help.stdout, /email-evals validate/);
 
-    const scaffold = invoke([
+    const scaffold = await invoke([
       "scaffold", "--root", suiteRoot, "--name", "fictional-support-smoke",
       "--target-env", "E2A_EVAL_TARGET", "--actor-env", "E2A_EVAL_ACTOR",
     ]);
-    assert.equal(scaffold.status, 0, scaffold.stderr);
+    assert.match(scaffold.stdout, /^created README\.md$/m);
+    assert.match(scaffold.stdout, /^created suite\.yaml$/m);
 
-    const setup = invoke(["setup", "--root", suiteRoot]);
-    assert.equal(setup.status, 0, setup.stderr);
+    const setup = await invoke(["setup", "--root", suiteRoot]);
+    assert.match(setup.stdout, /Prepared trusted email eval runtime/);
 
-    const validate = invoke(["validate", "--suite", path.join(suiteRoot, "suite.yaml")]);
-    assert.notEqual(validate.status, 127, validate.stderr);
-    assert.notEqual(validate.status, null, "validate did not spawn");
-    assert.doesNotMatch(validate.stderr, /(?:No such file|launcher failure)/i);
+    const suiteFile = path.join(suiteRoot, "suite.yaml");
+    const suite = await readFile(suiteFile, "utf8");
+    const loopbackSuite = suite.replace(
+      "  adapter: e2a\n",
+      `  adapter: e2a\n  base_url: ${trustedOrigin}\n`,
+    );
+    assert.notEqual(loopbackSuite, suite, "scaffolded suite receives the loopback base URL");
+    await writeFile(suiteFile, loopbackSuite);
+
+    const validate = await invoke([
+      "validate", "--suite", suiteFile, "--trusted-origin", trustedOrigin, "--json",
+    ]);
+    const output = JSON.parse(validate.stdout);
+    assert.equal(output.command, "validate");
+    assert.equal(output.plan.networkSends, false);
+    assert.deepEqual(output.plan.recipientAliases, ["actor", "target"]);
+    assert.doesNotMatch(JSON.stringify(output.plan), /@|actor@eval\.test|target@eval\.test/);
+    assert.deepEqual(
+      requests,
+      [
+        "/v1/agents/actor%40eval.test",
+        "/v1/agents/target%40eval.test",
+        "/v1/agents/actor%40eval.test/protection",
+        "/v1/agents/target%40eval.test/protection",
+      ].map((pathname) => ({
+        method: "GET", pathname, authorization: `Bearer ${environment.E2A_EVAL_API_KEY}`,
+      })),
+    );
   } finally {
+    await closeServer(server);
     await rm(cleanRoom, { recursive: true, force: true });
   }
 });
