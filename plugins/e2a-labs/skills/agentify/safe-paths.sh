@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# CDPATH makes `cd` search alternate directories and, on GNU bash, print the
+# resolved path to stdout — either would corrupt `--to` canonicalization.
+unset CDPATH
 
 safe_stderr() {
   printf '%s\n' "$*" >&2

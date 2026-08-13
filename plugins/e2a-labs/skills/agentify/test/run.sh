@@ -3,6 +3,7 @@
 # Runs from anywhere; cd's to the agentify dir. Exit non-zero on any failure.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+RENDERER=$(pwd)/agentify-render.sh
 fail=0
 run() { echo "+ $*"; "$@" || fail=1; }
 section() { echo; echo "== $1 =="; }
@@ -21,7 +22,7 @@ run_renderer() {
     ANS_FIX_GATE_MODE="hitl" \
     ANS_APPROVER_ADDRESS="approver@example.test" \
     ANS_VERIFY_SETUP_SCRIPT="scripts/verify.sh" \
-    bash agentify-render.sh "$@"
+    bash "$RENDERER" "$@"
 }
 
 section "target symlink rejection"
@@ -54,6 +55,21 @@ for force in no yes; do
   [ "$(file_mode "$outside/sentinel")" = "$outside_mode" ] || { echo "FAIL: outside config sentinel mode changed (force=$force)"; fail=1; }
   rm -rf "$target" "$outside"
 done
+
+section "CDPATH neutralization"
+workdir=$(mktemp -d)
+decoy=$(mktemp -d)
+mkdir -p "$workdir/mytarget" "$decoy/mytarget"
+printf 'decoy\n' > "$decoy/mytarget/sentinel"
+(
+  cd "$workdir" || exit 1
+  export CDPATH="$decoy"
+  run_renderer --to mytarget >/dev/null 2>&1
+)
+[ -f "$workdir/mytarget/autonomous-repo.config.yml" ] || { echo "FAIL: relative --to did not scaffold into the cwd target"; fail=1; }
+[ -e "$decoy/mytarget/autonomous-repo.config.yml" ] && { echo "FAIL: CDPATH redirected --to canonicalization"; fail=1; }
+[ "$(cat "$decoy/mytarget/sentinel")" = decoy ] || { echo "FAIL: CDPATH decoy was mutated"; fail=1; }
+rm -rf "$workdir" "$decoy"
 
 section "script selftests"
 for s in templates/scripts/ticket_card templates/scripts/comms_send templates/scripts/released_markers; do
