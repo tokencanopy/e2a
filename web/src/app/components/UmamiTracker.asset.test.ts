@@ -26,7 +26,7 @@ describe("vendored Umami tracker", () => {
     const tracker = readFileSync(
       join(umamiDirectory, "umami-v3.2.0.1ad1145d.js"),
     );
-    const license = readFileSync(join(umamiDirectory, "LICENSE.txt"), "utf8");
+    const license = readFileSync(join(umamiDirectory, "LICENSE.txt"));
 
     expect(manifest).toMatchObject({
       bytes: 4655,
@@ -42,7 +42,13 @@ describe("vendored Umami tracker", () => {
     expect(createHash("sha256").update(tracker).digest("hex")).toBe(
       "1ad1145d19d4558c20f5469ca4a5fc50a1a46f860858c9c91bfcd56fd29a522a",
     );
-    expect(license.startsWith("MIT License")).toBe(true);
-    expect(license).toContain("Copyright (c) 2022 Umami Software, Inc.");
+    expect(license).toHaveLength(1093);
+    expect(createHash("sha256").update(license).digest("hex")).toBe(
+      "d59f69c3a56253a150adfc42b41acd49e9024410ad087c58a23d506623258dfe",
+    );
+    expect(license.toString("utf8").startsWith("MIT License")).toBe(true);
+    expect(license.toString("utf8")).toContain(
+      "Copyright (c) 2022 Umami Software, Inc.",
+    );
   });
 });

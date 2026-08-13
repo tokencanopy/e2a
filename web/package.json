@@ -11,7 +11,8 @@
     "lint": "eslint",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "verify:umami": "node scripts/vendor-umami-tracker.mjs --check"
+    "verify:umami": "node scripts/vendor-umami-tracker.mjs --check",
+    "test:umami-updater": "node --test scripts/vendor-umami-tracker.test.mjs"
   },
   "dependencies": {
     "@e2a/ui": "file:../design-system",
