@@ -17,6 +17,9 @@ const eslintConfig = defineConfig([
     // Reviewed immutable third-party runtime; hash/size checks own its
     // integrity contract in UmamiTracker.asset.test.ts and verify:umami.
     "public/vendor/umami/umami-v3.2.0.1ad1145d.js",
+    // Reviewed immutable third-party API reference runtime; hash/size checks
+    // own its integrity contract in Redoc.asset.test.ts and verify:redoc.
+    "public/vendor/redoc/redoc-v2.5.0.standalone.js",
   ]),
   // Two React 19 strict rules from eslint-plugin-react-hooks are
   // over-eager for legitimate "now-ish" UI and prop→state sync

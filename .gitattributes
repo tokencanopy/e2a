@@ -1,0 +1,4 @@
+# Preserve reviewed third-party bytes even when upstream carries whitespace
+# that `git diff --check` would otherwise flag.
+web/public/vendor/redoc/LICENSE.txt -whitespace
+web/public/vendor/redoc/redoc-v2.5.0.standalone.js -whitespace

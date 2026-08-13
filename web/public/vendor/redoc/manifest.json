@@ -1,0 +1,13 @@
+{
+  "name": "Redoc standalone",
+  "version": "2.5.0",
+  "upstreamCommit": "00bc6edfc42c9cec9e453a2af4a8f5cef5e033ca",
+  "source": "https://cdn.redoc.ly/redoc/v2.5.0/bundles/redoc.standalone.js",
+  "upstream": "https://github.com/Redocly/redoc/releases/tag/v2.5.0",
+  "sha256": "0ec05be285ac885a330289b02f470e1bdbd2b6b3223a9fa213f24bf805a851d1",
+  "bytes": 910994,
+  "license": "MIT",
+  "notices": "redoc.standalone.js.LICENSE.txt",
+  "noticesSha256": "1b18b986225f8a85fa7fcaf191f0118bb297ba8c6f027b669e4b79828c9c17ed",
+  "noticesBytes": 2729
+}
