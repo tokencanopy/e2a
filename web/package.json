@@ -12,7 +12,7 @@
     "test": "jest",
     "test:coverage": "jest --coverage",
     "verify:umami": "node scripts/vendor-umami-tracker.mjs --check",
-    "test:umami-updater": "node --test scripts/vendor-umami-tracker.test.mjs"
+    "test:umami-updater": "node --test scripts/vendor-umami-tracker.check.mjs"
   },
   "dependencies": {
     "@e2a/ui": "file:../design-system",
