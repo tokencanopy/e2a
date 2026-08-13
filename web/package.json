@@ -10,7 +10,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "verify:umami": "node scripts/vendor-umami-tracker.mjs --check"
   },
   "dependencies": {
     "@e2a/ui": "file:../design-system",
