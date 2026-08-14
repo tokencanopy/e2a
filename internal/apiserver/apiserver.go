@@ -104,8 +104,10 @@ type SenderIdentityEnqueuer interface {
 	EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain string) error
 	EnqueueDeprovisionTx(ctx context.Context, tx pgx.Tx, domain string) error
 	// TryDeprovisionNow is the post-commit best-effort provider convergence for
-	// a just-deleted domain. Errors are logged, never returned to the client.
-	TryDeprovisionNow(ctx context.Context, domain string) error
+	// a just-deleted domain. confirmed=false with nil error means a provider
+	// identity exists but e2a cannot establish ownership; callers must retain
+	// DNS and surface manual review. Errors mean asynchronous retry is pending.
+	TryDeprovisionNow(ctx context.Context, domain string) (confirmed bool, err error)
 }
 
 // BuildDeps maps Params into the httpapi dependency set. Kept as the single
@@ -346,14 +348,17 @@ const bestEffortDeprovisionTimeout = 10 * time.Second
 // provider failure there (outage, throttle, foreign/untagged identity) is
 // logged and left to the committed job + hourly reaper to converge, never
 // surfaced to the client. Without SES configured, this is a plain delete.
-func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (bool, error) {
+func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (string, error) {
 	if p.SenderIdentity == nil {
 		// No provider — nothing to tear down, so teardown is never pending.
-		return func(ctx context.Context, domain, userID string) (bool, error) {
-			return false, p.Store.DeleteDomain(ctx, domain, userID)
+		return func(ctx context.Context, domain, userID string) (string, error) {
+			if err := p.Store.DeleteDomain(ctx, domain, userID); err != nil {
+				return "", err
+			}
+			return httpapi.SendingTeardownConfirmed, nil
 		}
 	}
-	return func(ctx context.Context, domain, userID string) (bool, error) {
+	return func(ctx context.Context, domain, userID string) (string, error) {
 		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
 			// The delete is the tombstone's latest mutation: stamping it keeps
 			// any audit/sweep from finalizing the ledger row before THIS
@@ -365,18 +370,22 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 			}
 			return p.Store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
 		}); err != nil {
-			return false, err
+			return "", err
 		}
 		depCtx, cancel := context.WithTimeout(ctx, bestEffortDeprovisionTimeout)
 		defer cancel()
-		if err := p.SenderIdentity.TryDeprovisionNow(depCtx, domain); err != nil {
+		confirmed, err := p.SenderIdentity.TryDeprovisionNow(depCtx, domain)
+		if err != nil {
 			log.Printf("[apiserver] best-effort sender-identity deprovision for %s: %v (async teardown will converge)", domain, err)
 			// Surfaced to the client as sending_teardown:"pending" so callers
 			// (e.g. the conformance harness) do not remove DNS from under a
 			// still-live provider identity.
-			return true, nil
+			return httpapi.SendingTeardownPending, nil
 		}
-		return false, nil
+		if !confirmed {
+			return httpapi.SendingTeardownManualReview, nil
+		}
+		return httpapi.SendingTeardownConfirmed, nil
 	}
 }
 

@@ -207,7 +207,7 @@ type Deps struct {
 	// sending-identity teardown is still pending (best-effort deprovision did
 	// not confirm; a durable job + hourly reconciler converge it). False when
 	// teardown was confirmed or there is nothing to tear down (no SES).
-	DeleteDomain        func(ctx context.Context, domain, userID string) (teardownPending bool, err error)
+	DeleteDomain        func(ctx context.Context, domain, userID string) (teardown string, err error)
 	CountAgentsOnDomain func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a

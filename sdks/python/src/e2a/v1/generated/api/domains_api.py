@@ -63,7 +63,7 @@ class DomainsApi:
     ) -> DeleteDomainResult:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str
@@ -134,7 +134,7 @@ class DomainsApi:
     ) -> ApiResponse[DeleteDomainResult]:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str
@@ -205,7 +205,7 @@ class DomainsApi:
     ) -> RESTResponseType:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str

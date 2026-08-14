@@ -336,8 +336,12 @@ func TestManagerTryDeprovisionNow(t *testing.T) {
 		provider.SeedIdentity(domain)
 		manager := NewManager(store, provider, nil, Config{})
 
-		if err := manager.TryDeprovisionNow(context.Background(), domain); err != nil {
+		confirmed, err := manager.TryDeprovisionNow(context.Background(), domain)
+		if err != nil {
 			t.Fatalf("TryDeprovisionNow: %v", err)
+		}
+		if !confirmed {
+			t.Fatal("owned provider deletion was not confirmed")
 		}
 		identities, _ := provider.List(context.Background())
 		if len(identities) != 0 {
@@ -355,8 +359,12 @@ func TestManagerTryDeprovisionNow(t *testing.T) {
 		provider.SetDeprovisionErr(ErrIdentityNotOwned)
 		manager := NewManager(store, provider, nil, Config{})
 
-		if err := manager.TryDeprovisionNow(context.Background(), domain); err != nil {
+		confirmed, err := manager.TryDeprovisionNow(context.Background(), domain)
+		if err != nil {
 			t.Fatalf("a not-owned identity is not e2a's to delete and must be tolerated: %v", err)
+		}
+		if confirmed {
+			t.Fatal("not-owned provider identity must not be reported absent")
 		}
 	})
 
@@ -367,7 +375,7 @@ func TestManagerTryDeprovisionNow(t *testing.T) {
 		provider.SetDeprovisionErr(errors.New("ses unavailable"))
 		manager := NewManager(store, provider, nil, Config{})
 
-		if err := manager.TryDeprovisionNow(context.Background(), domain); err == nil {
+		if _, err := manager.TryDeprovisionNow(context.Background(), domain); err == nil {
 			t.Fatal("transient provider error must surface (the caller logs it; the job converges)")
 		}
 	})

@@ -28,7 +28,7 @@ class DeleteDomainResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false.")
     domain: StrictStr = Field(description="The deleted domain.")
-    sending_teardown: Optional[StrictStr] = Field(default=None, description="State of e2a-managed sending-identity teardown: 'confirmed' (identity removed, or was never e2a-managed / no provider configured) or 'pending' (open set — treat unknown values as not confirmed). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.")
+    sending_teardown: Optional[StrictStr] = Field(default=None, description="State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["deleted", "domain", "sending_teardown"]
 

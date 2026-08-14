@@ -322,7 +322,7 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
-		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).",
+		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteDomain)
 
@@ -573,7 +573,7 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	if live > 0 || trashed > 0 {
 		return nil, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
 	}
-	teardownPending, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
+	teardown, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, identity.ErrDomainHasAgents):
@@ -583,10 +583,6 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 		default:
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
 		}
-	}
-	teardown := SendingTeardownConfirmed
-	if teardownPending {
-		teardown = SendingTeardownPending
 	}
 	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: teardown}}, nil
 }

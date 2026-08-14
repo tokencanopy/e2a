@@ -105,12 +105,14 @@ for verified domains; (b) needed an aligned Return-Path.
   guarded row delete plus the durable teardown job — that is the API success
   boundary, independent of SES availability (an untagged/foreign identity or
   an SES outage can never fail the delete). A best-effort post-commit
-  deprovision (bounded ~10s, errors logged only) then converges immediately,
-  so with a healthy provider the SES identity is confirmed absent before the
-  HTTP response returns — which is why the conformance harness may remove
-  fixture DNS right after a 200 without stranding an identity in practice.
-  When that best-effort attempt fails, teardown converges via the committed
-  job and the hourly reaper instead. (An earlier revision ran Deprovision
+  deprovision (bounded ~10s, errors logged only) then converges immediately.
+  The response's open `sending_teardown` value is the DNS-release contract:
+  only `confirmed` proves provider absence; `pending`, `manual_review`, and
+  unknown future values require retaining DNS. `manual_review` means a
+  provider identity exists but its ownership marker is absent, so e2a refuses
+  to mutate it. When a best-effort attempt fails transiently, teardown
+  converges via the committed job and the hourly reaper instead. (An earlier
+  revision ran Deprovision
   synchronously inside the delete transaction; review showed that coupling
   only added failure modes — permanent 500s on foreign identities, deletes
   blocked by SES outages, and a resurrection window after an irreversible

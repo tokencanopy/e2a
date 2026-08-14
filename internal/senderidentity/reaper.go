@@ -77,7 +77,8 @@ func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrai
 		if statusErr != nil && !providerMissing && !errors.Is(statusErr, ErrIdentityNotOwned) {
 			return statusErr
 		}
-		return syncProviderIdentity(ctx, domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, providerMissing || needsProvision[domain], true, w.legacyJobs)
+		_, err = syncProviderIdentity(ctx, domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, providerMissing || needsProvision[domain], true, w.legacyJobs)
+		return err
 	}
 	return nil
 }
@@ -102,7 +103,7 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 		// A missing provider identity must bypass the verified-state no-op and
 		// be recreated. Present identities take the normal desired-state path,
 		// which deletes them when their domain row is absent/unverified.
-		if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
+		if _, err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
 			errs = append(errs, errors.New(domain+": "+err.Error()))
 			continue
 		}

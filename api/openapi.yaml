@@ -1337,7 +1337,7 @@ components:
           description: The deleted domain.
           type: string
         sending_teardown:
-          description: "State of e2a-managed sending-identity teardown: 'confirmed' (identity removed, or was never e2a-managed / no provider configured) or 'pending' (open set — treat unknown values as not confirmed). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices."
+          description: "State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."
           type: string
       required:
         - deleted
@@ -7845,7 +7845,7 @@ paths:
         - domains
   /v1/domains/{domain}:
     delete:
-      description: Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+      description: Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
       operationId: deleteDomain
       parameters:
         - in: path

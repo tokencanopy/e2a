@@ -62,9 +62,9 @@ func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, d
 // is the post-commit best-effort provider call, the latter the in-tx durable
 // enqueue — conflating them would let a test pass while asserting the wrong
 // half of the delete contract.
-func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) error {
+func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) (bool, error) {
 	f.tried = append(f.tried, domain)
-	return f.tryErr
+	return true, f.tryErr
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {

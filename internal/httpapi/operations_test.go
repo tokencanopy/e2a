@@ -367,7 +367,7 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		DeleteDomain: func(ctx context.Context, domain, userID string) (bool, error) { return false, nil },
+		DeleteDomain: func(ctx context.Context, domain, userID string) (string, error) { return SendingTeardownConfirmed, nil },
 		CountAgentsOnDomain: func(ctx context.Context, domain, userID string) (int, int, error) {
 			if domain == "busy.com" {
 				return 1, 0, nil

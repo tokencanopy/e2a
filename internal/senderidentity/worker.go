@@ -391,14 +391,20 @@ type syncOutcome struct {
 	errMsg        string
 }
 
-func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs bool) error {
+func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs bool) (teardownConfirmed bool, retErr error) {
 	var out syncOutcome
 	err := store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
 		state, err := store.LoadSendingIdentityState(lockedCtx, domain)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !state.Verified) {
-			if err := provider.Deprovision(lockedCtx, domain); err != nil && !errors.Is(err, ErrIdentityNotOwned) {
+			if err := provider.Deprovision(lockedCtx, domain); errors.Is(err, ErrIdentityNotOwned) {
+				// The provider identity still exists. It may be foreign, or it may
+				// be an e2a identity whose ownership tag drifted. Either way we are
+				// not authorized to delete it and must not claim absence.
+				return nil
+			} else if err != nil {
 				return err
 			}
+			teardownConfirmed = true
 			if finalizeDeletion {
 				return store.FinalizeSendingIdentityTombstone(lockedCtx, domain, postDrainConvergenceDelay)
 			}
@@ -561,22 +567,22 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 	}
 	if err != nil {
-		return err
+		return teardownConfirmed, err
 	}
 	if !out.changed {
-		return nil
+		return teardownConfirmed, nil
 	}
 	switch out.status {
 	case StatusVerified, StatusFailed:
-		return nil
+		return teardownConfirmed, nil
 	default:
 		client, cerr := river.ClientFromContextSafely[pgx.Tx](ctx)
 		if cerr != nil || client == nil {
-			return nil
+			return teardownConfirmed, nil
 		}
 		args, opts := reconcileInsert(domain, out.incarnation, maxAttempts(maxReconcileAttempt), legacyJobs)
 		_, err := client.Insert(ctx, args, opts)
-		return err
+		return teardownConfirmed, err
 	}
 }
 
@@ -586,7 +592,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 // after this call during blue/green overlap; the delayed sweep is the durable
 // convergence handoff once that binary has stopped.
 func convergeWorkerIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, legacyJobs bool) error {
-	if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, false, legacyJobs); err != nil {
+	if _, err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, false, legacyJobs); err != nil {
 		return err
 	}
 	client, err := river.ClientFromContextSafely[pgx.Tx](ctx)

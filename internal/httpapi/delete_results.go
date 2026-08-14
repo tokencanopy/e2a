@@ -35,11 +35,13 @@ type DeleteAgentResult struct {
 
 // Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
 // means e2a-managed teardown is complete: the provider identity is confirmed
-// removed, or was never e2a's to remove (not e2a-managed, or no provider
-// configured).
+// removed or no provider is configured. "manual_review" means a provider
+// identity exists but its ownership tag is absent, so e2a cannot safely mutate
+// it or claim absence.
 const (
-	SendingTeardownConfirmed = "confirmed"
-	SendingTeardownPending   = "pending"
+	SendingTeardownConfirmed    = "confirmed"
+	SendingTeardownPending      = "pending"
+	SendingTeardownManualReview = "manual_review"
 )
 
 // DeleteDomainResult confirms a domain delete.
@@ -48,7 +50,7 @@ type DeleteDomainResult struct {
 	Domain  string `json:"domain" doc:"The deleted domain."`
 	// omitempty keeps the field OPTIONAL in the schema: generated clients must
 	// accept responses from older servers that predate it.
-	SendingTeardown string `json:"sending_teardown,omitempty" doc:"State of e2a-managed sending-identity teardown: 'confirmed' (identity removed, or was never e2a-managed / no provider configured) or 'pending' (open set — treat unknown values as not confirmed). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices."`
+	SendingTeardown string `json:"sending_teardown,omitempty" doc:"State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."`
 } // @name DeleteDomainResult
 
 // DeleteSuppressionResult confirms a suppression-list removal.

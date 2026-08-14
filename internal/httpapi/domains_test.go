@@ -143,8 +143,8 @@ func TestDeleteDomain(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body["deleted"] != true || body["domain"] != "acme.com" {
-		t.Fatalf("want {deleted:true, domain:acme.com}, got %v", body)
+	if body["deleted"] != true || body["domain"] != "acme.com" || body["sending_teardown"] != SendingTeardownConfirmed {
+		t.Fatalf("want {deleted:true, domain:acme.com, sending_teardown:confirmed}, got %v", body)
 	}
 }
 

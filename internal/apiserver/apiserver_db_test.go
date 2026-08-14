@@ -26,6 +26,7 @@ type fakeSenderIdentity struct {
 	provisionErr   error
 	deprovisionErr error
 	tryErr         error
+	tryUnconfirmed bool
 	deprovisioned  []string
 	tried          []string
 	// onTry observes state at TryDeprovisionNow time (e.g. that the domain row
@@ -33,12 +34,12 @@ type fakeSenderIdentity struct {
 	onTry func()
 }
 
-func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) error {
+func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) (bool, error) {
 	if f.onTry != nil {
 		f.onTry()
 	}
 	f.tried = append(f.tried, domain)
-	return f.tryErr
+	return !f.tryUnconfirmed, f.tryErr
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, _ string) error {
@@ -97,12 +98,12 @@ func TestBuildDepsDeleteDomainWithSenderIdentity(t *testing.T) {
 		rowGoneAtTryTime = lookupErr != nil
 	}
 
-	teardownPending, err := deps.DeleteDomain(ctx, domain, user.ID)
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
 	if err != nil {
 		t.Fatalf("DeleteDomain: %v", err)
 	}
-	if teardownPending {
-		t.Fatal("teardownPending = true, want false when the best-effort deprovision succeeded")
+	if teardown != httpapi.SendingTeardownConfirmed {
+		t.Fatalf("teardown = %q, want %q when best-effort deprovision succeeded", teardown, httpapi.SendingTeardownConfirmed)
 	}
 	if len(fake.deprovisioned) != 1 || fake.deprovisioned[0] != domain {
 		t.Fatalf("deprovisioned = %v, want [%s] — durable SES teardown must be enqueued in the delete tx", fake.deprovisioned, domain)
@@ -139,18 +140,45 @@ func TestBuildDepsDeleteDomainSucceedsWhenProviderUnavailable(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	teardownPending, err := deps.DeleteDomain(ctx, domain, user.ID)
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
 	if err != nil {
 		t.Fatalf("DeleteDomain must succeed while the provider is down, got %v", err)
 	}
-	if !teardownPending {
-		t.Fatal("teardownPending = false, want true — callers gate DNS removal on this")
+	if teardown != httpapi.SendingTeardownPending {
+		t.Fatalf("teardown = %q, want %q — callers gate DNS removal on this", teardown, httpapi.SendingTeardownPending)
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
 		t.Fatal("domain row still present after DeleteDomain")
 	}
 	if len(fake.deprovisioned) != 1 {
 		t.Fatalf("durable teardown job missing: %v", fake.deprovisioned)
+	}
+}
+
+func TestBuildDepsDeleteDomainReportsManualReviewWhenOwnershipCannotBeConfirmed(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	p.SenderIdentity = &fakeSenderIdentity{tryUnconfirmed: true}
+	deps := apiserver.BuildDeps(p)
+
+	user, err := store.CreateOrGetUser(ctx, "ownership-drift@example.test", "Owner", "ownership-drift-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "ownership-drift.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("DeleteDomain must commit despite ownership drift: %v", err)
+	}
+	if teardown != httpapi.SendingTeardownManualReview {
+		t.Fatalf("teardown = %q, want %q", teardown, httpapi.SendingTeardownManualReview)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
+		t.Fatal("domain row still present after DeleteDomain")
 	}
 }
 

@@ -57,10 +57,11 @@ type Manager struct {
 // and the hourly reaper are the guarantee). It runs the same desired-state
 // convergence as the workers: the absent row converges to provider absence,
 // ErrIdentityNotOwned is tolerated (a foreign identity is not e2a's to
-// delete), and the ledger tombstone is deliberately retained for the
+// delete) but returned as confirmed=false so callers never claim provider
+// absence or release DNS. The ledger tombstone is deliberately retained for the
 // post-drain audit to finalize (mixed-version late-create repair). The caller
 // bounds the wait via ctx; the mutation gate honors cancellation.
-func (m *Manager) TryDeprovisionNow(ctx context.Context, domain string) error {
+func (m *Manager) TryDeprovisionNow(ctx context.Context, domain string) (confirmed bool, err error) {
 	return syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false, m.cfg.LegacyJobCompat)
 }
 
