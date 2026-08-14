@@ -253,10 +253,16 @@ async def test_messages_extended_surface_conversations_and_inbound_facade():
             assert metrics.messages_in_window > 0
             assert metrics.messages_with_lifecycle > 0
             assert metrics.counters, "expected at least one reason-code tally"
-            assert metrics.summary.accepted > 0
-            # A denominator exists now, so the rate is a real number. It stays
-            # None only when there is no traffic at all.
-            assert metrics.rates.delivered_rate is not None
+            # This test sends only to the same agent, so the message takes the
+            # local loopback path. Loopback mail never reaches a recipient
+            # server and is intentionally excluded from delivery-rate
+            # denominators; with no external send, the rate is undefined.
+            assert metrics.summary.accepted == 1
+            assert metrics.summary.submitted == 1
+            assert metrics.summary.loopback == 1
+            assert metrics.summary.received == 1
+            assert metrics.summary.delivered == 0
+            assert metrics.rates.delivered_rate is None
             assert metrics.end > metrics.start
             mark_covered("messages.get_metrics")
 

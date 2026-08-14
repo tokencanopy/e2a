@@ -314,6 +314,7 @@ func accountDaysTx(ctx context.Context, tx pgx.Tx, userID string, start, end tim
 		JOIN agent_identities a ON a.id = m.agent_id
 		JOIN message_lifecycle_transitions t ON t.message_id = m.id
 		WHERE a.user_id = $1
+		  AND a.deleted_at IS NULL
 		  AND m.created_at >= $2
 		  AND m.created_at < $3
 		GROUP BY day, t.reason_code, t.stage, t.outcome, t.retryable

@@ -14,7 +14,7 @@ import { HttpFile } from '../http/http.js';
 
 export class MetricsSummaryView {
     /**
-    * Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.
+    * Outbound messages e2a accepted from the send API. External-delivery rates use accepted minus loopback as their denominator. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.
     */
     'accepted': number;
     /**
@@ -86,7 +86,7 @@ export class MetricsSummaryView {
     */
     'sendFailed': number;
     /**
-    * Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate.
+    * Messages an upstream provider or the loopback path accepted for delivery. The bounce rate uses submitted minus loopback as its denominator; complaint rate is complained ÷ delivered.
     */
     'submitted': number;
     /**

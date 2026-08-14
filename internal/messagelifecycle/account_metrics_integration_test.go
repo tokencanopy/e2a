@@ -40,6 +40,23 @@ func accountCountsByCode(metrics messagelifecycle.AgentMetrics) map[messagelifec
 	return countsByCode(metrics)
 }
 
+func accountDayCountsByCode(days []messagelifecycle.DayBucket) map[messagelifecycle.ReasonCode]messagelifecycle.ReasonCodeCount {
+	result := make(map[messagelifecycle.ReasonCode]messagelifecycle.ReasonCodeCount)
+	for _, day := range days {
+		for _, count := range day.Counts {
+			current := result[count.ReasonCode]
+			current.ReasonCode = count.ReasonCode
+			current.Stage = count.Stage
+			current.Outcome = count.Outcome
+			current.Retryable = count.Retryable
+			current.Messages += count.Messages
+			current.Observations += count.Observations
+			result[count.ReasonCode] = current
+		}
+	}
+	return result
+}
+
 // TestAccountMetricsSumsEveryAgentAndExcludesOtherAccounts is the tenancy
 // test: totals must span all of the caller's agents and none of anybody else's.
 func TestAccountMetricsSumsEveryAgentAndExcludesOtherAccounts(t *testing.T) {
@@ -112,7 +129,7 @@ func TestAccountMetricsExcludesTrashedAgents(t *testing.T) {
 	}
 
 	metrics, err := store.CountByReasonCodeForAccount(ctx, "usr_accttrashlive",
-		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, false)
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, true)
 	if err != nil {
 		t.Fatalf("CountByReasonCodeForAccount: %v", err)
 	}
@@ -128,6 +145,32 @@ func TestAccountMetricsExcludesTrashedAgents(t *testing.T) {
 	}
 	if metrics.Agents[0].AgentEmail != live {
 		t.Errorf("breakdown agent = %q, want the live agent %q", metrics.Agents[0].AgentEmail, live)
+	}
+	if got := accountDayCountsByCode(metrics.Days)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages; got != 1 {
+		t.Errorf("daily accepted messages = %d, want 1: a trashed agent's mail is still in the buckets", got)
+	}
+	if got := accountDayCountsByCode(metrics.Days)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages; got != accountCountsByCode(metrics.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages {
+		t.Errorf("daily accepted messages = %d, totals accepted = %d: buckets must reconcile with totals", got, accountCountsByCode(metrics.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE agent_identities SET deleted_at = NULL WHERE id = $1`, doomed); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics, err = store.CountByReasonCodeForAccount(ctx, "usr_accttrashlive",
+		metricsBaseTime.Add(-time.Hour), metricsBaseTime.Add(time.Hour), true, true)
+	if err != nil {
+		t.Fatalf("CountByReasonCodeForAccount after restore: %v", err)
+	}
+	if got := accountCountsByCode(metrics.Totals)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages; got != 2 {
+		t.Errorf("restored accepted messages = %d, want 2", got)
+	}
+	if got := len(metrics.Agents); got != 2 {
+		t.Errorf("restored agents = %d, want 2", got)
+	}
+	if got := accountDayCountsByCode(metrics.Days)[messagelifecycle.ReasonAcceptanceOutboundAPI].Messages; got != 2 {
+		t.Errorf("restored daily accepted messages = %d, want 2", got)
 	}
 }
 

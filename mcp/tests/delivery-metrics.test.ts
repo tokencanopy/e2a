@@ -93,6 +93,25 @@ describe("MCP delivery-metrics tools", () => {
     }
   });
 
+  it("names every rate formula in both tool descriptions", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["get_agent_metrics", "get_account_metrics"]) {
+      const desc = tools.find((t) => t.name === name)!.description!;
+      expect(desc, `${name} must name the delivery formula`).toContain(
+        "delivered_rate = delivered / (accepted - loopback)",
+      );
+      expect(desc, `${name} must name the bounce formula`).toContain(
+        "bounce_rate = (bounced_hard + bounced_soft + bounced_undetermined) / (submitted - loopback)",
+      );
+      expect(desc, `${name} must preserve the delivered complaint denominator`).toContain(
+        "complaint_rate = complained / delivered",
+      );
+      expect(desc, `${name} must name the suppression formula`).toContain(
+        "suppression_block_rate = suppressed / (accepted - loopback)",
+      );
+    }
+  });
+
   it("forwards the agent selector and parsed window", async () => {
     await client.callTool({
       name: "get_agent_metrics",

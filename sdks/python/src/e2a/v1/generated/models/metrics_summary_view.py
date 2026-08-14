@@ -26,7 +26,7 @@ class MetricsSummaryView(BaseModel):
     """
     MetricsSummaryView
     """ # noqa: E501
-    accepted: StrictInt = Field(description="Outbound messages e2a accepted from the send API. The denominator for delivered_rate and suppression_block_rate. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.")
+    accepted: StrictInt = Field(description="Outbound messages e2a accepted from the send API. External-delivery rates use accepted minus loopback as their denominator. Counts sends only — the arriving copy of an agent-to-agent loopback delivery is counted under received, not here.")
     bounced_hard: StrictInt = Field(description="Permanent bounces. These add the recipient to the suppression list.")
     bounced_soft: StrictInt = Field(description="Transient bounces.")
     bounced_undetermined: StrictInt = Field(description="Bounces the provider did not classify. Kept separate rather than folded into soft, which would understate hard-bounce risk.")
@@ -44,7 +44,7 @@ class MetricsSummaryView(BaseModel):
     review_held: StrictInt = Field(description="Messages placed on a human-in-the-loop review hold.")
     review_rejected: StrictInt = Field(description="Holds a reviewer explicitly rejected.")
     send_failed: StrictInt = Field(description="Messages that reached a terminal submission failure: provider rejection, local retry exhaustion, or policy cancellation. Break the three apart via counters[].")
-    submitted: StrictInt = Field(description="Messages an upstream provider or the loopback path accepted for delivery. The denominator for bounce_rate.")
+    submitted: StrictInt = Field(description="Messages an upstream provider or the loopback path accepted for delivery. The bounce rate uses submitted minus loopback as its denominator; complaint rate is complained ÷ delivered.")
     suppressed: StrictInt = Field(description="Sends blocked before submission because the recipient was on a suppression list. These never left e2a, so an agent sees no bounce and no reply — watch this counter for silent losses.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["accepted", "bounced_hard", "bounced_soft", "bounced_undetermined", "complained", "delivered", "dmarc_error", "dmarc_fail", "dmarc_none", "dmarc_pass", "loopback", "received", "review_approved", "review_expired_approved", "review_expired_rejected", "review_held", "review_rejected", "send_failed", "submitted", "suppressed"]

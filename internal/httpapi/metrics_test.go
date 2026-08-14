@@ -103,6 +103,7 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 			metricsCount(messagelifecycle.ReasonSubmissionUpstreamAccepted, 8, 8),
 			metricsCount(messagelifecycle.ReasonDeliveryRecipientServerAccepted, 6, 6),
 			metricsCount(messagelifecycle.ReasonDeliveryPermanentBounce, 2, 2),
+			metricsCount(messagelifecycle.ReasonComplaintRecipientReported, 1, 1),
 		},
 	})
 
@@ -129,6 +130,9 @@ func TestAgentMetricsSummaryUsesMessageGrain(t *testing.T) {
 	// comparable to the provider thresholds that trigger account review.
 	if got := rates["bounce_rate"].(float64); got != 0.25 {
 		t.Errorf("bounce_rate = %v, want 0.25 (2 bounced / 8 submitted)", got)
+	}
+	if got := rates["complaint_rate"].(float64); got != 1.0/6.0 {
+		t.Errorf("complaint_rate = %v, want %v (1 complaint / 6 delivered)", got, 1.0/6.0)
 	}
 
 	// The retried code must still expose its attempt count in counters[].
@@ -235,23 +239,27 @@ func TestAgentMetricsRateIsNullForPureLoopbackTraffic(t *testing.T) {
 		MessagesInWindow:      10,
 		MessagesWithLifecycle: 10,
 		Counts: []messagelifecycle.ReasonCodeCount{
-			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 5, 5),
-			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 5, 5),
-			metricsCount(messagelifecycle.ReasonAcceptanceLocalLoopback, 5, 5),
+			metricsCount(messagelifecycle.ReasonAcceptanceOutboundAPI, 1, 1),
+			metricsCount(messagelifecycle.ReasonSubmissionLocalLoopbackAccepted, 1, 1),
+			metricsCount(messagelifecycle.ReasonAcceptanceLocalLoopback, 1, 1),
 		},
 	})
 
 	_, body := metricsGET(t, srv, "agent@example.com", "")
-	rates := metricsSection(t, body, "rates")
-	if rates["delivered_rate"] != nil {
-		t.Errorf("delivered_rate = %#v, want null: there is no external mail to rate", rates["delivered_rate"])
+	summary := metricsSection(t, body, "summary")
+	want := map[string]float64{
+		"accepted": 1, "submitted": 1, "loopback": 1,
+		"received": 1, "delivered": 0,
 	}
-	if rates["bounce_rate"] != nil {
-		t.Errorf("bounce_rate = %#v, want null", rates["bounce_rate"])
+	for key, expected := range want {
+		if got := summary[key].(float64); got != expected {
+			t.Errorf("summary[%s] = %v, want %v", key, got, expected)
+		}
 	}
-	// The traffic is still visible in the counters — only the rate ignores it.
-	if got := metricsSection(t, body, "summary")["received"].(float64); got != 5 {
-		t.Errorf("received = %v, want 5", got)
+	for _, key := range []string{"delivered_rate", "bounce_rate", "complaint_rate", "suppression_block_rate"} {
+		if got := metricsSection(t, body, "rates")[key]; got != nil {
+			t.Errorf("rates[%s] = %#v, want null", key, got)
+		}
 	}
 }
 
