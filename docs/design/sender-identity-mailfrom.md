@@ -79,17 +79,23 @@ for verified domains; (b) needed an aligned Return-Path.
   claim new work; legacy jobs are drained by compatibility
   workers that converge current state and hand polling to an incarnation-aware
   v2 job with a fresh attempt budget.
-- **Rollback contract (the versioning's reverse direction):** a v2 job
+- **Rollback contract — this release is ROLL-FORWARD-ONLY.** A v2 job
   committed while the new binary bakes strands unconsumed if the deploy rolls
-  back — the old binary registers neither the v2 kinds nor the queue. This is
-  deliberately harmless rather than prevented: the ledger row (not the job) is
-  the source of truth, so the job is only an accelerator. During the rollback
-  window the old binary's alert-only reaper still surfaces any orphan identity
-  via its List sweep; on the next successful deploy the v2 reaper's
-  RunOnStart sweep converges the ledger backlog within minutes without
-  depending on the stranded job. The post-commit best-effort deprovision on
-  DELETE (below) additionally means the identity is usually already gone
-  before a rollback can strand anything.
+  back: the old binary registers neither the v2 kinds nor the queue, its
+  reaper is alert-only, and its blind legacy deprovision semantics return
+  (including the pre-existing delete/re-register ABA hazard the v2 versioning
+  exists to close). The stranding is bounded — the ledger row, not the job,
+  is the source of truth; the old binary's List sweep still ALERTs on orphan
+  identities; the post-commit best-effort deprovision on DELETE usually
+  removes the identity before a rollback can strand anything; and the next
+  v2-consuming deploy's RunOnStart sweep converges the ledger backlog within
+  minutes — but nothing converges it *while the rolled-back binary runs*.
+  Operators must therefore treat an automatic bake-gate rollback of this
+  release as a page: re-deploy a fixed v2-consuming candidate promptly rather
+  than sitting on the rolled-back binary. (The alternative — a two-release
+  consumers-first rollout — was rejected: producing legacy kinds from the new
+  binary would let the old slot claim new-style mutations with blind
+  semantics mid-overlap, which is strictly worse than bounded stranding.)
 - **`DELETE /v1/domains/{domain}` semantics:** the transaction commits the
   guarded row delete plus the durable teardown job — that is the API success
   boundary, independent of SES availability (an untagged/foreign identity or
@@ -149,6 +155,10 @@ owned by another application.
 5. Re-run both inventories, then deploy. An untagged legacy e2a identity fails
    closed with `identity not owned`; audit and tag it explicitly rather than
    weakening the ownership check.
+6. Deploy this release roll-forward-only (see the rollback contract above):
+   if the bake gate auto-rolls it back, promptly re-deploy a fixed candidate —
+   v2 teardown/repair work is stranded until a v2-consuming binary runs, and
+   the rolled-back binary's blind legacy semantics are back in force.
 
 ## Verification
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits
