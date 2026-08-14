@@ -57,14 +57,14 @@ export async function cleanupDomainFixture(
 	// outlive the identity, so DNS removal requires an EXPLICIT
 	// sending_teardown:"confirmed" — every other outcome fails closed. In
 	// particular, a retry of an already-deleted domain answers 404 with no
-	// teardown state at all: once this process has seen the domain pending,
-	// that 404 proves nothing and DNS stays. (A 404 with no pending history is
-	// the never-provisioned/already-cleaned case and proceeds — requiring
-	// 'confirmed' there would leak DNS for every fixture whose registration
-	// never succeeded.) Retained records are reported and the fixture stays
-	// tracked for manual follow-up once the identity is verifiably gone.
+	// teardown state at all. That response is ambiguous: the original DELETE
+	// may have committed while its pending receipt was lost, or another cleanup
+	// process may have observed it. A bodiless response therefore proves
+	// nothing about provider absence and DNS stays. Retained records are
+	// reported and the fixture stays tracked for manual follow-up once the
+	// identity is verifiably gone.
 	const domainDelete = result.completed.find((c) => c.kind === "domain" && c.id === fixture.domain);
-	if (!sendingTeardownAllowsDnsRemoval(fixture.domain, domainDelete?.raw ?? "")) {
+	if (!sendingTeardownAllowsDnsRemoval(domainDelete?.raw ?? "")) {
 		return {
 			...result,
 			dnsFailed: fixture.dnsRecords.map((record) => ({
@@ -100,36 +100,16 @@ export async function cleanupDomainFixture(
   return { ...result, dnsFailed };
 }
 
-// teardownPendingDomains remembers, per process, every domain whose delete
-// reported sending_teardown:"pending". A later bodiless 404 retry carries no
-// state and must not be read as safety.
-const teardownPendingDomains = new Set<string>();
-
-/** Test-only: clear the per-process pending-teardown memory. */
-export function resetSendingTeardownMemory(): void {
-	teardownPendingDomains.clear();
-}
-
 /**
- * DNS removal is allowed only on an explicit sending_teardown:"confirmed", or
- * on a bodiless response (404/204) for a domain never seen pending — the
- * never-provisioned case. Pending, malformed bodies, unexpected values, and
- * post-pending 404s all fail closed.
+ * DNS removal is allowed only on an explicit sending_teardown:"confirmed".
+ * Pending, malformed or bodiless responses, and unexpected values all fail
+ * closed because none proves provider absence after retries or process loss.
  */
-function sendingTeardownAllowsDnsRemoval(domain: string, raw: string): boolean {
-	if (raw === "") {
-		return !teardownPendingDomains.has(domain);
-	}
+function sendingTeardownAllowsDnsRemoval(raw: string): boolean {
+	if (raw === "") return false;
 	try {
 		const parsed = JSON.parse(raw) as { sending_teardown?: unknown };
-		if (parsed.sending_teardown === "confirmed") {
-			teardownPendingDomains.delete(domain);
-			return true;
-		}
-		if (parsed.sending_teardown === "pending") {
-			teardownPendingDomains.add(domain);
-		}
-		return false;
+		return parsed.sending_teardown === "confirmed";
 	} catch {
 		return false;
 	}

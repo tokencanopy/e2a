@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiClient, RawResponse } from "./client.ts";
-import { cleanupDomainFixture, DnsDeleteError, resetSendingTeardownMemory } from "./domain-fixture-cleanup.ts";
+import { cleanupDomainFixture, DnsDeleteError } from "./domain-fixture-cleanup.ts";
 import { disarmLeakReporter, getTracked, setReporterDeps, track, untrack } from "./cleanup.ts";
 
 function fakeClient(statusFor: (path: string) => number | { status: number; raw: string }, calls: string[]): ApiClient {
@@ -30,7 +30,6 @@ beforeEach(() => {
   drainTracked();
   disarmLeakReporter();
   setReporterDeps();
-	resetSendingTeardownMemory();
 });
 
 after(() => {
@@ -41,7 +40,13 @@ after(() => {
 
 test("verified-domain cleanup purges the agent and domain before removing DNS", async () => {
   const calls: string[] = [];
-  const client = fakeClient(() => 204, calls);
+  const client = fakeClient(
+		(path) =>
+			path.startsWith("/v1/domains/")
+				? { status: 200, raw: JSON.stringify({ deleted: true, domain: "run.example.test", sending_teardown: "confirmed" }) }
+				: 204,
+		calls,
+	);
   track("domain", "run.example.test");
   track("agent", "bot@run.example.test");
 
@@ -213,11 +218,9 @@ test("malformed or unexpected teardown values fail closed", async () => {
 	}
 });
 
-test("a first-contact 404 with no pending history proceeds to DNS removal", async () => {
-	// A fixture whose registration never succeeded server-side (or was already
-	// confirmed-cleaned in an earlier run) deletes to a 404 with no pending
-	// memory: no identity was ever provisioned, so DNS removal is safe —
-	// requiring 'confirmed' here would leak DNS for every such fixture.
+test("a first-contact 404 retains DNS because a prior pending receipt may have been lost", async () => {
+	// A missing API resource does not prove provider teardown. The DELETE may
+	// have committed in an earlier process whose pending receipt was lost.
 	const dnsCalls: string[] = [];
 	const client = fakeClient((path) => (path.startsWith("/v1/domains/") ? { status: 404, raw: "" } : 204), []);
 	track("domain", "never-registered.example.test");
@@ -229,13 +232,50 @@ test("a first-contact 404 with no pending history proceeds to DNS removal", asyn
 		},
 		{ sleep: async () => {} },
 	);
-	assert.deepEqual(dnsCalls, ["dns-ownership"]);
-	assert.deepEqual(result.dnsFailed, []);
+	assert.deepEqual(dnsCalls, []);
+	assert.equal(result.dnsFailed.length, 1);
+	assert.deepEqual(getTracked(), [{ kind: "domain", id: "never-registered.example.test" }]);
+});
+
+test("a lost committed DELETE response followed by 404 retains DNS", async () => {
+	let deletes = 0;
+	const client = {
+		async delete(path: string): Promise<RawResponse> {
+			if (!path.startsWith("/v1/domains/")) {
+				return { status: 204, ok: true, headers: {}, body: null, raw: "", latencyMs: 0 };
+			}
+			deletes++;
+			if (deletes === 1) throw new Error("response lost after commit");
+			return { status: 404, ok: false, headers: {}, body: null, raw: "", latencyMs: 0 };
+		},
+	} as unknown as ApiClient;
+	const dnsCalls: string[] = [];
+	track("domain", "run.example.test");
+
+	const result = await cleanupDomainFixture(
+		client,
+		{ domain: "run.example.test", dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.run.example.test" }] },
+		async (record) => {
+			dnsCalls.push(record.id!);
+		},
+		{ attempts: 2, sleep: async () => {} },
+	);
+
+	assert.equal(deletes, 2);
+	assert.deepEqual(dnsCalls, [], "an ambiguous retry must never release DNS");
+	assert.equal(result.dnsFailed.length, 1);
+	assert.deepEqual(getTracked(), [{ kind: "domain", id: "run.example.test" }]);
 });
 
 test("fixture-scoped cleanup cannot detach an older fixture from its DNS", async () => {
   const calls: string[] = [];
-  const client = fakeClient(() => 204, calls);
+  const client = fakeClient(
+		(path) =>
+			path.startsWith("/v1/domains/")
+				? { status: 200, raw: JSON.stringify({ deleted: true, domain: "current.example.test", sending_teardown: "confirmed" }) }
+				: 204,
+		calls,
+	);
   track("domain", "old.example.test");
   track("domain", "current.example.test");
 
@@ -257,7 +297,13 @@ test("fixture-scoped cleanup cannot detach an older fixture from its DNS", async
 test("DNS deletes retry independently and aggregate failures", async () => {
   const calls: string[] = [];
   const attempts = new Map<string, number>();
-  const client = fakeClient(() => 204, calls);
+  const client = fakeClient(
+		(path) =>
+			path.startsWith("/v1/domains/")
+				? { status: 200, raw: JSON.stringify({ deleted: true, domain: "run.example.test", sending_teardown: "confirmed" }) }
+				: 204,
+		calls,
+	);
   track("domain", "run.example.test");
 
   const result = await cleanupDomainFixture(
