@@ -120,6 +120,13 @@ func (ReconcileV2Args) Kind() string { return "sender_identity_reconcile_v2" }
 // queue and only after the old slot's maximum bake+drain window has elapsed.
 type PostDrainAuditArgs struct {
 	Domain string `json:"domain" river:"unique"`
+	// Window is the audit's schedule bucket (scheduled-at unix seconds /
+	// postDrainConvergenceDelay). It scopes ByArgs uniqueness in time: River's
+	// unique state set cannot drop `completed`, so without it a completed
+	// audit inside the ~24h retention blocked the next mutation's audit for
+	// the same domain. Same-bucket mutations still dedupe to one job; a
+	// completed audit's bucket is strictly older than any new mutation's.
+	Window int64 `json:"window" river:"unique"`
 }
 
 func (PostDrainAuditArgs) Kind() string { return "sender_identity_post_drain_audit_v2" }
@@ -469,12 +476,24 @@ func convergeWorkerIdentity(ctx context.Context, domain string, store Store, pro
 	if err != nil || client == nil {
 		return nil
 	}
-	_, err = client.Insert(ctx, PostDrainAuditArgs{Domain: domain}, &river.InsertOpts{
-		Queue:       jobs.QueueSenderIdentityV2,
-		ScheduledAt: time.Now().Add(postDrainConvergenceDelay),
-		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByQueue: true},
-	})
+	args, opts := postDrainAuditInsert(domain, time.Now())
+	_, err = client.Insert(ctx, args, opts)
 	return err
+}
+
+// postDrainAuditInsert builds the delayed finalizer insert for a mutation
+// happening at now. See PostDrainAuditArgs.Window for why uniqueness is
+// scoped to the schedule bucket.
+func postDrainAuditInsert(domain string, now time.Time) (PostDrainAuditArgs, *river.InsertOpts) {
+	scheduledAt := now.Add(postDrainConvergenceDelay)
+	return PostDrainAuditArgs{
+			Domain: domain,
+			Window: scheduledAt.Unix() / int64(postDrainConvergenceDelay/time.Second),
+		}, &river.InsertOpts{
+			Queue:       jobs.QueueSenderIdentityV2,
+			ScheduledAt: scheduledAt,
+			UniqueOpts:  river.UniqueOpts{ByArgs: true, ByQueue: true},
+		}
 }
 
 // setFailedStatus writes a failed status and reports whether the incarnation

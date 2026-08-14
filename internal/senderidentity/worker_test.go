@@ -417,6 +417,34 @@ func TestPostDrainSweepRepairsLegacyMutationRaces(t *testing.T) {
 	})
 }
 
+// TestPostDrainAuditWindowScopesUniqueness pins the review fix for the
+// completed-job dedupe trap: River cannot drop `completed` from a unique
+// state set, so a completed audit inside the ~24h retention window silently
+// swallowed the next mutation's audit (a domain re-registered and re-deleted
+// within retention waited for the hourly reaper instead of the promised
+// 15-minute finalizer). Scoping uniqueness by the audit's schedule bucket
+// keeps same-window mutations deduped while a completed audit — whose bucket
+// is always in the past relative to a new mutation's — can never block one.
+func TestPostDrainAuditWindowScopesUniqueness(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	first, opts := postDrainAuditInsert("d.example", now)
+	if opts.ScheduledAt != now.Add(postDrainConvergenceDelay) {
+		t.Fatalf("ScheduledAt = %v, want now+%v", opts.ScheduledAt, postDrainConvergenceDelay)
+	}
+	if !opts.UniqueOpts.ByArgs || !opts.UniqueOpts.ByQueue {
+		t.Fatalf("audit insert must stay unique by args+queue, got %+v", opts.UniqueOpts)
+	}
+
+	sameWindow, _ := postDrainAuditInsert("d.example", now.Add(30*time.Second))
+	if first.Window != sameWindow.Window {
+		t.Fatalf("mutations 30s apart must share a window: %d vs %d", first.Window, sameWindow.Window)
+	}
+	later, _ := postDrainAuditInsert("d.example", now.Add(postDrainConvergenceDelay+time.Minute))
+	if first.Window == later.Window {
+		t.Fatalf("a mutation after the first audit's schedule must get a fresh window, both %d", first.Window)
+	}
+}
+
 func TestLegacyReapRetainsDeletionTombstone(t *testing.T) {
 	const domain = "legacy-reap.example.test"
 	store := newFakeStore()
