@@ -6,7 +6,7 @@
 # wizard (SKILL.md) gathers the answers, exports them as ANS_*, and runs this;
 # keeping the mechanical part here makes it testable and reproducible.
 #
-#   agentify-render.sh --to <target-repo-root>
+#   agentify-render.sh --to TARGET_REPO_ROOT
 #   agentify-render.sh _selftest          # render into a temp dir + assert
 #
 # Answers (env, gathered by the wizard):
@@ -15,14 +15,16 @@
 #   ANS_VERIFY_SETUP_SCRIPT
 #
 # Renders (idempotent — safe to re-run to update):
-#   autonomous-repo.config.yml.tmpl -> <target>/autonomous-repo.config.yml
-#   runtime-skill/**                -> <target>/.claude/skills/autonomous-repo/**
-#   scripts/*.sh                    -> <target>/scripts/
-#   workflows/*.yml.tmpl            -> <target>/.github/workflows/*.yml  (.tmpl stripped)
+#   autonomous-repo.config.yml.tmpl becomes TARGET/autonomous-repo.config.yml
+#   runtime-skill/**                becomes TARGET/.claude/skills/autonomous-repo/**
+#   scripts/*.sh                    becomes TARGET/scripts/
+#   workflows/*.yml.tmpl            becomes TARGET/.github/workflows/*.yml
 set -euo pipefail
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="$BASE/templates"
+# shellcheck source=./safe-paths.sh
+source "$BASE/safe-paths.sh"
 
 _yaml_dq_content() {
   python3 -c 'import json,sys
@@ -44,12 +46,12 @@ _sed_replacement() {
 
 _single_line() {
   case "$2" in
-    *$'\n'*|*$'\r'*) echo "agentify: $1 must be one line" >&2; exit 2 ;;
+    *$'\n'*|*$'\r'*) safe_stderr "agentify: $1 must be one line"; exit 2 ;;
   esac
 }
 
 _required() {
-  [ -n "$2" ] || { echo "agentify: $1 is required" >&2; exit 2; }
+  [ -n "$2" ] || { safe_stderr "agentify: $1 is required"; exit 2; }
 }
 
 _validate_answers() {
@@ -58,21 +60,21 @@ _validate_answers() {
     ANS_SUPPORT_ADDRESS ANS_FIX_GATE_MODE ANS_APPROVER_ADDRESS ANS_VERIFY_SETUP_SCRIPT; do
     _single_line "$name" "${!name:-}"
   done
-  [[ "${ANS_OWNER:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "agentify: invalid owner" >&2; exit 2; }
-  [[ "${ANS_REPO:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "agentify: invalid repo" >&2; exit 2; }
-  [[ "${ANS_MARKER:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "agentify: invalid marker" >&2; exit 2; }
-  [[ "${ANS_FIX_GATE_MODE:-}" =~ ^(auto|hitl)$ ]] || { echo "agentify: fix gate must be auto or hitl" >&2; exit 2; }
+  [[ "${ANS_OWNER:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { safe_stderr "agentify: invalid owner"; exit 2; }
+  [[ "${ANS_REPO:-}" =~ ^[A-Za-z0-9_.-]+$ ]] || { safe_stderr "agentify: invalid repo"; exit 2; }
+  [[ "${ANS_MARKER:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { safe_stderr "agentify: invalid marker"; exit 2; }
+  [[ "${ANS_FIX_GATE_MODE:-}" =~ ^(auto|hitl)$ ]] || { safe_stderr "agentify: fix gate must be auto or hitl"; exit 2; }
   for name in ANS_PRODUCT_NAME ANS_SUPPORT_ADDRESS ANS_APPROVER_ADDRESS ANS_VERIFY_SETUP_SCRIPT; do
     _required "$name" "${!name:-}"
   done
 }
 
-render_config() {  # $1 = target root, $2 = force ("1" to overwrite)
-  local out="$1/autonomous-repo.config.yml"
+render_config() {  # $1 = force ("1" to overwrite)
+  local force=${1:-} out=""
   # Re-runs UPDATE the code (scaffold) but must NOT clobber the adopter's
   # tuned config (always_hitl, the filled bot_login, etc.). Preserve an
   # existing config unless --force.
-  if [ -f "$out" ] && [ "${2:-}" != "1" ]; then
+  if out=$(safe_existing_file "autonomous-repo.config.yml") && [ "$force" != "1" ]; then
     echo "agentify: $out exists — preserving your edits (pass --force to regenerate)."
     return 0
   fi
@@ -87,61 +89,76 @@ render_config() {  # $1 = target root, $2 = force ("1" to overwrite)
     -e "s|{{FIX_GATE_MODE}}|$(_sed_replacement "${ANS_FIX_GATE_MODE:-hitl}")|g" \
     -e "s|{{APPROVER_ADDRESS}}|$(_sed_replacement "${ANS_APPROVER_ADDRESS:-}")|g" \
     -e "s|{{VERIFY_SETUP_SCRIPT}}|$(_sed_replacement "${ANS_VERIFY_SETUP_SCRIPT:-}")|g" \
-    "$TEMPLATES/autonomous-repo.config.yml.tmpl" > "$out"
+    "$TEMPLATES/autonomous-repo.config.yml.tmpl" | safe_write "autonomous-repo.config.yml" 0644
   # Only real placeholders ({{UPPERCASE_IDENT}}) — not the literal "{{...}}"
   # in the template's explanatory comment.
+  out=$(safe_existing_file "autonomous-repo.config.yml")
   if grep -qE '\{\{[A-Z][A-Z_]*\}\}' "$out"; then
-    echo "agentify-render.sh: unfilled placeholder(s) remain in $out:" >&2
-    grep -nE '\{\{[A-Z][A-Z_]*\}\}' "$out" >&2; return 1
+    safe_stderr "agentify-render.sh: unfilled placeholder(s) remain in $out:"
+    safe_stderr "$(grep -nE '\{\{[A-Z][A-Z_]*\}\}' "$out")"
+    return 1
   fi
 }
 
-scaffold() {  # $1 = target root
-  local t="$1"
-  mkdir -p "$t/.claude/skills/autonomous-repo" "$t/scripts" "$t/.github/workflows"
-  cp -R "$TEMPLATES/runtime-skill/." "$t/.claude/skills/autonomous-repo/"
-  cp "$TEMPLATES"/scripts/*.sh "$t/scripts/"
-  chmod +x "$t"/scripts/*.sh
+scaffold() {
+  local f rel
+  while IFS= read -r -d '' f; do
+    rel=${f#"$TEMPLATES/runtime-skill/"}
+    safe_copy "$f" ".claude/skills/autonomous-repo/$rel" 0644
+  done < <(find "$TEMPLATES/runtime-skill" -type f -print0)
+  for f in "$TEMPLATES"/scripts/*.sh; do
+    safe_copy "$f" "scripts/$(basename "$f")" 0755
+  done
   for f in "$TEMPLATES"/workflows/*.yml.tmpl; do
-    cp "$f" "$t/.github/workflows/$(basename "$f" .tmpl)"
+    safe_copy "$f" ".github/workflows/$(basename "$f" .tmpl)" 0644
   done
 }
 
 # apply_addons: scaffold each opted-in addon (ANS_ADDONS, space-separated) to
-# tools/<name>/ and append its setup.md. Addons are additive — the core loop
+# tools/NAME and append its setup.md. Addons are additive — the core loop
 # runs without them.
-apply_addons() {  # $1 = target root
-  local t="$1" name src
+apply_addons() {
+  local name src f rel setup_out=""
   for name in ${ANS_ADDONS:-}; do
     # Reject anything that isn't a plain addon name — `..`/`/` would let the
     # cp escape tools/ (ANS_ADDONS is deployer-set, but fail safe anyway).
     case "$name" in
-      ""|*[!a-z0-9-]*) echo "agentify: invalid addon name '$name' (skipped)" >&2; continue ;;
+      ""|*[!a-z0-9-]*) safe_stderr "agentify: invalid addon name '$name' (skipped)"; continue ;;
     esac
     src="$TEMPLATES/addons/$name"
     if [ ! -d "$src/files" ]; then
-      echo "agentify: unknown addon '$name' (skipped)" >&2; continue
+      safe_stderr "agentify: unknown addon '$name' (skipped)"; continue
     fi
-    mkdir -p "$t/tools/$name"
-    cp -R "$src/files/." "$t/tools/$name/"
+    while IFS= read -r -d '' f; do
+      rel=${f#"$src/files/"}
+      safe_copy "$f" "tools/$name/$rel" 0644
+    done < <(find "$src/files" -type f -print0)
     if [ -f "$src/setup.md" ]; then
-      { printf '\n## Addon: %s\n\n' "$name"; cat "$src/setup.md"; } >> "$t/AGENTIFY-ADDON-SETUP.md"
+      if setup_out=$(safe_existing_file "AGENTIFY-ADDON-SETUP.md"); then
+        { cat "$setup_out"; printf '\n## Addon: %s\n\n' "$name"; cat "$src/setup.md"; } |
+          safe_write "AGENTIFY-ADDON-SETUP.md" 0644
+      else
+        { printf '\n## Addon: %s\n\n' "$name"; cat "$src/setup.md"; } |
+          safe_write "AGENTIFY-ADDON-SETUP.md" 0644
+      fi
     fi
-    echo "agentify: addon '$name' -> tools/$name/"
+    echo "agentify: addon '$name' installed in tools/$name/"
   done
 }
 
 if [ "${1:-}" = "_selftest" ]; then
   T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+  safe_paths_init "$T"
   export ANS_PRODUCT_NAME="acme" ANS_OWNER="acme" ANS_REPO="widget" ANS_MARKER="acme-feedback" \
     ANS_REVIEWER_LOGIN="dev" ANS_BOT_LOGIN="acme-bot[bot]" ANS_SUPPORT_ADDRESS="support@acme.test" \
     ANS_FIX_GATE_MODE="hitl" ANS_APPROVER_ADDRESS="boss@acme.test" ANS_VERIFY_SETUP_SCRIPT="scripts/verify.sh"
-  render_config "$T"; scaffold "$T"
+  render_config; scaffold
   fail=0
   # re-run must preserve an existing config (update the code, not the config)
-  echo 'tuned: yes' >> "$T/autonomous-repo.config.yml"
-  render_config "$T"; grep -q 'tuned: yes' "$T/autonomous-repo.config.yml" || { echo "FAIL: re-run clobbered the config"; fail=1; }
-  render_config "$T" 1; grep -q 'tuned: yes' "$T/autonomous-repo.config.yml" && { echo "FAIL: --force did not regenerate"; fail=1; }
+  config_path=$(safe_existing_file "autonomous-repo.config.yml")
+  { cat "$config_path"; echo 'tuned: yes'; } | safe_write "autonomous-repo.config.yml" 0644
+  render_config; grep -q 'tuned: yes' "$T/autonomous-repo.config.yml" || { echo "FAIL: re-run clobbered the config"; fail=1; }
+  render_config 1; grep -q 'tuned: yes' "$T/autonomous-repo.config.yml" && { echo "FAIL: --force did not regenerate"; fail=1; }
   grep -q 'repo: "acme/widget"' "$T/autonomous-repo.config.yml" || { echo "FAIL: repo not rendered"; fail=1; }
   grep -q 'approver: "boss@acme.test"' "$T/autonomous-repo.config.yml" || { echo "FAIL: approver not rendered"; fail=1; }
   grep -qE '\{\{[A-Z][A-Z_]*\}\}' "$T/autonomous-repo.config.yml" && { echo "FAIL: placeholder left"; fail=1; }
@@ -155,13 +172,13 @@ if [ "${1:-}" = "_selftest" ]; then
   # addons: none by default
   [ -e "$T/tools" ] && { echo "FAIL: tools/ created with no ANS_ADDONS"; fail=1; }
   # addons: opt in submit-feedback-mcp
-  ANS_ADDONS="submit-feedback-mcp" apply_addons "$T"
+  ANS_ADDONS="submit-feedback-mcp" apply_addons
   [ -f "$T/tools/submit-feedback-mcp/server.mjs" ] || { echo "FAIL: addon server.mjs not scaffolded"; fail=1; }
   [ -f "$T/tools/submit-feedback-mcp/bridge.mjs" ] || { echo "FAIL: addon bridge.mjs not scaffolded"; fail=1; }
   grep -q 'Addon: submit-feedback-mcp' "$T/AGENTIFY-ADDON-SETUP.md" || { echo "FAIL: addon setup not appended"; fail=1; }
-  ANS_ADDONS="nope-addon" apply_addons "$T" 2>/dev/null; [ -e "$T/tools/nope-addon" ] && { echo "FAIL: unknown addon scaffolded"; fail=1; }
+  ANS_ADDONS="nope-addon" apply_addons; [ -e "$T/tools/nope-addon" ] && { echo "FAIL: unknown addon scaffolded"; fail=1; }
   # traversal name rejected (dest would be $T/tools/../evil = $T/evil)
-  ANS_ADDONS="../evil" apply_addons "$T" 2>/dev/null; [ -e "$T/evil" ] && { echo "FAIL: traversal addon escaped tools/"; fail=1; }
+  ANS_ADDONS="../evil" apply_addons; [ -e "$T/evil" ] && { echo "FAIL: traversal addon escaped tools/"; fail=1; }
   if [ "$fail" = 0 ]; then echo "agentify-render.sh selftest: OK"; else echo "agentify-render.sh selftest: FAILED"; exit 1; fi
   exit 0
 fi
@@ -171,13 +188,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --to) TARGET="$2"; shift 2 ;;
     --force) FORCE="1"; shift ;;
-    *) echo "agentify-render.sh: unknown arg '$1'" >&2; exit 2 ;;
+    *) safe_stderr "agentify-render.sh: unknown arg '$1'"; exit 2 ;;
   esac
 done
-[ -n "$TARGET" ] || { echo "agentify-render.sh: --to <target-repo-root> is required" >&2; exit 2; }
-[ -d "$TEMPLATES" ] || { echo "agentify-render.sh: templates not found at $TEMPLATES" >&2; exit 2; }
+[ -n "$TARGET" ] || { safe_stderr "agentify-render.sh: --to TARGET_REPO_ROOT is required"; exit 2; }
+[ -d "$TEMPLATES" ] || { safe_stderr "agentify-render.sh: templates not found at $TEMPLATES"; exit 2; }
 _validate_answers
-render_config "$TARGET" "$FORCE"
-scaffold "$TARGET"
-apply_addons "$TARGET"
+safe_paths_init "$TARGET"
+render_config "$FORCE"
+scaffold
+apply_addons
 echo "agentify: rendered into $TARGET (config + .claude/skills/autonomous-repo + scripts + .github/workflows)"

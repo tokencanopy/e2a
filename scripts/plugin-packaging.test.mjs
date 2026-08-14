@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { access, readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { test } from "node:test";
+import { promisify } from "node:util";
+import { unexpectedPluginPackagePaths } from "./plugin-package-policy.mjs";
 
 const require = createRequire(import.meta.url);
 const { parse: parseYaml } = require("../plugins/e2a/skills/email-evals/runtime/node_modules/yaml");
+const execFileAsync = promisify(execFile);
+
+// The distributable is the tracked package tree. This excludes Git metadata and
+// ignored local build inputs such as a freshly installed runtime/node_modules.
+const walkFiles = async (directory) => {
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--", directory]);
+  return stdout.split("\0").filter(Boolean);
+};
+
+const directoryBytes = async (directory) => {
+  const files = await walkFiles(directory);
+  const sizes = await Promise.all(files.map(async (file) => {
+    const { stdout } = await execFileAsync("git", ["cat-file", "-s", `:${file}`]);
+    return Number(stdout.trim());
+  }));
+  return sizes.reduce((total, size) => total + size, 0);
+};
 
 const skillNames = async (plugin) => (await readdir(`plugins/${plugin}/skills`, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
@@ -35,16 +55,16 @@ test("marketplaces expose the supported plugin set and release versions", async 
   assert.deepEqual(claudeMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
   assert.deepEqual(codexMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
   assert.deepEqual(cursorMarket.plugins.map((plugin) => plugin.name), ["e2a"]);
-  assert.equal(claudeMarket.metadata.version, "0.9.0");
-  assert.equal(cursorMarket.metadata.version, "0.9.0");
+  assert.equal(claudeMarket.metadata.version, "0.9.1");
+  assert.equal(cursorMarket.metadata.version, "0.9.1");
 
   for (const client of [".claude-plugin", ".codex-plugin", ".cursor-plugin"]) {
     const core = JSON.parse(await readFile(`plugins/e2a/${client}/plugin.json`, "utf8"));
-    assert.equal(core.version, "0.9.0");
+    assert.equal(core.version, "0.9.1");
   }
   for (const client of [".claude-plugin", ".codex-plugin"]) {
     const labs = JSON.parse(await readFile(`plugins/e2a-labs/${client}/plugin.json`, "utf8"));
-    assert.equal(labs.version, "0.2.0");
+    assert.equal(labs.version, "0.2.1");
   }
 });
 
@@ -66,6 +86,31 @@ test("core Codex description advertises every stable capability", async () => {
   assert.match(codex.interface.longDescription, /inbox operation/i);
   assert.match(codex.interface.longDescription, /diagnosis/i);
   assert.match(codex.interface.longDescription, /evaluation/i);
+});
+
+test("plugin distributables omit build dependencies and native binaries", async () => {
+  for (const plugin of ["e2a", "e2a-labs"]) {
+    const files = await walkFiles(`plugins/${plugin}`);
+    assert.deepEqual(unexpectedPluginPackagePaths(plugin, files), []);
+    assert.equal(files.some((file) => file.split("/").includes("node_modules")), false);
+    assert.equal(files.some((file) => /(?:\.node|\/esbuild(?:\.exe)?)$/.test(file)), false);
+  }
+  assert.ok(await directoryBytes("plugins/e2a") < 5 * 1024 * 1024);
+});
+
+test("plugin package allowlists reject caches and undeclared runtime files", () => {
+  const syntheticCorePaths = [
+    "plugins/e2a/.npm/_cacache/index-v5/example",
+    "plugins/e2a/.yarn/cache/example-package.zip",
+    "plugins/e2a/skills/email-evals/runtime/lib/undeclared-runtime.mjs",
+  ];
+  const syntheticLabsPaths = [
+    "plugins/e2a-labs/.pnpm-store/v3/files/example",
+    "plugins/e2a-labs/skills/autopilot/runtime-cache.json",
+  ];
+
+  assert.deepEqual(unexpectedPluginPackagePaths("e2a", syntheticCorePaths), syntheticCorePaths);
+  assert.deepEqual(unexpectedPluginPackagePaths("e2a-labs", syntheticLabsPaths), syntheticLabsPaths);
 });
 
 test("Labs tracks the core plugin without requiring release tags", async () => {

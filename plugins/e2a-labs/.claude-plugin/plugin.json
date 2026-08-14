@@ -1,7 +1,7 @@
 {
   "name": "e2a-labs",
   "displayName": "e2a Labs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Experimental autonomous workflows for the e2a agent email gateway. Requires the core e2a plugin for MCP tools and authentication.",
   "author": {
     "name": "TokenCanopy",

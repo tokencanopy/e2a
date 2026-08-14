@@ -17,6 +17,7 @@ const requireBanner = [
 ].join("\n");
 const noticePackages = Object.freeze([
   { name: "postal-mime", version: "2.7.5", source: "https://postal-mime.postalsys.com", license: "LICENSE.txt" },
+  { name: "re2js", version: "2.8.6", source: "https://github.com/le0pard/re2js", license: "LICENSE" },
   { name: "ws", version: "8.21.3", source: "https://github.com/websockets/ws", license: "LICENSE" },
   { name: "yaml", version: "2.9.0", source: "https://eemeli.org/yaml/", license: "LICENSE" },
 ]);

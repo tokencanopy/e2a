@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { SafePatternSyntaxError, compileSafePattern } from "./safe-pattern.mjs";
 import { types as utilTypes } from "node:util";
 
 const STATUS_WEIGHT = Object.freeze({ pass: 0, fail: 1, error: 2 });
@@ -202,10 +203,13 @@ function containsHeaderInjection(value) {
   return false;
 }
 
-function compileRegex(value) {
-  if (value instanceof RegExp) return value;
+function compilePattern(value) {
+  if (value && typeof value.test === "function" && typeof value.replaceAll === "function") return value;
   if (typeof value !== "string" || value.length > 512) return null;
-  try { return new RegExp(value); } catch { return null; }
+  try { return compileSafePattern(value); } catch (error) {
+    if (error instanceof SafePatternSyntaxError) return null;
+    throw error;
+  }
 }
 
 function expectedAttachments(value) {
@@ -390,9 +394,9 @@ export function gradeContent(expectation = {}, evidence = {}, { replayRedactions
       }));
       if (subject.regex !== undefined) results.push(aggregate("subject.regex", subject.regex, candidates, (candidate) => {
         const found = withSubject(candidate); if (found.error) return found.error;
-        const regex = compileRegex(subject.regex);
-        if (!regex) return { status: "error", code: "invalid_subject_regex", actual: null };
-        const matches = regex.test(found.value);
+        const pattern = subject.regexPattern ?? compilePattern(subject.regex);
+        if (!pattern) return { status: "error", code: "invalid_subject_regex", actual: null };
+        const matches = pattern.test(found.value);
         return { status: matches ? "pass" : "fail", code: matches ? "matched" : "subject_regex_mismatch", actual: found.value };
       }));
       if (subject.policy !== undefined) results.push(aggregate("subject.policy", subject.policy, candidates, (candidate) => {
@@ -446,7 +450,7 @@ export function gradeContent(expectation = {}, evidence = {}, { replayRedactions
       }));
       if (body.forbiddenPatterns !== undefined) results.push(aggregate("body.forbidden_patterns", body.forbiddenPatterns, candidates, (candidate) => {
         const found = text(candidate); if (found.error) return found.error;
-        const patterns = body.forbiddenPatternRegexes ?? body.forbiddenPatterns.map((pattern) => compileRegex(pattern));
+        const patterns = body.forbiddenPatternPatterns ?? body.forbiddenPatterns.map((pattern) => compilePattern(pattern));
         if (patterns.some((pattern) => !pattern)) return { status: "error", code: "invalid_forbidden_pattern", actual: null };
         const replayDigests = replayRedactions && Array.isArray(mimeOf(candidate)?.textRedactions?.forbiddenPatternDigests)
           ? new Set(mimeOf(candidate).textRedactions.forbiddenPatternDigests) : new Set();

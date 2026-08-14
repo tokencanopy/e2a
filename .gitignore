@@ -7,6 +7,7 @@ config.local.yaml
 /config.yaml
 client_secret_*.json
 /node_modules/
+/plugins/e2a/skills/email-evals/runtime/node_modules/
 
 # Stray Next.js build output if run from repo root instead of web/
 /.next/

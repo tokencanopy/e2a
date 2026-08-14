@@ -3,6 +3,7 @@ import { E2AClient, E2AConnectionError } from "@e2a/sdk/v1";
 import { executionBounds } from "./contract.mjs";
 import { EvalError, isStableEvalErrorCode } from "./errors.mjs";
 import { normalizeMessageIdToken, parseMimeEvidence } from "./mime.mjs";
+import { SafePatternSyntaxError, compileSafePattern } from "./safe-pattern.mjs";
 import {
   NormalizationError, normalizeAddressSet, normalizeMailbox, normalizeMailboxHeader, replaceMailboxText,
 } from "./normalize.mjs";
@@ -1017,7 +1018,13 @@ function subjectMatches(subject, expectation, stimulusSubject) {
   const specification = expectation ?? {};
   if (typeof specification.exact === "string" && subject !== specification.exact) return false;
   if (typeof specification.regex === "string") {
-    try { if (!new RegExp(specification.regex).test(subject)) return false; } catch { return false; }
+    try {
+      const pattern = specification.regexPattern ?? compileSafePattern(specification.regex);
+      if (!pattern.test(subject)) return false;
+    } catch (error) {
+      if (error instanceof SafePatternSyntaxError) return false;
+      throw error;
+    }
   }
   if (Array.isArray(specification.requiredFragments) && specification.requiredFragments.some((fragment) => !subject.includes(fragment))) return false;
   if (Array.isArray(specification.forbiddenFragments) && specification.forbiddenFragments.some((fragment) => subject.includes(fragment))) return false;

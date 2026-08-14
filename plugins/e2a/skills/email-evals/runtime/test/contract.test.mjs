@@ -36,8 +36,8 @@ test("loadSuite resolves complete scalar references and canonicalizes the closed
   assert.equal(suite.cases.length, 3);
   assert.equal(suite.cases[0].expect.timing.replyWithinMs, 60_000);
   assert.deepEqual(suite.cases[0].expect.recipients.envelope.exactly, ["actor@eval.test"]);
-  assert.equal(suite.cases[0].expect.body.forbiddenPatternRegexes[0] instanceof RegExp, true);
-  assert.doesNotMatch(JSON.stringify(suite.cases[0].expect.body), /forbiddenPatternRegexes/);
+  assert.equal(suite.cases[0].expect.body.forbiddenPatternPatterns[0].test("sk-synthetic"), true);
+  assert.doesNotMatch(JSON.stringify(suite.cases[0].expect.body), /forbiddenPatternPatterns/);
 });
 
 test("environment-backed regular expressions are rejected for replay-safe grading", async () => {
@@ -64,6 +64,34 @@ expect:
   await assert.rejects(
     loadSuite(path.join(root, "suite.yaml"), { environment: { ...validEnvironment, E2A_EVAL_PATTERN: "secret-[0-9]+" } }),
     (error) => error.errorClass === "configuration_error" && error.code === "environment_reference_not_allowed",
+  );
+});
+
+test("unsupported regex syntax fails as invalid_regex at its YAML pointer before execution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-unsupported-regex-"));
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    "  action: { kind: none, count: 0 }", "  body:", "    forbidden_patterns: ['(a+)\\1']", "",
+  ].join("\n") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error"
+      && error.code === "invalid_regex"
+      && error.details?.path === "/expect/body/forbidden_patterns/0",
+  );
+});
+
+test("unsupported subject regex syntax fails at the scalar YAML pointer before execution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "email-evals-unsupported-subject-regex-"));
+  await writeMinimalSuite(root, { caseSource: [
+    "id: synthetic-case", "send: { subject: Synthetic, text: Synthetic }", "expect:",
+    "  action: { kind: none, count: 0 }", "  subject:", "    regex: '(a+)\\1'", "",
+  ].join("\n") });
+  await assert.rejects(
+    loadSuite(path.join(root, "suite.yaml"), { environment: validEnvironment }),
+    (error) => error.errorClass === "configuration_error"
+      && error.code === "invalid_regex"
+      && error.details?.path === "/expect/subject/regex",
   );
 });
 

@@ -6,6 +6,7 @@ import { parseDocument } from "yaml";
 import { EvalError } from "./errors.mjs";
 import { NormalizationError, normalizeAddressSet, normalizeMailbox, parseDuration } from "./normalize.mjs";
 import { EVAL_IDENTIFIER_LIMITS, isEvalLiteralIdentifier } from "./result-contract.mjs";
+import { SafePatternSyntaxError, compileSafePattern } from "./safe-pattern.mjs";
 
 export { EVAL_IDENTIFIER_LIMITS } from "./result-contract.mjs";
 
@@ -196,23 +197,28 @@ function normalizeSentAs(value, environment, pointer) {
   return resolved;
 }
 
+function normalizeRegex(value, environment, pointer) {
+  const resolved = resolveString(value, environment, pointer);
+  if (environmentReference.test(resolved.source)) {
+    throw configurationError(
+      "regex_environment_not_supported",
+      "Regular expressions must be literal so saved evidence can be regraded without environment secrets",
+      pointer,
+    );
+  }
+  if (resolved.value.length > 512) throw configurationError("invalid_regex", "Regular expression exceeds the maximum length", pointer);
+  try {
+    return { source: resolved.source, value: resolved.value, pattern: compileSafePattern(resolved.value) };
+  } catch (error) {
+    if (error instanceof SafePatternSyntaxError) {
+      throw configurationError("invalid_regex", "Regular expression must use RE2-compatible syntax", pointer);
+    }
+    throw error;
+  }
+}
+
 function normalizeRegexes(value, environment, pointer) {
-  return asArray(value, pointer).map((entry, index) => {
-    const resolved = resolveString(entry, environment, `${pointer}/${index}`);
-    if (environmentReference.test(resolved.source)) {
-      throw configurationError(
-        "regex_environment_not_supported",
-        "Regular expressions must be literal so saved evidence can be regraded without environment secrets",
-        `${pointer}/${index}`,
-      );
-    }
-    if (resolved.value.length > 512) throw configurationError("invalid_regex", "Regular expression exceeds the maximum length", `${pointer}/${index}`);
-    try {
-      return { source: resolved.source, value: resolved.value, regex: new RegExp(resolved.value) };
-    } catch {
-      throw configurationError("invalid_regex", "Invalid regular expression", `${pointer}/${index}`);
-    }
-  });
+  return asArray(value, pointer).map((entry, index) => normalizeRegex(entry, environment, `${pointer}/${index}`));
 }
 
 function resolveEnum(value, environment, allowed, code, pointer) {
@@ -323,10 +329,12 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
     const subjectCanonical = {};
     for (const key of ["exact", "regex"]) {
       if (subjectRaw[key] !== undefined) {
-        const resolved = resolveString(subjectRaw[key], environment, `/expect/subject/${key}`);
-        if (key === "regex") normalizeRegexes([subjectRaw.regex], environment, "/expect/subject/regex");
+        const resolved = key === "regex"
+          ? normalizeRegex(subjectRaw.regex, environment, "/expect/subject/regex")
+          : resolveString(subjectRaw[key], environment, `/expect/subject/${key}`);
         subject[key] = resolved.value;
         subjectCanonical[key] = resolved.source;
+        if (key === "regex") Object.defineProperty(subject, "regexPattern", { value: resolved.pattern });
       }
     }
     if (subjectRaw.policy !== undefined) {
@@ -361,8 +369,8 @@ function normalizeCase(rawCase, environment, casePath, casePointer) {
       const values = normalizeRegexes(bodyRaw.forbidden_patterns, environment, "/expect/body/forbidden_patterns");
       body.forbiddenPatterns = values.map(({ value }) => value);
       // Compiled forms are intentionally non-enumerable: grading can reuse the
-      // validation-time bounded regexes while suite artifacts remain JSON-safe.
-      Object.defineProperty(body, "forbiddenPatternRegexes", { value: values.map(({ regex }) => regex) });
+      // validation-time bounded RE2 patterns while suite artifacts remain JSON-safe.
+      Object.defineProperty(body, "forbiddenPatternPatterns", { value: values.map(({ pattern }) => pattern) });
       bodyCanonical.forbiddenPatterns = values.map(({ source }) => source);
     }
     if (bodyRaw.plain_text !== undefined) {

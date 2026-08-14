@@ -8,6 +8,7 @@ import { types as utilTypes } from "node:util";
 import { EvalError } from "./errors.mjs";
 import { RESOLVED_ENVIRONMENT_SOURCES, RESOLVED_ENVIRONMENT_VALUES } from "./contract.mjs";
 import { isSafeResultCaseId } from "./result-contract.mjs";
+import { SafePatternSyntaxError, compileSafePattern } from "./safe-pattern.mjs";
 import {
   mailboxAddressesInText,
   NormalizationError,
@@ -89,7 +90,7 @@ function snapshot(value) {
         const descriptor = Object.getOwnPropertyDescriptor(source, key);
         if (!descriptor || !Object.hasOwn(descriptor, "value")) throw new TypeError("invalid object property");
         // JSON and the contract intentionally omit validated non-enumerable
-        // caches such as forbiddenPatternRegexes. Never invoke an accessor,
+        // caches such as forbiddenPatternPatterns. Never invoke an accessor,
         // but ignore safe hidden data properties.
         if (!descriptor.enumerable) continue;
         result[key] = visit(descriptor.value, depth + 1);
@@ -344,11 +345,12 @@ function patternsFor(record, suite) {
       patterns.push({
         index,
         digest: createHash("sha256").update(pattern).digest("hex"),
-        expression: new RegExp(pattern, "g"),
+        pattern: compileSafePattern(pattern),
       });
-    } catch {
+    } catch (error) {
       // Contract validation normally prevents this. Reporting remains safe if
       // called directly with malformed data.
+      if (!(error instanceof SafePatternSyntaxError)) throw error;
     }
   }
   return patterns;
@@ -431,6 +433,7 @@ function tokenizeObservedEnvironment(
     let result = value;
     for (const entry of environment) {
       const replacement = environmentMarker(entry, entry.value);
+      // This native RegExp receives a literal escaped by escapeRegExp above.
       result = result.replace(new RegExp(escapeRegExp(entry.value), "g"), replacement);
     }
     if (result !== value) loss?.add(pointer || "/", value);
@@ -513,13 +516,13 @@ export function artifactSuiteName(suite) {
 
 function redactString(value, patterns, sensitive) {
   let result = value.replace(/[\u0000-\u001F\u007F]/g, "[REDACTED:control]");
-  for (const { index, expression } of patterns) {
-    expression.lastIndex = 0;
-    result = result.replace(expression, `[REDACTED:${index}]`);
+  for (const { index, pattern } of patterns) {
+    result = pattern.replaceAll(result, `[REDACTED:${index}]`);
   }
   for (const entry of sensitive) {
     result = entry.mailbox
       ? replaceMailboxText(result, (mailbox, candidate) => mailbox.address === entry.value ? entry.replacement : candidate)
+      // This native RegExp receives a literal escaped by escapeRegExp above.
       : result.replace(new RegExp(escapeRegExp(entry.value), "g"), entry.replacement);
   }
   result = replaceMailboxText(result, () => "[REDACTED:address]");
@@ -563,8 +566,7 @@ function redactEvidenceBodyText(value, patterns, parentKey = "", loss = null, po
   if (parentKey === "mime" && typeof value.text === "string") {
     const digests = [];
     for (const pattern of patterns) {
-      pattern.expression.lastIndex = 0;
-      if (pattern.expression.test(value.text)) digests.push(pattern.digest);
+      if (pattern.pattern.test(value.text)) digests.push(pattern.digest);
     }
     result.text = redactString(value.text, patterns, []);
     if (result.text !== value.text) loss?.add(pointerPath(pointer, "text"), value.text);
