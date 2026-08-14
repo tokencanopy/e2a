@@ -661,6 +661,21 @@ func TestReapWorker_Work(t *testing.T) {
 		}
 	})
 
+	t.Run("an orphan-check error does not fail the convergence sweep", func(t *testing.T) {
+		// The alert loop is a diagnostic; a DB blip while checking an identity
+		// that is not even ledgered must not red a sweep in which every
+		// ledgered domain converged (adversarial-review finding).
+		store := newFakeStore()
+		store.domainExistsErr = errors.New("pool exhausted")
+		prov := NewFakeProvider()
+		prov.SeedIdentity("someone-elses.example")
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("alert-only orphan check failed the sweep: %v", err)
+		}
+	})
+
 	t.Run("does not touch unmanaged provider identities", func(t *testing.T) {
 		store := newFakeStore()
 		prov := NewFakeProvider()
@@ -1100,6 +1115,34 @@ func TestSyncWorker_AppliedButProviderDriftedReprovisions(t *testing.T) {
 	}
 	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
 		t.Fatalf("status = %q, want pending while the recreated identity verifies", got)
+	}
+}
+
+// TestSyncWorker_HealthyRecheckTransientStatusErrorRetries: when the healthy
+// short-circuit's provider GET fails transiently, the worker has NO signal —
+// mutating a (by-ledger) healthy sender on no signal is exactly the flap the
+// short-circuit exists to prevent. Retry instead (adversarial-review finding:
+// the fall-through let a transient GET error demote verified→pending when the
+// subsequent Provision happened to succeed).
+func TestSyncWorker_HealthyRecheckTransientStatusErrorRetries(t *testing.T) {
+	const domain = "healthy-blip.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation"
+	store.applied[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SetStatusErr(domain, errors.New("ses throttled"))
+	w := &SyncWorker{store: store, provider: prov}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err == nil {
+		t.Fatal("transient GET error on a healthy re-check must retry, not converge blind")
+	}
+	if len(prov.ProvisionCalls) != 0 || len(store.SetStatusCalls) != 0 {
+		t.Fatalf("no-signal path mutated state: provision=%v statusWrites=%d", prov.ProvisionCalls, len(store.SetStatusCalls))
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status = %q, want verified untouched", got)
 	}
 }
 

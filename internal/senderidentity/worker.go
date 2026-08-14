@@ -383,13 +383,27 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		// incarnation applied and the provider agrees the identity is verified,
 		// converging again would re-Put the BYODKIM key and demote
 		// verified→pending until the next poll — the exact flap the pre-ledger
-		// no-op guard prevented. One provider GET replaces the Create/Put; ANY
-		// other outcome (missing, foreign, pending, failed, transient error)
+		// no-op guard prevented. One provider GET replaces the Create/Put; a
+		// definitive non-healthy answer (missing, foreign, pending, failed)
 		// falls through to full convergence, so a stale-verified row — whose
-		// applied incarnation necessarily differs — still converges.
+		// applied incarnation necessarily differs — still converges. A
+		// transient GET error is NO signal: retry rather than mutate a
+		// by-ledger-healthy sender blind.
+		//
+		// CAUTION: the GET cross-checks the provider's verification STATUS,
+		// not the installed key material. `applied_incarnation == incarnation`
+		// is what ties "verified" to "this registration's selector/key" — that
+		// holds today because selector/key are immutable per incarnation. Any
+		// future in-place DKIM key rotation or MAIL FROM convention change
+		// must invalidate applied_incarnation (or revisit this gate), or the
+		// forced re-check will silently stop re-installing.
 		if state.Status == StatusVerified && state.AppliedIncarnation == state.Incarnation {
-			if res, serr := provider.Status(lockedCtx, domain); serr == nil && res.Status == StatusVerified {
+			res, serr := provider.Status(lockedCtx, domain)
+			if serr == nil && res.Status == StatusVerified {
 				return nil
+			}
+			if serr != nil && !errors.Is(serr, ErrIdentityNotFound) && !errors.Is(serr, ErrIdentityNotOwned) {
+				return serr
 			}
 		}
 		if state.Selector == "" || len(state.PrivateKey) == 0 {

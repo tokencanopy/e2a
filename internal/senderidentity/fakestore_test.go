@@ -34,8 +34,9 @@ type fakeStore struct {
 	setStatusErr   error
 	touchErr       error
 	getStatusErr   error
-	forgetErr      error
-	markAppliedErr error
+	forgetErr       error
+	markAppliedErr  error
+	domainExistsErr error
 
 	// recorded calls
 	SetStatusCalls []setStatusCall
@@ -243,6 +244,9 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.domainExistsErr != nil {
+		return false, s.domainExistsErr
+	}
 	_, ok := s.status[domain]
 	return ok, nil
 }

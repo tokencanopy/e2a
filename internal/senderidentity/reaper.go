@@ -120,19 +120,27 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 	for _, domain := range managed {
 		ledgered[domain] = struct{}{}
 	}
+	orphans := 0
 	for _, domain := range providerDomains {
 		if _, ok := ledgered[domain]; ok {
 			continue
 		}
 		exists, err := store.DomainExists(ctx, domain)
 		if err != nil {
-			errs = append(errs, errors.New(domain+": orphan check: "+err.Error()))
+			// Diagnostic-only: a blip checking an unledgered identity must not
+			// red a sweep in which every ledgered domain converged. The next
+			// hourly sweep re-checks anyway.
+			log.Printf("[senderidentity:reaper] orphan check for %s: %v", domain, err)
 			continue
 		}
 		if !exists {
+			orphans++
 			log.Printf("[senderidentity:reaper] ALERT orphan sending identity with no live domain: %s "+
 				"(provider identity exists but is neither ledgered nor backed by a domain row) — manual review required", domain)
 		}
+	}
+	if orphans > 0 {
+		log.Printf("[senderidentity:reaper] swept %d provider identities, %d orphan(s) flagged", len(providerDomains), orphans)
 	}
 	return errors.Join(errs...)
 }
