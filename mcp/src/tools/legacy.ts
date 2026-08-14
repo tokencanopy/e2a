@@ -52,18 +52,46 @@ export function registerLegacyTools(server: McpServer, client: McpClient): void 
       title: "Deprecated alias: send_message",
       annotations: { destructiveHint: false },
       description:
-        "DEPRECATED: use `send_message`. This compatibility alias preserves the historical body/html_body/agent_email inputs for cached MCP clients.",
+        "DEPRECATED — use `send_message` instead. Sends a new email from the agent's inbox to one or more recipients, identical to `send_message` except that it keeps the historical field names (`body`/`html_body`/`agent_email` rather than `text`/`html`/`email`). It exists only for MCP clients pinned to the old schema and gains no new features: templates and scheduled sending are unavailable here. Like `send_message`, it starts a NEW thread — use `reply_to_message` to respond to a message you can see. **`accepted` and `pending_review` are both success, not failure — do NOT re-send.** `accepted` means the send was durably persisted and queued; `pending_review` means a human review hold caught it first. The terminal outcome arrives later via webhook events or by polling `get_message`, not by retrying.",
       inputSchema: strictInputSchema({
         to: z.array(z.string()).describe("Recipient email addresses (one or more)."),
-        subject: z.string(),
+        subject: z.string().describe("Subject line of the new message."),
         body: z.string().describe("Plain-text body. Use html_body for HTML."),
-        html_body: z.string().optional(),
-        cc: z.array(z.string()).optional(),
-        bcc: z.array(z.string()).optional(),
+        html_body: z
+          .string()
+          .optional()
+          .describe(
+            "Optional HTML body, sent alongside `body` as a multipart alternative. `body` stays required — it is what recipients with HTML disabled receive. (`send_message` calls this field `html`.)",
+          ),
+        cc: z
+          .array(z.string())
+          .optional()
+          .describe("Carbon-copy addresses. Visible to every recipient."),
+        bcc: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Blind-carbon-copy addresses. NOT visible to any other recipient, and absent from the headers the recipient sees.",
+          ),
         attachments: attachmentsArraySchema,
-        conversation_id: z.string().optional(),
-        idempotency_key: z.string().optional(),
-        agent_email: z.string().optional(),
+        conversation_id: z
+          .string()
+          .optional()
+          .describe(
+            "Optional stable conversation grouping ID; reuse it across related sends so e2a grouping follows your runtime's own thread. Maximum 200 characters; no CR/LF. Server generates one if omitted.",
+          ),
+        idempotency_key: z
+          .string()
+          .optional()
+          .describe(
+            "Stable key for retry-safe sends. Set it to deduplicate when the caller has its own retry loop; omit to let the SDK mint a fresh UUIDv4 per call, which protects against network-layer retries only.",
+          ),
+        agent_email: z
+          .string()
+          .optional()
+          .describe(
+            "Sending agent's inbox (full email address). REQUIRED when the credential is account-scoped, since such a credential owns many agents and has no bound agent to default to. Defaults to the bound agent for agent-scoped credentials (omit it there). (`send_message` calls this field `email`.)",
+          ),
       }),
     },
     async (args) =>
@@ -99,11 +127,24 @@ export function registerLegacyTools(server: McpServer, client: McpClient): void 
       title: "Deprecated alias: get_attachment",
       annotations: { readOnlyHint: true },
       description:
-        "DEPRECATED: use `get_attachment` with inline:true. This compatibility alias preserves attachment_index/agent_email inputs and the historical inline base64 response. The current 256 KB inline limit applies.",
+        "DEPRECATED — use `get_attachment` with `inline: true` instead. Returns one attachment's metadata plus its bytes as base64 `data`, always inline. It exists only for MCP clients pinned to the old schema, and it is strictly weaker than `get_attachment`: it cannot return a short-lived `download_url`, so every fetch streams the whole file through your context, and attachments over the 256 KB inline limit fail outright rather than falling back to a URL. Prefer `get_attachment` and hand the `download_url` to whatever needs the file.",
       inputSchema: strictInputSchema({
-        message_id: z.string(),
-        attachment_index: z.number().int().min(0),
-        agent_email: z.string().optional(),
+        message_id: z
+          .string()
+          .describe("ID of the message the attachment belongs to (e.g. msg_…)."),
+        attachment_index: z
+          .number()
+          .int()
+          .min(0)
+          .describe(
+            "0-based index from `get_message`'s `attachments[].index` (stable for a given message_id).",
+          ),
+        agent_email: z
+          .string()
+          .optional()
+          .describe(
+            "Owning agent's inbox (full email address). REQUIRED when the credential is account-scoped; defaults to the bound agent for agent-scoped credentials. (`get_attachment` calls this field `email`.)",
+          ),
       }),
     },
     async (args) =>
