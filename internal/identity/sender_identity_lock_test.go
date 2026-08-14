@@ -84,7 +84,7 @@ func TestLoadSendingIdentityStateReportsAppliedIncarnation(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	inc, _, _, _, _, _, applied, err := store.LoadSendingIdentityState(ctx, domain)
+	inc, _, _, _, _, _, applied, _, err := store.LoadSendingIdentityState(ctx, domain)
 	if err != nil {
 		t.Fatalf("LoadSendingIdentityState: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestLoadSendingIdentityStateReportsAppliedIncarnation(t *testing.T) {
 	if err := store.MarkSendingIdentityApplied(ctx, domain, inc); err != nil {
 		t.Fatalf("MarkSendingIdentityApplied: %v", err)
 	}
-	_, _, _, _, _, _, applied, err = store.LoadSendingIdentityState(ctx, domain)
+	_, _, _, _, _, _, applied, _, err = store.LoadSendingIdentityState(ctx, domain)
 	if err != nil {
 		t.Fatalf("LoadSendingIdentityState after apply: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSendingIdentityTombstoneFinalizeRespectsAge(t *testing.T) {
 	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
-	inc, _, _, _, _, _, _, err := store.LoadSendingIdentityState(ctx, domain)
+	inc, _, _, _, _, _, _, _, err := store.LoadSendingIdentityState(ctx, domain)
 	if err != nil {
 		t.Fatalf("LoadSendingIdentityState: %v", err)
 	}

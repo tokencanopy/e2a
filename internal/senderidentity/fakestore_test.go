@@ -36,9 +36,9 @@ type fakeStore struct {
 	inputsErr error
 
 	// forced errors for the write/read methods (for retry-path tests).
-	setStatusErr   error
-	touchErr       error
-	getStatusErr   error
+	setStatusErr    error
+	touchErr        error
+	getStatusErr    error
 	forgetErr       error
 	markAppliedErr  error
 	domainExistsErr error
@@ -181,6 +181,7 @@ func (s *fakeStore) LoadSendingIdentityState(ctx context.Context, domain string)
 		Selector:           s.selector,
 		PrivateKey:         append([]byte(nil), s.privKey...),
 		AppliedIncarnation: s.applied[domain],
+		LedgerUpdatedAt:    s.managedTouched[domain],
 	}, nil
 }
 

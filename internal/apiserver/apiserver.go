@@ -355,13 +355,15 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 	}
 	return func(ctx context.Context, domain, userID string) (bool, error) {
 		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
-			// The delete is the tombstone's latest mutation: stamping it here
-			// is what keeps any audit/sweep from finalizing the ledger row
-			// before THIS delete's drain window has elapsed.
-			if err := p.Store.TouchSendingIdentityTombstoneTx(ctx, tx, domain); err != nil {
+			// The delete is the tombstone's latest mutation: stamping it keeps
+			// any audit/sweep from finalizing the ledger row before THIS
+			// delete's drain window has elapsed. Stamp AFTER the job insert
+			// (and with clock_timestamp) so the recorded time is as close to
+			// commit as the tx allows.
+			if err := p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain); err != nil {
 				return err
 			}
-			return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
+			return p.Store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
 		}); err != nil {
 			return false, err
 		}

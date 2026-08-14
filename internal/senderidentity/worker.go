@@ -28,6 +28,14 @@ const postDrainConvergenceDelay = 15 * time.Minute
 // signal, not a real failure.
 var errStillPending = errors.New("sending identity still pending verification")
 
+// pendingVerificationBackstopTTL is the ABSOLUTE deadline for a domain stuck
+// `pending` with no live reconcile budget (the hourly sweep's read-only
+// resolve path). River's per-job attempt budget exhausts in hours, so a
+// pending older than this (anchored on the ledger row's last mutation) has
+// provably lost its poller and times out instead of being re-checked hourly
+// forever — preserving the design's bounded-verification promise.
+const pendingVerificationBackstopTTL = 24 * time.Hour
+
 // Store is the narrow persistence surface the workers need. *identity.Store
 // satisfies it. Kept minimal so the workers don't depend on the whole store.
 type Store interface {
@@ -80,6 +88,11 @@ type SendingIdentityState struct {
 	// none). Equal to Incarnation only when THIS registration's key was
 	// confirmed installed — the gate for the healthy-recheck no-op.
 	AppliedIncarnation string
+	// LedgerUpdatedAt is the ledger row's last-mutation time (zero when no
+	// ledger row exists). Anchors the absolute pending-verification backstop
+	// TTL: a domain stuck pending with no live reconcile budget times out
+	// relative to this instead of being polled hourly forever.
+	LedgerUpdatedAt time.Time
 }
 
 // EventFirer publishes a domain.sending_verified / domain.sending_failed
@@ -389,23 +402,37 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		if err != nil {
 			return err
 		}
-		// The periodic sweep only needs to act when the provider identity is
-		// absent/unapplied. A healthy applied live identity is a no-op so hourly
-		// convergence never flaps a verified sender back to pending. The one
-		// exception is a domain stuck `pending` behind an applied, present
-		// identity: its reconcile job is gone (enqueue failed or budget
-		// exhausted) and nothing else would ever poll it again, so the sweep
-		// resolves it READ-ONLY from the provider — verified/failed commit and
-		// fire; still-pending waits for the next sweep; an absent/foreign
-		// answer falls through to full convergence.
+		// The periodic sweep never MUTATES a healthy applied identity (that
+		// would flap a verified sender back to pending), but it does inspect
+		// the two states that can silently rot behind an applied, present
+		// identity, both READ-ONLY:
+		//
+		//   - stuck `pending`: the reconcile budget is gone (enqueue failed or
+		//     exhausted) and nothing else would ever poll it. Verified/failed
+		//     resolves and fires; still-pending waits — bounded by an absolute
+		//     backstop TTL anchored on the ledger's last mutation, so a
+		//     never-resolving identity cannot be polled hourly forever.
+		//   - `verified` drift: an ownership tag removed out-of-band or a
+		//     provider-side hard failure (customer pulled the DNS) otherwise
+		//     stays reported verified indefinitely. A definitive provider
+		//     `failed` commits (with axes) and fires; a provider mid-recheck
+		//     `pending` is NOT committed (no flap on a transient re-check).
+		//
+		// An absent/foreign answer in either state falls through to full
+		// convergence; `failed` steady state costs no provider call.
 		force := forceProvision
 		if !force {
-			if state.Status != StatusPending {
+			if state.Status != StatusPending && state.Status != StatusVerified {
 				return nil
 			}
 			res, serr := provider.Status(lockedCtx, domain)
 			switch {
-			case serr == nil && (res.Status == StatusVerified || res.Status == StatusFailed):
+			case errors.Is(serr, ErrIdentityNotFound), errors.Is(serr, ErrIdentityNotOwned):
+				force = true
+			case serr != nil:
+				return serr
+			case state.Status == StatusPending && (res.Status == StatusVerified || res.Status == StatusFailed),
+				state.Status == StatusVerified && res.Status == StatusFailed:
 				if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, res.Status, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						return nil
@@ -414,12 +441,22 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 				}
 				out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 				return nil
-			case serr == nil:
-				return nil // provider still verifying; the next sweep re-checks
-			case errors.Is(serr, ErrIdentityNotFound), errors.Is(serr, ErrIdentityNotOwned):
-				force = true
+			case state.Status == StatusPending:
+				// Provider still verifying. Backstop TTL: a zero ledger time
+				// (no row — cannot happen for a provisioned domain) skips it.
+				if !state.LedgerUpdatedAt.IsZero() && time.Since(state.LedgerUpdatedAt) > pendingVerificationBackstopTTL {
+					const reason = "verification timed out"
+					changed, err := setFailedStatus(lockedCtx, store, domain, state, reason)
+					if err != nil {
+						return err
+					}
+					if changed {
+						out = syncOutcome{changed: true, statusChanged: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
+					}
+				}
+				return nil
 			default:
-				return serr
+				return nil // verified and provider agrees (or mid-recheck): healthy
 			}
 		}
 		// A durable mutation signal is usually a redundant re-check (POST

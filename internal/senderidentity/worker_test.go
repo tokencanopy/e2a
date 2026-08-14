@@ -421,7 +421,7 @@ func TestFinalizeRespectsLatestMutationDrainWindow(t *testing.T) {
 			t.Fatal("hourly sweep finalized a tombstone inside the drain window")
 		}
 
-		store.ageTombstone(domain) // drain window elapses
+		store.ageTombstone(domain)    // drain window elapses
 		provider.SeedIdentity(domain) // late legacy create landed meanwhile
 		if err := w.Work(context.Background(), reapJob()); err != nil {
 			t.Fatalf("reap after window: %v", err)
@@ -839,6 +839,141 @@ func TestReapWorker_Work(t *testing.T) {
 		}
 		if len(prov.ProvisionCalls) != 0 || firer.count() != 0 {
 			t.Fatalf("still-pending must not mutate or fire: provisions=%v events=%d", prov.ProvisionCalls, firer.count())
+		}
+	})
+
+	t.Run("verified identity with a removed ownership tag converges to failed", func(t *testing.T) {
+		// Second-review should-fix: verified/applied identities were never
+		// re-inspected, so an ownership tag removed out-of-band (or a foreign
+		// same-name identity) stayed reported verified indefinitely. The
+		// sweep's read-only GET must surface it within the hour.
+		store := newFakeStore()
+		store.setStatus("tag-removed.example", StatusVerified)
+		store.setOwner("tag-removed.example", "u8")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["tag-removed.example"] = "tag-removed.example-incarnation"
+		store.applied["tag-removed.example"] = "tag-removed.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("tag-removed.example")
+		prov.SetStatusErr("tag-removed.example", ErrIdentityNotOwned)
+		prov.SetProvisionErr(ErrIdentityNotOwned)
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "tag-removed.example"); got != StatusFailed {
+			t.Fatalf("status = %q, want failed for a no-longer-owned identity", got)
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusFailed {
+			t.Fatalf("fired %+v ok=%v, want sending_failed", ev, ok)
+		}
+	})
+
+	t.Run("verified identity the provider now reports failed commits failed", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("dns-broken.example", StatusVerified)
+		store.setOwner("dns-broken.example", "u9")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["dns-broken.example"] = "dns-broken.example-incarnation"
+		store.applied["dns-broken.example"] = "dns-broken.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("dns-broken.example")
+		prov.SetStatus("dns-broken.example", Result{Status: StatusFailed, DkimStatus: StatusFailed, MailFromStatus: StatusVerified, Error: "DKIM records removed"})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		got, _ := store.lastSetStatus()
+		if got.Status != StatusFailed || got.DkimStatus != StatusFailed {
+			t.Fatalf("expected provider-reported failure committed with axes, got %+v", got)
+		}
+		if len(prov.ProvisionCalls) != 0 {
+			t.Fatalf("drift detection must be read-only, got provisions %v", prov.ProvisionCalls)
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusFailed {
+			t.Fatalf("fired %+v ok=%v, want sending_failed", ev, ok)
+		}
+	})
+
+	t.Run("verified identity mid-recheck at the provider is not flapped", func(t *testing.T) {
+		// SES periodically re-verifies; a transient provider 'pending' must not
+		// demote a verified sender (that would drop own-address From).
+		store := newFakeStore()
+		store.setStatus("rechecking.example", StatusVerified)
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["rechecking.example"] = "rechecking.example-incarnation"
+		store.applied["rechecking.example"] = "rechecking.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("rechecking.example")
+		prov.SetStatus("rechecking.example", Result{Status: StatusPending})
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "rechecking.example"); got != StatusVerified {
+			t.Fatalf("status = %q, want verified preserved through a provider re-check", got)
+		}
+		if len(store.SetStatusCalls) != 0 || len(prov.ProvisionCalls) != 0 {
+			t.Fatalf("mid-recheck must not mutate: writes=%d provisions=%v", len(store.SetStatusCalls), prov.ProvisionCalls)
+		}
+	})
+
+	t.Run("stuck-pending past the absolute backstop TTL times out", func(t *testing.T) {
+		// Second-review should-fix: the hourly read-only resolve would
+		// otherwise poll a never-resolving identity forever, bypassing the
+		// bounded-verification promise. The ledger's last-mutation time is the
+		// persisted anchor for an absolute backstop deadline.
+		store := newFakeStore()
+		store.setStatus("stale-pending.example", StatusPending)
+		store.setOwner("stale-pending.example", "u10")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["stale-pending.example"] = "stale-pending.example-incarnation"
+		store.applied["stale-pending.example"] = "stale-pending.example-incarnation"
+		store.ageTombstone("stale-pending.example") // provisioned >24h ago
+		prov := NewFakeProvider()
+		prov.SeedIdentity("stale-pending.example")
+		prov.SetStatus("stale-pending.example", Result{Status: StatusPending})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		got, _ := store.lastSetStatus()
+		if got.Status != StatusFailed || got.ErrMsg != "verification timed out" {
+			t.Fatalf("expected absolute-TTL timeout, got %+v", got)
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusFailed {
+			t.Fatalf("fired %+v ok=%v, want sending_failed on timeout", ev, ok)
+		}
+	})
+
+	t.Run("stuck-pending within the backstop TTL keeps waiting", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("young-pending.example", StatusPending)
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["young-pending.example"] = "young-pending.example-incarnation"
+		store.applied["young-pending.example"] = "young-pending.example-incarnation"
+		store.touchTombstone("young-pending.example")
+		prov := NewFakeProvider()
+		prov.SeedIdentity("young-pending.example")
+		prov.SetStatus("young-pending.example", Result{Status: StatusPending})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "young-pending.example"); got != StatusPending {
+			t.Fatalf("status = %q, want pending inside the TTL", got)
+		}
+		if firer.count() != 0 {
+			t.Fatalf("no event inside the TTL, got %d", firer.count())
 		}
 	})
 

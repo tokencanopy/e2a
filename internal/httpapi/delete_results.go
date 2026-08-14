@@ -34,8 +34,9 @@ type DeleteAgentResult struct {
 } // @name DeleteAgentResult
 
 // Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
-// also covers deployments without a sending-identity provider (nothing to
-// tear down).
+// means e2a-managed teardown is complete: the provider identity is confirmed
+// removed, or was never e2a's to remove (not e2a-managed, or no provider
+// configured).
 const (
 	SendingTeardownConfirmed = "confirmed"
 	SendingTeardownPending   = "pending"
@@ -45,7 +46,9 @@ const (
 type DeleteDomainResult struct {
 	Deleted bool   `json:"deleted" doc:"Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false."`
 	Domain  string `json:"domain" doc:"The deleted domain."`
-	SendingTeardown string `json:"sending_teardown" doc:"Whether the provider-side sending identity is confirmed removed: 'confirmed' or 'pending' (open set). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices."`
+	// omitempty keeps the field OPTIONAL in the schema: generated clients must
+	// accept responses from older servers that predate it.
+	SendingTeardown string `json:"sending_teardown,omitempty" doc:"State of e2a-managed sending-identity teardown: 'confirmed' (identity removed, or was never e2a-managed / no provider configured) or 'pending' (open set — treat unknown values as not confirmed). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices."`
 } // @name DeleteDomainResult
 
 // DeleteSuppressionResult confirms a suppression-list removal.

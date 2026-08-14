@@ -717,10 +717,12 @@ func main() {
 	// DELETE teardown is wired the same way in apiserver.
 	if senderEnqueuer != nil {
 		api.SetDomainTeardownHook(func(ctx context.Context, tx pgx.Tx, domain string) error {
-			if err := store.TouchSendingIdentityTombstoneTx(ctx, tx, domain); err != nil {
+			// Enqueue first, stamp second — the stamp should sit as close to
+			// commit as the tx allows (see TouchSendingIdentityTombstoneTx).
+			if err := senderEnqueuer.EnqueueDeprovisionTx(ctx, tx, domain); err != nil {
 				return err
 			}
-			return senderEnqueuer.EnqueueDeprovisionTx(ctx, tx, domain)
+			return store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
 		})
 	}
 	api.SetOutbox(webhookOutbox)

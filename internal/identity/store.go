@@ -1117,29 +1117,33 @@ func (s *Store) senderIdentityGateChan() chan struct{} {
 // appliedIncarnation is the ledger's provider-confirmed incarnation ("" when
 // the ledger has no row or nothing confirmed) — the signal that lets a forced
 // re-check of a healthy domain stay a read-only no-op.
-func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, appliedIncarnation string, err error) {
+func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, appliedIncarnation string, ledgerUpdatedAt time.Time, err error) {
 	norm := normalizeDomain(domain)
 	var blob []byte
+	var ledgerAt *time.Time
 	err = s.senderIdentityExecutor(ctx).QueryRow(ctx,
 		`SELECT d.verification_token, COALESCE(d.user_id::text, ''), d.verified, d.sending_status,
 		        COALESCE(d.dkim_selector, ''), d.dkim_private_key,
-		        COALESCE(m.applied_incarnation, '')
+		        COALESCE(m.applied_incarnation, ''), m.updated_at
 		   FROM domains d
 		   LEFT JOIN sender_identity_managed_domains m ON m.domain = d.domain
 		  WHERE d.domain = $1`,
 		norm,
-	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob, &appliedIncarnation)
+	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob, &appliedIncarnation, &ledgerAt)
 	if err != nil {
-		return "", "", false, "", "", nil, "", err
+		return "", "", false, "", "", nil, "", time.Time{}, err
+	}
+	if ledgerAt != nil {
+		ledgerUpdatedAt = *ledgerAt
 	}
 	if !verified || selector == "" || len(blob) == 0 {
-		return incarnation, owner, verified, status, selector, nil, appliedIncarnation, nil
+		return incarnation, owner, verified, status, selector, nil, appliedIncarnation, ledgerUpdatedAt, nil
 	}
 	privateKeyDER, err = s.unsealDKIM(blob, norm)
 	if err != nil {
-		return "", "", false, "", "", nil, "", fmt.Errorf("dkim key unseal: %w", err)
+		return "", "", false, "", "", nil, "", time.Time{}, fmt.Errorf("dkim key unseal: %w", err)
 	}
-	return incarnation, owner, verified, status, selector, privateKeyDER, appliedIncarnation, nil
+	return incarnation, owner, verified, status, selector, privateKeyDER, appliedIncarnation, ledgerUpdatedAt, nil
 }
 
 // SetSendingStatusForIncarnation refuses to write through a delete/re-register
@@ -1334,8 +1338,11 @@ func (s *Store) FinalizeSendingIdentityTombstone(ctx context.Context, domain str
 // legacy slot is still draining. A domain with no ledger row (sender identity
 // never provisioned) is a no-op.
 func (s *Store) TouchSendingIdentityTombstoneTx(ctx context.Context, tx pgx.Tx, domain string) error {
+	// clock_timestamp(), not now(): now() is transaction-START time, and the
+	// delete tx can wait on the domain-claim advisory locks — a long wait
+	// would commit an already-aged stamp and erode the drain-window guard.
 	_, err := tx.Exec(ctx,
-		`UPDATE sender_identity_managed_domains SET updated_at = now() WHERE domain = $1`,
+		`UPDATE sender_identity_managed_domains SET updated_at = clock_timestamp() WHERE domain = $1`,
 		normalizeDomain(domain),
 	)
 	return err
