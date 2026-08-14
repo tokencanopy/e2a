@@ -71,9 +71,9 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 	river.AddWorker(w, &DeprovisionWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
 	river.AddWorker(w, &SyncWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
 	river.AddWorker(w, &ReconcileV2Worker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
+	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
+	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
+	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
 
 	reaperInterval := m.cfg.ReaperInterval
 	if reaperInterval <= 0 {

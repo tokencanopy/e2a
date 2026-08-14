@@ -642,6 +642,113 @@ func TestReapWorker_Work(t *testing.T) {
 	})
 }
 
+// TestReapWorker_FiresStatusEvents pins the review fix: reaper-driven
+// sending-status transitions must emit the same domain.sending_failed /
+// sending_verified webhooks as worker-driven ones. Before the fix the reap and
+// audit workers were built with fire=nil, so a customer whose domain lost
+// sending capability via the hourly sweep got no notification at all.
+func TestReapWorker_FiresStatusEvents(t *testing.T) {
+	const domain = "reaped-foreign.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u1")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation" // unapplied ⇒ needsProvision
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetProvisionErr(ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), reapJob()); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed for a not-owned identity", got)
+	}
+	ev, ok := firer.last()
+	if !ok || ev.Status != StatusFailed || ev.UserID != "u1" {
+		t.Fatalf("reaper transition fired %+v ok=%v, want domain.sending_failed for u1", ev, ok)
+	}
+}
+
+// TestPostDrainAuditWorker_FiresStatusEvents covers the same review fix for
+// the delayed post-drain finalizer.
+func TestPostDrainAuditWorker_FiresStatusEvents(t *testing.T) {
+	const domain = "audited-foreign.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u2")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetProvisionErr(ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &PostDrainAuditWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[PostDrainAuditArgs]{Args: PostDrainAuditArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	ev, ok := firer.last()
+	if !ok || ev.Status != StatusFailed || ev.UserID != "u2" {
+		t.Fatalf("audit transition fired %+v ok=%v, want domain.sending_failed for u2", ev, ok)
+	}
+}
+
+// TestReconcileWorker_NotOwnedForgetFailureStillFires pins the review fix for
+// the lost-event window: the failed status is committed, then the ledger
+// Forget hits a transient DB error. The job retries (error propagates), but
+// the retry short-circuits on status != pending — so the event MUST fire on
+// this attempt or it is lost for good.
+func TestReconcileWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
+	const domain = "forget-blip.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusPending)
+	store.setOwner(domain, "u3")
+	store.forgetErr = errors.New("db blip")
+	prov := NewFakeProvider()
+	prov.SetStatusErr(domain, ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
+
+	err := w.Work(context.Background(), reconcileJob(domain, 1, 12))
+	if err == nil {
+		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed committed before the Forget error", got)
+	}
+	ev, ok := firer.last()
+	if !ok || ev.Status != StatusFailed {
+		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
+	}
+}
+
+// TestSyncWorker_NotOwnedForgetFailureStillFires: same window in the sync
+// (provision) path — status commit succeeded, ledger Forget failed.
+func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
+	const domain = "sync-forget-blip.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u4")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.forgetErr = errors.New("db blip")
+	prov := NewFakeProvider()
+	prov.SetProvisionErr(ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}})
+	if err == nil {
+		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
+	}
+	ev, ok := firer.last()
+	if !ok || ev.Status != StatusFailed {
+		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
+	}
+}
+
 func provisionJob(domain string) *river.Job[ProvisionArgs] {
 	return &river.Job[ProvisionArgs]{
 		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 12, Kind: ProvisionArgs{}.Kind()},

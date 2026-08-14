@@ -219,6 +219,9 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 				return err
 			}
 			if changed {
+				// out is set BEFORE the ledger Forget: the failed status is already
+				// committed, and the retry after a Forget error short-circuits on
+				// status != pending — firing must not depend on Forget succeeding.
 				out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			}
 			return store.ForgetSendingIdentityManaged(ctx, domain)
@@ -276,11 +279,15 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			return errStillPending
 		}
 	})
-	if err != nil {
-		return err
-	}
+	// Fire before the error check: a terminal status may have committed even
+	// when a later store call in the same locked section failed (e.g. the
+	// ledger Forget after a not-owned failure). The retry short-circuits on
+	// status != pending, so this attempt is the event's only chance.
 	if out.changed {
 		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
+	}
+	if err != nil {
+		return err
 	}
 	if repairMissingIdentity {
 		// Re-enter through the normal mutation helper only after releasing this
@@ -355,12 +362,14 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}
+			// out before Forget: the failed status is committed, so the event
+			// must fire even when the ledger cleanup errors and the job retries.
+			out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			if finalizeDeletion {
 				if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
 					return err
 				}
 			}
-			out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			return nil
 		}
 		if err := store.MarkSendingIdentityManaged(lockedCtx, domain, state.Incarnation); err != nil {
@@ -372,11 +381,9 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}
-			if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
-				return err
-			}
+			// out before Forget — see the no-key branch above.
 			out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
-			return nil
+			return store.ForgetSendingIdentityManaged(lockedCtx, domain)
 		}
 		if err != nil {
 			return err
@@ -403,6 +410,12 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 		return nil
 	})
+	// Fire terminal transitions before the error check: the status write is
+	// already committed, and a retry after a later store error (e.g. the
+	// ledger Forget) never reaches this transition again.
+	if out.changed && (out.status == StatusVerified || out.status == StatusFailed) {
+		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
+	}
 	if err != nil {
 		return err
 	}
@@ -411,7 +424,6 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 	}
 	switch out.status {
 	case StatusVerified, StatusFailed:
-		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 		return nil
 	default:
 		client, cerr := river.ClientFromContextSafely[pgx.Tx](ctx)
