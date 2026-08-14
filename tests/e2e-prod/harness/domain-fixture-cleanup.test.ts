@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import type { ApiClient, RawResponse } from "./client.ts";
-import { cleanupDomainFixture, DnsDeleteError } from "./domain-fixture-cleanup.ts";
+import { cleanupDomainFixture, DnsDeleteError, resetSendingTeardownMemory } from "./domain-fixture-cleanup.ts";
 import { disarmLeakReporter, getTracked, setReporterDeps, track, untrack } from "./cleanup.ts";
 
 function fakeClient(statusFor: (path: string) => number | { status: number; raw: string }, calls: string[]): ApiClient {
@@ -30,6 +30,7 @@ beforeEach(() => {
   drainTracked();
   disarmLeakReporter();
   setReporterDeps();
+	resetSendingTeardownMemory();
 });
 
 after(() => {
@@ -132,7 +133,7 @@ test("pending sending-identity teardown preserves DNS and keeps the fixture trac
 	assert.deepEqual(result.failed, [], "the API delete itself succeeded");
 	assert.equal(calls.some((call) => call.startsWith("dns:")), false, "DNS must remain while provider teardown is pending");
 	assert.equal(result.dnsFailed.length, 2, "retained records are reported, not silently kept");
-	assert.match(result.dnsFailed[0]!.reason, /teardown.*pending/i);
+	assert.match(result.dnsFailed[0]!.reason, /teardown not confirmed/i);
 	assert.deepEqual(getTracked(), [{ kind: "domain", id: "run.example.test" }], "the fixture stays tracked for follow-up");
 });
 
@@ -160,6 +161,76 @@ test("confirmed sending-identity teardown proceeds to DNS removal", async () => 
 	assert.deepEqual(result.dnsFailed, []);
 	assert.deepEqual(calls.slice(-1), ["dns:dns-ownership"]);
 	assert.deepEqual(getTracked(), []);
+});
+
+test("a 404 retry after a pending teardown must NOT release DNS", async () => {
+	// Second-review repro: pass 1 deletes the domain, server reports teardown
+	// pending → DNS retained. Pass 2 retries the (already-deleted) domain and
+	// gets a bodiless 404 — which carries no teardown state at all. Treating
+	// that 404 as safe released DNS from under a possibly-still-live provider
+	// identity. Once a fixture has been seen pending, only an explicit
+	// confirmed can release its DNS.
+	const dnsRecords = [{ id: "dns-ownership", type: "TXT", name: "_verify.run.example.test" }];
+	let deletes = 0;
+	const client = fakeClient((path) => {
+		if (!path.startsWith("/v1/domains/")) return 204;
+		deletes++;
+		return deletes === 1
+			? { status: 200, raw: JSON.stringify({ deleted: true, domain: "run.example.test", sending_teardown: "pending" }) }
+			: { status: 404, raw: "" };
+	}, []);
+	const dnsCalls: string[] = [];
+	const deleteDns = async (record: { id?: string }) => {
+		dnsCalls.push(record.id!);
+	};
+
+	track("domain", "run.example.test");
+	const first = await cleanupDomainFixture(client, { domain: "run.example.test", dnsRecords }, deleteDns, { sleep: async () => {} });
+	assert.equal(first.dnsFailed.length, 1, "pass 1 retains DNS");
+
+	const second = await cleanupDomainFixture(client, { domain: "run.example.test", dnsRecords }, deleteDns, { sleep: async () => {} });
+	assert.deepEqual(dnsCalls, [], "the 404 retry proves nothing about teardown — DNS must stay");
+	assert.equal(second.dnsFailed.length, 1, "pass 2 keeps reporting the retained records");
+	assert.deepEqual(getTracked(), [{ kind: "domain", id: "run.example.test" }]);
+});
+
+test("malformed or unexpected teardown values fail closed", async () => {
+	for (const raw of ["not-json{", JSON.stringify({ deleted: true, domain: "run.example.test" }), JSON.stringify({ sending_teardown: "later" })]) {
+		drainTracked();
+		const dnsCalls: string[] = [];
+		const client = fakeClient((path) => (path.startsWith("/v1/domains/") ? { status: 200, raw } : 204), []);
+		track("domain", "run.example.test");
+		const result = await cleanupDomainFixture(
+			client,
+			{ domain: "run.example.test", dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.run.example.test" }] },
+			async (record) => {
+				dnsCalls.push(record.id!);
+			},
+			{ sleep: async () => {} },
+		);
+		assert.deepEqual(dnsCalls, [], `body ${raw.slice(0, 40)} must not release DNS`);
+		assert.equal(result.dnsFailed.length, 1);
+	}
+});
+
+test("a first-contact 404 with no pending history proceeds to DNS removal", async () => {
+	// A fixture whose registration never succeeded server-side (or was already
+	// confirmed-cleaned in an earlier run) deletes to a 404 with no pending
+	// memory: no identity was ever provisioned, so DNS removal is safe —
+	// requiring 'confirmed' here would leak DNS for every such fixture.
+	const dnsCalls: string[] = [];
+	const client = fakeClient((path) => (path.startsWith("/v1/domains/") ? { status: 404, raw: "" } : 204), []);
+	track("domain", "never-registered.example.test");
+	const result = await cleanupDomainFixture(
+		client,
+		{ domain: "never-registered.example.test", dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.never-registered.example.test" }] },
+		async (record) => {
+			dnsCalls.push(record.id!);
+		},
+		{ sleep: async () => {} },
+	);
+	assert.deepEqual(dnsCalls, ["dns-ownership"]);
+	assert.deepEqual(result.dnsFailed, []);
 });
 
 test("fixture-scoped cleanup cannot detach an older fixture from its DNS", async () => {
