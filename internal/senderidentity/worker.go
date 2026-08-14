@@ -121,15 +121,25 @@ func (ReconcileV2Args) Kind() string { return "sender_identity_reconcile_v2" }
 
 // PostDrainAuditArgs is a domain-scoped, deduplicated finalizer scheduled by
 // mutations that can overlap a legacy blue/green slot. It runs only on the v2
-// queue and only after the old slot's maximum bake+drain window has elapsed.
+// queue, nominally postDrainConvergenceDelay after its mutation — but see
+// Window: a mutation deduped into an audit scheduled earlier in the same
+// bucket can be finalized up to one bucket early, i.e. possibly while the old
+// slot still drains. The hourly reaper and the orphan ALERT remain the
+// backstop for that residual window (which the pre-Window code had in an
+// unbounded form).
 type PostDrainAuditArgs struct {
 	Domain string `json:"domain" river:"unique"`
 	// Window is the audit's schedule bucket (scheduled-at unix seconds /
 	// postDrainConvergenceDelay). It scopes ByArgs uniqueness in time: River's
 	// unique state set cannot drop `completed`, so without it a completed
 	// audit inside the ~24h retention blocked the next mutation's audit for
-	// the same domain. Same-bucket mutations still dedupe to one job; a
-	// completed audit's bucket is strictly older than any new mutation's.
+	// the same domain. A completed audit's bucket is strictly older than any
+	// new mutation's (an audit for bucket B cannot complete before B's start,
+	// and any later mutation schedules into a later bucket — modulo replica
+	// clock skew, which shrinks that guarantee by the skew), so dedupe can
+	// only ever match a still-scheduled job. Mutations straddling a bucket
+	// edge produce two audits; the audit is idempotent, so that is noise,
+	// not a bug.
 	Window int64 `json:"window" river:"unique"`
 }
 

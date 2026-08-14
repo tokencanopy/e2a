@@ -37,8 +37,10 @@ func minimalParams() Params {
 type fakeSenderIdentity struct {
 	provisionErr   error
 	deprovisionErr error
+	tryErr         error
 	provisioned    []string
 	deprovisioned  []string
+	tried          []string
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, domain string) error {
@@ -56,9 +58,13 @@ func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, d
 	return f.deprovisionErr
 }
 
+// TryDeprovisionNow records separately from EnqueueDeprovisionTx: the former
+// is the post-commit best-effort provider call, the latter the in-tx durable
+// enqueue — conflating them would let a test pass while asserting the wrong
+// half of the delete contract.
 func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) error {
-	f.deprovisioned = append(f.deprovisioned, domain)
-	return f.deprovisionErr
+	f.tried = append(f.tried, domain)
+	return f.tryErr
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {

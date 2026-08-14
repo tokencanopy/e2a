@@ -260,9 +260,12 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
     assert.equal(ag.status, 201, `create custom-domain agent: ${ag.raw.slice(0, 200)}`);
     assert.equal(ag.body?.domain_verified, true, "custom-domain agent reports domain_verified=true on create");
   } finally {
-    // 7. teardown — permanent agent purge first, then transactional domain +
-    //    confirmed SES deprovision + durable backstop, then DNS. If API teardown fails, retain DNS
-    //    so a still-live provider identity does not lose verification.
+    // 7. teardown — permanent agent purge first, then the transactional
+    //    domain delete (commits the durable teardown job; a best-effort
+    //    immediate deprovision usually confirms provider absence before the
+    //    200, with async convergence as the guarantee), then DNS. If API
+    //    teardown fails, retain DNS so a still-live provider identity does
+    //    not lose verification.
     const result = await cleanupDomainFixture(client, { domain, agent: agentEmail, dnsRecords }, (record) => cfDns.delete(record));
     if (result.failed.length > 0) {
       fail(

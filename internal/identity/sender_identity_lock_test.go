@@ -154,6 +154,14 @@ func TestSendingIdentityMutationGateHonorsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestDeleteDomainTxUsesPinnedMutationConnection guards senderIdentityBegin's
+// pinned-connection contract: any store write invoked inside a
+// WithSendingIdentityMutationLock callback must run on the lock-owning
+// connection rather than acquiring a second one. No production caller
+// currently runs DeleteDomainTx under the lock (the delete handler enqueues
+// in-tx and deprovisions post-commit), but the capability is what keeps every
+// lock-scoped store method single-connection — hence the invariant stays
+// pinned here with DeleteDomainTx as its exercise.
 func TestDeleteDomainTxUsesPinnedMutationConnection(t *testing.T) {
 	// Initialize and clean the shared test database, then use a dedicated
 	// one-connection pool to prove the advisory-lock callback does not try to

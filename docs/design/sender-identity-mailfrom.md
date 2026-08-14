@@ -107,9 +107,16 @@ for verified domains; (b) needed an aligned Return-Path.
 - **Healthy-recheck no-op:** a forced mutation signal (POST /verify on an
   already-verified domain) short-circuits to a single provider GET when the
   ledger confirms the current incarnation applied AND the provider reports
-  verified. Any other outcome falls through to full convergence. This restores
-  the pre-ledger guard against flapping a verified sender back to pending on
-  every re-check.
+  verified; a transient GET error retries the job rather than converging
+  blind. Any definitive non-healthy outcome falls through to full
+  convergence. This restores the pre-ledger guard against flapping a verified
+  sender back to pending on every re-check. Caveat: the GET cross-checks the
+  provider's verification *status*, not the installed key material —
+  `applied_incarnation == incarnation` is what ties "verified" to this
+  registration's selector/key, and that holds only while selector/key are
+  immutable per incarnation. Any future in-place DKIM rotation or MAIL FROM
+  convention change must invalidate `applied_incarnation` or revisit the
+  gate.
 - The MX/SPF records are **preserved across verify** — `Status()` re-emits them on
   every poll, so a verified domain's view keeps showing the records the customer
   must KEEP published (removing them later silently loses SPF alignment). (Adjusted

@@ -110,7 +110,9 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 // Intentionally NOT unique: River's job uniqueness can't drop `completed` from
 // its state set (only `retryable` is safely removable), so a completed job
 // would block a legitimate re-provision — e.g. POST /verify retrying a `failed`
-// domain — for the ~24h completed-job retention window. Instead we always
+// domain — for the ~24h completed-job retention window. (Where dedupe IS
+// wanted despite that constraint, scope uniqueness in time instead — see
+// PostDrainAuditArgs.Window.) Instead we always
 // enqueue and rely on desired-state convergence: the current incarnation's
 // BYODKIM + MAIL FROM replaces any prior provider state.
 // Provider mutations are serialized per process and per domain across replicas,

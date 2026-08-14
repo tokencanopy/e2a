@@ -332,6 +332,10 @@ func verifyDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 // DELETE /domains response waits for. Generous enough for Deprovision's
 // bounded absence-confirmation polling (~3s worst case) against a healthy
 // provider; a degraded provider hits this instead of holding the response.
+// Note: a deadline that fires while waiting on the per-domain advisory lock
+// hijacks and closes that pooled connection (the outcome-safe release path in
+// WithSendingIdentityMutationLock), so sustained SES hangs trade some
+// connection churn for the bounded response — accepted.
 const bestEffortDeprovisionTimeout = 10 * time.Second
 
 // deleteDomainFunc wires DELETE /domains. The transaction commits the guarded
