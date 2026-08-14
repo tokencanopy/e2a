@@ -109,6 +109,22 @@ const sendAtField = z
     'Beta: scheduled sending may change before it is declared stable. Optional scheduled-send time in RFC 3339 format with an explicit UTC offset. When set to a future instant, the message is accepted immediately with status "scheduled" and submitted at approximately that time ("not before", accurate to seconds). A value at or before now sends immediately; more than 90 days ahead is rejected. A future send_at whose only recipient is the sending agent\'s own address returns 400 invalid_request because self-delivery is an immediate loopback with no scheduled arm — even when the message would otherwise be held for review. Scheduling survives a review hold: if held, send_at is preserved on the pending_review message (surfaced as scheduled_at) and re-armed on approval — submitted at send_at if still in the future, or immediately if it has already passed. Moving the message to trash before provider submission starts prevents submission; if submission already has a fresh lease, delete returns 409 send_in_progress. Restoring before send_at re-arms it; restoring at or after send_at returns it live with delivery_status=failed and leaves the send canceled.',
   );
 
+// Shared recipient fields. Same wording everywhere the field appears so an
+// agent learns one rule, not three (mirrors emailSelector's reasoning in
+// util.ts). Bcc is called out as invisible: a model that cannot see the
+// difference from the schema will otherwise treat cc and bcc as synonyms.
+const ccField = z
+  .array(z.string())
+  .optional()
+  .describe("Carbon-copy addresses. Visible to every recipient.");
+
+const bccField = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Blind-carbon-copy addresses. NOT visible to any other recipient, and absent from the headers the recipient sees.",
+  );
+
 export function registerMessageTools(server: McpServer, client: McpClient): void {
   server.registerTool(
     "send_message",
@@ -121,7 +137,12 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
         to: z.array(z.string()).describe("Recipient email addresses (one or more)."),
         subject: z.string().optional().describe("Literal subject. Required unless a template reference is used (then it must be omitted)."),
         text: z.string().optional().describe("Literal plain-text body; use `html` for HTML. Required unless a template reference is used (then it must be omitted)."),
-        html: z.string().optional(),
+        html: z
+          .string()
+          .optional()
+          .describe(
+            "Optional HTML body, sent alongside `text` as a multipart alternative. Always pass `text` too — it is what recipients with HTML disabled receive.",
+          ),
         template_id: z
           .string()
           .optional()
@@ -140,8 +161,8 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Variables for the referenced template ({{name}}, dot paths into nested objects). Missing variables render as EMPTY strings — no error. For raw {{{…_html}}} fragment slots, HTML-escape any user content you splice in. Requires template_id or template_alias. Beta.",
           ),
-        cc: z.array(z.string()).optional(),
-        bcc: z.array(z.string()).optional(),
+        cc: ccField,
+        bcc: bccField,
         attachments: attachmentsArraySchema,
         conversation_id: z
           .string()
@@ -210,13 +231,18 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the message to reply to — inbound or one the agent sent (e.g. msg_…)."),
         text: z.string().describe("Plain-text reply body."),
-        html: z.string().optional(),
+        html: z
+          .string()
+          .optional()
+          .describe(
+            "Optional HTML reply body, sent alongside `text` as a multipart alternative. `text` stays required — it is what recipients with HTML disabled receive.",
+          ),
         reply_all: z
           .boolean()
           .optional()
           .describe("If true, copy the original message's Cc list."),
-        cc: z.array(z.string()).optional(),
-        bcc: z.array(z.string()).optional(),
+        cc: ccField,
+        bcc: bccField,
         attachments: attachmentsArraySchema,
         conversation_id: z
           .string()
@@ -286,15 +312,20 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       inputSchema: strictInputSchema({
         message_id: z.string().describe("ID of the message to forward — inbound or one the agent sent (e.g. msg_…)."),
         to: z.array(z.string()).describe("Forward target addresses (one or more)."),
-        cc: z.array(z.string()).optional(),
-        bcc: z.array(z.string()).optional(),
+        cc: ccField,
+        bcc: bccField,
         text: z
           .string()
           .optional()
           .describe(
             "Optional plain-text comment to prepend above the forwarded content. The original body is appended automatically.",
           ),
-        html: z.string().optional(),
+        html: z
+          .string()
+          .optional()
+          .describe(
+            "Optional HTML version of your prepended comment. The original body and its header block are appended automatically, same as for `text`.",
+          ),
         attachments: attachmentsArraySchema,
         conversation_id: z
           .string()
@@ -429,7 +460,11 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       description:
         "Returns the full application conversation group — aggregate counts, the participants union (sender + recipient + to + cc + bcc across members), the labels union, and every live member message in chronological order (oldest first). This groups by `conversation_id`, which is independent of email thread topology. Returns a not-found error when no live messages exist for `(agent, conversation_id)`. Use this after `list_conversations` (or whenever you have a `conversation_id` from an inbound/outbound payload) to read the full group.",
       inputSchema: strictInputSchema({
-        conversation_id: z.string(),
+        conversation_id: z
+          .string()
+          .describe(
+            "The grouping ID to read, as returned by `list_conversations` or carried on an inbound/outbound message payload.",
+          ),
         email: emailSelector,
       }),
     },
@@ -451,7 +486,12 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
           .describe(
             "Which folder to list: `inbound` = Inbox (received, default), `outbound` = Sent (this agent's sent mail + held drafts), `all` = both.",
           ),
-        read_status: z.enum(["unread", "read", "all"]).optional(),
+        read_status: z
+          .enum(["unread", "read", "all"])
+          .optional()
+          .describe(
+            "Filter received mail by read state. Defaults to `unread` — pass `all` to see the whole folder, not just what you have yet to open. Applies to inbound only; sent mail has no read state.",
+          ),
         ...paginationInput,
         sort: z
           .enum(["asc", "desc"])
@@ -593,7 +633,11 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       description:
         "Use after `list_messages` to read one inbound or outbound message in full; for outbound messages, this is also how you poll a send's terminal outcome. Returns text + HTML, direction, labels, delivery/review lifecycle, suspicious-message flags and protection findings, header_from, envelope_from, verified_domain, SPF/DKIM/DMARC evidence, conversation id, and attachment metadata. `truncated:true` means the inbound parser clipped the decoded body. A non-null verified_domain means DMARC passed for the RFC 5322 From domain; it does not authenticate the mailbox local part, a person, or message content. Pass the message's `id` from the list response. **Side effect:** fetching an unread inbound message marks it read — there is no peek-without-consuming and no mark-unread, so only open a message when you mean to consume it. Attachment bytes and raw MIME are intentionally omitted to protect context; the response lists each attachment's filename, content_type, 0-based `index`, and size_bytes. Call `get_attachment` with that index to fetch one file by reference.",
       inputSchema: strictInputSchema({
-        message_id: z.string(),
+        message_id: z
+          .string()
+          .describe(
+            "ID of the message to read (e.g. msg_…), taken from `list_messages`. Opening an unread inbound message marks it read.",
+          ),
         email: emailSelector,
       }),
     },
@@ -615,10 +659,13 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       description:
         "Beta: returns the ordered transitions e2a observed for one persisted inbound or outbound message; the lifecycle contract may change before it is declared stable. SMTP acceptance, upstream submission, provider delivery feedback, and complaint feedback remain distinct; this does not claim inbox placement. **Cursor-paginated:** returns one page in `transitions` plus `next_cursor` only when more pages remain; pass it back as `cursor` to continue, and stop when it is absent.",
       inputSchema: strictInputSchema({
-        message_id: z.string(),
+        message_id: z
+          .string()
+          .describe("ID of the message whose lifecycle you want (e.g. msg_…)."),
         email: emailSelector,
-        cursor: z.string().optional(),
-        limit: z.number().int().min(1).max(100).optional(),
+        // Share the standard cursor/limit wording rather than re-declaring an
+        // equivalent shape: one pagination rule across every paged tool.
+        ...paginationInput,
       }),
     },
     async (args) =>
@@ -649,7 +696,9 @@ export function registerMessageTools(server: McpServer, client: McpClient): void
       description:
         "Returns one attachment's metadata plus a short-lived `download_url` (+ `expires_at`) — fetch the bytes out of band so binary content never streams through your context (no size limit). `attachment_index` is the 0-based `attachments[].index` from `get_message`. Pass `inline: true` to ALSO get base64 `data` for small attachments (≤256 KB; larger inline requests error) — use this only when you must re-attach the bytes (e.g. forwarding a small file via `send_message`'s `attachments[]`); otherwise hand the `download_url` to whatever needs the file.",
       inputSchema: strictInputSchema({
-        message_id: z.string(),
+        message_id: z
+          .string()
+          .describe("ID of the message the attachment belongs to (e.g. msg_…)."),
         attachment_index: z
           .number()
           .int()
