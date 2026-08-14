@@ -544,10 +544,16 @@ const (
 
 type Store struct {
 	pool *pgxpool.Pool
-	// senderIdentityMutationMu caps provider mutations at one per process.
-	// Each cross-process advisory lock owns one pool connection for the remote
+	// senderIdentityGate caps provider mutations at one per process. Each
+	// cross-process advisory lock owns one pool connection for the remote
 	// call, so this prevents an SES slowdown from consuming the whole DB pool.
-	senderIdentityMutationMu sync.Mutex
+	// A capacity-1 channel rather than a sync.Mutex so a waiter whose context
+	// is cancelled (an HTTP handler on a deadline, a worker shutting down)
+	// unblocks with ctx.Err() instead of parking forever behind a slow SES
+	// call. Lazily initialized (senderIdentityGateChan) so zero-value Stores
+	// in tests keep working.
+	senderIdentityGateOnce sync.Once
+	senderIdentityGate     chan struct{}
 	// dkimCipher envelope-encrypts DKIM private keys at rest (#144 / M4).
 	// Optional: nil ⇒ keys are stored as plaintext DER (dev/test without a
 	// configured signing secret). cmd/e2a always installs it in production.
@@ -1057,8 +1063,13 @@ func (s *Store) senderIdentityBegin(ctx context.Context) (pgx.Tx, error) {
 // a context that pins the sender-identity store methods below to the lock-owning
 // connection, so a worker needs only one pool connection while it waits on SES.
 func (s *Store) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) (retErr error) {
-	s.senderIdentityMutationMu.Lock()
-	defer s.senderIdentityMutationMu.Unlock()
+	gate := s.senderIdentityGateChan()
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-gate }()
 
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -1091,6 +1102,13 @@ func (s *Store) WithSendingIdentityMutationLock(ctx context.Context, domain stri
 
 	lockedCtx := context.WithValue(ctx, senderIdentityExecutorKey{}, conn)
 	return fn(lockedCtx)
+}
+
+// senderIdentityGateChan lazily initializes the process-wide mutation gate so
+// Stores built as zero-value literals (tests) work like NewStore-built ones.
+func (s *Store) senderIdentityGateChan() chan struct{} {
+	s.senderIdentityGateOnce.Do(func() { s.senderIdentityGate = make(chan struct{}, 1) })
+	return s.senderIdentityGate
 }
 
 // LoadSendingIdentityState returns one incarnation-consistent snapshot for the

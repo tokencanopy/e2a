@@ -68,6 +68,54 @@ func TestSendingIdentityMutationLockSerializesSameDomain(t *testing.T) {
 	}
 }
 
+// TestSendingIdentityMutationGateHonorsContextCancellation pins the review
+// fix for the process-wide mutation gate: a waiter whose context is cancelled
+// (an HTTP handler on a deadline, a worker shutting down) must unblock with
+// ctx.Err() instead of parking forever behind a slow provider call. The two
+// goroutines use DIFFERENT domains so the process gate — not the per-domain
+// advisory lock — is provably the thing being waited on.
+func TestSendingIdentityMutationGateHonorsContextCancellation(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- store.WithSendingIdentityMutationLock(context.Background(), "gate-holder.example.com", func(context.Context) error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- store.WithSendingIdentityMutationLock(ctx, "gate-waiter.example.com", func(context.Context) error {
+			return nil
+		})
+	}()
+	// Let the waiter queue behind the gate, then cancel it.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled waiter returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled waiter stayed parked behind the process-wide mutation gate")
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("gate holder: %v", err)
+	}
+}
+
 func TestDeleteDomainTxUsesPinnedMutationConnection(t *testing.T) {
 	// Initialize and clean the shared test database, then use a dedicated
 	// one-connection pool to prove the advisory-lock callback does not try to
