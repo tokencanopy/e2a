@@ -322,7 +322,7 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
-		Description: "Deprovisions the domain's sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).",
+		Description: "Deletes the domain and commits durable teardown of its sending identity, breaking sending and receiving for every agent on it. The provider-side identity is usually removed before the response returns and is guaranteed to converge shortly after even through provider outages. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteDomain)
 

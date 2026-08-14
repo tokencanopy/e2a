@@ -318,45 +318,54 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 	})
 }
 
-func TestManagerDeleteWithProviderCleanup(t *testing.T) {
+// TestManagerTryDeprovisionNow covers the post-commit best-effort convergence
+// the delete handler runs after the row delete + durable teardown job have
+// committed. It replaces the synchronous in-tx Deprovision (review findings:
+// an untagged/foreign identity made the domain permanently undeletable, and a
+// transient SES failure blocked deletion entirely).
+func TestManagerTryDeprovisionNow(t *testing.T) {
 	const domain = "delete-boundary.example.test"
-	t.Run("provider failure preserves database state", func(t *testing.T) {
-		store := newFakeStore()
-		store.setStatus(domain, StatusVerified)
-		provider := NewFakeProvider()
-		provider.SetDeprovisionErr(errors.New("ses unavailable"))
-		manager := NewManager(store, provider, nil, Config{})
-		deleted := false
-		err := manager.DeleteWithProviderCleanup(context.Background(), domain, func(ctx context.Context, cleanup func(context.Context) error) error {
-			if err := cleanup(ctx); err != nil {
-				return err // transaction rolls back; model that by leaving deleted false
-			}
-			deleted = true
-			return nil
-		})
-		if err == nil || deleted {
-			t.Fatalf("provider failure must stop DB delete: err=%v deleted=%v", err, deleted)
-		}
-	})
 
-	t.Run("success confirms provider absence before database delete", func(t *testing.T) {
-		store := newFakeStore()
-		store.setStatus(domain, StatusVerified)
+	t.Run("removes the owned provider identity for a deleted domain", func(t *testing.T) {
+		store := newFakeStore() // absent row = deleted domain
+		store.managed[domain] = "deleted-incarnation"
 		provider := NewFakeProvider()
 		provider.SeedIdentity(domain)
 		manager := NewManager(store, provider, nil, Config{})
-		providerAbsentInCallback := false
-		err := manager.DeleteWithProviderCleanup(context.Background(), domain, func(ctx context.Context, cleanup func(context.Context) error) error {
-			if err := cleanup(ctx); err != nil {
-				return err
-			}
-			identities, _ := provider.List(context.Background())
-			providerAbsentInCallback = len(identities) == 0
-			store.deleteDomain(domain)
-			return nil
-		})
-		if err != nil || !providerAbsentInCallback {
-			t.Fatalf("delete boundary: err=%v providerAbsentInCallback=%v", err, providerAbsentInCallback)
+
+		if err := manager.TryDeprovisionNow(context.Background(), domain); err != nil {
+			t.Fatalf("TryDeprovisionNow: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 0 {
+			t.Fatalf("provider identity survived the immediate deprovision: %v", identities)
+		}
+		if store.managed[domain] == "" {
+			t.Fatal("tombstone must be retained for the post-drain audit to finalize")
+		}
+	})
+
+	t.Run("tolerates a foreign or untagged identity", func(t *testing.T) {
+		store := newFakeStore()
+		store.managed[domain] = "deleted-incarnation"
+		provider := NewFakeProvider()
+		provider.SetDeprovisionErr(ErrIdentityNotOwned)
+		manager := NewManager(store, provider, nil, Config{})
+
+		if err := manager.TryDeprovisionNow(context.Background(), domain); err != nil {
+			t.Fatalf("a not-owned identity is not e2a's to delete and must be tolerated: %v", err)
+		}
+	})
+
+	t.Run("surfaces transient provider errors for the caller to log", func(t *testing.T) {
+		store := newFakeStore()
+		store.managed[domain] = "deleted-incarnation"
+		provider := NewFakeProvider()
+		provider.SetDeprovisionErr(errors.New("ses unavailable"))
+		manager := NewManager(store, provider, nil, Config{})
+
+		if err := manager.TryDeprovisionNow(context.Background(), domain); err == nil {
+			t.Fatal("transient provider error must surface (the caller logs it; the job converges)")
 		}
 	})
 }

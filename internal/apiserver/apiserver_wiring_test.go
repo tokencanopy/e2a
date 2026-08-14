@@ -56,8 +56,9 @@ func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, d
 	return f.deprovisionErr
 }
 
-func (f *fakeSenderIdentity) DeleteWithProviderCleanup(ctx context.Context, _ string, deleteFn func(context.Context, func(context.Context) error) error) error {
-	return deleteFn(ctx, func(context.Context) error { return f.deprovisionErr })
+func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) error {
+	f.deprovisioned = append(f.deprovisioned, domain)
+	return f.deprovisionErr
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {

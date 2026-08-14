@@ -38,17 +38,19 @@ type Manager struct {
 	enq      jobs.Enqueuer
 }
 
-// DeleteWithProviderCleanup makes the HTTP domain-delete success boundary mean
-// that the provider identity is already confirmed absent. deleteFn first
-// performs the guarded database DELETE, then invokes its cleanup callback
-// inside that still-open transaction. This ordering prevents an agent-create
-// race from deleting SES under a domain whose DB delete is FK-blocked.
-func (m *Manager) DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error {
-	return m.store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
-		return deleteFn(lockedCtx, func(deleteCtx context.Context) error {
-			return m.provider.Deprovision(deleteCtx, domain)
-		})
-	})
+// TryDeprovisionNow is the post-commit best-effort convergence attempt for a
+// just-deleted domain: the delete transaction has already committed the row
+// delete plus the durable teardown job, so the provider identity is usually
+// confirmed absent before the HTTP response returns — but a failure here is
+// for the caller to LOG, never to propagate to the client (the committed job
+// and the hourly reaper are the guarantee). It runs the same desired-state
+// convergence as the workers: the absent row converges to provider absence,
+// ErrIdentityNotOwned is tolerated (a foreign identity is not e2a's to
+// delete), and the ledger tombstone is deliberately retained for the
+// post-drain audit to finalize (mixed-version late-create repair). The caller
+// bounds the wait via ctx; the mutation gate honors cancellation.
+func (m *Manager) TryDeprovisionNow(ctx context.Context, domain string) error {
+	return syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false)
 }
 
 // NewManager builds the manager with its dependencies. It does NOT build a River

@@ -103,7 +103,9 @@ type SenderIdentityEnqueuer interface {
 	EnqueueProvision(ctx context.Context, domain string) error
 	EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain string) error
 	EnqueueDeprovisionTx(ctx context.Context, tx pgx.Tx, domain string) error
-	DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error
+	// TryDeprovisionNow is the post-commit best-effort provider convergence for
+	// a just-deleted domain. Errors are logged, never returned to the client.
+	TryDeprovisionNow(ctx context.Context, domain string) error
 }
 
 // BuildDeps maps Params into the httpapi dependency set. Kept as the single
@@ -326,23 +328,36 @@ func verifyDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 	}
 }
 
-// deleteDomainFunc wires DELETE /domains. With SES configured it first confirms
-// provider deletion, then commits the domain-row delete and durable backstop
-// job in one transaction. Therefore HTTP success is safe for callers to use as
-// the boundary for removing DNS; without SES configured, this is a plain delete.
+// bestEffortDeprovisionTimeout bounds the post-commit provider convergence a
+// DELETE /domains response waits for. Generous enough for Deprovision's
+// bounded absence-confirmation polling (~3s worst case) against a healthy
+// provider; a degraded provider hits this instead of holding the response.
+const bestEffortDeprovisionTimeout = 10 * time.Second
+
+// deleteDomainFunc wires DELETE /domains. The transaction commits the guarded
+// domain-row delete together with the durable teardown job (the success
+// boundary: the delete cannot be lost even with SES unreachable). A
+// best-effort provider deprovision then runs post-commit, so the SES identity
+// is usually already confirmed absent when the response returns — but a
+// provider failure there (outage, throttle, foreign/untagged identity) is
+// logged and left to the committed job + hourly reaper to converge, never
+// surfaced to the client. Without SES configured, this is a plain delete.
 func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) error {
 	if p.SenderIdentity == nil {
 		return p.Store.DeleteDomain
 	}
 	return func(ctx context.Context, domain, userID string) error {
-		return p.SenderIdentity.DeleteWithProviderCleanup(ctx, domain, func(lockedCtx context.Context, deprovision func(context.Context) error) error {
-			return p.Store.DeleteDomainTx(lockedCtx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
-				if err := deprovision(ctx); err != nil {
-					return err
-				}
-				return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
-			})
-		})
+		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+			return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
+		}); err != nil {
+			return err
+		}
+		depCtx, cancel := context.WithTimeout(ctx, bestEffortDeprovisionTimeout)
+		defer cancel()
+		if err := p.SenderIdentity.TryDeprovisionNow(depCtx, domain); err != nil {
+			log.Printf("[apiserver] best-effort sender-identity deprovision for %s: %v (async teardown will converge)", domain, err)
+		}
+		return nil
 	}
 }
 

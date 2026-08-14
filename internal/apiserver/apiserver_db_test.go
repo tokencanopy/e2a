@@ -23,17 +23,22 @@ import (
 // fakeSenderIdentity records SenderIdentityEnqueuer calls so the transactional
 // teardown contract can be asserted without SES/River.
 type fakeSenderIdentity struct {
-	provisionErr    error
-	deprovisionErr  error
-	deprovisioned   []string
-	providerCleaned []string
+	provisionErr   error
+	deprovisionErr error
+	tryErr         error
+	deprovisioned  []string
+	tried          []string
+	// onTry observes state at TryDeprovisionNow time (e.g. that the domain row
+	// is already committed-deleted when the best-effort provider call runs).
+	onTry func()
 }
 
-func (f *fakeSenderIdentity) DeleteWithProviderCleanup(ctx context.Context, domain string, deleteFn func(context.Context, func(context.Context) error) error) error {
-	return deleteFn(ctx, func(context.Context) error {
-		f.providerCleaned = append(f.providerCleaned, domain)
-		return f.deprovisionErr
-	})
+func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) error {
+	if f.onTry != nil {
+		f.onTry()
+	}
+	f.tried = append(f.tried, domain)
+	return f.tryErr
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, _ string) error {
@@ -86,17 +91,58 @@ func TestBuildDepsDeleteDomainWithSenderIdentity(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
+	rowGoneAtTryTime := false
+	fake.onTry = func() {
+		_, lookupErr := store.LookupDomain(ctx, domain, user.ID)
+		rowGoneAtTryTime = lookupErr != nil
+	}
+
 	if err := deps.DeleteDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("DeleteDomain: %v", err)
 	}
 	if len(fake.deprovisioned) != 1 || fake.deprovisioned[0] != domain {
-		t.Fatalf("deprovisioned = %v, want [%s] — SES teardown must be enqueued", fake.deprovisioned, domain)
+		t.Fatalf("deprovisioned = %v, want [%s] — durable SES teardown must be enqueued in the delete tx", fake.deprovisioned, domain)
 	}
-	if len(fake.providerCleaned) != 1 || fake.providerCleaned[0] != domain {
-		t.Fatalf("providerCleaned = %v, want [%s] — 200 must mean SES teardown already completed", fake.providerCleaned, domain)
+	if len(fake.tried) != 1 || fake.tried[0] != domain {
+		t.Fatalf("tried = %v, want [%s] — the best-effort immediate deprovision must run", fake.tried, domain)
+	}
+	if !rowGoneAtTryTime {
+		t.Fatal("best-effort deprovision ran before the delete committed — a provider call inside the tx recreates the SES-coupled delete")
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
 		t.Fatal("domain row still present after DeleteDomain")
+	}
+}
+
+// TestBuildDepsDeleteDomainSucceedsWhenProviderUnavailable pins the review
+// fix for the SES-coupled delete: a transient provider failure (SES outage,
+// throttling) or a foreign/untagged identity must NOT fail the API delete.
+// The row delete + durable teardown job committed; the provider converges
+// asynchronously.
+func TestBuildDepsDeleteDomainSucceedsWhenProviderUnavailable(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	fake := &fakeSenderIdentity{tryErr: errors.New("ses unavailable")}
+	p.SenderIdentity = fake
+	deps := apiserver.BuildDeps(p)
+
+	user, err := store.CreateOrGetUser(ctx, "cov-sesdown@example.com", "Owner", "google-cov-sesdown")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "cov-sesdown.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	if err := deps.DeleteDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("DeleteDomain must succeed while the provider is down, got %v", err)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
+		t.Fatal("domain row still present after DeleteDomain")
+	}
+	if len(fake.deprovisioned) != 1 {
+		t.Fatalf("durable teardown job missing: %v", fake.deprovisioned)
 	}
 }
 
@@ -174,8 +220,11 @@ func TestBuildDepsDeleteDomainFKFailureDoesNotTouchProvider(t *testing.T) {
 	if err := deps.DeleteDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainHasAgents) {
 		t.Fatalf("DeleteDomain error = %v, want ErrDomainHasAgents", err)
 	}
-	if len(fake.providerCleaned) != 0 {
-		t.Fatalf("provider touched before FK-safe DB delete: %v", fake.providerCleaned)
+	if len(fake.tried) != 0 {
+		t.Fatalf("provider touched after an FK-blocked delete: %v", fake.tried)
+	}
+	if len(fake.deprovisioned) != 0 {
+		t.Fatalf("teardown enqueued for an FK-blocked delete: %v", fake.deprovisioned)
 	}
 }
 
