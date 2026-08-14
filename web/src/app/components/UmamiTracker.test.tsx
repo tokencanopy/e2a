@@ -66,7 +66,7 @@ describe("UmamiTracker", () => {
     await act(async () => {});
     expect(
       document.querySelector(
-        'script[src="https://umami.tokencanopy.com/script.js"]',
+        'script[src="/vendor/umami/umami-v3.2.0.1ad1145d.js"]',
       ),
     ).toBeNull();
     expect(track).not.toHaveBeenCalled();
@@ -76,9 +76,18 @@ describe("UmamiTracker", () => {
     window.history.replaceState({}, "", "/?campaign=sensitive");
     render(<UmamiTracker />);
 
-    const script = document.querySelector(
-      'script[src="https://umami.tokencanopy.com/script.js"]',
+    const script = document.querySelector("#tc-umami-tracker");
+    expect(script).toHaveAttribute(
+      "src",
+      "/vendor/umami/umami-v3.2.0.1ad1145d.js",
     );
+    expect(script).toHaveAttribute(
+      "data-host-url",
+      "https://umami.tokencanopy.com",
+    );
+    expect(
+      document.querySelector('script[src^="https://umami.tokencanopy.com"]'),
+    ).toBeNull();
     expect(script).toHaveAttribute("data-auto-track", "false");
     expect(script).toHaveAttribute("data-exclude-search", "true");
     expect(script).toHaveAttribute("data-exclude-hash", "true");
@@ -143,7 +152,7 @@ describe("UmamiTracker", () => {
     await act(async () => {});
     expect(
       document.querySelector(
-        'script[src="https://umami.tokencanopy.com/script.js"]',
+        'script[src="/vendor/umami/umami-v3.2.0.1ad1145d.js"]',
       ),
     ).toBeNull();
     expect(track).not.toHaveBeenCalled();

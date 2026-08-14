@@ -1,0 +1,10 @@
+{
+  "name": "Umami tracker",
+  "version": "3.2.0",
+  "upstreamCommit": "2f6e2b5",
+  "source": "https://umami.tokencanopy.com/script.js",
+  "upstream": "https://github.com/umami-software/umami/releases/tag/v3.2.0",
+  "sha256": "1ad1145d19d4558c20f5469ca4a5fc50a1a46f860858c9c91bfcd56fd29a522a",
+  "bytes": 4655,
+  "license": "MIT"
+}

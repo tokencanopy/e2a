@@ -10,7 +10,11 @@
     "start": "next start",
     "lint": "eslint",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "verify:umami": "node scripts/vendor-umami-tracker.mjs --check",
+    "test:umami-updater": "node --test scripts/vendor-umami-tracker.check.mjs",
+    "verify:redoc": "node scripts/vendor-redoc.mjs --check",
+    "test:redoc-updater": "node --test scripts/vendor-redoc.check.mjs"
   },
   "dependencies": {
     "@e2a/ui": "file:../design-system",

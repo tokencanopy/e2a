@@ -5,6 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { UMAMI_WEBSITE_ID } from "../../lib/site";
 
+export const UMAMI_TRACKER_PATH =
+  "/vendor/umami/umami-v3.2.0.1ad1145d.js";
+const UMAMI_COLLECTOR_ORIGIN = "https://umami.tokencanopy.com";
+
 type UmamiPayload = Record<string, unknown> & {
   referrer?: string;
   title?: string;
@@ -172,8 +176,9 @@ export function UmamiTracker() {
   return (
     <Script
       id="tc-umami-tracker"
-      src="https://umami.tokencanopy.com/script.js"
+      src={UMAMI_TRACKER_PATH}
       strategy="afterInteractive"
+      data-host-url={UMAMI_COLLECTOR_ORIGIN}
       data-website-id={UMAMI_WEBSITE_ID}
       data-auto-track="false"
       data-before-send="tcUmamiBeforeSend"
