@@ -573,7 +573,8 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	if live > 0 || trashed > 0 {
 		return nil, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
 	}
-	if err := s.deps.DeleteDomain(ctx, in.Domain, user.ID); err != nil {
+	teardownPending, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
+	if err != nil {
 		switch {
 		case errors.Is(err, identity.ErrDomainHasAgents):
 			return nil, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
@@ -583,7 +584,11 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
 		}
 	}
-	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain}}, nil
+	teardown := SendingTeardownConfirmed
+	if teardownPending {
+		teardown = SendingTeardownPending
+	}
+	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: teardown}}, nil
 }
 
 // domainHasAgentsMessage explains WHICH agents are blocking a domain delete.

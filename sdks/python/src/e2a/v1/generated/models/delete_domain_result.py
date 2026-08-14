@@ -28,8 +28,9 @@ class DeleteDomainResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false.")
     domain: StrictStr = Field(description="The deleted domain.")
+    sending_teardown: StrictStr = Field(description="Whether the provider-side sending identity is confirmed removed: 'confirmed' or 'pending' (open set). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["deleted", "domain"]
+    __properties: ClassVar[List[str]] = ["deleted", "domain", "sending_teardown"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -90,7 +91,8 @@ class DeleteDomainResult(BaseModel):
 
         _obj = cls.model_validate({
             "deleted": obj.get("deleted"),
-            "domain": obj.get("domain")
+            "domain": obj.get("domain"),
+            "sending_teardown": obj.get("sending_teardown")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

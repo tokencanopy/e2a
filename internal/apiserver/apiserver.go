@@ -346,11 +346,14 @@ const bestEffortDeprovisionTimeout = 10 * time.Second
 // provider failure there (outage, throttle, foreign/untagged identity) is
 // logged and left to the committed job + hourly reaper to converge, never
 // surfaced to the client. Without SES configured, this is a plain delete.
-func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) error {
+func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (bool, error) {
 	if p.SenderIdentity == nil {
-		return p.Store.DeleteDomain
+		// No provider — nothing to tear down, so teardown is never pending.
+		return func(ctx context.Context, domain, userID string) (bool, error) {
+			return false, p.Store.DeleteDomain(ctx, domain, userID)
+		}
 	}
-	return func(ctx context.Context, domain, userID string) error {
+	return func(ctx context.Context, domain, userID string) (bool, error) {
 		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
 			// The delete is the tombstone's latest mutation: stamping it here
 			// is what keeps any audit/sweep from finalizing the ledger row
@@ -360,14 +363,18 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 			}
 			return p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain)
 		}); err != nil {
-			return err
+			return false, err
 		}
 		depCtx, cancel := context.WithTimeout(ctx, bestEffortDeprovisionTimeout)
 		defer cancel()
 		if err := p.SenderIdentity.TryDeprovisionNow(depCtx, domain); err != nil {
 			log.Printf("[apiserver] best-effort sender-identity deprovision for %s: %v (async teardown will converge)", domain, err)
+			// Surfaced to the client as sending_teardown:"pending" so callers
+			// (e.g. the conformance harness) do not remove DNS from under a
+			// still-live provider identity.
+			return true, nil
 		}
-		return nil
+		return false, nil
 	}
 }
 

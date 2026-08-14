@@ -406,7 +406,7 @@ test("a Retry-After shorter than the backoff floor does not shorten the wait", a
 test("cleanup on an empty registry is a no-op", async () => {
   const { client, calls } = fakeClient(() => 204);
   const r = await cleanup(client, { sleep: noSleep });
-  assert.deepEqual(r, { attempted: 0, succeeded: 0, failed: [] });
+  assert.deepEqual(r, { attempted: 0, succeeded: 0, failed: [], completed: [] });
   assert.equal(calls.length, 0);
 });
 

@@ -97,8 +97,12 @@ func TestBuildDepsDeleteDomainWithSenderIdentity(t *testing.T) {
 		rowGoneAtTryTime = lookupErr != nil
 	}
 
-	if err := deps.DeleteDomain(ctx, domain, user.ID); err != nil {
+	teardownPending, err := deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil {
 		t.Fatalf("DeleteDomain: %v", err)
+	}
+	if teardownPending {
+		t.Fatal("teardownPending = true, want false when the best-effort deprovision succeeded")
 	}
 	if len(fake.deprovisioned) != 1 || fake.deprovisioned[0] != domain {
 		t.Fatalf("deprovisioned = %v, want [%s] — durable SES teardown must be enqueued in the delete tx", fake.deprovisioned, domain)
@@ -135,8 +139,12 @@ func TestBuildDepsDeleteDomainSucceedsWhenProviderUnavailable(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	if err := deps.DeleteDomain(ctx, domain, user.ID); err != nil {
+	teardownPending, err := deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil {
 		t.Fatalf("DeleteDomain must succeed while the provider is down, got %v", err)
+	}
+	if !teardownPending {
+		t.Fatal("teardownPending = false, want true — callers gate DNS removal on this")
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
 		t.Fatal("domain row still present after DeleteDomain")
@@ -189,7 +197,7 @@ func TestBuildDepsDeleteDomainHookErrorRollsBack(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	err = deps.DeleteDomain(ctx, domain, user.ID)
+	_, err = deps.DeleteDomain(ctx, domain, user.ID)
 	if !errors.Is(err, hookErr) {
 		t.Fatalf("DeleteDomain error = %v, want the hook error %v", err, hookErr)
 	}
@@ -217,7 +225,7 @@ func TestBuildDepsDeleteDomainFKFailureDoesNotTouchProvider(t *testing.T) {
 	if _, err := store.CreateAgent(ctx, "bot@"+domain, domain, "Bot", "", "", user.ID); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
-	if err := deps.DeleteDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainHasAgents) {
+	if _, err := deps.DeleteDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainHasAgents) {
 		t.Fatalf("DeleteDomain error = %v, want ErrDomainHasAgents", err)
 	}
 	if len(fake.tried) != 0 {

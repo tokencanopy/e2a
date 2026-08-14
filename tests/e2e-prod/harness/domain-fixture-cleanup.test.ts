@@ -4,17 +4,18 @@ import type { ApiClient, RawResponse } from "./client.ts";
 import { cleanupDomainFixture, DnsDeleteError } from "./domain-fixture-cleanup.ts";
 import { disarmLeakReporter, getTracked, setReporterDeps, track, untrack } from "./cleanup.ts";
 
-function fakeClient(statusFor: (path: string) => number, calls: string[]): ApiClient {
+function fakeClient(statusFor: (path: string) => number | { status: number; raw: string }, calls: string[]): ApiClient {
   return {
     delete(path: string): Promise<RawResponse> {
       calls.push(path);
-      const status = statusFor(path);
+      const r = statusFor(path);
+      const { status, raw } = typeof r === "number" ? { status: r, raw: "" } : r;
       return Promise.resolve({
         status,
         ok: status < 400,
         headers: {},
         body: null,
-        raw: "",
+        raw,
         latencyMs: 0,
       });
     },
@@ -93,6 +94,72 @@ test("verified-domain cleanup preserves DNS when API resource teardown fails", a
   assert.equal(result.failed[0]!.kind, "domain");
   assert.equal(calls.some((call) => call.startsWith("dns:")), false, "DNS must remain while the identity is stranded");
   assert.deepEqual(getTracked(), [{ kind: "domain", id: "run.example.test" }]);
+});
+
+test("pending sending-identity teardown preserves DNS and keeps the fixture tracked", async () => {
+	// The API delete can succeed while SES teardown continues asynchronously
+	// (sending_teardown:"pending" — provider outage/throttle at delete time).
+	// Removing DNS then would strand the still-live identity in a failing
+	// state: the exact failure this module exists to prevent. DNS must be
+	// preserved and reported until the identity is actually gone.
+	const calls: string[] = [];
+	const client = fakeClient(
+		(path) =>
+			path.startsWith("/v1/domains/")
+				? { status: 200, raw: JSON.stringify({ deleted: true, domain: "run.example.test", sending_teardown: "pending" }) }
+				: 204,
+		calls,
+	);
+	track("domain", "run.example.test");
+	track("agent", "bot@run.example.test");
+
+	const result = await cleanupDomainFixture(
+		client,
+		{
+			domain: "run.example.test",
+			agent: "bot@run.example.test",
+			dnsRecords: [
+				{ id: "dns-ownership", type: "TXT", name: "_verify.run.example.test" },
+				{ id: "dns-mail-from", type: "MX", name: "bounce.run.example.test" },
+			],
+		},
+		async (record) => {
+			calls.push(`dns:${record.id}`);
+		},
+		{ sleep: async () => {} },
+	);
+
+	assert.deepEqual(result.failed, [], "the API delete itself succeeded");
+	assert.equal(calls.some((call) => call.startsWith("dns:")), false, "DNS must remain while provider teardown is pending");
+	assert.equal(result.dnsFailed.length, 2, "retained records are reported, not silently kept");
+	assert.match(result.dnsFailed[0]!.reason, /teardown.*pending/i);
+	assert.deepEqual(getTracked(), [{ kind: "domain", id: "run.example.test" }], "the fixture stays tracked for follow-up");
+});
+
+test("confirmed sending-identity teardown proceeds to DNS removal", async () => {
+	const calls: string[] = [];
+	const client = fakeClient(
+		(path) =>
+			path.startsWith("/v1/domains/")
+				? { status: 200, raw: JSON.stringify({ deleted: true, domain: "run.example.test", sending_teardown: "confirmed" }) }
+				: 204,
+		calls,
+	);
+	track("domain", "run.example.test");
+
+	const result = await cleanupDomainFixture(
+		client,
+		{ domain: "run.example.test", dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.run.example.test" }] },
+		async (record) => {
+			calls.push(`dns:${record.id}`);
+		},
+		{ sleep: async () => {} },
+	);
+
+	assert.deepEqual(result.failed, []);
+	assert.deepEqual(result.dnsFailed, []);
+	assert.deepEqual(calls.slice(-1), ["dns:dns-ownership"]);
+	assert.deepEqual(getTracked(), []);
 });
 
 test("fixture-scoped cleanup cannot detach an older fixture from its DNS", async () => {

@@ -744,7 +744,10 @@ class DomainsResource {
     return call(() => this.api.registerDomain(body));
   }
   delete(domain: string): Promise<DeleteDomainResult> {
-    // Returns the deletion object ({deleted:true, domain}).
+    // Returns the deletion object ({deleted:true, domain, sending_teardown}).
+    // sending_teardown:"pending" means the provider-side identity is still
+    // being removed asynchronously — keep the domain's DNS published until it
+    // completes.
     return call(() => this.api.deleteDomain(domain, "DELETE"));
   }
   verify(domain: string): Promise<VerifyDomainView> {

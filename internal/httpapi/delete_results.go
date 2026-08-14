@@ -33,10 +33,19 @@ type DeleteAgentResult struct {
 	MessagesDeleted int64  `json:"messages_deleted" doc:"Number of messages permanently removed by the cascade; zero when the agent is moved to trash."`
 } // @name DeleteAgentResult
 
+// Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
+// also covers deployments without a sending-identity provider (nothing to
+// tear down).
+const (
+	SendingTeardownConfirmed = "confirmed"
+	SendingTeardownPending   = "pending"
+)
+
 // DeleteDomainResult confirms a domain delete.
 type DeleteDomainResult struct {
 	Deleted bool   `json:"deleted" doc:"Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false."`
 	Domain  string `json:"domain" doc:"The deleted domain."`
+	SendingTeardown string `json:"sending_teardown" doc:"Whether the provider-side sending identity is confirmed removed: 'confirmed' or 'pending' (open set). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices."`
 } // @name DeleteDomainResult
 
 // DeleteSuppressionResult confirms a suppression-list removal.

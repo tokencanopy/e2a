@@ -13,6 +13,12 @@ export interface CleanupResult {
   attempted: number;
   succeeded: number;
   failed: Array<{ kind: Kind; id: string; reason: string }>;
+	/**
+	 * The terminal-success response body per deleted fixture (raw text; "" for
+	 * bodiless 204s). Lets callers act on server-reported teardown state — the
+	 * domain-fixture flow gates DNS removal on sending_teardown.
+	 */
+	completed: Array<{ kind: Kind; id: string; raw: string }>;
 }
 
 export interface CleanupOpts {
@@ -96,6 +102,7 @@ export async function cleanupFixtures(
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const failed: CleanupResult["failed"] = [];
+	const completed: CleanupResult["completed"] = [];
   let succeeded = 0;
   // Snapshot up front: the loop mutates `tracked` via untrack().
   const batch = [...fixtures].reverse();
@@ -103,18 +110,22 @@ export async function cleanupFixtures(
     // Each fixture is fully isolated — its own try/catch AND its own retry
     // budget — so neither a hard failure nor an exhausted retry on one fixture
     // can stop the remaining ones from being deleted.
-		const reason = await deleteWithRetry(client, t, attempts, conflictAttempts, backoffMs, sleep);
-    if (reason === null) {
+		const outcome = await deleteWithRetry(client, t, attempts, conflictAttempts, backoffMs, sleep);
+		if (outcome.reason === null) {
       succeeded++;
+			completed.push({ ...t, raw: outcome.raw });
       untrack(t.kind, t.id);
     } else {
-      failed.push({ ...t, reason });
+			failed.push({ ...t, reason: outcome.reason });
     }
   }
-  return { attempted: batch.length, succeeded, failed };
+	return { attempted: batch.length, succeeded, failed, completed };
 }
 
-/** Returns null once the fixture is gone, or a human-readable reason on give-up. */
+/**
+ * Returns {reason: null, raw} once the fixture is gone (raw = the terminal
+ * response body), or {reason} on give-up.
+ */
 async function deleteWithRetry(
   client: ApiClient,
 	t: CleanupFixture,
@@ -122,7 +133,7 @@ async function deleteWithRetry(
 	conflictAttempts: number,
   backoffMs: number,
   sleep: (ms: number) => Promise<void>,
-): Promise<string | null> {
+): Promise<{ reason: string | null; raw: string }> {
   const path = pathFor(t);
   let reason = "no attempt made";
 	const maxAttempts = Math.max(attempts, conflictAttempts);
@@ -137,7 +148,7 @@ async function deleteWithRetry(
     let waitMs = backoffMs * attempt;
     try {
       const res = await client.delete(path);
-      if (TERMINAL_OK.has(res.status)) return null;
+			if (TERMINAL_OK.has(res.status)) return { reason: null, raw: res.raw };
 			reason = `HTTP ${res.status}: ${res.raw.slice(0, 200)}`;
 			retryable = isRetryableResponse(res.status, res.raw);
 			if (isRetryableConflictResponse(res.status, res.raw)) budget = Math.max(budget, conflictAttempts);
@@ -157,7 +168,7 @@ async function deleteWithRetry(
 		if (!retryable || attempt >= budget) break;
     await sleep(Math.min(waitMs, MAX_BACKOFF_MS));
   }
-  return reason;
+	return { reason, raw: "" };
 }
 
 function errMessage(e: unknown): string {

@@ -21,6 +21,10 @@ export class DeleteDomainResult {
     * The deleted domain.
     */
     'domain': string;
+    /**
+    * Whether the provider-side sending identity is confirmed removed: \'confirmed\' or \'pending\' (open set). \'pending\' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain\'s DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.
+    */
+    'sendingTeardown': string;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -36,6 +40,12 @@ export class DeleteDomainResult {
         {
             "name": "domain",
             "baseName": "domain",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "sendingTeardown",
+            "baseName": "sending_teardown",
             "type": "string",
             "format": ""
         }    ];

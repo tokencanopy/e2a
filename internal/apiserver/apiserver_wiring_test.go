@@ -226,13 +226,13 @@ func TestEnqueueSenderProvisionFunc(t *testing.T) {
 }
 
 func TestDeleteDomainFuncSelection(t *testing.T) {
-	t.Run("without sender identity it is the plain store delete", func(t *testing.T) {
-		store := &identity.Store{}
+	t.Run("without sender identity it wraps the plain store delete", func(t *testing.T) {
+		// Since deleteDomain reports teardown state, the no-SES path is a
+		// wrapper (always teardownPending=false) rather than the bare method
+		// value; the behavioral contract is pinned by the DB-backed tests.
 		p := minimalParams()
-		p.Store = store
-		got := deleteDomainFunc(p)
-		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(store.DeleteDomain).Pointer() {
-			t.Fatal("without SES, deleteDomainFunc should be exactly Store.DeleteDomain")
+		if got := deleteDomainFunc(p); got == nil {
+			t.Fatal("expected a delete function without SES configured")
 		}
 	})
 

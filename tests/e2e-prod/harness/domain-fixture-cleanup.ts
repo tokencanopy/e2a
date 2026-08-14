@@ -28,9 +28,11 @@ export class DnsDeleteError extends Error {
  * domain's sender identity valid. The shared cleanup registry owns resource
  * ordering, permanent agent purge, retries, and leak reporting.
  *
- * If any API resource survives, preserve every DNS record. Removing DNS from
- * underneath a live domain strands its provider identity in a pending/failed
- * state and turns a cleanup failure into a delayed SES verification alert.
+ * If any API resource survives — or the API reports the provider-side
+ * sending-identity teardown as still pending (sending_teardown:"pending" on
+ * the delete response) — preserve every DNS record. Removing DNS from
+ * underneath a live provider identity strands it in a pending/failed state
+ * and turns a cleanup failure into a delayed SES verification alert.
  */
 export async function cleanupDomainFixture(
   client: ApiClient,
@@ -49,6 +51,22 @@ export async function cleanupDomainFixture(
 	// teardown still reports the fixture. It is untracked only after every DNS
 	// record is confirmed deleted.
 	track("domain", fixture.domain);
+
+	// The API delete committed, but the provider identity may still exist
+	// (best-effort deprovision failed; async teardown continues). DNS must
+	// outlive the identity, so retain every record, report them, and keep the
+	// fixture tracked — a later run (or manual follow-up) removes the DNS once
+	// the identity is gone.
+	const domainDelete = result.completed.find((c) => c.kind === "domain" && c.id === fixture.domain);
+	if (domainDelete && sendingTeardownPending(domainDelete.raw)) {
+		return {
+			...result,
+			dnsFailed: fixture.dnsRecords.map((record) => ({
+				id: record.id ?? `${record.type} ${record.name}`,
+				reason: "sending-identity teardown pending at the provider; DNS retained until the identity is removed",
+			})),
+		};
+	}
 
   const attempts = Math.max(1, opts.attempts ?? 3);
   const backoffMs = opts.backoffMs ?? 1_000;
@@ -74,4 +92,15 @@ export async function cleanupDomainFixture(
 
 	if (dnsFailed.length === 0) untrack("domain", fixture.domain);
   return { ...result, dnsFailed };
+}
+
+/** True when the delete response body reports provider teardown still pending. */
+function sendingTeardownPending(raw: string): boolean {
+	if (raw === "") return false; // bodiless 204/404: nothing reported
+	try {
+		const parsed = JSON.parse(raw) as { sending_teardown?: unknown };
+		return parsed.sending_teardown === "pending";
+	} catch {
+		return false;
+	}
 }
