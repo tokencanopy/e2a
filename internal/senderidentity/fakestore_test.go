@@ -31,10 +31,11 @@ type fakeStore struct {
 	inputsErr error
 
 	// forced errors for the write/read methods (for retry-path tests).
-	setStatusErr error
-	touchErr     error
-	getStatusErr error
-	forgetErr    error
+	setStatusErr   error
+	touchErr       error
+	getStatusErr   error
+	forgetErr      error
+	markAppliedErr error
 
 	// recorded calls
 	SetStatusCalls []setStatusCall
@@ -218,6 +219,9 @@ func (s *fakeStore) MarkSendingIdentityManaged(ctx context.Context, domain, inca
 func (s *fakeStore) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.markAppliedErr != nil {
+		return s.markAppliedErr
+	}
 	if s.managed[domain] != incarnation {
 		return pgx.ErrNoRows
 	}

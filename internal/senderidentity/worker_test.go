@@ -813,7 +813,12 @@ func TestReconcileWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
 }
 
 // TestSyncWorker_NotOwnedForgetFailureStillFires: same window in the sync
-// (provision) path — status commit succeeded, ledger Forget failed.
+// (provision) path — status commit succeeded, ledger Forget failed. The
+// adversarial review then proved the naive fix fires once per River attempt
+// (the sync path re-executes the same terminal transition on retry, unlike
+// reconcile's status!=pending guard), so this also pins exactly-one event
+// across the retries: the first attempt's write CHANGES the status and fires;
+// the retry's failed→failed rewrite must not.
 func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
 	const domain = "sync-forget-blip.example"
 	store := newFakeStore()
@@ -833,6 +838,73 @@ func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
 	ev, ok := firer.last()
 	if !ok || ev.Status != StatusFailed {
 		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
+	}
+	// River retries (Forget still failing): the rewrite is failed→failed — no
+	// duplicate webhook.
+	for attempt := 2; attempt <= 4; attempt++ {
+		if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err == nil {
+			t.Fatalf("attempt %d: Forget still failing must still propagate", attempt)
+		}
+	}
+	if firer.count() != 1 {
+		t.Fatalf("fired %d events over 4 attempts, want exactly 1 (no duplicate per retry)", firer.count())
+	}
+}
+
+// TestReapWorker_StuckFailedDomainDoesNotRefireHourly pins the independent
+// review's deploy-burst finding: with fire wired into the reaper, a domain
+// stuck in `failed` whose identity is missing/foreign would re-emit
+// domain.sending_failed on EVERY hourly sweep (and on the RunOnStart sweep of
+// every deploy). A failed→failed rewrite is not a transition and must not
+// notify the customer again.
+func TestReapWorker_StuckFailedDomainDoesNotRefireHourly(t *testing.T) {
+	const domain = "stuck-failed.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusFailed)
+	store.setOwner(domain, "u5")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation" // unapplied ⇒ forced every sweep
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetProvisionErr(ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+	for sweep := 1; sweep <= 3; sweep++ {
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("sweep %d: %v", sweep, err)
+		}
+	}
+	if firer.count() != 0 {
+		t.Fatalf("fired %d events over 3 sweeps for an already-failed domain, want 0", firer.count())
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed maintained", got)
+	}
+}
+
+// TestSyncWorker_TerminalWriteFiresEvenWhenMarkAppliedFails extends the
+// fire-on-commit rule to the main terminal-write branch (the reviewers found
+// it was applied to only two of the three branches): a committed
+// verified/failed write must fire even when a subsequent ledger call errors.
+func TestSyncWorker_TerminalWriteFiresEvenWhenMarkAppliedFails(t *testing.T) {
+	const domain = "mark-applied-blip.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusPending)
+	store.setOwner(domain, "u6")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.markAppliedErr = errors.New("db blip")
+	prov := NewFakeProvider()
+	prov.SetProvisionResult(Result{Status: StatusVerified})
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err == nil {
+		t.Fatal("MarkApplied failure must propagate for retry")
+	}
+	ev, ok := firer.last()
+	if !ok || ev.Status != StatusVerified {
+		t.Fatalf("fired %+v ok=%v, want sending_verified despite the MarkApplied error", ev, ok)
 	}
 }
 

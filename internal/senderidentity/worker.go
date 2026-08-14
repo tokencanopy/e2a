@@ -340,11 +340,20 @@ func maxAttempts(n int) int {
 }
 
 type syncOutcome struct {
-	changed     bool
-	incarnation string
-	owner       string
-	status      Status
-	errMsg      string
+	// changed means a status write committed this attempt (drives the
+	// pending-path reconcile enqueue, which must run even for a
+	// pending→pending re-provision).
+	changed bool
+	// statusChanged means the written status DIFFERS from the pre-write
+	// state — the only thing that may fire a customer-visible webhook. The
+	// sync path re-executes its terminal transition on every River retry and
+	// on every forced hourly sweep, so firing on `changed` alone multiplies
+	// domain.sending_* events by the retry/sweep count (review finding).
+	statusChanged bool
+	incarnation   string
+	owner         string
+	status        Status
+	errMsg        string
 }
 
 func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion bool) error {
@@ -393,7 +402,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 			}
 			// out before Forget: the failed status is committed, so the event
 			// must fire even when the ledger cleanup errors and the job retries.
-			out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
+			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			if finalizeDeletion {
 				if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
 					return err
@@ -411,7 +420,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 				return err
 			}
 			// out before Forget — see the no-key branch above.
-			out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
+			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			return store.ForgetSendingIdentityManaged(lockedCtx, domain)
 		}
 		if err != nil {
@@ -427,6 +436,10 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, res.Status, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
 			return err
 		}
+		// out before the ledger calls below, same rule as the two branches
+		// above: the status is committed, so a terminal transition must fire
+		// even when Forget/MarkApplied errors and the job retries.
+		out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 		if res.Status == StatusFailed {
 			if finalizeDeletion {
 				if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
@@ -436,13 +449,15 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		} else if err := store.MarkSendingIdentityApplied(lockedCtx, domain, state.Incarnation); err != nil {
 			return err
 		}
-		out = syncOutcome{changed: true, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 		return nil
 	})
-	// Fire terminal transitions before the error check: the status write is
-	// already committed, and a retry after a later store error (e.g. the
-	// ledger Forget) never reaches this transition again.
-	if out.changed && (out.status == StatusVerified || out.status == StatusFailed) {
+	// Fire terminal TRANSITIONS before the error check: the status write is
+	// already committed, and after a later store error (e.g. the ledger
+	// Forget) the retry's rewrite is same→same and will not fire — this
+	// attempt is the event's only chance. Gating on statusChanged (not
+	// changed) is what keeps that retry, and every forced hourly re-sweep of
+	// a stuck domain, from duplicating the webhook.
+	if out.statusChanged && (out.status == StatusVerified || out.status == StatusFailed) {
 		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 	}
 	if err != nil {
