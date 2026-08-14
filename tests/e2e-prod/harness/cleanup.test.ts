@@ -274,6 +274,39 @@ test("default conflict waits out the full ten-minute send lease", async () => {
 	assert.ok(waits.reduce((sum, ms) => sum + ms, 0) >= 600_000, "retry waits must exceed the 600s claim lease");
 });
 
+test("a 429 mid-conflict-wait does not forfeit the conflict budget", async () => {
+	track("agent", "contested@x.test");
+	// The realistic interleaving: the ten-minute send_in_progress wait competes
+	// with the suite's own rate limit, so some attempts inside the conflict
+	// window come back 429 (or 5xx) instead of 409. Once a fixture has entered
+	// the conflict wait, a transient blip must consume one attempt, not the
+	// whole budget.
+	const { client, calls } = fakeClient((_path, attempt) => {
+		if (attempt === 3 || attempt === 5) return 429;
+		if (attempt === 4) return 503;
+		if (attempt < 8) {
+			return { status: 409, headers: {}, raw: JSON.stringify({ error: { code: "send_in_progress" } }) };
+		}
+		return 204;
+	});
+
+	const r = await cleanup(client, { sleep: noSleep });
+
+	assert.deepEqual(r.failed, []);
+	assert.equal(r.succeeded, 1);
+	assert.equal(calls.length, 8, "transient blips inside the conflict wait must not abort it");
+});
+
+test("a fixture that never sees a conflict keeps the small transport budget", async () => {
+	track("agent", "throttled-only@x.test");
+	const { client, calls } = fakeClient(() => 429);
+
+	const r = await cleanup(client, { sleep: noSleep });
+
+	assert.equal(r.failed.length, 1);
+	assert.equal(calls.length, 3, "pure transport failures must still stop at `attempts`");
+});
+
 test("tracking the same identity twice registers it once", async () => {
   // Over-tracking is the safe direction — suites now track a requested identity
   // before the create, which can duplicate an id tracked elsewhere — but a

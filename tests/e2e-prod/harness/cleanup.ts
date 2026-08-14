@@ -126,16 +126,21 @@ async function deleteWithRetry(
   const path = pathFor(t);
   let reason = "no attempt made";
 	const maxAttempts = Math.max(attempts, conflictAttempts);
+	// The budget is monotonic: once any attempt observes a known transient 409,
+	// the fixture has entered the (up to ten-minute) conflict wait and keeps the
+	// larger budget for the rest of its attempts. A 429/5xx/transport blip
+	// interleaved with the conflict responses consumes one attempt — it must not
+	// shrink the budget back to `attempts` and abandon the fixture mid-wait.
+	let budget = attempts;
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		let retryable: boolean;
-		let budget = attempts;
     let waitMs = backoffMs * attempt;
     try {
       const res = await client.delete(path);
       if (TERMINAL_OK.has(res.status)) return null;
 			reason = `HTTP ${res.status}: ${res.raw.slice(0, 200)}`;
 			retryable = isRetryableResponse(res.status, res.raw);
-			if (isRetryableConflictResponse(res.status, res.raw)) budget = conflictAttempts;
+			if (isRetryableConflictResponse(res.status, res.raw)) budget = Math.max(budget, conflictAttempts);
       waitMs = Math.max(waitMs, retryAfterMs(res.headers));
     } catch (e) {
       // A thrown request is a transport failure (DNS, socket reset, abort).
