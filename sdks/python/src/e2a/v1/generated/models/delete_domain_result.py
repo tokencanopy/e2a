@@ -18,7 +18,7 @@ import re  # noqa: F401
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -28,7 +28,7 @@ class DeleteDomainResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false.")
     domain: StrictStr = Field(description="The deleted domain.")
-    sending_teardown: StrictStr = Field(description="Whether the provider-side sending identity is confirmed removed: 'confirmed' or 'pending' (open set). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.")
+    sending_teardown: Optional[StrictStr] = Field(default=None, description="State of e2a-managed sending-identity teardown: 'confirmed' (identity removed, or was never e2a-managed / no provider configured) or 'pending' (open set — treat unknown values as not confirmed). 'pending' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain's DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["deleted", "domain", "sending_teardown"]
 

@@ -22,9 +22,9 @@ export class DeleteDomainResult {
     */
     'domain': string;
     /**
-    * Whether the provider-side sending identity is confirmed removed: \'confirmed\' or \'pending\' (open set). \'pending\' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain\'s DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.
+    * State of e2a-managed sending-identity teardown: \'confirmed\' (identity removed, or was never e2a-managed / no provider configured) or \'pending\' (open set — treat unknown values as not confirmed). \'pending\' means teardown continues asynchronously (durable job + hourly reconciler); keep the domain\'s DNS records published until it completes, or the still-live identity may emit provider verification-failure notices.
     */
-    'sendingTeardown': string;
+    'sendingTeardown'?: string;
 
     static readonly discriminator: string | undefined = undefined;
 
