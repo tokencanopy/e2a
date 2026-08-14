@@ -1569,7 +1569,7 @@ export class ObjectDomainsApi {
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
      * Delete a domain
      * @param param the request object
      */
@@ -1578,7 +1578,7 @@ export class ObjectDomainsApi {
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
      * Delete a domain
      * @param param the request object
      */

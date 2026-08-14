@@ -7842,7 +7842,7 @@ paths:
         - domains
   /v1/domains/{domain}:
     delete:
-      description: Deletes the domain and commits durable teardown of its sending identity, breaking sending and receiving for every agent on it. The provider-side identity is usually removed before the response returns and is guaranteed to converge shortly after even through provider outages. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+      description: Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise teardown is retried asynchronously by a durable job and an hourly reconciler. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
       operationId: deleteDomain
       parameters:
         - in: path
