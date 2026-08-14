@@ -391,9 +391,36 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		}
 		// The periodic sweep only needs to act when the provider identity is
 		// absent/unapplied. A healthy applied live identity is a no-op so hourly
-		// convergence never flaps a verified sender back to pending.
-		if !forceProvision {
-			return nil
+		// convergence never flaps a verified sender back to pending. The one
+		// exception is a domain stuck `pending` behind an applied, present
+		// identity: its reconcile job is gone (enqueue failed or budget
+		// exhausted) and nothing else would ever poll it again, so the sweep
+		// resolves it READ-ONLY from the provider — verified/failed commit and
+		// fire; still-pending waits for the next sweep; an absent/foreign
+		// answer falls through to full convergence.
+		force := forceProvision
+		if !force {
+			if state.Status != StatusPending {
+				return nil
+			}
+			res, serr := provider.Status(lockedCtx, domain)
+			switch {
+			case serr == nil && (res.Status == StatusVerified || res.Status == StatusFailed):
+				if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, res.Status, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return nil
+					}
+					return err
+				}
+				out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
+				return nil
+			case serr == nil:
+				return nil // provider still verifying; the next sweep re-checks
+			case errors.Is(serr, ErrIdentityNotFound), errors.Is(serr, ErrIdentityNotOwned):
+				force = true
+			default:
+				return serr
+			}
 		}
 		// A durable mutation signal is usually a redundant re-check (POST
 		// /verify on a healthy domain). When the ledger confirms THIS

@@ -785,6 +785,63 @@ func TestReapWorker_Work(t *testing.T) {
 		}
 	})
 
+	t.Run("resolves a stuck-pending domain read-only", func(t *testing.T) {
+		// Second-review blocker: provisioning marks the incarnation applied
+		// while SES is still verifying. If the reconcile enqueue then fails or
+		// its budget exhausts, the ledger reads current/applied and the
+		// identity is present, so the sweep passed forceProvision=false and
+		// returned before any provider call — the domain stayed `pending`
+		// forever with nothing left to poll it. The sweep must resolve that
+		// state from the provider without re-provisioning.
+		store := newFakeStore()
+		store.setStatus("stuck.example", StatusPending)
+		store.setOwner("stuck.example", "u7")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["stuck.example"] = "stuck.example-incarnation"
+		store.applied["stuck.example"] = "stuck.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("stuck.example")
+		prov.SetStatus("stuck.example", Result{Status: StatusVerified})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "stuck.example"); got != StatusVerified {
+			t.Fatalf("status = %q, want verified resolved from the provider", got)
+		}
+		if len(prov.ProvisionCalls) != 0 {
+			t.Fatalf("stuck-pending repair must be read-only, got provisions %v", prov.ProvisionCalls)
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusVerified || ev.UserID != "u7" {
+			t.Fatalf("fired %+v ok=%v, want sending_verified for u7", ev, ok)
+		}
+	})
+
+	t.Run("still-pending at the provider stays pending without mutation", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("slow.example", StatusPending)
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["slow.example"] = "slow.example-incarnation"
+		store.applied["slow.example"] = "slow.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("slow.example")
+		prov.SetStatus("slow.example", Result{Status: StatusPending})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "slow.example"); got != StatusPending {
+			t.Fatalf("status = %q, want pending until the provider resolves", got)
+		}
+		if len(prov.ProvisionCalls) != 0 || firer.count() != 0 {
+			t.Fatalf("still-pending must not mutate or fire: provisions=%v events=%d", prov.ProvisionCalls, firer.count())
+		}
+	})
+
 	t.Run("healthy applied identity is not reprovisioned every sweep", func(t *testing.T) {
 		store := newFakeStore()
 		store.setStatus("healthy.example", StatusVerified)
