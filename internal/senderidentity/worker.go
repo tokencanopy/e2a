@@ -65,6 +65,10 @@ type SendingIdentityState struct {
 	Status      Status
 	Selector    string
 	PrivateKey  []byte
+	// AppliedIncarnation is the ledger's provider-confirmed incarnation ("" if
+	// none). Equal to Incarnation only when THIS registration's key was
+	// confirmed installed — the gate for the healthy-recheck no-op.
+	AppliedIncarnation string
 }
 
 // EventFirer publishes a domain.sending_verified / domain.sending_failed
@@ -353,6 +357,20 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		// convergence never flaps a verified sender back to pending.
 		if !forceProvision {
 			return nil
+		}
+		// A durable mutation signal is usually a redundant re-check (POST
+		// /verify on a healthy domain). When the ledger confirms THIS
+		// incarnation applied and the provider agrees the identity is verified,
+		// converging again would re-Put the BYODKIM key and demote
+		// verified→pending until the next poll — the exact flap the pre-ledger
+		// no-op guard prevented. One provider GET replaces the Create/Put; ANY
+		// other outcome (missing, foreign, pending, failed, transient error)
+		// falls through to full convergence, so a stale-verified row — whose
+		// applied incarnation necessarily differs — still converges.
+		if state.Status == StatusVerified && state.AppliedIncarnation == state.Incarnation {
+			if res, serr := provider.Status(lockedCtx, domain); serr == nil && res.Status == StatusVerified {
+				return nil
+			}
 		}
 		if state.Selector == "" || len(state.PrivateKey) == 0 {
 			const reason = "no DKIM key material for domain; re-register the domain"

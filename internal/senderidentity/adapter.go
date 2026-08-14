@@ -12,7 +12,7 @@ import (
 // into the typed Store the workers consume.
 type RawStore interface {
 	WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) error
-	LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, err error)
+	LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, appliedIncarnation string, err error)
 	SetSendingStatusForIncarnation(ctx context.Context, domain, incarnation, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error
 	TouchSendingCheckedForIncarnation(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error
@@ -32,14 +32,15 @@ func (a *storeAdapter) WithSendingIdentityMutationLock(ctx context.Context, doma
 }
 
 func (a *storeAdapter) LoadSendingIdentityState(ctx context.Context, domain string) (SendingIdentityState, error) {
-	incarnation, owner, verified, status, selector, key, err := a.raw.LoadSendingIdentityState(ctx, domain)
+	incarnation, owner, verified, status, selector, key, applied, err := a.raw.LoadSendingIdentityState(ctx, domain)
 	return SendingIdentityState{
-		Incarnation: incarnation,
-		Owner:       owner,
-		Verified:    verified,
-		Status:      Status(status),
-		Selector:    selector,
-		PrivateKey:  key,
+		Incarnation:        incarnation,
+		Owner:              owner,
+		Verified:           verified,
+		Status:             Status(status),
+		Selector:           selector,
+		PrivateKey:         key,
+		AppliedIncarnation: applied,
 	}, err
 }
 

@@ -68,6 +68,44 @@ func TestSendingIdentityMutationLockSerializesSameDomain(t *testing.T) {
 	}
 }
 
+// TestLoadSendingIdentityStateReportsAppliedIncarnation covers the ledger
+// join that gates the healthy-recheck no-op: the snapshot must report "" until
+// the provider confirmed THIS incarnation applied, and the incarnation after.
+func TestLoadSendingIdentityStateReportsAppliedIncarnation(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "applied-state@example.com", "Owner", "applied-state-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "applied-state.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	inc, _, _, _, _, _, applied, err := store.LoadSendingIdentityState(ctx, domain)
+	if err != nil {
+		t.Fatalf("LoadSendingIdentityState: %v", err)
+	}
+	if applied != "" {
+		t.Fatalf("applied = %q before any provider confirmation, want empty", applied)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain, inc); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+	if err := store.MarkSendingIdentityApplied(ctx, domain, inc); err != nil {
+		t.Fatalf("MarkSendingIdentityApplied: %v", err)
+	}
+	_, _, _, _, _, _, applied, err = store.LoadSendingIdentityState(ctx, domain)
+	if err != nil {
+		t.Fatalf("LoadSendingIdentityState after apply: %v", err)
+	}
+	if applied != inc {
+		t.Fatalf("applied = %q, want the confirmed incarnation %q", applied, inc)
+	}
+}
+
 // TestSendingIdentityMutationGateHonorsContextCancellation pins the review
 // fix for the process-wide mutation gate: a waiter whose context is cancelled
 // (an HTTP handler on a deadline, a worker shutting down) must unblock with

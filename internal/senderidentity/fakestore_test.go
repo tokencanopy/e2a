@@ -151,12 +151,13 @@ func (s *fakeStore) LoadSendingIdentityState(ctx context.Context, domain string)
 		return SendingIdentityState{}, s.inputsErr
 	}
 	return SendingIdentityState{
-		Incarnation: s.incarnations[domain],
-		Owner:       s.owners[domain],
-		Verified:    s.verified[domain],
-		Status:      status,
-		Selector:    s.selector,
-		PrivateKey:  append([]byte(nil), s.privKey...),
+		Incarnation:        s.incarnations[domain],
+		Owner:              s.owners[domain],
+		Verified:           s.verified[domain],
+		Status:             status,
+		Selector:           s.selector,
+		PrivateKey:         append([]byte(nil), s.privKey...),
+		AppliedIncarnation: s.applied[domain],
 	}, nil
 }
 

@@ -22,8 +22,8 @@ func (f *fakeRawStore) WithSendingIdentityMutationLock(ctx context.Context, doma
 	return fn(ctx)
 }
 
-func (f *fakeRawStore) LoadSendingIdentityState(ctx context.Context, domain string) (string, string, bool, string, string, []byte, error) {
-	return "inc-1", "user_1", true, f.getStatusReturn, "sel", []byte("der"), nil
+func (f *fakeRawStore) LoadSendingIdentityState(ctx context.Context, domain string) (string, string, bool, string, string, []byte, string, error) {
+	return "inc-1", "user_1", true, f.getStatusReturn, "sel", []byte("der"), "inc-applied", nil
 }
 
 func (f *fakeRawStore) SetSendingStatusForIncarnation(ctx context.Context, domain, incarnation, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error {
@@ -93,7 +93,7 @@ func TestStoreAdapter_LoadSendingIdentityState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSendingStatus: %v", err)
 	}
-	if got.Status != StatusPending || got.Incarnation != "inc-1" || got.Owner != "user_1" || !got.Verified {
+	if got.Status != StatusPending || got.Incarnation != "inc-1" || got.Owner != "user_1" || !got.Verified || got.AppliedIncarnation != "inc-applied" {
 		t.Fatalf("primitive state conversion failed: got %+v", got)
 	}
 }

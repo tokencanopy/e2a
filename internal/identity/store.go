@@ -1114,26 +1114,32 @@ func (s *Store) senderIdentityGateChan() chan struct{} {
 // LoadSendingIdentityState returns one incarnation-consistent snapshot for the
 // provider synchronizer. A live but unverified domain is returned with
 // verified=false; callers converge that state to no provider identity.
-func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, err error) {
+// appliedIncarnation is the ledger's provider-confirmed incarnation ("" when
+// the ledger has no row or nothing confirmed) — the signal that lets a forced
+// re-check of a healthy domain stay a read-only no-op.
+func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, appliedIncarnation string, err error) {
 	norm := normalizeDomain(domain)
 	var blob []byte
 	err = s.senderIdentityExecutor(ctx).QueryRow(ctx,
-		`SELECT verification_token, COALESCE(user_id::text, ''), verified, sending_status,
-		        COALESCE(dkim_selector, ''), dkim_private_key
-		   FROM domains WHERE domain = $1`,
+		`SELECT d.verification_token, COALESCE(d.user_id::text, ''), d.verified, d.sending_status,
+		        COALESCE(d.dkim_selector, ''), d.dkim_private_key,
+		        COALESCE(m.applied_incarnation, '')
+		   FROM domains d
+		   LEFT JOIN sender_identity_managed_domains m ON m.domain = d.domain
+		  WHERE d.domain = $1`,
 		norm,
-	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob)
+	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob, &appliedIncarnation)
 	if err != nil {
-		return "", "", false, "", "", nil, err
+		return "", "", false, "", "", nil, "", err
 	}
 	if !verified || selector == "" || len(blob) == 0 {
-		return incarnation, owner, verified, status, selector, nil, nil
+		return incarnation, owner, verified, status, selector, nil, appliedIncarnation, nil
 	}
 	privateKeyDER, err = s.unsealDKIM(blob, norm)
 	if err != nil {
-		return "", "", false, "", "", nil, fmt.Errorf("dkim key unseal: %w", err)
+		return "", "", false, "", "", nil, "", fmt.Errorf("dkim key unseal: %w", err)
 	}
-	return incarnation, owner, verified, status, selector, privateKeyDER, nil
+	return incarnation, owner, verified, status, selector, privateKeyDER, appliedIncarnation, nil
 }
 
 // SetSendingStatusForIncarnation refuses to write through a delete/re-register

@@ -879,9 +879,76 @@ func TestProvisionWorker_Work(t *testing.T) {
 	})
 }
 
+// TestSyncWorker_AlreadyVerifiedNoOp restores the pre-ledger regression guard
+// (the deleted TestProvisionWorker_AlreadyVerifiedNoOp): a forced re-check of
+// a HEALTHY domain — ledger-applied current incarnation, provider-confirmed
+// verified — must be a read-only no-op. Before the fix, every POST /verify on
+// a verified domain re-Put the BYODKIM key, demoted sending_status
+// verified→pending (dropping own-address From until the next poll), and
+// emitted a duplicate sending_verified event on each flap.
+func TestSyncWorker_AlreadyVerifiedNoOp(t *testing.T) {
+	const domain = "healthy-recheck.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u1")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation"
+	store.applied[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(prov.ProvisionCalls) != 0 || len(prov.DeprovisionCalls) != 0 {
+		t.Fatalf("healthy re-check must not mutate the provider: provision=%v deprovision=%v", prov.ProvisionCalls, prov.DeprovisionCalls)
+	}
+	if len(store.SetStatusCalls) != 0 {
+		t.Fatalf("healthy re-check must not write status, got %d writes", len(store.SetStatusCalls))
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status = %q, want verified untouched", got)
+	}
+	if firer.count() != 0 {
+		t.Fatalf("healthy re-check fired %d event(s), want none", firer.count())
+	}
+}
+
+// TestSyncWorker_AppliedButProviderDriftedReprovisions: the healthy
+// short-circuit must trust the ledger only when the provider agrees. An
+// identity that vanished out-of-band (applied incarnation notwithstanding)
+// still takes the full force-provision path — that drift repair is exactly
+// what the forced re-check exists for.
+func TestSyncWorker_AppliedButProviderDriftedReprovisions(t *testing.T) {
+	const domain = "drifted.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation"
+	store.applied[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SetStatusNotFound(domain)
+	w := &SyncWorker{store: store, provider: prov}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(prov.ProvisionCalls) != 1 {
+		t.Fatalf("drifted identity was not re-provisioned: %v", prov.ProvisionCalls)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status = %q, want pending while the recreated identity verifies", got)
+	}
+}
+
 // Legacy mutation jobs force current desired state during blue/green rollout.
 // This closes the window where an old reconcile could mark a replacement row
-// verified before its new BYODKIM key was installed.
+// verified before its new BYODKIM key was installed. (The fake store reports
+// no applied incarnation here, so the healthy no-op short-circuit must NOT
+// engage — a stale-verified row still converges.)
 func TestProvisionWorker_AlreadyVerifiedConvergesCurrentKey(t *testing.T) {
 	store := newFakeStore()
 	store.setStatus("acme.com", StatusVerified)
