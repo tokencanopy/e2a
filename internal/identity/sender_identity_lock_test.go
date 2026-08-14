@@ -106,6 +106,79 @@ func TestLoadSendingIdentityStateReportsAppliedIncarnation(t *testing.T) {
 	}
 }
 
+// TestSendingIdentityTombstoneFinalizeRespectsAge pins the drain-window guard
+// at the SQL layer: FinalizeSendingIdentityTombstone must be a no-op while the
+// ledger row's updated_at is inside the window, delete it once aged, and
+// TouchSendingIdentityTombstoneTx (the delete tx's stamp) must reset the age.
+func TestSendingIdentityTombstoneFinalizeRespectsAge(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "tombstone-age@example.com", "Owner", "tombstone-age-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "tombstone-age.example.com"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	inc, _, _, _, _, _, _, err := store.LoadSendingIdentityState(ctx, domain)
+	if err != nil {
+		t.Fatalf("LoadSendingIdentityState: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain, inc); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+	ledgered := func() bool {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sender_identity_managed_domains WHERE domain=$1`, domain).Scan(&n); err != nil {
+			t.Fatalf("count ledger: %v", err)
+		}
+		return n == 1
+	}
+
+	// Fresh row (Mark stamped now): finalize must be a no-op.
+	if err := store.FinalizeSendingIdentityTombstone(ctx, domain, 15*time.Minute); err != nil {
+		t.Fatalf("Finalize (fresh): %v", err)
+	}
+	if !ledgered() {
+		t.Fatal("finalize deleted a tombstone inside the drain window")
+	}
+
+	// Backdate past the window, then stamp it via the delete-tx touch: the
+	// bump must reset the age and keep the row protected.
+	if _, err := pool.Exec(ctx, `UPDATE sender_identity_managed_domains SET updated_at = now() - interval '1 hour' WHERE domain=$1`, domain); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := store.TouchSendingIdentityTombstoneTx(ctx, tx, domain); err != nil {
+		t.Fatalf("TouchSendingIdentityTombstoneTx: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := store.FinalizeSendingIdentityTombstone(ctx, domain, 15*time.Minute); err != nil {
+		t.Fatalf("Finalize (touched): %v", err)
+	}
+	if !ledgered() {
+		t.Fatal("finalize ignored the delete-tx stamp and removed a just-mutated tombstone")
+	}
+
+	// Aged row: finalize removes it.
+	if _, err := pool.Exec(ctx, `UPDATE sender_identity_managed_domains SET updated_at = now() - interval '1 hour' WHERE domain=$1`, domain); err != nil {
+		t.Fatalf("backdate again: %v", err)
+	}
+	if err := store.FinalizeSendingIdentityTombstone(ctx, domain, 15*time.Minute); err != nil {
+		t.Fatalf("Finalize (aged): %v", err)
+	}
+	if ledgered() {
+		t.Fatal("finalize left an aged tombstone in place")
+	}
+}
+
 // TestSendingIdentityMutationGateHonorsContextCancellation pins the review
 // fix for the process-wide mutation gate: a waiter whose context is cancelled
 // (an HTTP handler on a deadline, a worker shutting down) must unblock with

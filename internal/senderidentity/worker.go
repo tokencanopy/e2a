@@ -53,6 +53,13 @@ type Store interface {
 	MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
+	// FinalizeSendingIdentityTombstone removes the ledger row ONLY when its
+	// last mutation (updated_at) is older than olderThan. An audit or sweep
+	// that runs inside a later mutation's drain window therefore cannot
+	// finalize that mutation's tombstone out from under a still-draining
+	// legacy slot; the reaper (or that mutation's own audit) finalizes once
+	// the window has truly elapsed.
+	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
 	// DomainExists reports whether a live domain row exists. The reaper uses
 	// it to ALERT on provider identities that are neither ledgered nor backed
@@ -375,7 +382,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 				return err
 			}
 			if finalizeDeletion {
-				return store.ForgetSendingIdentityManaged(lockedCtx, domain)
+				return store.FinalizeSendingIdentityTombstone(lockedCtx, domain, postDrainConvergenceDelay)
 			}
 			return nil
 		}
@@ -428,7 +435,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 			// must fire even when the ledger cleanup errors and the job retries.
 			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			if finalizeDeletion {
-				if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
+				if err := store.FinalizeSendingIdentityTombstone(lockedCtx, domain, postDrainConvergenceDelay); err != nil {
 					return err
 				}
 			}
@@ -466,7 +473,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 		if res.Status == StatusFailed {
 			if finalizeDeletion {
-				if err := store.ForgetSendingIdentityManaged(lockedCtx, domain); err != nil {
+				if err := store.FinalizeSendingIdentityTombstone(lockedCtx, domain, postDrainConvergenceDelay); err != nil {
 					return err
 				}
 			}

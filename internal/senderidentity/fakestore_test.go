@@ -3,6 +3,7 @@ package senderidentity
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -23,6 +24,10 @@ type fakeStore struct {
 	verified     map[string]bool
 	managed      map[string]string
 	applied      map[string]string
+	// managedTouched models the ledger row's updated_at. Entries seeded
+	// directly into `managed` without a timestamp read as ancient, so tests
+	// that don't care about the drain window keep their old behavior.
+	managedTouched map[string]time.Time
 
 	// provisionInputs feeds SendingProvisionInputs.
 	selector  string
@@ -54,13 +59,29 @@ type setStatusCall struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		status:       map[string]Status{},
-		owners:       map[string]string{},
-		incarnations: map[string]string{},
-		verified:     map[string]bool{},
-		managed:      map[string]string{},
-		applied:      map[string]string{},
+		status:         map[string]Status{},
+		owners:         map[string]string{},
+		incarnations:   map[string]string{},
+		verified:       map[string]bool{},
+		managed:        map[string]string{},
+		applied:        map[string]string{},
+		managedTouched: map[string]time.Time{},
 	}
+}
+
+// touchTombstone stamps the ledger row as mutated "now" (what the delete tx
+// and MarkSendingIdentityManaged do in production).
+func (s *fakeStore) touchTombstone(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managedTouched[domain] = time.Now()
+}
+
+// ageTombstone backdates the ledger row past any drain window.
+func (s *fakeStore) ageTombstone(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managedTouched[domain] = time.Now().Add(-24 * time.Hour)
 }
 
 func (s *fakeStore) setStatus(domain string, st Status) {
@@ -238,6 +259,22 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	}
 	delete(s.managed, domain)
 	delete(s.applied, domain)
+	delete(s.managedTouched, domain)
+	return nil
+}
+
+func (s *fakeStore) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.forgetErr != nil {
+		return s.forgetErr
+	}
+	if touched, ok := s.managedTouched[domain]; ok && time.Since(touched) < olderThan {
+		return nil // a mutation inside the drain window: keep the tombstone
+	}
+	delete(s.managed, domain)
+	delete(s.applied, domain)
+	delete(s.managedTouched, domain)
 	return nil
 }
 

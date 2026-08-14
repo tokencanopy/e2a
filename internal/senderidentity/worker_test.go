@@ -373,6 +373,66 @@ func TestManagerTryDeprovisionNow(t *testing.T) {
 	})
 }
 
+// TestFinalizeRespectsLatestMutationDrainWindow pins the second-review
+// blocker: an audit scheduled by an EARLIER mutation (or the hourly reaper)
+// can run inside a LATER mutation's drain window — bucket-inherited schedules
+// make it deterministic, but even without dedupe an early audit can finalize
+// another mutation's tombstone. Finalization must therefore be guarded by the
+// tombstone's own last-mutation time, persisted in the ledger: a tombstone
+// younger than the drain window survives the Forget so a late legacy
+// create/delete still has a ledgered repair path; only the reaper or a later
+// audit finalizes it once the window has truly elapsed.
+func TestFinalizeRespectsLatestMutationDrainWindow(t *testing.T) {
+	const domain = "late-delete.example"
+
+	t.Run("audit keeps a fresh tombstone", func(t *testing.T) {
+		store := newFakeStore() // absent row = deleted domain
+		store.managed[domain] = "deleted-incarnation"
+		store.touchTombstone(domain) // the delete just happened
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain)
+		provider.SetStatusNotFound(domain)
+		w := &PostDrainAuditWorker{store: store, provider: provider}
+
+		if err := w.Work(context.Background(), &river.Job[PostDrainAuditArgs]{Args: PostDrainAuditArgs{Domain: domain}}); err != nil {
+			t.Fatalf("audit: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 0 {
+			t.Fatalf("audit must still converge the provider: %v", identities)
+		}
+		if store.managed[domain] == "" {
+			t.Fatal("audit finalized a tombstone inside the latest mutation's drain window")
+		}
+	})
+
+	t.Run("reaper keeps a fresh tombstone and finalizes an aged one", func(t *testing.T) {
+		store := newFakeStore()
+		store.managed[domain] = "deleted-incarnation"
+		store.touchTombstone(domain)
+		provider := NewFakeProvider()
+		provider.SeedIdentity(domain)
+		w := &ReapWorker{store: store, provider: provider}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("reap: %v", err)
+		}
+		if store.managed[domain] == "" {
+			t.Fatal("hourly sweep finalized a tombstone inside the drain window")
+		}
+
+		store.ageTombstone(domain) // drain window elapses
+		provider.SeedIdentity(domain) // late legacy create landed meanwhile
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("reap after window: %v", err)
+		}
+		identities, _ := provider.List(context.Background())
+		if len(identities) != 0 || store.managed[domain] != "" {
+			t.Fatalf("aged tombstone must converge and finalize: provider=%v ledger=%v", identities, store.managed)
+		}
+	})
+}
+
 func TestPostDrainSweepRepairsLegacyMutationRaces(t *testing.T) {
 	t.Run("late legacy create after delete is removed", func(t *testing.T) {
 		const domain = "deleted-race.example.com"

@@ -1311,6 +1311,36 @@ func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string)
 	return err
 }
 
+// FinalizeSendingIdentityTombstone removes the ledger row only when its last
+// mutation (updated_at — bumped by provision marks, the migration trigger, and
+// TouchSendingIdentityTombstoneTx on delete) is older than olderThan. This is
+// what stops an audit or sweep running inside a LATER mutation's drain window
+// from finalizing that mutation's tombstone; a younger row survives as a no-op
+// and a later audit or the hourly reaper finalizes it once the window has
+// elapsed.
+func (s *Store) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`DELETE FROM sender_identity_managed_domains
+		  WHERE domain = $1 AND updated_at <= now() - ($2 * interval '1 second')`,
+		normalizeDomain(domain), olderThan.Seconds(),
+	)
+	return err
+}
+
+// TouchSendingIdentityTombstoneTx stamps the ledger row's updated_at inside a
+// domain-delete transaction, marking the delete as the tombstone's latest
+// mutation. Without it, a long-lived domain's ledger row is old at delete
+// time and the very first audit/sweep could finalize the tombstone while the
+// legacy slot is still draining. A domain with no ledger row (sender identity
+// never provisioned) is a no-op.
+func (s *Store) TouchSendingIdentityTombstoneTx(ctx context.Context, tx pgx.Tx, domain string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE sender_identity_managed_domains SET updated_at = now() WHERE domain = $1`,
+		normalizeDomain(domain),
+	)
+	return err
+}
+
 // ListManagedSendingIdentityDomains returns only identities e2a has claimed
 // ownership of. It deliberately does not scan/delete arbitrary SES account
 // identities, which may belong to other applications.

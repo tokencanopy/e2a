@@ -3,6 +3,7 @@ package senderidentity
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // RawStore is the primitive persistence surface implemented by
@@ -18,6 +19,7 @@ type RawStore interface {
 	MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
+	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
 	DomainExists(ctx context.Context, domain string) (bool, error)
 }
@@ -75,6 +77,10 @@ func (a *storeAdapter) ForgetSendingIdentityManaged(ctx context.Context, domain 
 
 func (a *storeAdapter) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
 	return a.raw.ListManagedSendingIdentityDomains(ctx)
+}
+
+func (a *storeAdapter) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
+	return a.raw.FinalizeSendingIdentityTombstone(ctx, domain, olderThan)
 }
 
 func (a *storeAdapter) DomainExists(ctx context.Context, domain string) (bool, error) {

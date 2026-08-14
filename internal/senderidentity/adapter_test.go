@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // fakeRawStore implements RawStore, recording the primitive (string/JSON) form
@@ -46,6 +47,9 @@ func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]str
 	return nil, nil, nil
 }
 func (f *fakeRawStore) DomainExists(context.Context, string) (bool, error) { return false, nil }
+func (f *fakeRawStore) FinalizeSendingIdentityTombstone(context.Context, string, time.Duration) error {
+	return nil
+}
 
 func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 	raw := &fakeRawStore{}
