@@ -355,7 +355,7 @@ func main() {
 			senderidentity.NewStoreAdapter(store),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
-			senderidentity.Config{},
+			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
 		)
 		registrars = append(registrars, senderMgr)
 	}

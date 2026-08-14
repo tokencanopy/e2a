@@ -26,13 +26,14 @@ type LegacyReapWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *LegacyReapWorker) Work(ctx context.Context, _ *river.Job[ReapArgs]) error {
 	// A legacy reap job may run while the old slot can still finish an unlocked
 	// provider mutation. Converge what is visible, but retain deletion
 	// tombstones for the post-drain v2 audit to finalize.
-	return reapManagedIdentities(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, false)
+	return reapManagedIdentities(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, false, w.legacyJobs)
 }
 
 // ReapWorker is the durable teardown/provisioning backstop. Normal mutation
@@ -46,10 +47,11 @@ type ReapWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *ReapWorker) Work(ctx context.Context, _ *river.Job[ReapV2Args]) error {
-	return reapManagedIdentities(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true)
+	return reapManagedIdentities(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
 }
 
 type PostDrainAuditWorker struct {
@@ -58,6 +60,7 @@ type PostDrainAuditWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrainAuditArgs]) error {
@@ -74,12 +77,12 @@ func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrai
 		if statusErr != nil && !providerMissing && !errors.Is(statusErr, ErrIdentityNotOwned) {
 			return statusErr
 		}
-		return syncProviderIdentity(ctx, domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, providerMissing || needsProvision[domain], true)
+		return syncProviderIdentity(ctx, domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, providerMissing || needsProvision[domain], true, w.legacyJobs)
 	}
 	return nil
 }
 
-func reapManagedIdentities(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion bool) error {
+func reapManagedIdentities(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool) error {
 	managed, needsProvision, err := store.ListManagedSendingIdentityDomains(ctx)
 	if err != nil {
 		return err
@@ -99,7 +102,7 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 		// A missing provider identity must bypass the verified-state no-op and
 		// be recreated. Present identities take the normal desired-state path,
 		// which deletes them when their domain row is absent/unverified.
-		if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion); err != nil {
+		if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
 			errs = append(errs, errors.New(domain+": "+err.Error()))
 			continue
 		}

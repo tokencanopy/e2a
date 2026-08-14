@@ -175,10 +175,11 @@ type ProvisionWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *ProvisionWorker) Work(ctx context.Context, job *river.Job[ProvisionArgs]) error {
-	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true)
+	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
 }
 
 // SyncWorker handles all newly enqueued provider mutations. Legacy workers
@@ -189,12 +190,13 @@ type SyncWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *SyncWorker) Work(ctx context.Context, job *river.Job[SyncArgs]) error {
 	// A durable mutation signal always forces the current live incarnation to
 	// be installed, even if a stale legacy poll incorrectly marked it verified.
-	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true)
+	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
 }
 
 // ReconcileWorker polls SES for a pending domain and transitions it to
@@ -207,6 +209,7 @@ type ReconcileWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *ReconcileWorker) Work(ctx context.Context, job *river.Job[ReconcileArgs]) error {
@@ -214,9 +217,9 @@ func (w *ReconcileWorker) Work(ctx context.Context, job *river.Job[ReconcileArgs
 	// inherited attempt count polling whatever row now occupies the domain;
 	// converge current desired state and enqueue a fresh v2 poll budget instead.
 	if job.Args.Incarnation == "" {
-		return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true)
+		return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
 	}
-	return reconcileProviderIdentity(ctx, job.Args.Domain, job.Args.Incarnation, job.Attempt, job.MaxAttempts, w.store, w.provider, w.fire, w.maxReconcileAttempt)
+	return reconcileProviderIdentity(ctx, job.Args.Domain, job.Args.Incarnation, job.Attempt, job.MaxAttempts, w.store, w.provider, w.fire, w.maxReconcileAttempt, w.legacyJobs)
 }
 
 type ReconcileV2Worker struct {
@@ -225,13 +228,14 @@ type ReconcileV2Worker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *ReconcileV2Worker) Work(ctx context.Context, job *river.Job[ReconcileV2Args]) error {
-	return reconcileProviderIdentity(ctx, job.Args.Domain, job.Args.Incarnation, job.Attempt, job.MaxAttempts, w.store, w.provider, w.fire, w.maxReconcileAttempt)
+	return reconcileProviderIdentity(ctx, job.Args.Domain, job.Args.Incarnation, job.Attempt, job.MaxAttempts, w.store, w.provider, w.fire, w.maxReconcileAttempt, w.legacyJobs)
 }
 
-func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, attempt, maxAttempt int, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int) error {
+func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, attempt, maxAttempt int, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, legacyJobs bool) error {
 	var repairMissingIdentity bool
 	var out syncOutcome
 	err := store.WithSendingIdentityMutationLock(ctx, domain, func(ctx context.Context) error {
@@ -337,7 +341,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 	if repairMissingIdentity {
 		// Re-enter through the normal mutation helper only after releasing this
 		// lock; convergeWorkerIdentity acquires the same non-reentrant lock.
-		return convergeWorkerIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, true)
+		return convergeWorkerIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, true, legacyJobs)
 	}
 	return nil
 }
@@ -350,6 +354,7 @@ type DeprovisionWorker struct {
 	provider            Provider
 	fire                EventFirer
 	maxReconcileAttempt int
+	legacyJobs          bool
 }
 
 func (w *DeprovisionWorker) Work(ctx context.Context, job *river.Job[DeprovisionArgs]) error {
@@ -357,7 +362,7 @@ func (w *DeprovisionWorker) Work(ctx context.Context, job *river.Job[Deprovision
 	// current incarnation under the mutation lock: absent/unverified converges
 	// to provider absence; a re-registered verified domain converges to its new
 	// key instead of being deleted by an old teardown job.
-	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true)
+	return convergeWorkerIdentity(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
 }
 
 // --- helpers ---
@@ -386,7 +391,7 @@ type syncOutcome struct {
 	errMsg        string
 }
 
-func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion bool) error {
+func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs bool) error {
 	var out syncOutcome
 	err := store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
 		state, err := store.LoadSendingIdentityState(lockedCtx, domain)
@@ -569,10 +574,8 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		if cerr != nil || client == nil {
 			return nil
 		}
-		_, err := client.Insert(ctx, ReconcileV2Args{Domain: domain, Incarnation: out.incarnation}, &river.InsertOpts{
-			MaxAttempts: maxAttempts(maxReconcileAttempt),
-			Queue:       jobs.QueueSenderIdentityV2,
-		})
+		args, opts := reconcileInsert(domain, out.incarnation, maxAttempts(maxReconcileAttempt), legacyJobs)
+		_, err := client.Insert(ctx, args, opts)
 		return err
 	}
 }
@@ -582,8 +585,8 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 // not take the advisory lock and can still finish a provider create/delete
 // after this call during blue/green overlap; the delayed sweep is the durable
 // convergence handoff once that binary has stopped.
-func convergeWorkerIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision bool) error {
-	if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, false); err != nil {
+func convergeWorkerIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, legacyJobs bool) error {
+	if err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, false, legacyJobs); err != nil {
 		return err
 	}
 	client, err := river.ClientFromContextSafely[pgx.Tx](ctx)
@@ -593,6 +596,19 @@ func convergeWorkerIdentity(ctx context.Context, domain string, store Store, pro
 	args, opts := postDrainAuditInsert(domain, time.Now())
 	_, err = client.Insert(ctx, args, opts)
 	return err
+}
+
+// reconcileInsert builds the fresh verification-poll insert per compat mode
+// (see Config.LegacyJobCompat): the legacy kind on the default queue keeps
+// the previous release able to claim the poll during phase 1 (it ignores the
+// unknown incarnation field and polls with its old semantics — today's
+// production behavior), while this binary's own ReconcileWorker honors the
+// incarnation.
+func reconcileInsert(domain, incarnation string, maxAttempts int, legacy bool) (river.JobArgs, *river.InsertOpts) {
+	if legacy {
+		return ReconcileArgs{Domain: domain, Incarnation: incarnation}, &river.InsertOpts{MaxAttempts: maxAttempts}
+	}
+	return ReconcileV2Args{Domain: domain, Incarnation: incarnation}, &river.InsertOpts{MaxAttempts: maxAttempts, Queue: jobs.QueueSenderIdentityV2}
 }
 
 // postDrainAuditInsert builds the delayed finalizer insert for a mutation

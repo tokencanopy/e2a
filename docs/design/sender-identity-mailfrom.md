@@ -79,23 +79,28 @@ for verified domains; (b) needed an aligned Return-Path.
   claim new work; legacy jobs are drained by compatibility
   workers that converge current state and hand polling to an incarnation-aware
   v2 job with a fresh attempt budget.
-- **Rollback contract — this release is ROLL-FORWARD-ONLY.** A v2 job
-  committed while the new binary bakes strands unconsumed if the deploy rolls
-  back: the old binary registers neither the v2 kinds nor the queue, its
-  reaper is alert-only, and its blind legacy deprovision semantics return
-  (including the pre-existing delete/re-register ABA hazard the v2 versioning
-  exists to close). The stranding is bounded — the ledger row, not the job,
-  is the source of truth; the old binary's List sweep still ALERTs on orphan
-  identities; the post-commit best-effort deprovision on DELETE usually
-  removes the identity before a rollback can strand anything; and the next
-  v2-consuming deploy's RunOnStart sweep converges the ledger backlog within
-  minutes — but nothing converges it *while the rolled-back binary runs*.
-  Operators must therefore treat an automatic bake-gate rollback of this
-  release as a page: re-deploy a fixed v2-consuming candidate promptly rather
-  than sitting on the rolled-back binary. (The alternative — a two-release
-  consumers-first rollout — was rejected: producing legacy kinds from the new
-  binary would let the old slot claim new-style mutations with blind
-  semantics mid-overlap, which is strictly worse than bounded stranding.)
+- **Rollback contract — two-phase rollout via `sender_identity.legacy_job_compat`.**
+  The old binary registers neither the v2 kinds nor the queue, so a v2 job
+  committed while a new binary bakes strands unconsumed on rollback (and the
+  rolled-back binary's blind legacy deprovision semantics return, including
+  the pre-existing delete/re-register ABA hazard the versioning closes).
+  Rollback is made mechanically safe by splitting the producer flip from the
+  binary deploy: **phase 1** deploys this release with
+  `legacy_job_compat: true` — it PRODUCES the legacy kinds (consumable by the
+  previous release; its own workers run the new converge semantics; the old
+  slot claiming a job mid-overlap is today's production behavior, not a new
+  risk) while CONSUMING both lanes. **Phase 2**, once phase 1 is the stable
+  rollback target, flips the flag off in a config-only deploy; a rollback of
+  phase 2 lands on the phase-1 binary, which consumes v2 — nothing strands.
+  Residual: post-drain audit jobs are v2-only in both phases; a phase-1
+  rollback strands only those repair *accelerators* (bounded — ledger + the
+  next v2 binary's RunOnStart sweep converge them; the old binary's List
+  sweep still ALERTs on orphans meanwhile). Note the IAM ordering too: once
+  the tag-conditioned IAM policy (ops #310) is applied, a rolled-back
+  pre-tagging binary cannot CREATE identities at all (untagged
+  CreateEmailIdentity is denied — existing identities keep sending, new
+  provisioning pauses until roll-forward), so apply that policy no earlier
+  than phase 1 going stable.
 - **`DELETE /v1/domains/{domain}` semantics:** the transaction commits the
   guarded row delete plus the durable teardown job — that is the API success
   boundary, independent of SES availability (an untagged/foreign identity or
@@ -155,10 +160,12 @@ owned by another application.
 5. Re-run both inventories, then deploy. An untagged legacy e2a identity fails
    closed with `identity not owned`; audit and tag it explicitly rather than
    weakening the ownership check.
-6. Deploy this release roll-forward-only (see the rollback contract above):
-   if the bake gate auto-rolls it back, promptly re-deploy a fixed candidate —
-   v2 teardown/repair work is stranded until a v2-consuming binary runs, and
-   the rolled-back binary's blind legacy semantics are back in force.
+6. Deploy in two phases (see the rollback contract above): first with
+   `sender_identity.legacy_job_compat: true`; once that deploy is the stable
+   rollback target, flip the flag off in a config-only deploy. Apply the
+   strict tag-conditioned IAM policy no earlier than phase 1 going stable — a
+   rollback to a pre-tagging binary under that policy cannot create new
+   identities until rolled forward.
 
 ## Verification
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits

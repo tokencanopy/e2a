@@ -21,6 +21,17 @@ type Config struct {
 	MaxReconcileAttempts int
 	// ReaperInterval overrides the orphan-sweep cadence. 0 → default.
 	ReaperInterval time.Duration
+	// LegacyJobCompat is phase 1 of the two-phase blue/green rollout that
+	// makes ROLLBACK mechanically safe (config sender_identity.legacy_job_compat).
+	// When true, mutation and reconcile jobs are PRODUCED as the legacy kinds
+	// on the default queue — consumable by the previous release — while this
+	// binary still CONSUMES both lanes. Deploy this release with the flag on;
+	// once it is the stable rollback target, flip the flag off (a config-only
+	// deploy) to switch producers to the versioned v2 lane. A rollback of
+	// that second deploy lands on a binary that consumes v2, so nothing
+	// strands. Default false: single-instance/self-host deployments have no
+	// blue/green overlap and want the v2 semantics immediately.
+	LegacyJobCompat bool
 }
 
 // Manager owns the sender-identity job lifecycle on the SHARED River client
@@ -50,7 +61,7 @@ type Manager struct {
 // post-drain audit to finalize (mixed-version late-create repair). The caller
 // bounds the wait via ctx; the mutation gate honors cancellation.
 func (m *Manager) TryDeprovisionNow(ctx context.Context, domain string) error {
-	return syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false)
+	return syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false, m.cfg.LegacyJobCompat)
 }
 
 // NewManager builds the manager with its dependencies. It does NOT build a River
@@ -68,14 +79,14 @@ func (m *Manager) SetEnqueuer(e jobs.Enqueuer) { m.enq = e }
 // shared client, and returns the v2 periodic reaper. Implements jobs.Registrar. The workers run
 // on the default queue (nil InsertOpts.Queue), preserving prior behavior.
 func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, &ProvisionWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &ReconcileWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &DeprovisionWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &SyncWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &ReconcileV2Worker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
-	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts})
+	river.AddWorker(w, &ProvisionWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &ReconcileWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &DeprovisionWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &SyncWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &ReconcileV2Worker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
 
 	reaperInterval := m.cfg.ReaperInterval
 	if reaperInterval <= 0 {
@@ -118,13 +129,15 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 // Provider mutations are serialized per process and per domain across replicas,
 // so concurrent duplicate enqueues are harmless.
 func (m *Manager) EnqueueProvision(ctx context.Context, domain string) error {
-	_, err := m.enq.Insert(ctx, SyncArgs{Domain: domain}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2})
+	args, opts := m.provisionInsert(domain)
+	_, err := m.enq.Insert(ctx, args, opts)
 	return err
 }
 
 // EnqueueProvisionTx is the verify-time atomic-outbox variant.
 func (m *Manager) EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain string) error {
-	_, err := m.enq.InsertTx(ctx, tx, SyncArgs{Domain: domain}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2})
+	args, opts := m.provisionInsert(domain)
+	_, err := m.enq.InsertTx(ctx, tx, args, opts)
 	return err
 }
 
@@ -132,6 +145,24 @@ func (m *Manager) EnqueueProvisionTx(ctx context.Context, tx pgx.Tx, domain stri
 // delete transaction, so the job is committed atomically with the domain-row
 // delete — it can never be lost if SES is unreachable at delete time.
 func (m *Manager) EnqueueDeprovisionTx(ctx context.Context, tx pgx.Tx, domain string) error {
-	_, err := m.enq.InsertTx(ctx, tx, SyncArgs{Domain: domain}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2})
+	args, opts := m.deprovisionInsert(domain)
+	_, err := m.enq.InsertTx(ctx, tx, args, opts)
 	return err
+}
+
+// provisionInsert/deprovisionInsert choose the job lane per LegacyJobCompat
+// (see Config): legacy kinds on the default queue keep the previous release
+// able to consume this binary's mutations during phase 1 of the rollout.
+func (m *Manager) provisionInsert(domain string) (river.JobArgs, *river.InsertOpts) {
+	if m.cfg.LegacyJobCompat {
+		return ProvisionArgs{Domain: domain}, &river.InsertOpts{}
+	}
+	return SyncArgs{Domain: domain}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2}
+}
+
+func (m *Manager) deprovisionInsert(domain string) (river.JobArgs, *river.InsertOpts) {
+	if m.cfg.LegacyJobCompat {
+		return DeprovisionArgs{Domain: domain}, &river.InsertOpts{}
+	}
+	return SyncArgs{Domain: domain}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2}
 }
