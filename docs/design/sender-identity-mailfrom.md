@@ -79,6 +79,37 @@ for verified domains; (b) needed an aligned Return-Path.
   claim new work; legacy jobs are drained by compatibility
   workers that converge current state and hand polling to an incarnation-aware
   v2 job with a fresh attempt budget.
+- **Rollback contract (the versioning's reverse direction):** a v2 job
+  committed while the new binary bakes strands unconsumed if the deploy rolls
+  back — the old binary registers neither the v2 kinds nor the queue. This is
+  deliberately harmless rather than prevented: the ledger row (not the job) is
+  the source of truth, so the job is only an accelerator. During the rollback
+  window the old binary's alert-only reaper still surfaces any orphan identity
+  via its List sweep; on the next successful deploy the v2 reaper's
+  RunOnStart sweep converges the ledger backlog within minutes without
+  depending on the stranded job. The post-commit best-effort deprovision on
+  DELETE (below) additionally means the identity is usually already gone
+  before a rollback can strand anything.
+- **`DELETE /v1/domains/{domain}` semantics:** the transaction commits the
+  guarded row delete plus the durable teardown job — that is the API success
+  boundary, independent of SES availability (an untagged/foreign identity or
+  an SES outage can never fail the delete). A best-effort post-commit
+  deprovision (bounded ~10s, errors logged only) then converges immediately,
+  so with a healthy provider the SES identity is confirmed absent before the
+  HTTP response returns — which is why the conformance harness may remove
+  fixture DNS right after a 200 without stranding an identity in practice.
+  When that best-effort attempt fails, teardown converges via the committed
+  job and the hourly reaper instead. (An earlier revision ran Deprovision
+  synchronously inside the delete transaction; review showed that coupling
+  only added failure modes — permanent 500s on foreign identities, deletes
+  blocked by SES outages, and a resurrection window after an irreversible
+  provider delete — that the ledger already heals.)
+- **Healthy-recheck no-op:** a forced mutation signal (POST /verify on an
+  already-verified domain) short-circuits to a single provider GET when the
+  ledger confirms the current incarnation applied AND the provider reports
+  verified. Any other outcome falls through to full convergence. This restores
+  the pre-ledger guard against flapping a verified sender back to pending on
+  every re-check.
 - The MX/SPF records are **preserved across verify** — `Status()` re-emits them on
   every poll, so a verified domain's view keeps showing the records the customer
   must KEEP published (removing them later silently loses SPF alignment). (Adjusted

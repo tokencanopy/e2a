@@ -107,5 +107,32 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 	if len(managed) > 0 {
 		log.Printf("[senderidentity:reaper] converged %d managed identity candidate(s), %d error(s)", len(managed), len(errs))
 	}
+
+	// Provider identities outside the ledger can never be converged (the
+	// ledger is the only deletion authority) and, when no live domain row
+	// backs them either, they are invisible to every other path: a delete
+	// whose teardown was lost under a pre-ledger release, for example — the
+	// migration backfill reads only live rows and could not adopt them.
+	// ALERT-only, exactly like the pre-ledger reaper: an unledgered identity
+	// may belong to another application in a shared SES account and must
+	// never be mutated.
+	ledgered := make(map[string]struct{}, len(managed))
+	for _, domain := range managed {
+		ledgered[domain] = struct{}{}
+	}
+	for _, domain := range providerDomains {
+		if _, ok := ledgered[domain]; ok {
+			continue
+		}
+		exists, err := store.DomainExists(ctx, domain)
+		if err != nil {
+			errs = append(errs, errors.New(domain+": orphan check: "+err.Error()))
+			continue
+		}
+		if !exists {
+			log.Printf("[senderidentity:reaper] ALERT orphan sending identity with no live domain: %s "+
+				"(provider identity exists but is neither ledgered nor backed by a domain row) — manual review required", domain)
+		}
+	}
 	return errors.Join(errs...)
 }

@@ -54,6 +54,10 @@ type Store interface {
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
+	// DomainExists reports whether a live domain row exists. The reaper uses
+	// it to ALERT on provider identities that are neither ledgered nor backed
+	// by a row (pre-upgrade orphans the migration backfill could not see).
+	DomainExists(ctx context.Context, domain string) (bool, error)
 }
 
 // SendingIdentityState is the incarnation-consistent desired-state snapshot

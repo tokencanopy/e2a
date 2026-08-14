@@ -93,7 +93,12 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 				// anyway.
 				return ReapV2Args{}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2}
 			},
-			&river.PeriodicJobOpts{RunOnStart: false},
+			// RunOnStart: the reaper is the version-agnostic convergence path for
+			// the ledger, so the first sweep after any (re)deploy — including a
+			// re-upgrade after a rollback stranded v2 jobs on the unconsumed
+			// queue — repairs the backlog within minutes instead of waiting up
+			// to an hour. Idempotent; a startup sweep is cheap.
+			&river.PeriodicJobOpts{RunOnStart: true},
 		),
 	}
 }

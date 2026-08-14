@@ -236,6 +236,13 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	return nil
 }
 
+func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.status[domain]
+	return ok, nil
+}
+
 func (s *fakeStore) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -1,8 +1,11 @@
 package senderidentity
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -608,6 +611,53 @@ func TestReapWorker_Work(t *testing.T) {
 		identities, _ := prov.List(context.Background())
 		if len(identities) != 0 || len(store.managed) != 0 {
 			t.Fatalf("managed orphan survived: provider=%v ledger=%v", identities, store.managed)
+		}
+	})
+
+	t.Run("alerts on an unledgered orphan identity without touching it", func(t *testing.T) {
+		// A pre-upgrade orphan: its domain row died under the old release, so
+		// migration 101's live-rows backfill never ledgered it and the sweep
+		// will never converge it. The old reaper's ALERT was the only operator
+		// signal for this class — removing it made such identities permanently
+		// invisible (review finding).
+		store := newFakeStore()
+		prov := NewFakeProvider()
+		prov.SeedIdentity("preupgrade-orphan.example")
+		var buf bytes.Buffer
+		prevOut := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(prevOut)
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		logged := buf.String()
+		if !strings.Contains(logged, "ALERT orphan sending identity") || !strings.Contains(logged, "preupgrade-orphan.example") {
+			t.Fatalf("expected an orphan ALERT for the unledgered identity, got: %q", logged)
+		}
+		identities, _ := prov.List(context.Background())
+		if len(identities) != 1 {
+			t.Fatalf("alert-only path must never mutate the identity: %v", identities)
+		}
+	})
+
+	t.Run("does not alert for a live domain outside the ledger", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("live-unledgered.example", StatusVerified)
+		prov := NewFakeProvider()
+		prov.SeedIdentity("live-unledgered.example")
+		var buf bytes.Buffer
+		prevOut := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(prevOut)
+		w := &ReapWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if strings.Contains(buf.String(), "ALERT") {
+			t.Fatalf("live domain must not be flagged as an orphan: %q", buf.String())
 		}
 	})
 

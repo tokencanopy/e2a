@@ -45,6 +45,7 @@ func (f *fakeRawStore) ForgetSendingIdentityManaged(context.Context, string) err
 func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]string, map[string]bool, error) {
 	return nil, nil, nil
 }
+func (f *fakeRawStore) DomainExists(context.Context, string) (bool, error) { return false, nil }
 
 func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 	raw := &fakeRawStore{}

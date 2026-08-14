@@ -19,6 +19,7 @@ type RawStore interface {
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
+	DomainExists(ctx context.Context, domain string) (bool, error)
 }
 
 // NewStoreAdapter bridges a RawStore (e.g. *identity.Store) to the typed
@@ -74,4 +75,8 @@ func (a *storeAdapter) ForgetSendingIdentityManaged(ctx context.Context, domain 
 
 func (a *storeAdapter) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
 	return a.raw.ListManagedSendingIdentityDomains(ctx)
+}
+
+func (a *storeAdapter) DomainExists(ctx context.Context, domain string) (bool, error) {
+	return a.raw.DomainExists(ctx, domain)
 }
