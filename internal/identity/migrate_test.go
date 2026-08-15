@@ -151,6 +151,82 @@ func TestSenderIdentityMigrationInstallsTriggerBeforeBackfill(t *testing.T) {
 	}
 }
 
+func TestDomainTeardownReceiptMigrationUpgradesAppliedLegacyShape(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		CREATE SCHEMA domain_receipt_upgrade_probe;
+		SET LOCAL search_path TO domain_receipt_upgrade_probe;
+		CREATE TABLE users (id TEXT PRIMARY KEY);
+		CREATE TABLE domains (domain TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id));
+		CREATE TABLE domain_teardown_receipts (
+			domain TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'manual_review', 'confirmed')),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			CHECK (domain = lower(domain))
+		);
+		CREATE INDEX idx_domain_teardown_receipts_user ON domain_teardown_receipts(user_id);
+		CREATE FUNCTION clear_domain_teardown_receipt_on_registration()
+		RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			DELETE FROM domain_teardown_receipts WHERE domain = NEW.domain;
+			RETURN NEW;
+		END;
+		$$;
+		CREATE TRIGGER domains_clear_teardown_receipt
+		BEFORE INSERT ON domains FOR EACH ROW
+		EXECUTE FUNCTION clear_domain_teardown_receipt_on_registration();
+		INSERT INTO users (id) VALUES ('usr_upgrade');
+		INSERT INTO domain_teardown_receipts (domain, user_id, state)
+		VALUES ('upgrade.example.test', 'usr_upgrade', 'confirmed');
+	`); err != nil {
+		t.Fatalf("install legacy migration shape: %v", err)
+	}
+
+	upgrade, err := migrations.FS.ReadFile("104_domain_teardown_receipts_upgrade.sql")
+	if err != nil {
+		t.Fatalf("read upgrade migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(upgrade)); err != nil {
+		t.Fatalf("apply upgrade migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(upgrade)); err != nil {
+		t.Fatalf("reapply upgrade migration: %v", err)
+	}
+
+	var receiptID int64
+	var incarnation, state string
+	if err := tx.QueryRow(ctx,
+		`SELECT receipt_id, incarnation, state FROM domain_teardown_receipts WHERE domain = 'upgrade.example.test'`,
+	).Scan(&receiptID, &incarnation, &state); err != nil {
+		t.Fatalf("read upgraded receipt: %v", err)
+	}
+	if receiptID < 1 || !strings.HasPrefix(incarnation, "legacy:") || state != "confirmed" {
+		t.Fatalf("upgraded receipt = (%d, %q, %q)", receiptID, incarnation, state)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO domains (domain, user_id) VALUES ('upgrade.example.test', 'usr_upgrade')`); err != nil {
+		t.Fatalf("register replacement: %v", err)
+	}
+	var count int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM domain_teardown_receipts WHERE domain = 'upgrade.example.test'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("count retained receipt: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("replacement registration erased historical receipt: count=%d", count)
+	}
+}
+
 // stubFS builds an fs.FS with the given filename → SQL body mapping.
 // Order isn't preserved by MapFS but RunMigrations sorts by filename.
 func stubFS(files map[string]string) fstest.MapFS {

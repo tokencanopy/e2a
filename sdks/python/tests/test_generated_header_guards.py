@@ -45,9 +45,13 @@ retry layer does not use that mechanism, so the list starts empty).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
 
 from e2a.v1.generated.api.domains_api import DomainsApi
 
@@ -175,3 +179,10 @@ def test_delete_domain_preserves_transport_option_positions() -> None:
         parameters = list(inspect.signature(getattr(DomainsApi, method_name)).parameters)
         assert parameters[:4] == ["self", "domain", "confirm", "_request_timeout"]
         assert parameters[-1] == "idempotency_key"
+
+
+@pytest.mark.parametrize("key", ["two words", "café", "k" * 256])
+def test_delete_domain_generated_key_validation_matches_wire_contract(key: str) -> None:
+    api = DomainsApi(api_client=object())
+    with pytest.raises(ValidationError):
+        asyncio.run(api.delete_domain("mail.example.test", "DELETE", idempotency_key=key))

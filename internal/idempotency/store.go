@@ -87,7 +87,18 @@ type CachedResponse struct {
 type ClaimResult struct {
 	Outcome ClaimOutcome
 	Cached  CachedResponse
+	// Token fences this ownership generation. A stale takeover receives a new
+	// token; delayed prior handlers cannot complete or release the new claim.
+	Token ClaimToken
 }
+
+// ClaimToken is the database-authored generation for one acquired claim.
+// created_at changes on every stale takeover and needs no schema expansion.
+type ClaimToken struct{ createdAt time.Time }
+
+// ErrClaimLost means this handler no longer owns the in-progress generation.
+// Transactional callers must propagate it so their side effect rolls back.
+var ErrClaimLost = errors.New("idempotency: claim ownership lost")
 
 // Store is the postgres-backed idempotency store.
 type Store struct {
@@ -167,7 +178,7 @@ func (s *Store) Claim(ctx context.Context, userID, key, path, bodyHash string) (
 	// WHERE clause is true. Returns no rows when an existing row
 	// blocks us (completed, or in_progress but not yet stale), in
 	// which case we read the existing row to classify the outcome.
-	var owned int
+	var claimedAt time.Time
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO idempotency_keys (
 		     user_id, key, request_path, request_body_hash,
@@ -182,15 +193,16 @@ func (s *Store) Claim(ctx context.Context, userID, key, path, bodyHash string) (
 		        response_content_type = '',
 		        response_body         = ''::bytea,
 		        status                = 'in_progress',
-		        created_at            = now(),
+		        created_at            = clock_timestamp(),
 		        completed_at          = NULL
 		  WHERE idempotency_keys.status = 'in_progress'
+		    AND idempotency_keys.request_body_hash = EXCLUDED.request_body_hash
 		    AND idempotency_keys.created_at < now() - make_interval(secs => $5)
-		 RETURNING 1`,
+		 RETURNING created_at`,
 		userID, key, path, bodyHash, staleSecs,
-	).Scan(&owned)
+	).Scan(&claimedAt)
 	if err == nil {
-		return ClaimResult{Outcome: OutcomeAcquired}, nil
+		return ClaimResult{Outcome: OutcomeAcquired, Token: ClaimToken{createdAt: claimedAt}}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ClaimResult{}, err
@@ -220,13 +232,13 @@ func (s *Store) Claim(ctx context.Context, userID, key, path, bodyHash string) (
 		return ClaimResult{}, err
 	}
 
+	if gotHash != bodyHash {
+		return ClaimResult{Outcome: OutcomeMismatch}, nil
+	}
 	if gotStatus == "in_progress" {
 		return ClaimResult{Outcome: OutcomeInFlight}, nil
 	}
 	// gotStatus == "completed"
-	if gotHash != bodyHash {
-		return ClaimResult{Outcome: OutcomeMismatch}, nil
-	}
 	return ClaimResult{
 		Outcome: OutcomeReplay,
 		Cached: CachedResponse{
@@ -241,21 +253,21 @@ func (s *Store) Claim(ctx context.Context, userID, key, path, bodyHash string) (
 // this point any subsequent Claim with the same key either replays
 // (body matches) or 422s (body differs), until the row is swept.
 //
-// Idempotent against double-call: only updates rows still marked
-// in_progress, so a stray re-Complete from a buggy caller cannot
-// overwrite an already-cached response.
-func (s *Store) Complete(ctx context.Context, userID, key string, resp CachedResponse) error {
-	_, err := s.pool.Exec(ctx,
+// Fenced against double-call and stale owners: only the currently acquired
+// in-progress generation can complete. ErrClaimLost tells transactional
+// callers to roll back their side effect.
+func (s *Store) Complete(ctx context.Context, userID, key string, token ClaimToken, resp CachedResponse) error {
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE idempotency_keys
 		    SET status                = 'completed',
-		        response_status       = $3,
-		        response_content_type = $4,
-		        response_body         = $5,
+		        response_status       = $4,
+		        response_content_type = $5,
+		        response_body         = $6,
 		        completed_at          = now()
-		  WHERE user_id = $1 AND key = $2 AND status = 'in_progress'`,
-		userID, key, resp.StatusCode, resp.ContentType, resp.Body,
+		  WHERE user_id = $1 AND key = $2 AND created_at = $3 AND status = 'in_progress'`,
+		userID, key, token.createdAt, resp.StatusCode, resp.ContentType, resp.Body,
 	)
-	return err
+	return claimMutationResult(tag.RowsAffected(), err)
 }
 
 // CompleteTx is Complete on the caller's transaction — for the async accept path
@@ -265,20 +277,21 @@ func (s *Store) Complete(ctx context.Context, userID, key string, resp CachedRes
 // side effect) leaves open: if the process dies after the accept-tx commits but
 // before a post-hoc Complete, the key stays in_progress and a retry past the stale
 // window re-runs the send. With CompleteTx the key is 'completed' the instant the
-// message is durable, so every retry replays. Same in_progress guard as Complete,
-// so a later post-hoc Complete is a harmless no-op.
-func (s *Store) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, resp CachedResponse) error {
-	_, err := tx.Exec(ctx,
+// message is durable, so every retry replays. A later post-hoc Complete returns
+// ErrClaimLost; the generic HTTP wrapper deliberately ignores that expected
+// result because the transaction already persisted the response.
+func (s *Store) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, token ClaimToken, resp CachedResponse) error {
+	tag, err := tx.Exec(ctx,
 		`UPDATE idempotency_keys
 		    SET status                = 'completed',
-		        response_status       = $3,
-		        response_content_type = $4,
-		        response_body         = $5,
+		        response_status       = $4,
+		        response_content_type = $5,
+		        response_body         = $6,
 		        completed_at          = now()
-		  WHERE user_id = $1 AND key = $2 AND status = 'in_progress'`,
-		userID, key, resp.StatusCode, resp.ContentType, resp.Body,
+		  WHERE user_id = $1 AND key = $2 AND created_at = $3 AND status = 'in_progress'`,
+		userID, key, token.createdAt, resp.StatusCode, resp.ContentType, resp.Body,
 	)
-	return err
+	return claimMutationResult(tag.RowsAffected(), err)
 }
 
 // Release drops an OutcomeAcquired claim without recording a response.
@@ -287,15 +300,25 @@ func (s *Store) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, r
 // so the next caller with the same key can try again with a fresh
 // payload rather than getting OutcomeMismatch on the second attempt.
 //
-// Only deletes in_progress rows so it cannot accidentally wipe a
-// completed cache entry.
-func (s *Store) Release(ctx context.Context, userID, key string) error {
-	_, err := s.pool.Exec(ctx,
+// Only the current in-progress generation can be deleted. A stale owner gets
+// ErrClaimLost instead of deleting a replacement claim.
+func (s *Store) Release(ctx context.Context, userID, key string, token ClaimToken) error {
+	tag, err := s.pool.Exec(ctx,
 		`DELETE FROM idempotency_keys
-		  WHERE user_id = $1 AND key = $2 AND status = 'in_progress'`,
-		userID, key,
+		  WHERE user_id = $1 AND key = $2 AND created_at = $3 AND status = 'in_progress'`,
+		userID, key, token.createdAt,
 	)
-	return err
+	return claimMutationResult(tag.RowsAffected(), err)
+}
+
+func claimMutationResult(rows int64, err error) error {
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrClaimLost
+	}
+	return nil
 }
 
 // Sweep removes completed rows older than TTL. Returns the count

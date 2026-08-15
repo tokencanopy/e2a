@@ -18,6 +18,9 @@ func TestDeleteDomainLostResponseCanPollConfirmedReceipt(t *testing.T) {
 		deps.DeleteDomain = func(context.Context, string, string, DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
 			return domainteardown.Receipt{Incarnation: "lost-response-incarnation", State: state}, nil
 		}
+		deps.LookupDomainTeardownSnapshot = func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			return state, false, nil
+		}
 	})
 
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/domains/lost-response.example.test?confirm=DELETE", "good", nil)
@@ -47,12 +50,11 @@ func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 			// replacement row, but the ownership-blind safety check still sees it.
 			return nil, pgx.ErrNoRows
 		}
-		deps.DomainExists = func(context.Context, string) (bool, error) { return live, nil }
-		deps.LookupDomainTeardownForIncarnation = func(_ context.Context, _, incarnation, _ string) (domainteardown.State, error) {
+		deps.LookupDomainTeardownSnapshot = func(_ context.Context, _, incarnation, _ string) (domainteardown.State, bool, error) {
 			if incarnation != originalIncarnation {
-				return "", pgx.ErrNoRows
+				return "", false, pgx.ErrNoRows
 			}
-			return receiptState, nil
+			return receiptState, live, nil
 		}
 		deps.DeleteDomain = func(ctx context.Context, _ string, _ string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
 			deletions++
@@ -140,7 +142,7 @@ func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 // transaction-bound completion retains the real memIdem behavior.
 type atomicOnlyIdem struct{ *memIdem }
 
-func (m *atomicOnlyIdem) Complete(context.Context, string, string, idempotency.CachedResponse) error {
+func (m *atomicOnlyIdem) Complete(context.Context, string, string, idempotency.ClaimToken, idempotency.CachedResponse) error {
 	return nil
 }
 

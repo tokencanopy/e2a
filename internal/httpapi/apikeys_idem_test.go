@@ -24,10 +24,10 @@ import (
 // exercise both the retry-replay path and the reuse-with-different-body path,
 // and proves the handler threads RawBody through for the body-hash. Like the
 // real Store it scopes rows by (user_id, key) — two accounts may reuse the same
-// key — and Complete only lands on an in-flight claim (the real Store's
-// `WHERE status = 'in_progress'` guard), so a post-hoc Complete after an
-// in-transaction CompleteTx is a harmless no-op instead of corrupting the
-// cached row.
+// key — and Complete only lands on an in-flight claim, so a post-hoc Complete
+// after an in-transaction CompleteTx cannot corrupt the cached row. The real
+// Store reports ErrClaimLost for that fenced mutation; this focused fake only
+// models the preserved cached response.
 type bodyAwareIdem struct {
 	mu     sync.Mutex
 	cached map[string]struct {
@@ -67,13 +67,13 @@ func (m *bodyAwareIdem) Claim(_ context.Context, uid, key, _, bodyHash string) (
 	return idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}, nil
 }
 
-func (m *bodyAwareIdem) Complete(_ context.Context, uid, key string, resp idempotency.CachedResponse) error {
+func (m *bodyAwareIdem) Complete(_ context.Context, uid, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := uid + "|" + key
 	h, ok := m.inflight[k]
 	if !ok {
-		return nil // already completed (e.g. via CompleteTx) — mirrors the real in_progress guard
+		return nil // already completed (e.g. via CompleteTx); preserve the cached response
 	}
 	m.cached[k] = struct {
 		hash string
@@ -83,11 +83,11 @@ func (m *bodyAwareIdem) Complete(_ context.Context, uid, key string, resp idempo
 	return nil
 }
 
-func (m *bodyAwareIdem) CompleteTx(_ context.Context, _ pgx.Tx, uid, key string, resp idempotency.CachedResponse) error {
-	return m.Complete(context.Background(), uid, key, resp)
+func (m *bodyAwareIdem) CompleteTx(_ context.Context, _ pgx.Tx, uid, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error {
+	return m.Complete(context.Background(), uid, key, token, resp)
 }
 
-func (m *bodyAwareIdem) Release(_ context.Context, uid, key string) error {
+func (m *bodyAwareIdem) Release(_ context.Context, uid, key string, _ idempotency.ClaimToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.inflight, uid+"|"+key)

@@ -245,7 +245,7 @@ func TestHITLReplyHoldCommitsOneIdempotentThreadDecision(t *testing.T) {
 		if marshalErr != nil {
 			return marshalErr
 		}
-		return idemStore.CompleteTx(ctx, tx, user.ID, idemKey, idempotency.CachedResponse{
+		return idemStore.CompleteTx(ctx, tx, user.ID, idemKey, claim.Token, idempotency.CachedResponse{
 			StatusCode:  202,
 			ContentType: "application/json",
 			Body:        body,

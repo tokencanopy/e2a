@@ -353,9 +353,11 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			return nil, errors.New("not found")
 		},
 		LookupDomain: fakeLookupDomain,
-		DomainExists: func(ctx context.Context, domain string) (bool, error) {
-			_, err := fakeLookupDomain(ctx, domain, "u_1")
-			return err == nil, nil
+		// DeleteDomain's base fixture models a completed deletion, so the
+		// post-delete snapshot has a confirmed receipt and no live replacement.
+		// Receipt-transition and ABA tests override both values explicitly.
+		LookupDomainTeardownSnapshot: func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			return domainteardown.Confirmed, false, nil
 		},
 		ListDomains: func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error) {
 			return []identity.Domain{{Domain: "acme.com", Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true, AgentCount: 2}}, nil

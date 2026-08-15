@@ -98,6 +98,7 @@ export function registerDomainTools(server: McpServer, client: McpClient): void 
           .string()
           .min(1)
           .max(255)
+          .regex(/^[!-~]+$/, "must contain only printable ASCII characters without spaces")
           .describe(
             "Stable key for this logical deletion. Reuse it after an ambiguous failure; use a new key only for a replacement domain registration.",
           ),

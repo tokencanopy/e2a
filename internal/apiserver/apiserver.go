@@ -187,44 +187,43 @@ func BuildDeps(p Params) httpapi.Deps {
 		RestoreMessage:       p.Store.RestoreMessage,
 		PurgeMessage:         p.Store.PurgeMessage,
 
-		ListDomains:                        p.Store.ListDomainsByUser,
-		SendingRampSnapshot:                rampSnapshot,
-		ClaimDomain:                        p.Store.ClaimOrCreateDomain,
-		EnforceDomainCreate:                p.Enforcer.CheckDomainCreate,
-		DeleteDomain:                       deleteDomainFunc(p),
-		LookupDomainTeardownForIncarnation: p.Store.LookupDomainTeardownReceiptForIncarnation,
-		DomainExists:                       p.Store.DomainExists,
-		CountAgentsOnDomain:                p.Store.CountAgentsOnDomain,
-		SMTPDomain:                         p.SMTPDomain,
-		SESRegion:                          p.SESRegion,
-		CursorSecret:                       p.SigningSecret,
-		EventsEnabled:                      p.EventsEnabled,
-		Idempotency:                        p.Idempotency,
-		DeliverOutbound:                    p.API.DeliverOutbound,
-		SendTest:                           p.API.SendTestCore,
-		PollSendOutcome:                    p.Store.GetSendOutcome,
-		ApprovePending:                     p.API.ApprovePendingCore,
-		SendLimit:                          p.API.SendLimitAllow,
-		PollLimit:                          p.API.PollLimitAllow,
-		RegLimit:                           p.API.RegLimitAllow,
-		DownloadLimit:                      p.API.DownloadLimitAllow,
-		UnsubscribeLimit:                   p.API.UnsubscribeLimitAllow,
-		RejectPending:                      p.API.RejectPendingCore,
-		GetReviewMessage:                   p.Store.GetReviewMessage,
-		ApproveInboundReview:               p.API.ApproveInboundReviewCore,
-		RejectInboundReview:                p.API.RejectInboundReviewCore,
-		ListReviews:                        p.Store.ListReviews,
-		GetReviewWithContent:               p.Store.GetReviewWithContent,
-		EnforceMessageSend:                 p.Enforcer.CheckMessageSend,
-		GetRepliableMessage:                p.Store.GetRepliableMessage,
-		GetLimits:                          p.Enforcer.Get,
-		ExportUserData:                     p.API.ExportUserDataCore,
-		DeleteUserData:                     p.API.DeleteUserDataCore,
-		ListSuppressions:                   p.Store.ListSuppressions,
-		RemoveSuppression:                  p.Store.RemoveSuppression,
-		AddAgentSuppression:                p.Store.AddAgentSuppression,
-		ListAgentSuppressions:              p.Store.ListAgentSuppressions,
-		RemoveAgentSuppression:             p.Store.RemoveAgentSuppression,
+		ListDomains:                  p.Store.ListDomainsByUser,
+		SendingRampSnapshot:          rampSnapshot,
+		ClaimDomain:                  p.Store.ClaimOrCreateDomain,
+		EnforceDomainCreate:          p.Enforcer.CheckDomainCreate,
+		DeleteDomain:                 deleteDomainFunc(p),
+		LookupDomainTeardownSnapshot: p.Store.LookupDomainTeardownSnapshot,
+		CountAgentsOnDomain:          p.Store.CountAgentsOnDomain,
+		SMTPDomain:                   p.SMTPDomain,
+		SESRegion:                    p.SESRegion,
+		CursorSecret:                 p.SigningSecret,
+		EventsEnabled:                p.EventsEnabled,
+		Idempotency:                  p.Idempotency,
+		DeliverOutbound:              p.API.DeliverOutbound,
+		SendTest:                     p.API.SendTestCore,
+		PollSendOutcome:              p.Store.GetSendOutcome,
+		ApprovePending:               p.API.ApprovePendingCore,
+		SendLimit:                    p.API.SendLimitAllow,
+		PollLimit:                    p.API.PollLimitAllow,
+		RegLimit:                     p.API.RegLimitAllow,
+		DownloadLimit:                p.API.DownloadLimitAllow,
+		UnsubscribeLimit:             p.API.UnsubscribeLimitAllow,
+		RejectPending:                p.API.RejectPendingCore,
+		GetReviewMessage:             p.Store.GetReviewMessage,
+		ApproveInboundReview:         p.API.ApproveInboundReviewCore,
+		RejectInboundReview:          p.API.RejectInboundReviewCore,
+		ListReviews:                  p.Store.ListReviews,
+		GetReviewWithContent:         p.Store.GetReviewWithContent,
+		EnforceMessageSend:           p.Enforcer.CheckMessageSend,
+		GetRepliableMessage:          p.Store.GetRepliableMessage,
+		GetLimits:                    p.Enforcer.Get,
+		ExportUserData:               p.API.ExportUserDataCore,
+		DeleteUserData:               p.API.DeleteUserDataCore,
+		ListSuppressions:             p.Store.ListSuppressions,
+		RemoveSuppression:            p.Store.RemoveSuppression,
+		AddAgentSuppression:          p.Store.AddAgentSuppression,
+		ListAgentSuppressions:        p.Store.ListAgentSuppressions,
+		RemoveAgentSuppression:       p.Store.RemoveAgentSuppression,
 
 		CreateContact:            p.Store.CreateContact,
 		GetContact:               p.Store.GetContactByAddress,
@@ -367,6 +366,9 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string,
 			}, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
 				receipt, err = p.Store.LookupDomainTeardownReceiptRecordTx(ctx, tx, domain, userID)
+				if errors.Is(err, pgx.ErrNoRows) {
+					return identity.ErrDomainNotFound
+				}
 				if err != nil || complete == nil {
 					return err
 				}
@@ -405,6 +407,9 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string,
 		}, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			receipt, err = p.Store.LookupDomainTeardownReceiptRecordTx(ctx, tx, domain, userID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return identity.ErrDomainNotFound
+			}
 			if err != nil || complete == nil {
 				return err
 			}

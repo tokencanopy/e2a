@@ -248,7 +248,7 @@ func TestBuildDepsDeleteDomainCompletesIdempotencyInDeleteTransaction(t *testing
 		if marshalErr != nil {
 			return marshalErr
 		}
-		return idem.CompleteTx(ctx, tx, user.ID, key, idempotency.CachedResponse{
+		return idem.CompleteTx(ctx, tx, user.ID, key, claim.Token, idempotency.CachedResponse{
 			StatusCode: http.StatusOK, ContentType: "application/json", Body: body,
 		})
 	})
@@ -271,6 +271,58 @@ func TestBuildDepsDeleteDomainCompletesIdempotencyInDeleteTransaction(t *testing
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("replacement was deleted by old claim: %v", err)
+	}
+}
+
+func TestBuildDepsDeleteDomainRollsBackWhenIdempotencyClaimWasTakenOver(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "fenced-delete@example.test", "Fenced Delete", "fenced-delete-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "fenced-delete.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	idem := idempotency.NewStore(p.Pool)
+	const key = "u:fenced-domain-delete"
+	const route = "/v1/domains/fenced-delete.example.test"
+	hash := idempotency.HashRequest(route, nil)
+	oldClaim, err := idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || oldClaim.Outcome != idempotency.OutcomeAcquired {
+		t.Fatalf("old claim = %+v, %v", oldClaim, err)
+	}
+	if _, err := p.Pool.Exec(ctx,
+		`UPDATE idempotency_keys SET created_at = now() - interval '10 minutes' WHERE user_id = $1 AND key = $2`,
+		user.ID, key); err != nil {
+		t.Fatalf("age idempotency row: %v", err)
+	}
+	newClaim, err := idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || newClaim.Outcome != idempotency.OutcomeAcquired {
+		t.Fatalf("takeover claim = %+v, %v", newClaim, err)
+	}
+
+	complete := func(token idempotency.ClaimToken) func(context.Context, pgx.Tx, domainteardown.Receipt) error {
+		return func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error {
+			return idem.CompleteTx(ctx, tx, user.ID, key, token, idempotency.CachedResponse{
+				StatusCode: http.StatusOK, ContentType: "application/json", Body: []byte(`{"deleted":true}`),
+			})
+		}
+	}
+	if _, err := deps.DeleteDomain(ctx, domain, user.ID, complete(oldClaim.Token)); !errors.Is(err, idempotency.ErrClaimLost) {
+		t.Fatalf("delete with stale claim = %v, want ErrClaimLost", err)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("domain must remain after fenced transaction rollback: %v", err)
+	}
+	if _, err := deps.DeleteDomain(ctx, domain, user.ID, complete(newClaim.Token)); err != nil {
+		t.Fatalf("delete with current claim: %v", err)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainNotFound) {
+		t.Fatalf("domain after current-owner delete = %v, want ErrDomainNotFound", err)
 	}
 }
 
@@ -308,7 +360,7 @@ func TestBuildDepsDeleteDomainAtomicallyBindsKeyToExistingReceipt(t *testing.T) 
 		if marshalErr != nil {
 			return marshalErr
 		}
-		return idem.CompleteTx(ctx, tx, user.ID, key, idempotency.CachedResponse{
+		return idem.CompleteTx(ctx, tx, user.ID, key, claim.Token, idempotency.CachedResponse{
 			StatusCode: http.StatusOK, ContentType: "application/json", Body: body,
 		})
 	})
@@ -354,6 +406,46 @@ func TestBuildDepsDeleteDomainIdempotencyFailureRollsBack(t *testing.T) {
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("domain delete committed without idempotency completion: %v", err)
+	}
+}
+
+func TestBuildDepsDeleteDomainMissingAndCrossOwnerAreNotFound(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	deps := apiserver.BuildDeps(p)
+	owner, err := store.CreateOrGetUser(ctx, "not-found-owner@example.test", "Not Found Owner", "not-found-owner-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser owner: %v", err)
+	}
+	other, err := store.CreateOrGetUser(ctx, "not-found-other@example.test", "Not Found Other", "not-found-other-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser other: %v", err)
+	}
+	const foreignDomain = "foreign-not-found.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, foreignDomain, other.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain foreign: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		domain   string
+		complete httpapi.DomainDeleteIdemCompleter
+	}{
+		{name: "unkeyed absent", domain: "absent-not-found.example.test"},
+		{name: "keyed absent", domain: "absent-keyed-not-found.example.test", complete: func(context.Context, pgx.Tx, domainteardown.Receipt) error {
+			t.Fatal("idempotency completion called for absent domain")
+			return nil
+		}},
+		{name: "cross owner", domain: foreignDomain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := deps.DeleteDomain(ctx, tc.domain, owner.ID, tc.complete); !errors.Is(err, identity.ErrDomainNotFound) {
+				t.Fatalf("DeleteDomain error = %v, want ErrDomainNotFound", err)
+			}
+		})
+	}
+	if _, err := store.LookupDomain(ctx, foreignDomain, other.ID); err != nil {
+		t.Fatalf("cross-owner domain was changed: %v", err)
 	}
 }
 

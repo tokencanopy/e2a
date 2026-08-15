@@ -1972,6 +1972,27 @@ func (s *Store) LookupDomainTeardownReceiptForIncarnation(ctx context.Context, d
 	return state, err
 }
 
+// LookupDomainTeardownSnapshot returns an exact historical receipt together
+// with whether the DNS name is currently registered, from one PostgreSQL
+// statement snapshot. Keeping these reads together is load-bearing: a newer
+// deletion resets old receipts to pending while removing the replacement row,
+// and two separate statements could otherwise observe confirmed before that
+// commit and absent after it.
+func (s *Store) LookupDomainTeardownSnapshot(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, bool, error) {
+	var (
+		state domainteardown.State
+		live  bool
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT r.state,
+		        EXISTS (SELECT 1 FROM domains d WHERE d.domain = $1)
+		 FROM domain_teardown_receipts r
+		 WHERE r.domain = $1 AND r.incarnation = $2 AND r.user_id = $3`,
+		normalizeDomain(domain), incarnation, userID,
+	).Scan(&state, &live)
+	return state, live, err
+}
+
 // SetDomainTeardownState advances a receipt after provider convergence. It is
 // intentionally a no-op when no domain-delete receipt exists (for example an
 // account delete, whose user and receipts cascade together).

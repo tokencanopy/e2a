@@ -4,13 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/domainteardown"
+	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 )
+
+func TestDeleteDomainIdempotencyKeyBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{name: "absent is optional", key: "", want: true},
+		{name: "one printable ASCII", key: "k", want: true},
+		{name: "255 printable ASCII", key: strings.Repeat("k", idempotency.MaxKeyLength), want: true},
+		{name: "256 rejected", key: strings.Repeat("k", idempotency.MaxKeyLength+1), want: false},
+		{name: "space rejected", key: "two words", want: false},
+		{name: "non ASCII rejected", key: "café", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validDeleteDomainIdempotencyKey(tc.key); got != tc.want {
+				t.Fatalf("validDeleteDomainIdempotencyKey(%q) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestGetDomainIncludesReadOnlySendingRamp(t *testing.T) {
 	srv := testServer(t, func(deps *Deps) {
@@ -182,6 +205,9 @@ func TestDeleteDomainReturnsOwnerScopedReceiptAfterRowIsGone(t *testing.T) {
 				t.Fatalf("receipt resolution = %q, %q", domain, userID)
 			}
 			return domainteardown.Receipt{Incarnation: "deleted-incarnation", State: domainteardown.Pending}, nil
+		}
+		deps.LookupDomainTeardownSnapshot = func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			return domainteardown.Pending, false, nil
 		}
 	})
 

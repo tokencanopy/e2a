@@ -1512,7 +1512,7 @@ export interface DomainsApiDeleteDomainRequest {
      */
     confirm: 'DELETE'
     /**
-     * Optional idempotency key for safe retries (unique per logical domain deletion; at most 255 bytes). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
+     * Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      * Defaults to: undefined
      * @type string
      * @memberof DomainsApideleteDomain

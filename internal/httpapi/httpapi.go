@@ -87,10 +87,6 @@ type DomainDeleteIdemCompleter func(ctx context.Context, tx pgx.Tx, receipt doma
 // ownership guard.
 type DomainLookup func(ctx context.Context, domain, userID string) (*identity.Domain, error)
 
-// DomainExists is an ownership-blind safety check used only to suppress a
-// historical DNS-release signal while any same-name registration is live.
-type DomainExists func(ctx context.Context, domain string) (bool, error)
-
 // CoveringDomainLookup mirrors store.LookupCoveringDomain(sub, userID): the
 // create-time fallback that finds the most-specific registered parent domain
 // the user owns which covers an agent's subdomain (label-boundary match). The
@@ -218,10 +214,9 @@ type Deps struct {
 	// DeleteDomain atomically either deletes the live incarnation or resolves
 	// the newest historical receipt when the row is already gone. The exact-
 	// incarnation lookup lets a completed key observe later state transitions.
-	DeleteDomain                       func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error)
-	LookupDomainTeardownForIncarnation func(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, error)
-	DomainExists                       DomainExists
-	CountAgentsOnDomain                func(ctx context.Context, domain, userID string) (live, trashed int, err error)
+	DeleteDomain                 func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error)
+	LookupDomainTeardownSnapshot func(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, bool, error)
+	CountAgentsOnDomain          func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a
 	// domain must publish (config smtp.domain).
