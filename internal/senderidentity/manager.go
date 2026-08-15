@@ -21,16 +21,19 @@ type Config struct {
 	MaxReconcileAttempts int
 	// ReaperInterval overrides the orphan-sweep cadence. 0 → default.
 	ReaperInterval time.Duration
-	// LegacyJobCompat is phase 1 of the two-phase blue/green rollout that
-	// makes ROLLBACK mechanically safe (config sender_identity.legacy_job_compat).
+	// LegacyJobCompat is phase 1 of the two-phase blue/green job-lane rollout
+	// (config sender_identity.legacy_job_compat).
 	// When true, mutation and reconcile jobs are PRODUCED as the legacy kinds
 	// on the default queue — consumable by the previous release — while this
 	// binary still CONSUMES both lanes. Deploy this release with the flag on;
 	// once it is the stable rollback target, flip the flag off (a config-only
 	// deploy) to switch producers to the versioned v2 lane. A rollback of
 	// that second deploy lands on a binary that consumes v2, so nothing
-	// strands. Default false: single-instance/self-host deployments have no
-	// blue/green overlap and want the v2 semantics immediately.
+	// strands. This only makes the River lanes rollback-compatible: operators
+	// must still freeze sender-identity mutations while a pre-ownership worker
+	// overlaps or is a possible rollback target (see the deployment design).
+	// Default false: single-instance/self-host deployments have no blue/green
+	// overlap and want the v2 semantics immediately.
 	LegacyJobCompat bool
 }
 

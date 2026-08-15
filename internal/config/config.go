@@ -324,10 +324,12 @@ type SenderIdentityConfig struct {
 	// LegacyJobCompat is phase 1 of the two-phase blue/green rollout for the
 	// versioned sender-identity job lanes: while true, this binary PRODUCES
 	// the legacy job kinds (consumable by the previous release) and CONSUMES
-	// both lanes, so rolling this deploy back strands no teardown work. Flip
-	// to false (config-only deploy) once this release is the stable rollback
-	// target. Default false — single-instance deployments have no blue/green
-	// overlap. Override via E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT.
+	// both lanes, so rolling this deploy back strands no teardown work. This
+	// does not make the previous binary's provider mutations ownership-safe;
+	// hosted operators must follow the documented mutation freeze and IAM
+	// sequence. Flip to false once this release is the stable rollback target.
+	// Default false — single-instance deployments have no blue/green overlap.
+	// Override via E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT.
 	LegacyJobCompat bool `yaml:"legacy_job_compat"`
 }
 
@@ -573,7 +575,11 @@ func Load(path string) (*Config, error) {
 		cfg.SenderIdentity.SESRegion = v
 	}
 	if v := os.Getenv("E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT"); v != "" {
-		cfg.SenderIdentity.LegacyJobCompat = v == "true" || v == "1"
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT: %w", err)
+		}
+		cfg.SenderIdentity.LegacyJobCompat = b
 	}
 	if v := os.Getenv("E2A_TRASH_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {

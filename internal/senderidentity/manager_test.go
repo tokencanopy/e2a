@@ -41,10 +41,11 @@ func (r *recordingEnqueuer) InsertTx(ctx context.Context, tx pgx.Tx, args river.
 }
 
 // TestManagerEnqueueKindsFollowCompatMode pins the two-phase blue/green
-// rollout mechanism (second-review blocker: rollback was not mechanically
-// safe). Phase 1 runs with LegacyJobCompat=true: every mutation is enqueued
+// rollout mechanism. Phase 1 runs with LegacyJobCompat=true: every mutation is enqueued
 // as a LEGACY kind on the default queue, which the still-deployed old binary
-// can consume — so rolling phase 1 back strands no teardown work. Phase 2
+// can consume — so rolling phase 1 back strands no River work. This does not
+// make the old worker's provider mutations ownership-safe; the deployment
+// contract separately freezes those mutations during overlap. Phase 2
 // (a config-only flip to false) switches producers to the v2 lane; its
 // rollback target is the phase-1 binary, which consumes v2. The critical
 // invariant: teardown mutations are never enqueued on a lane the deploy's

@@ -173,10 +173,12 @@ sender_identity:
   # Two-phase blue/green rollout switch for the versioned sender-identity job
   # lanes. Phase 1: deploy the new release with this true — it produces the
   # LEGACY job kinds (consumable by the previous release, so rollback strands
-  # no teardown work) while consuming both lanes. Phase 2: once this release
-  # is the stable rollback target, flip to false (config-only deploy) to
-  # switch producers to the versioned v2 lane. Single-instance deployments
-  # have no blue/green overlap and can leave this false.
+  # no teardown work) while consuming both lanes. This is job-lane
+  # compatibility only: before a pre-ownership binary overlaps, follow the
+  # design's tag-conditioned IAM setup and sender-identity mutation freeze.
+  # Phase 2: once this release is the stable rollback target, flip to false
+  # (config-only deploy) to switch producers to the versioned v2 lane.
+  # Single-instance deployments have no overlap and can leave this false.
   legacy_job_compat: false
 
 # Operator-managed recipient-volume ramp for newly verified custom sender

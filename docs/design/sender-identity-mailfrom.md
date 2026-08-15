@@ -79,28 +79,34 @@ for verified domains; (b) needed an aligned Return-Path.
   claim new work; legacy jobs are drained by compatibility
   workers that converge current state and hand polling to an incarnation-aware
   v2 job with a fresh attempt budget.
-- **Rollback contract — two-phase rollout via `sender_identity.legacy_job_compat`.**
+- **Rollback contract — two-phase job-lane rollout plus an operator mutation freeze.**
   The old binary registers neither the v2 kinds nor the queue, so a v2 job
   committed while a new binary bakes strands unconsumed on rollback (and the
   rolled-back binary's blind legacy deprovision semantics return, including
   the pre-existing delete/re-register ABA hazard the versioning closes).
-  Rollback is made mechanically safe by splitting the producer flip from the
-  binary deploy: **phase 1** deploys this release with
+  The River lanes are made rollback-compatible by splitting the producer flip
+  from the binary deploy: **phase 1** deploys this release with
   `legacy_job_compat: true` — it PRODUCES the legacy kinds (consumable by the
-  previous release; its own workers run the new converge semantics; the old
-  slot claiming a job mid-overlap is today's production behavior, not a new
-  risk) while CONSUMING both lanes. **Phase 2**, once phase 1 is the stable
+  previous release) while CONSUMING both lanes. This flag is not a provider
+  mutation boundary: the previous worker creates identities without the new
+  ownership tag and deletes without checking it. Therefore operators MUST
+  freeze domain verification, domain deletion, and account deletion before a
+  pre-ownership binary overlaps, and keep that freeze through old-slot drain
+  and the post-drain convergence window. **Phase 2**, once phase 1 is the stable
   rollback target, flips the flag off in a config-only deploy; a rollback of
   phase 2 lands on the phase-1 binary, which consumes v2 — nothing strands.
   Residual: post-drain audit jobs are v2-only in both phases; a phase-1
   rollback strands only those repair *accelerators* (bounded — ledger + the
   next v2 binary's RunOnStart sweep converge them; the old binary's List
-  sweep still ALERTs on orphans meanwhile). Note the IAM ordering too: once
-  the tag-conditioned IAM policy (ops #310) is applied, a rolled-back
-  pre-tagging binary cannot CREATE identities at all (untagged
-  CreateEmailIdentity is denied — existing identities keep sending, new
-  provisioning pauses until roll-forward), so apply that policy no earlier
-  than phase 1 going stable.
+  sweep still ALERTs on orphans meanwhile). Apply the tag-conditioned IAM
+  policy before any mixed-version overlap. Under that policy a rolled-back
+  pre-tagging binary cannot CREATE identities (existing identities keep
+  sending), but it can still delete a tagged identity; rollback to that binary
+  therefore requires the same mutation freeze and leaves provisioning paused
+  until roll-forward. Do not lift the freeze until the new binary is the sole
+  worker, its post-drain audit/reaper is green, and it is the accepted rollback
+  target. This operational gate is what closes the old-worker race; the compat
+  flag alone never does.
 - **`DELETE /v1/domains/{domain}` semantics:** the transaction commits the
   guarded row delete plus the durable teardown job — that is the API success
   boundary, independent of SES availability (an untagged/foreign identity or
@@ -159,15 +165,19 @@ owned by another application.
    tagged `CreateEmailIdentity` calls, in addition to the Create/Get/List/Put/
    Delete actions above. Apply request-tag conditions to create/tag and the
    resource-tag condition to both Put operations and delete.
-5. Re-run both inventories, then deploy. An untagged legacy e2a identity fails
+5. Re-run both inventories and apply the strict tag-conditioned IAM policy.
+   An untagged legacy e2a identity fails
    closed with `identity not owned`; audit and tag it explicitly rather than
    weakening the ownership check.
-6. Deploy in two phases (see the rollback contract above): first with
-   `sender_identity.legacy_job_compat: true`; once that deploy is the stable
-   rollback target, flip the flag off in a config-only deploy. Apply the
-   strict tag-conditioned IAM policy no earlier than phase 1 going stable — a
-   rollback to a pre-tagging binary under that policy cannot create new
-   identities until rolled forward.
+6. Freeze domain verification, domain deletion, and account deletion, then
+   deploy with `sender_identity.legacy_job_compat: true`. After cutover, wait
+   for the previous slot to stop and for the post-drain convergence window;
+   require the candidate reaper/audit and legacy-job drain checks to be green.
+   If rollback to the pre-tagging binary is required, re-establish/retain the
+   freeze first and keep provisioning paused until roll-forward.
+7. Once this release is the sole worker and accepted rollback target, lift the
+   mutation freeze. Flip `legacy_job_compat` to false in a later config-only
+   deploy; rollback of that flip lands on the v2-capable phase-1 binary.
 
 ## Verification
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits
