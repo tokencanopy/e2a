@@ -3,6 +3,7 @@ package senderidentity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -412,8 +413,10 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 			if err := provider.Deprovision(lockedCtx, domain); errors.Is(err, ErrIdentityNotOwned) {
 				// The provider identity still exists. It may be foreign, or it may
 				// be an e2a identity whose ownership tag drifted. Either way we are
-				// not authorized to delete it and must not claim absence.
-				return nil
+				// not authorized to delete it and must not claim absence. Keep the
+				// durable job/reaper red so this cannot disappear as a successful
+				// teardown after a lost HTTP response or account deletion.
+				return fmt.Errorf("provider identity ownership is unconfirmed; manual review required: %w", ErrIdentityNotOwned)
 			} else if err != nil {
 				return err
 			}

@@ -3,6 +3,7 @@ package senderidentity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 
@@ -157,7 +158,10 @@ func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider
 		// be recreated. Present identities take the normal desired-state path,
 		// which deletes them when their domain row is absent/unverified.
 		if _, err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
-			errs = append(errs, errors.New(domain+": "+err.Error()))
+			if errors.Is(err, ErrIdentityNotOwned) {
+				log.Printf("[senderidentity:reaper] ALERT teardown blocked for %s: %v", domain, err)
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", domain, err))
 			continue
 		}
 	}

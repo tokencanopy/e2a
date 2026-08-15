@@ -320,6 +320,30 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 			t.Fatalf("expected provider error to propagate, got %v", err)
 		}
 	})
+
+	t.Run("lost ownership remains a durable retry instead of completing the job", func(t *testing.T) {
+		store := newFakeStore() // absent row covers domain and account deletion
+		store.managed[domain] = "deleted-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity(domain)
+		prov.SetDeprovisionErr(ErrIdentityNotOwned)
+		w := &DeprovisionWorker{store: store, provider: prov}
+
+		err := w.Work(context.Background(), deprovJob())
+		if !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("ownership loss must keep the River job retryable, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "manual review required") {
+			t.Fatalf("worker error must be operator-actionable, got %q", err)
+		}
+		if store.managed[domain] == "" {
+			t.Fatal("ownership ambiguity removed the durable ledger tombstone")
+		}
+		identities, _ := prov.List(context.Background())
+		if len(identities) != 1 || identities[0] != domain {
+			t.Fatalf("not-owned provider identity was mutated: %v", identities)
+		}
+	})
 }
 
 // TestManagerTryDeprovisionNow covers the post-commit best-effort convergence
@@ -684,6 +708,30 @@ func TestReapWorker_Work(t *testing.T) {
 		identities, _ := prov.List(context.Background())
 		if len(identities) != 0 || len(store.managed) != 0 {
 			t.Fatalf("managed orphan survived: provider=%v ledger=%v", identities, store.managed)
+		}
+	})
+
+	t.Run("alerts and retries when a ledgered tombstone loses provider ownership", func(t *testing.T) {
+		store := newFakeStore()
+		store.managed["ownership-lost.example"] = "deleted-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("ownership-lost.example")
+		prov.SetDeprovisionErr(ErrIdentityNotOwned)
+		var buf bytes.Buffer
+		prevOut := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(prevOut)
+		w := &ReapWorker{store: store, provider: prov}
+
+		err := w.Work(context.Background(), reapJob())
+		if !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("reaper must remain red until ownership is resolved, got %v", err)
+		}
+		if !strings.Contains(buf.String(), "ALERT") || !strings.Contains(buf.String(), "manual review required") {
+			t.Fatalf("expected actionable ownership-loss ALERT, got %q", buf.String())
+		}
+		if store.managed["ownership-lost.example"] == "" {
+			t.Fatal("reaper removed the only durable retry authority")
 		}
 	})
 

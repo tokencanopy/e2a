@@ -2,6 +2,7 @@ package senderidentity
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -65,7 +66,13 @@ type Manager struct {
 // post-drain audit to finalize (mixed-version late-create repair). The caller
 // bounds the wait via ctx; the mutation gate honors cancellation.
 func (m *Manager) TryDeprovisionNow(ctx context.Context, domain string) (confirmed bool, err error) {
-	return syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false, m.cfg.LegacyJobCompat)
+	confirmed, err = syncProviderIdentity(ctx, domain, m.store, m.provider, m.fire, m.cfg.MaxReconcileAttempts, false, false, m.cfg.LegacyJobCompat)
+	if errors.Is(err, ErrIdentityNotOwned) {
+		// The synchronous DELETE response exposes this as manual_review, while
+		// durable workers must keep retrying/alerting the same condition.
+		return false, nil
+	}
+	return confirmed, err
 }
 
 // NewManager builds the manager with its dependencies. It does NOT build a River
