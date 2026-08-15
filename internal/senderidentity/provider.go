@@ -81,10 +81,17 @@ type Result struct {
 // treat it as "drop back to none/failed", never as a hard error.
 var ErrIdentityNotFound = errors.New("senderidentity: identity not found")
 
+// ErrIdentityNotOwned means an identity exists for the domain but lacks the
+// provider-side ownership marker written by e2a. Callers must never update or
+// delete it: an SES account can be shared with other applications.
+var ErrIdentityNotOwned = errors.New("senderidentity: identity is not managed by e2a")
+
 // Provider registers, polls, and removes the upstream (SES) sending
-// identity for a domain. Implementations MUST be idempotent: Provision on an
-// already-registered domain is a no-op success, and Deprovision treats a
-// missing identity as success.
+// identity for a domain. Implementations MUST be idempotent for identities they
+// own: Provision on an already-managed domain refreshes desired state, and
+// Deprovision treats a missing identity as success. An existing identity that
+// lacks the provider ownership marker returns ErrIdentityNotOwned and must not
+// be mutated.
 type Provider interface {
 	// Provision registers a BYODKIM sending identity for domain, supplying
 	// the per-domain DKIM selector + PKCS#1 DER private key that e2a
@@ -100,9 +107,14 @@ type Provider interface {
 	// reported as success (idempotent teardown).
 	Deprovision(ctx context.Context, domain string) error
 
-	// List returns the domains for which e2a currently has a sending
-	// identity at the provider. Used by the orphan reaper to alert on
-	// identities with no backing live domain row. SES caps each page; the
-	// implementation paginates and returns the full set.
+	// List returns all domain identities visible to the provider principal.
+	// It is retained for the phase-1 compatibility worker only; the v2 reaper
+	// uses ListPage so one River job cannot inventory the whole provider account.
+	// Neither path treats an unledgered identity as its own.
 	List(ctx context.Context) ([]string, error)
+
+	// ListPage returns one provider-bounded page plus the opaque continuation
+	// token. The v2 orphan audit uses this so one River job never inventories
+	// the whole provider account.
+	ListPage(ctx context.Context, nextToken string, limit int) (domains []string, followingToken string, err error)
 }

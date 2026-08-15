@@ -229,7 +229,11 @@ function makeStubClient(
       verified: true,
       sendingStatus: "verified",
     })),
-    deleteDomain: vi.fn(async (domain: string) => ({ deleted: true, domain })),
+    deleteDomain: vi.fn(async (domain: string, _idempotencyKey?: string) => ({
+      deleted: true,
+      domain,
+      sending_teardown: "confirmed",
+    })),
     deleteWebhook: vi.fn(async (id: string) => ({ deleted: true, id })),
     listWebhookDeliveries: vi.fn(
       async (id: string, _params: { status?: string; cursor?: string; limit?: number }) => ({
@@ -1993,14 +1997,39 @@ describe("e2a MCP server", () => {
     expect(stub.deleteDomain).not.toHaveBeenCalled();
   });
 
-  it("delete_domain forwards on explicit confirm:true", async () => {
+  it("delete_domain requires a stable idempotency_key", async () => {
     const res = await client.callTool({
       name: "delete_domain",
       arguments: { domain: "mail.acme.com", confirm: true },
     });
-    expect(stub.deleteDomain).toHaveBeenCalledWith("mail.acme.com");
+    expect(res.isError).toBe(true);
+    expect(stub.deleteDomain).not.toHaveBeenCalled();
+  });
+
+  it.each(["two words", "café"])(
+    "delete_domain rejects non-portable idempotency key %j",
+    async (idempotencyKey) => {
+      const res = await client.callTool({
+        name: "delete_domain",
+        arguments: { domain: "mail.acme.com", confirm: true, idempotency_key: idempotencyKey },
+      });
+      expect(res.isError).toBe(true);
+      expect(stub.deleteDomain).not.toHaveBeenCalled();
+    },
+  );
+
+  it("delete_domain forwards on explicit confirm:true", async () => {
+    const res = await client.callTool({
+      name: "delete_domain",
+      arguments: { domain: "mail.acme.com", confirm: true, idempotency_key: "delete-mail-domain" },
+    });
+    expect(stub.deleteDomain).toHaveBeenCalledWith("mail.acme.com", "delete-mail-domain");
     const content = res.content as Array<{ type: string; text: string }>;
-    expect(JSON.parse(content[0]!.text)).toEqual({ deleted: true, domain: "mail.acme.com" });
+    expect(JSON.parse(content[0]!.text)).toEqual({
+      deleted: true,
+      domain: "mail.acme.com",
+      sending_teardown: "confirmed",
+    });
   });
 
   it("delete_webhook returns the REST deletion receipt unchanged", async () => {
@@ -3055,7 +3084,11 @@ describe("e2a MCP server", () => {
     expect(byName.get("delete_domain")).toContain(
       "Moving an agent to trash is not sufficient",
     );
-    expect(byName.get("delete_domain")).toContain("trashed agents still belong to the domain");
+    expect(byName.get("delete_domain")).toContain(
+      "trashed agents still belong to the domain",
+    );
+    expect(byName.get("delete_domain")).toContain("sending_teardown");
+    expect(byName.get("delete_domain")).toContain("Keep DNS");
     expect(byName.get("delete_domain")).not.toContain("move those inboxes");
     expect(byName.get("delete_domain")).not.toContain("CASCADES to every agent");
   });

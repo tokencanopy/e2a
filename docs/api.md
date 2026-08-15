@@ -151,10 +151,11 @@ GA unless its heading or prose says `(beta)`.
   different account's credentials is a `400 invalid_cursor` rather than a
   silently wrong page. Cursors are opaque; treat them as ephemeral — on
   `invalid_cursor`, drop the cursor and restart the query from the first page.
-- **Idempotency.** Nine mutating operations honor an opt-in `Idempotency-Key`
+- **Idempotency.** Ten mutating operations honor an opt-in `Idempotency-Key`
   header: `sendMessage`, `replyToMessage`, `forwardMessage`, `approveReview`,
   `createWebhook`, `rotateWebhookSecret`, and `createApiKey`, plus the beta
-  contact operations `createContact` and `importContacts`. Semantics:
+  contact operations `createContact` and `importContacts`, plus
+  `deleteDomain`. Semantics:
   - **Replay.** A retry with the same key and a **byte-identical** body replays
     the first request's response instead of re-executing the side effect (the
     dedup hash covers the route + the raw body bytes, so the same key on a
@@ -169,10 +170,10 @@ GA unless its heading or prose says `(beta)`.
     *different* request body. Do **not** blind-retry this one: a legitimate
     retry must resend the byte-identical body, and a genuinely new request
     needs a fresh key.
-  - **Best-effort.** Dedup is best-effort, not transactional: under
-    idempotency-store degradation or a mid-request crash the protection
-    degrades to at-least-once — a keyed retry may re-execute the operation
-    rather than replay the cached response.
+  - **Atomic exceptions.** Accepted keyed sends, webhook creation, and domain
+    deletion commit their replay record in the same transaction as the side
+    effect. Other operations remain best-effort: under idempotency-store
+    degradation or a mid-request crash, a keyed retry may re-execute them.
 - **No NUL bytes and no invalid UTF-8 on `/v1`.** No client-supplied string in
   a `/v1` request may contain `U+0000`, and every client-supplied byte sequence
   must be well-formed UTF-8 — anywhere in the JSON body (at any depth,
@@ -564,7 +565,8 @@ agents, `domain` for domains, `address` for suppressions. `deleted` is always
 Cascading deletes may additionally carry receipt counts (all additive):
 `DELETE /v1/agents/{email}` includes `messages_deleted`, and `DELETE
 /v1/account` returns the full per-table `DeleteUserDataResult` receipt on top
-of `deleted: true`.
+of `deleted: true`. Domain deletion adds the durable, open-set
+`sending_teardown` state described below.
 
 ### Domains (`/v1/domains`)
 
@@ -574,6 +576,19 @@ Custom sending/receiving domains and their DNS verification.
   TXT records and the DKIM selector/key).
 - `GET /v1/domains/{domain}`, `DELETE /v1/domains/{domain}?confirm=DELETE` —
   fetch / delete (delete deprovisions the sending identity; irreversible).
+  The deletion receipt's open `sending_teardown` value is the DNS-release
+  contract: only `confirmed` proves provider absence. Keep DNS published for
+  `pending`, `manual_review`, missing, or unknown values. Send a unique
+  `Idempotency-Key` for each logical deletion and reuse it after an ambiguous
+  network failure: within the published key-retention window, the server
+  atomically binds it to the deleted registration and follows that receipt as
+  `pending` advances, without deleting a later registration of the same domain.
+  After retention expires, the same key starts a new operation. If a
+  replacement is live, the DNS-release signal fails closed as `pending`. Use a
+  new key only to delete that
+  replacement registration. While the domain remains absent, an unkeyed repeat
+  polls the newest owner-scoped receipt; never use an unkeyed retry across
+  re-registration.
 - `POST /v1/domains/{domain}/verify` — verify ownership via the TXT record.
 
 Every domain response (list, fetch, and register) carries **`capabilities`** —

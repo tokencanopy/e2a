@@ -1,7 +1,6 @@
 import { ResponseContext, RequestContext, HttpFile, HttpInfo } from '../http/http.js';
 import { Configuration, PromiseConfigurationOptions, wrapOptions } from '../configuration.js'
 import { PromiseMiddleware, Middleware, PromiseMiddlewareWrapper } from '../middleware.js';
-
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
@@ -1096,26 +1095,28 @@ export class PromiseDomainsApi {
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param domain
      * @param confirm Must be the literal DELETE — this action is irreversible.
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      */
-    public deleteDomainWithHttpInfo(domain: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<HttpInfo<DeleteDomainResult>> {
+    public deleteDomainWithHttpInfo(domain: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions, idempotencyKey?: string): Promise<HttpInfo<DeleteDomainResult>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.deleteDomainWithHttpInfo(domain, confirm, observableOptions);
+        const result = this.api.deleteDomainWithHttpInfo(domain, confirm, observableOptions, idempotencyKey);
         return result.toPromise();
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param domain
      * @param confirm Must be the literal DELETE — this action is irreversible.
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      */
-    public deleteDomain(domain: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<DeleteDomainResult> {
+    public deleteDomain(domain: string, confirm: 'DELETE', _options?: PromiseConfigurationOptions, idempotencyKey?: string): Promise<DeleteDomainResult> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.deleteDomain(domain, confirm, observableOptions);
+        const result = this.api.deleteDomain(domain, confirm, observableOptions, idempotencyKey);
         return result.toPromise();
     }
 
@@ -2213,6 +2214,3 @@ export class PromiseWebhooksApi {
 
 
 }
-
-
-

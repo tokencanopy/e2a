@@ -26,6 +26,10 @@ const (
 	// so a burst of held sends notifying — or a stuck notification to a bad owner
 	// address retrying — never competes with customer outbound delivery.
 	QueueNotify = "notify"
+	// QueueSenderIdentityV2 is versioned as well as its job kinds. During a
+	// blue/green rollout the old binary does not listen to this queue, so it
+	// cannot claim and error a new desired-state job as an unknown kind.
+	QueueSenderIdentityV2 = "sender_identity_v2"
 	// QueueDefault is River's built-in default — anything not explicitly routed.
 	QueueDefault = river.QueueDefault
 )
@@ -36,11 +40,12 @@ const (
 // its jobs sit unworked.
 func defaultQueueConfig(cfg Config) map[string]river.QueueConfig {
 	return map[string]river.QueueConfig{
-		QueueOutbound:    {MaxWorkers: cfg.OutboundWorkers},
-		QueueInbound:     {MaxWorkers: cfg.InboundWorkers},
-		QueueWebhook:     {MaxWorkers: cfg.WebhookWorkers},
-		QueueMaintenance: {MaxWorkers: cfg.MaintenanceWorkers},
-		QueueNotify:      {MaxWorkers: cfg.NotifyWorkers},
-		QueueDefault:     {MaxWorkers: cfg.DefaultWorkers},
+		QueueOutbound:         {MaxWorkers: cfg.OutboundWorkers},
+		QueueInbound:          {MaxWorkers: cfg.InboundWorkers},
+		QueueWebhook:          {MaxWorkers: cfg.WebhookWorkers},
+		QueueMaintenance:      {MaxWorkers: cfg.MaintenanceWorkers},
+		QueueNotify:           {MaxWorkers: cfg.NotifyWorkers},
+		QueueSenderIdentityV2: {MaxWorkers: cfg.SenderIdentityWorkers},
+		QueueDefault:          {MaxWorkers: cfg.DefaultWorkers},
 	}
 }

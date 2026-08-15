@@ -48,12 +48,12 @@ func TestApproveSent(t *testing.T) {
 // window where post-transaction runIdempotent completion never lands.
 type txOnlyIdem struct{ *memIdem }
 
-func (m *txOnlyIdem) Complete(context.Context, string, string, idempotency.CachedResponse) error {
+func (m *txOnlyIdem) Complete(context.Context, string, string, idempotency.ClaimToken, idempotency.CachedResponse) error {
 	return nil // simulate a crash window where post-transaction completion never lands
 }
 
-func (m *txOnlyIdem) CompleteTx(ctx context.Context, _ pgx.Tx, userID, key string, resp idempotency.CachedResponse) error {
-	return m.memIdem.Complete(ctx, userID, key, resp)
+func (m *txOnlyIdem) CompleteTx(ctx context.Context, _ pgx.Tx, userID, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error {
+	return m.memIdem.Complete(ctx, userID, key, token, resp)
 }
 
 // TestApproveAccepted202AndIdempotentReplay pins the async-accept convention

@@ -523,8 +523,8 @@ export class McpClient {
     return this.sdk.domains.verify(domain);
   }
 
-  deleteDomain(domain: string): Promise<DeleteDomainResult> {
-    return this.sdk.domains.delete(domain);
+  deleteDomain(domain: string, idempotencyKey: string): Promise<DeleteDomainResult> {
+    return this.sdk.domains.delete(domain, { idempotencyKey });
   }
 
   // ── Webhooks ────────────────────────────────────────────────────

@@ -1504,15 +1504,16 @@ export class ObservableDomainsApi {
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param domain
      * @param confirm Must be the literal DELETE — this action is irreversible.
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      */
-    public deleteDomainWithHttpInfo(domain: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<HttpInfo<DeleteDomainResult>> {
+    public deleteDomainWithHttpInfo(domain: string, confirm: 'DELETE', _options?: ConfigurationOptions, idempotencyKey?: string): Observable<HttpInfo<DeleteDomainResult>> {
         const _config = mergeConfiguration(this.configuration, _options);
 
-        const requestContextPromise = this.requestFactory.deleteDomain(domain, confirm, _config);
+        const requestContextPromise = this.requestFactory.deleteDomain(domain, confirm, _config, idempotencyKey);
         // build promise chain
         let middlewarePreObservable = from<RequestContext>(requestContextPromise);
         for (const middleware of _config.middleware) {
@@ -1530,13 +1531,14 @@ export class ObservableDomainsApi {
     }
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param domain
      * @param confirm Must be the literal DELETE — this action is irreversible.
+     * @param [idempotencyKey] Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      */
-    public deleteDomain(domain: string, confirm: 'DELETE', _options?: ConfigurationOptions): Observable<DeleteDomainResult> {
-        return this.deleteDomainWithHttpInfo(domain, confirm, _options).pipe(map((apiResponse: HttpInfo<DeleteDomainResult>) => apiResponse.data));
+    public deleteDomain(domain: string, confirm: 'DELETE', _options?: ConfigurationOptions, idempotencyKey?: string): Observable<DeleteDomainResult> {
+        return this.deleteDomainWithHttpInfo(domain, confirm, _options, idempotencyKey).pipe(map((apiResponse: HttpInfo<DeleteDomainResult>) => apiResponse.data));
     }
 
     /**

@@ -22,12 +22,13 @@ import { VerifyDomainView } from '../models/VerifyDomainView.js';
 export class DomainsApiRequestFactory extends BaseAPIRequestFactory {
 
     /**
-     * Deprovisions the domain\'s sending identity and breaks sending for every agent on it. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param domain 
      * @param confirm Must be the literal DELETE — this action is irreversible.
+     * @param idempotencyKey Optional idempotency key for safe retries (unique per logical domain deletion; 1-255 printable ASCII characters with no spaces). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
      */
-    public async deleteDomain(domain: string, confirm: 'DELETE', _options?: Configuration): Promise<RequestContext> {
+    public async deleteDomain(domain: string, confirm: 'DELETE', _options?: Configuration, idempotencyKey?: string): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'domain' is not null or undefined
@@ -42,6 +43,7 @@ export class DomainsApiRequestFactory extends BaseAPIRequestFactory {
         }
 
 
+
         // Path Params
         const localVarPath = '/v1/domains/{domain}'
             .replace('{' + 'domain' + '}', encodeURIComponent(String(domain)));
@@ -54,6 +56,9 @@ export class DomainsApiRequestFactory extends BaseAPIRequestFactory {
         if (confirm !== undefined) {
             requestContext.setQueryParam("confirm", ObjectSerializer.serialize(confirm, "'DELETE'", ""));
         }
+
+        // Header Params
+        requestContext.setHeaderParam("Idempotency-Key", ObjectSerializer.serialize(idempotencyKey, "string", ""));
 
 
         let authMethod: SecurityAuthentication | undefined;
@@ -257,12 +262,26 @@ export class DomainsApiResponseProcessor {
             ) as DeleteDomainResult;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
+        if (isCodeInRange("409", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code idempotency_in_flight: a request with this Idempotency-Key is still executing. Retry-able: wait for the first request to finish, then retry with the SAME key and byte-identical body — the retry replays the first request\&#39;s response instead of re-executing the side effect.", body, response.headers);
+        }
+        if (isCodeInRange("422", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Unprocessable — branch on error.code. idempotency_key_reuse: this Idempotency-Key was already used with a DIFFERENT request body (the dedup hash covers the route + the raw body bytes) — do NOT retry as-is; a legitimate retry must resend the byte-identical body, and a genuinely new request needs a fresh key. invalid_request: a semantic validation failure in the request body.", body, response.headers);
+        }
         if (isCodeInRange("0", response.httpStatusCode)) {
             const body: ErrorEnvelope = ObjectSerializer.deserialize(
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
         }
 
         // Work around for missing responses in specification, e.g. for petstore.yaml

@@ -2,6 +2,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -163,8 +164,8 @@ func TestClaimOrCreateDomain_CrossUserReclaimRejected(t *testing.T) {
 
 	// userB cannot read the row either; userA still owns it and the
 	// verification_token is unchanged.
-	if _, err := store.LookupDomain(ctx, "squat.example.com", userB.ID); err == nil {
-		t.Error("userB LookupDomain should not see squat.example.com")
+	if _, err := store.LookupDomain(ctx, "squat.example.com", userB.ID); !errors.Is(err, identity.ErrDomainNotFound) {
+		t.Errorf("userB LookupDomain error = %v, want ErrDomainNotFound", err)
 	}
 	after, err := store.LookupDomain(ctx, "squat.example.com", userA.ID)
 	if err != nil {

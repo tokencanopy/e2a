@@ -11,6 +11,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/dkim"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/filterquery"
@@ -543,6 +545,16 @@ const (
 
 type Store struct {
 	pool *pgxpool.Pool
+	// senderIdentityGate caps provider mutations at one per process. Each
+	// cross-process advisory lock owns one pool connection for the remote
+	// call, so this prevents an SES slowdown from consuming the whole DB pool.
+	// A capacity-1 channel rather than a sync.Mutex so a waiter whose context
+	// is cancelled (an HTTP handler on a deadline, a worker shutting down)
+	// unblocks with ctx.Err() instead of parking forever behind a slow SES
+	// call. Lazily initialized (senderIdentityGateChan) so zero-value Stores
+	// in tests keep working.
+	senderIdentityGateOnce sync.Once
+	senderIdentityGate     chan struct{}
 	// dkimCipher envelope-encrypts DKIM private keys at rest (#144 / M4).
 	// Optional: nil ⇒ keys are stored as plaintext DER (dev/test without a
 	// configured signing secret). cmd/e2a always installs it in production.
@@ -1022,6 +1034,161 @@ func (s *Store) SendingProvisionInputs(ctx context.Context, domain string) (sele
 	return selector, privateKeyDER, true, nil
 }
 
+// senderIdentityExecutorKey pins sender-identity reads/writes to the same
+// connection that owns the session advisory lock. Keeping the lock and the
+// state snapshot on one connection avoids consuming a second pool connection
+// per worker (and the pool-exhaustion deadlock that can otherwise create).
+type senderIdentityExecutorKey struct{}
+
+type senderIdentityExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *Store) senderIdentityExecutor(ctx context.Context) senderIdentityExecutor {
+	if conn, ok := ctx.Value(senderIdentityExecutorKey{}).(*pgxpool.Conn); ok {
+		return conn
+	}
+	return s.pool
+}
+
+func (s *Store) senderIdentityBegin(ctx context.Context) (pgx.Tx, error) {
+	if conn, ok := ctx.Value(senderIdentityExecutorKey{}).(*pgxpool.Conn); ok {
+		return conn.Begin(ctx)
+	}
+	return s.pool.Begin(ctx)
+}
+
+// WithSendingIdentityMutationLock serializes provider mutations for one
+// domain across workers, processes, and blue/green replicas. The callback gets
+// a context that pins the sender-identity store methods below to the lock-owning
+// connection, so a worker needs only one pool connection while it waits on SES.
+func (s *Store) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) (retErr error) {
+	gate := s.senderIdentityGateChan()
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-gate }()
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, "sender-identity:"+normalizeDomain(domain)); err != nil {
+		// Cancellation has an uncertain outcome: PostgreSQL may have acquired
+		// the session lock even though the client never received success. Never
+		// return that connection to the pool. Closing the hijacked session is the
+		// only outcome-safe way to release a possibly-held advisory lock.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		raw := conn.Hijack()
+		_ = raw.Close(closeCtx)
+		return fmt.Errorf("acquire sender identity mutation lock: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, unlockErr := conn.Exec(releaseCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, "sender-identity:"+normalizeDomain(domain)); unlockErr != nil {
+			// Never return a connection carrying a session lock to the pool. Hijack
+			// removes it from the pool; closing the raw connection releases the lock.
+			raw := conn.Hijack()
+			_ = raw.Close(releaseCtx)
+			retErr = errors.Join(retErr, fmt.Errorf("release sender identity mutation lock: %w", unlockErr))
+			return
+		}
+		conn.Release()
+	}()
+
+	lockedCtx := context.WithValue(ctx, senderIdentityExecutorKey{}, conn)
+	return fn(lockedCtx)
+}
+
+// senderIdentityGateChan lazily initializes the process-wide mutation gate so
+// Stores built as zero-value literals (tests) work like NewStore-built ones.
+func (s *Store) senderIdentityGateChan() chan struct{} {
+	s.senderIdentityGateOnce.Do(func() { s.senderIdentityGate = make(chan struct{}, 1) })
+	return s.senderIdentityGate
+}
+
+// LoadSendingIdentityState returns one incarnation-consistent snapshot for the
+// provider synchronizer. A live but unverified domain is returned with
+// verified=false; callers converge that state to no provider identity.
+// appliedIncarnation is the ledger's provider-confirmed incarnation ("" when
+// the ledger has no row or nothing confirmed) — the signal that lets a forced
+// re-check of a healthy domain stay a read-only no-op.
+func (s *Store) LoadSendingIdentityState(ctx context.Context, domain string) (incarnation, owner string, verified bool, status, selector string, privateKeyDER []byte, appliedIncarnation string, ledgerUpdatedAt time.Time, err error) {
+	norm := normalizeDomain(domain)
+	var blob []byte
+	var ledgerAt *time.Time
+	err = s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`SELECT d.verification_token, COALESCE(d.user_id::text, ''), d.verified, d.sending_status,
+		        COALESCE(d.dkim_selector, ''), d.dkim_private_key,
+		        COALESCE(m.applied_incarnation, ''), m.updated_at
+		   FROM domains d
+		   LEFT JOIN sender_identity_managed_domains m ON m.domain = d.domain
+		  WHERE d.domain = $1`,
+		norm,
+	).Scan(&incarnation, &owner, &verified, &status, &selector, &blob, &appliedIncarnation, &ledgerAt)
+	if err != nil {
+		return "", "", false, "", "", nil, "", time.Time{}, err
+	}
+	if ledgerAt != nil {
+		ledgerUpdatedAt = *ledgerAt
+	}
+	if !verified || selector == "" || len(blob) == 0 {
+		return incarnation, owner, verified, status, selector, nil, appliedIncarnation, ledgerUpdatedAt, nil
+	}
+	privateKeyDER, err = s.unsealDKIM(blob, norm)
+	if err != nil {
+		return "", "", false, "", "", nil, "", time.Time{}, fmt.Errorf("dkim key unseal: %w", err)
+	}
+	return incarnation, owner, verified, status, selector, privateKeyDER, appliedIncarnation, ledgerUpdatedAt, nil
+}
+
+// SetSendingStatusForIncarnation refuses to write through a delete/re-register
+// race. pgx.ErrNoRows makes the stale worker retry; its next desired-state sync
+// then converges the provider to the current row (or to absence).
+func (s *Store) SetSendingStatusForIncarnation(ctx context.Context, domain, incarnation, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error {
+	var errPtr *string
+	if errMsg != "" {
+		errPtr = &errMsg
+	}
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE domains
+		    SET sending_status = $3,
+		        sending_error = $4,
+		        sending_dns_records = $5,
+		        sending_dkim_status = $6,
+		        sending_mail_from_status = $7,
+		        sending_last_checked_at = now()
+		  WHERE domain = $1 AND verification_token = $2`,
+		normalizeDomain(domain), incarnation, status, errPtr, recordsJSON, nullIfEmpty(dkimStatus), nullIfEmpty(mailFromStatus),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) TouchSendingCheckedForIncarnation(ctx context.Context, domain, incarnation string) error {
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE domains SET sending_last_checked_at = now() WHERE domain = $1 AND verification_token = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 // SetSendingStatus writes the sending lifecycle state for a domain and stamps
 // sending_last_checked_at. recordsJSON may be nil (cleared). dkimStatus and
 // mailFromStatus are the per-axis SES breakdown (migration 049); an empty
@@ -1092,7 +1259,9 @@ func (s *Store) DomainOwner(ctx context.Context, domain string) (string, error) 
 	return *owner, nil
 }
 
-// DomainExists reports whether a live domain row exists (orphan reaper).
+// DomainExists reports whether any account currently owns the exact DNS name.
+// It deliberately returns only a boolean: the orphan reaper and historical
+// teardown-receipt safety checks need existence without owner disclosure.
 func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
@@ -1100,6 +1269,219 @@ func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 		normalizeDomain(domain),
 	).Scan(&exists)
 	return exists, err
+}
+
+// MarkSendingIdentityManaged records that e2a may have created a provider
+// identity for this domain. Call it before the external create/update so an
+// ambiguous transport failure still leaves a durable cleanup candidate.
+func (s *Store) MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation, updated_at, provider_pending_since)
+		 VALUES ($1, $2, NULL, clock_timestamp(), NULL)
+		 ON CONFLICT (domain) DO UPDATE
+		 SET incarnation = EXCLUDED.incarnation,
+		     applied_incarnation = NULL,
+		     updated_at = clock_timestamp(),
+		     provider_pending_since = NULL`,
+		normalizeDomain(domain), incarnation,
+	)
+	return err
+}
+
+// MarkSendingIdentityApplied records the incarnation whose selector/key was
+// confirmed installed at the provider. Keeping this separate from the
+// pre-mutation ownership mark lets the reaper repair ambiguous/exhausted
+// creates without re-provisioning healthy identities every hour.
+func (s *Store) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
+	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET applied_incarnation = $2,
+		        updated_at = clock_timestamp(),
+		        provider_pending_since = NULL
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// SendingIdentityLedgerExpired evaluates the pending-verification backstop on
+// the database clock. Comparing this persisted timestamp with the application
+// host clock would make clock skew alter the state machine.
+func (s *Store) SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	var expired bool
+	err := s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`SELECT updated_at <= clock_timestamp() - make_interval(secs => $3)
+		   FROM sender_identity_managed_domains
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation, olderThan.Seconds(),
+	).Scan(&expired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return expired, err
+}
+
+// ObserveSendingIdentityProviderPending records the first time a DB-verified
+// identity is seen provider-pending and returns whether that persisted grace
+// period has elapsed. Repeated observations never reset the timestamp.
+func (s *Store) ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	var expired bool
+	err := s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET provider_pending_since = COALESCE(provider_pending_since, clock_timestamp())
+		  WHERE domain = $1 AND incarnation = $2
+		  RETURNING provider_pending_since <= clock_timestamp() - make_interval(secs => $3)`,
+		normalizeDomain(domain), incarnation, olderThan.Seconds(),
+	).Scan(&expired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return expired, err
+}
+
+func (s *Store) ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET provider_pending_since = NULL
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	return err
+}
+
+// ForgetSendingIdentityManaged removes a cleanup candidate only after the
+// provider has confirmed deletion (NotFound is confirmed by the provider as
+// success). A DB failure leaves the ledger row for a later retry.
+func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`DELETE FROM sender_identity_managed_domains WHERE domain = $1`,
+		normalizeDomain(domain),
+	)
+	return err
+}
+
+// FinalizeSendingIdentityTombstone removes the ledger row only when its last
+// mutation (updated_at — bumped by provision marks, the migration trigger, and
+// TouchSendingIdentityTombstoneTx on delete) is older than olderThan. This is
+// what stops an audit or sweep running inside a LATER mutation's drain window
+// from finalizing that mutation's tombstone; a younger row survives as a no-op
+// and a later audit or the hourly reaper finalizes it once the window has
+// elapsed.
+func (s *Store) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`DELETE FROM sender_identity_managed_domains
+		  WHERE domain = $1 AND updated_at <= now() - ($2 * interval '1 second')`,
+		normalizeDomain(domain), olderThan.Seconds(),
+	)
+	return err
+}
+
+// TouchSendingIdentityTombstoneTx stamps the ledger row's updated_at inside a
+// domain-delete transaction, marking the delete as the tombstone's latest
+// mutation. Without it, a long-lived domain's ledger row is old at delete
+// time and the very first audit/sweep could finalize the tombstone while the
+// legacy slot is still draining. A domain with no ledger row (sender identity
+// never provisioned) is a no-op.
+func (s *Store) TouchSendingIdentityTombstoneTx(ctx context.Context, tx pgx.Tx, domain string) error {
+	// clock_timestamp(), not now(): now() is transaction-START time, and the
+	// delete tx can wait on the domain-claim advisory locks — a long wait
+	// would commit an already-aged stamp and erode the drain-window guard.
+	_, err := tx.Exec(ctx,
+		`UPDATE sender_identity_managed_domains SET updated_at = clock_timestamp() WHERE domain = $1`,
+		normalizeDomain(domain),
+	)
+	return err
+}
+
+// ListManagedSendingIdentityDomains returns only identities e2a has claimed
+// ownership of. It deliberately does not scan/delete arbitrary SES account
+// identities, which may belong to other applications.
+func (s *Store) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT domain, applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains ORDER BY domain`,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var domains []string
+	needsProvision := make(map[string]bool)
+	for rows.Next() {
+		var domain string
+		var needs bool
+		if err := rows.Scan(&domain, &needs); err != nil {
+			return nil, nil, err
+		}
+		domains = append(domains, domain)
+		needsProvision[domain] = needs
+	}
+	return domains, needsProvision, rows.Err()
+}
+
+// ListManagedSendingIdentityDomainsPage keyset-pages the durable ledger so a
+// single v2 reaper job cannot monopolize the sender-identity queue as the
+// account grows. hasMore is derived with a limit+1 read; only limit rows are
+// returned.
+func (s *Store) ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT domain, applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains
+		  WHERE domain > $1
+		  ORDER BY domain
+		  LIMIT $2`,
+		normalizeDomain(afterDomain), limit+1,
+	)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer rows.Close()
+	domains := make([]string, 0, limit+1)
+	needsProvision := make(map[string]bool, limit+1)
+	for rows.Next() {
+		var domain string
+		var needs bool
+		if err := rows.Scan(&domain, &needs); err != nil {
+			return nil, nil, false, err
+		}
+		domains = append(domains, domain)
+		needsProvision[domain] = needs
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, false, err
+	}
+	hasMore := len(domains) > limit
+	if hasMore {
+		delete(needsProvision, domains[limit])
+		domains = domains[:limit]
+	}
+	return domains, needsProvision, hasMore, nil
+}
+
+// LookupManagedSendingIdentityDomain checks exact ledger membership for one
+// provider identity during the bounded orphan-audit phase.
+func (s *Store) LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (needsProvision, found bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains WHERE domain = $1`,
+		normalizeDomain(domain),
+	).Scan(&needsProvision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return needsProvision, true, nil
 }
 
 // LookupDomain returns a domain if it exists and is owned by the given user.
@@ -1116,8 +1498,11 @@ func (s *Store) LookupDomain(ctx context.Context, domain, userID string) (*Domai
 		 FROM domains WHERE domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
 	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrDomainNotFound
+	}
 	if err != nil {
-		return nil, fmt.Errorf("domain not found")
+		return nil, err
 	}
 	return d, nil
 }
@@ -1267,6 +1652,13 @@ func namesMoreSpecificThan(sub, match string) []string {
 
 // VerifyDomain marks a domain as verified, only if owned by the given user.
 func (s *Store) VerifyDomain(ctx context.Context, domain, userID string) error {
+	return s.VerifyDomainTx(ctx, domain, userID, nil)
+}
+
+// VerifyDomainTx marks a domain verified and runs inTx before commit. Sender
+// identity provisioning uses this hook to make its River job an atomic outbox:
+// a verified row can never commit without the corresponding durable job.
+func (s *Store) VerifyDomainTx(ctx context.Context, domain, userID string, inTx func(context.Context, pgx.Tx) error) error {
 	domain = normalizeDomain(domain)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -1299,6 +1691,11 @@ func (s *Store) VerifyDomain(ctx context.Context, domain, userID string) error {
 		domain, userID,
 	); err != nil {
 		return err
+	}
+	if inTx != nil {
+		if err := inTx(ctx, tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -1418,7 +1815,7 @@ var ErrReservedDomain = fmt.Errorf("domain is reserved for managed infrastructur
 // DeleteDomain deletes a domain only if owned by the user.
 // The handler should check for existing agents first.
 func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
-	return s.DeleteDomainTx(ctx, domain, userID, nil)
+	return s.DeleteDomainTx(ctx, domain, userID, nil, nil)
 }
 
 // DeleteDomainTx deletes a domain and, before committing, runs inTx within
@@ -1428,33 +1825,197 @@ func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
 // unreachable at delete time. A nil hook is a plain delete (dev / no SES).
 //
 // inTx runs only after the DELETE affected a row (the domain existed and was
-// owned by userID); it never runs for a not-found / FK-blocked delete.
-func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+// owned by userID). onMissing, when non-nil, runs under the same domain locks
+// when no live row exists; domain DELETE uses it to atomically bind a new
+// idempotency key to an existing historical receipt. With no onMissing hook,
+// a missing/cross-owner domain returns ErrDomainNotFound.
+func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx, incarnation string) error, onMissing func(ctx context.Context, tx pgx.Tx) error) error {
+	domain = normalizeDomain(domain)
+	tx, err := s.senderIdentityBegin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx,
-		`DELETE FROM domains WHERE domain = $1 AND user_id = $2`,
-		normalizeDomain(domain), userID,
-	)
+	// Serialize deletion with same-name and hierarchical registration. Without
+	// these transaction locks, a same-owner ClaimOrCreateDomain can observe the
+	// old row while this DELETE is uncommitted, return it as an idempotent
+	// success, and then lose it when this transaction commits after provider
+	// teardown. Use the exact sorted namespace shared by the claim path.
+	for _, name := range domainClaimLockNames(domain) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, name); err != nil {
+			return err
+		}
+	}
+
+	var incarnation string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM domains WHERE domain = $1 AND user_id = $2 RETURNING verification_token`,
+		domain, userID,
+	).Scan(&incarnation)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// DELETE ... WHERE user_id cannot distinguish a globally absent row
+			// from a same-name registration owned by another account. Historical
+			// receipt polling is valid only for global absence; a live replacement
+			// must remain an ordinary ownership-scoped 404. The advisory locks above
+			// keep this check stable through the transaction.
+			var live bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM domains WHERE domain = $1)`, domain,
+			).Scan(&live); err != nil {
+				return err
+			}
+			if live {
+				return ErrDomainNotFound
+			}
+			if onMissing == nil {
+				return ErrDomainNotFound
+			}
+			if err := onMissing(ctx, tx); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		if strings.Contains(err.Error(), "violates foreign key") {
 			return ErrDomainHasAgents
 		}
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrDomainNotFound
-	}
 	if inTx != nil {
-		if err := inTx(ctx, tx); err != nil {
+		if err := inTx(ctx, tx, incarnation); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// BeginDomainTeardownReceiptTx persists the retry-visible outcome before the
+// domain-delete transaction commits. A configured provider always starts
+// pending until it confirms absence. With no provider configured, a domain
+// that was never in the managed ledger is immediately confirmed; a ledgered
+// identity stays pending until the provider is enabled and the reaper can
+// prove absence.
+func (s *Store) BeginDomainTeardownReceiptTx(ctx context.Context, tx pgx.Tx, domain, incarnation, userID string, providerConfigured bool) (domainteardown.Receipt, error) {
+	domain = normalizeDomain(domain)
+	state := domainteardown.Confirmed
+	if providerConfigured {
+		state = domainteardown.Pending
+	} else {
+		var managed bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sender_identity_managed_domains WHERE domain = $1)`,
+			domain,
+		).Scan(&managed); err != nil {
+			return domainteardown.Receipt{}, err
+		}
+		if managed {
+			state = domainteardown.Pending
+		}
+	}
+	// The provider identity is domain-global, not registration-scoped. Starting
+	// teardown for a replacement registration therefore invalidates a prior
+	// incarnation's confirmed DNS-release signal until this newest teardown
+	// converges. Keep every historical keyed receipt fail-closed; the reaper's
+	// SetDomainTeardownState advances them together after proving absence.
+	if _, err := tx.Exec(ctx,
+		`UPDATE domain_teardown_receipts
+		 SET state = $2, updated_at = now()
+		 WHERE domain = $1 AND state IS DISTINCT FROM $2`,
+		domain, state,
+	); err != nil {
+		return domainteardown.Receipt{}, err
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO domain_teardown_receipts (domain, incarnation, user_id, state, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, now(), now())
+		 ON CONFLICT (domain, incarnation) DO UPDATE
+		 SET user_id = EXCLUDED.user_id,
+		     state = EXCLUDED.state,
+		     created_at = now(),
+		     updated_at = now()`,
+		domain, incarnation, userID, state,
+	)
+	return domainteardown.Receipt{Incarnation: incarnation, State: state}, err
+}
+
+// LookupDomainTeardownReceipt returns only the requesting owner's receipt.
+// pgx.ErrNoRows deliberately preserves DELETE's anti-enumeration behavior for
+// absent domains and receipts owned by another account.
+func (s *Store) LookupDomainTeardownReceipt(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+	receipt, err := s.LookupDomainTeardownReceiptRecord(ctx, domain, userID)
+	return receipt.State, err
+}
+
+// LookupDomainTeardownReceiptRecord returns the newest deletion receipt for
+// an absent domain, including the incarnation needed to bind a later keyed
+// poll to this deletion rather than a future same-name deletion.
+func (s *Store) LookupDomainTeardownReceiptRecord(ctx context.Context, domain, userID string) (domainteardown.Receipt, error) {
+	return lookupDomainTeardownReceiptRecord(ctx, s.pool, domain, userID)
+}
+
+// LookupDomainTeardownReceiptRecordTx is the transaction-bound form used when
+// binding an idempotency key to an already-deleted incarnation. The caller
+// holds the same advisory locks as registration/deletion, so a replacement
+// cannot appear between receipt selection and key completion.
+func (s *Store) LookupDomainTeardownReceiptRecordTx(ctx context.Context, tx pgx.Tx, domain, userID string) (domainteardown.Receipt, error) {
+	return lookupDomainTeardownReceiptRecord(ctx, tx, domain, userID)
+}
+
+func lookupDomainTeardownReceiptRecord(ctx context.Context, q senderIdentityExecutor, domain, userID string) (domainteardown.Receipt, error) {
+	var receipt domainteardown.Receipt
+	err := q.QueryRow(ctx,
+		`SELECT incarnation, state FROM domain_teardown_receipts
+		 WHERE domain = $1 AND user_id = $2
+		 ORDER BY receipt_id DESC LIMIT 1`,
+		normalizeDomain(domain), userID,
+	).Scan(&receipt.Incarnation, &receipt.State)
+	return receipt, err
+}
+
+// LookupDomainTeardownReceiptForIncarnation follows one historical deletion.
+// It is the safe polling path for a keyed retry after the DNS name has been
+// registered again: the lookup cannot drift onto the replacement receipt.
+func (s *Store) LookupDomainTeardownReceiptForIncarnation(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, error) {
+	var state domainteardown.State
+	err := s.pool.QueryRow(ctx,
+		`SELECT state FROM domain_teardown_receipts
+		 WHERE domain = $1 AND incarnation = $2 AND user_id = $3`,
+		normalizeDomain(domain), incarnation, userID,
+	).Scan(&state)
+	return state, err
+}
+
+// LookupDomainTeardownSnapshot returns an exact historical receipt together
+// with whether the DNS name is currently registered, from one PostgreSQL
+// statement snapshot. Keeping these reads together is load-bearing: a newer
+// deletion resets old receipts to pending while removing the replacement row,
+// and two separate statements could otherwise observe confirmed before that
+// commit and absent after it.
+func (s *Store) LookupDomainTeardownSnapshot(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, bool, error) {
+	var (
+		state domainteardown.State
+		live  bool
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT r.state,
+		        EXISTS (SELECT 1 FROM domains d WHERE d.domain = $1)
+		 FROM domain_teardown_receipts r
+		 WHERE r.domain = $1 AND r.incarnation = $2 AND r.user_id = $3`,
+		normalizeDomain(domain), incarnation, userID,
+	).Scan(&state, &live)
+	return state, live, err
+}
+
+// SetDomainTeardownState advances a receipt after provider convergence. It is
+// intentionally a no-op when no domain-delete receipt exists (for example an
+// account delete, whose user and receipts cascade together).
+func (s *Store) SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE domain_teardown_receipts SET state = $2, updated_at = now() WHERE domain = $1`,
+		normalizeDomain(domain), state,
+	)
+	return err
 }
 
 // --- Agent CRUD ---

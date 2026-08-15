@@ -2,6 +2,7 @@ package idempotency_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestClaim_SameKeySameBodyAfterComplete_Replays(t *testing.T) {
 		ContentType: "application/json",
 		Body:        []byte(`{"status":"sent","message_id":"msg_abc"}`),
 	}
-	if err := store.Complete(ctx, userID, "key-replay", cached); err != nil {
+	if err := store.Complete(ctx, userID, "key-replay", first.Token, cached); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -87,7 +88,7 @@ func TestClaim_SameKeyDifferentBody_Mismatches(t *testing.T) {
 	if first.Outcome != idempotency.OutcomeAcquired {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
-	_ = store.Complete(ctx, userID, "key-mismatch", idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
+	_ = store.Complete(ctx, userID, "key-mismatch", first.Token, idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
 
 	second, err := store.Claim(ctx, userID, "key-mismatch", "/api/v1/send", hash2)
 	if err != nil {
@@ -119,12 +120,13 @@ func TestClaim_InFlightDuringActiveClaim(t *testing.T) {
 	}
 }
 
-func TestClaim_StaleInProgressIsTakenOver(t *testing.T) {
+func TestClaim_StaleInProgressTakeoverIsHashBoundAndFenced(t *testing.T) {
 	store, userID, pool := newStoreAndUser(t)
 	ctx := context.Background()
+	originalHash := idempotency.HashBody([]byte(`{"original":1}`))
 
 	// Acquire a claim, then age it past the stale window by direct UPDATE.
-	first, _ := store.Claim(ctx, userID, "key-stale", "/api/v1/send", idempotency.HashBody([]byte(`{"original":1}`)))
+	first, _ := store.Claim(ctx, userID, "key-stale", "/api/v1/send", originalHash)
 	if first.Outcome != idempotency.OutcomeAcquired {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
@@ -135,13 +137,36 @@ func TestClaim_StaleInProgressIsTakenOver(t *testing.T) {
 		t.Fatalf("age row: %v", err)
 	}
 
-	// Second caller, possibly with a different body, takes over.
-	second, err := store.Claim(ctx, userID, "key-stale", "/api/v1/send", idempotency.HashBody([]byte(`{"replacement":1}`)))
+	// A different logical request never takes over, even after the old owner is
+	// stale. Otherwise two destructive requests could execute under one key.
+	mismatch, err := store.Claim(ctx, userID, "key-stale", "/api/v1/send", idempotency.HashBody([]byte(`{"replacement":1}`)))
 	if err != nil {
-		t.Fatalf("second Claim: %v", err)
+		t.Fatalf("mismatched Claim: %v", err)
 	}
-	if second.Outcome != idempotency.OutcomeAcquired {
-		t.Errorf("Outcome = %d, want OutcomeAcquired (stale takeover)", second.Outcome)
+	if mismatch.Outcome != idempotency.OutcomeMismatch {
+		t.Fatalf("mismatched Outcome = %d, want OutcomeMismatch", mismatch.Outcome)
+	}
+
+	// The byte-identical logical request may take over and gets a fresh fencing
+	// token. Delayed work from the first owner can neither Complete nor Release
+	// the replacement generation.
+	second, err := store.Claim(ctx, userID, "key-stale", "/api/v1/send", originalHash)
+	if err != nil || second.Outcome != idempotency.OutcomeAcquired {
+		t.Fatalf("same-request stale takeover = (%d, %v), want acquired", second.Outcome, err)
+	}
+	response := idempotency.CachedResponse{StatusCode: 200, Body: []byte("new-owner")}
+	if err := store.Complete(ctx, userID, "key-stale", first.Token, response); !errors.Is(err, idempotency.ErrClaimLost) {
+		t.Fatalf("stale owner Complete = %v, want ErrClaimLost", err)
+	}
+	if err := store.Release(ctx, userID, "key-stale", first.Token); !errors.Is(err, idempotency.ErrClaimLost) {
+		t.Fatalf("stale owner Release = %v, want ErrClaimLost", err)
+	}
+	if err := store.Complete(ctx, userID, "key-stale", second.Token, response); err != nil {
+		t.Fatalf("current owner Complete: %v", err)
+	}
+	replay, err := store.Claim(ctx, userID, "key-stale", "/api/v1/send", originalHash)
+	if err != nil || replay.Outcome != idempotency.OutcomeReplay || string(replay.Cached.Body) != "new-owner" {
+		t.Fatalf("replay after fenced takeover = (%+v, %v)", replay, err)
 	}
 }
 
@@ -176,7 +201,7 @@ func TestRelease_AllowsFreshClaim(t *testing.T) {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
 
-	if err := store.Release(ctx, userID, "key-release"); err != nil {
+	if err := store.Release(ctx, userID, "key-release", first.Token); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 
@@ -199,11 +224,12 @@ func TestRelease_DoesNotDeleteCompletedRow(t *testing.T) {
 	if first.Outcome != idempotency.OutcomeAcquired {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
-	_ = store.Complete(ctx, userID, "key-rel-completed", idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
+	_ = store.Complete(ctx, userID, "key-rel-completed", first.Token, idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
 
-	// A buggy caller invokes Release post-Complete; must be a no-op.
-	if err := store.Release(ctx, userID, "key-rel-completed"); err != nil {
-		t.Fatalf("Release: %v", err)
+	// A buggy caller invokes Release post-Complete; it loses the fence and must
+	// leave the durable response untouched.
+	if err := store.Release(ctx, userID, "key-rel-completed", first.Token); !errors.Is(err, idempotency.ErrClaimLost) {
+		t.Fatalf("Release after completion = %v, want ErrClaimLost", err)
 	}
 
 	// Replay must still work.
@@ -213,7 +239,7 @@ func TestRelease_DoesNotDeleteCompletedRow(t *testing.T) {
 	}
 }
 
-func TestComplete_DoubleCallIsNoop(t *testing.T) {
+func TestComplete_DoubleCallIsFenced(t *testing.T) {
 	store, userID, _ := newStoreAndUser(t)
 	ctx := context.Background()
 
@@ -223,11 +249,13 @@ func TestComplete_DoubleCallIsNoop(t *testing.T) {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
 	originalCached := idempotency.CachedResponse{StatusCode: 200, ContentType: "application/json", Body: []byte(`{"status":"sent"}`)}
-	_ = store.Complete(ctx, userID, "key-dbl", originalCached)
+	_ = store.Complete(ctx, userID, "key-dbl", first.Token, originalCached)
 
 	// A buggy caller re-Completes with a different body. Must not
 	// overwrite the cached response.
-	_ = store.Complete(ctx, userID, "key-dbl", idempotency.CachedResponse{StatusCode: 500, Body: []byte("oops")})
+	if err := store.Complete(ctx, userID, "key-dbl", first.Token, idempotency.CachedResponse{StatusCode: 500, Body: []byte("oops")}); !errors.Is(err, idempotency.ErrClaimLost) {
+		t.Fatalf("second Complete = %v, want ErrClaimLost", err)
+	}
 
 	replay, _ := store.Claim(ctx, userID, "key-dbl", "/api/v1/send", hash)
 	if replay.Outcome != idempotency.OutcomeReplay {
@@ -247,7 +275,7 @@ func TestSweep_DeletesCompletedRowsPastTTL(t *testing.T) {
 	if first.Outcome != idempotency.OutcomeAcquired {
 		t.Fatalf("first Outcome = %d", first.Outcome)
 	}
-	_ = store.Complete(ctx, userID, "key-sweep", idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
+	_ = store.Complete(ctx, userID, "key-sweep", first.Token, idempotency.CachedResponse{StatusCode: 200, Body: []byte("ok")})
 
 	// Age the row past TTL.
 	if _, err := pool.Exec(ctx, `UPDATE idempotency_keys SET created_at = now() - $2::interval WHERE user_id = $1 AND key = 'key-sweep'`,
@@ -299,11 +327,11 @@ func TestClaim_ConcurrentSameKeyOnlyOneAcquires(t *testing.T) {
 	const N = 25
 
 	var (
-		wg          sync.WaitGroup
-		mu          sync.Mutex
-		acquired    int
-		inflight    int
-		other       int
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		acquired int
+		inflight int
+		other    int
 	)
 	wg.Add(N)
 	for i := 0; i < N; i++ {

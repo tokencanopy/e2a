@@ -12,7 +12,9 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
@@ -74,6 +76,12 @@ type ConversationGetter func(ctx context.Context, agentID, conversationID string
 // retained for signature compatibility with the store but are ignored — the
 // legacy columns were dropped (migration 029). Handlers pass "".
 type AgentCreator func(ctx context.Context, email, domain, name, webhookURL, agentMode, userID string) (*identity.AgentIdentity, error)
+
+// DomainDeleteIdemCompleter commits the keyed operation record in the same
+// transaction as the domain deletion and its incarnation-bound teardown
+// receipt. A post-commit process crash therefore cannot leave the key stale
+// and available to delete a same-name replacement.
+type DomainDeleteIdemCompleter func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error
 
 // DomainLookup mirrors store.LookupDomain(domain, userID) — the create-time
 // ownership guard.
@@ -203,8 +211,12 @@ type Deps struct {
 	SendingRampSnapshot func(ctx context.Context, userID, domain string, now time.Time) (sendramp.Snapshot, error)
 	ClaimDomain         func(ctx context.Context, domain, userID string) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
-	DeleteDomain        func(ctx context.Context, domain, userID string) error
-	CountAgentsOnDomain func(ctx context.Context, domain, userID string) (live, trashed int, err error)
+	// DeleteDomain atomically either deletes the live incarnation or resolves
+	// the newest historical receipt when the row is already gone. The exact-
+	// incarnation lookup lets a completed key observe later state transitions.
+	DeleteDomain                 func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error)
+	LookupDomainTeardownSnapshot func(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, bool, error)
+	CountAgentsOnDomain          func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a
 	// domain must publish (config smtp.domain).
@@ -417,9 +429,9 @@ type Deps struct {
 	TouchDomainChecked func(ctx context.Context, domain, userID string) error
 	VerifyDomain       func(ctx context.Context, domain, userID string) error
 	// EnqueueSenderProvision (decision 4 / Slice 4) schedules SES sending-
-	// identity provisioning for a verified domain. Called on every successful
-	// verify check (newly OR already verified), so POST /domains/{domain}/verify
-	// doubles as the forced sending re-check. Optional — nil when SES is not
+	// identity provisioning for an already-verified domain, so POST
+	// /domains/{domain}/verify doubles as the forced sending re-check. The newly
+	// verified transition is atomically wired in apiserver.VerifyDomain. Optional — nil when SES is not
 	// configured (dev/self-host), leaving sending_status at none (relay From).
 	EnqueueSenderProvision func(ctx context.Context, domain string)
 	// VerifyProbe runs the live DNS check for a domain's published records.

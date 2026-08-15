@@ -381,7 +381,7 @@ func (s *Server) handleCreateContact(ctx context.Context, in *createContactInput
 	// a spurious 409 for a request the caller believes never landed.
 	_, view, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/contacts", in.RawBody,
-		func() (int, ContactView, error) {
+		func(_ idemClaimToken) (int, ContactView, error) {
 			c, cerr := s.deps.CreateContact(ctx, user.ID, address, in.Body.DisplayName,
 				in.Body.Metadata, identity.ContactSourceManual, "")
 			if errors.Is(cerr, identity.ErrContactExists) {

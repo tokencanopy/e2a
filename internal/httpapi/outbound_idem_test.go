@@ -27,13 +27,15 @@ func (f *pathRecordingIdem) Claim(ctx context.Context, userID, key, path, bodyHa
 	f.paths = append(f.paths, path)
 	return idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}, nil
 }
-func (f *pathRecordingIdem) Complete(ctx context.Context, userID, key string, resp idempotency.CachedResponse) error {
+func (f *pathRecordingIdem) Complete(ctx context.Context, userID, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	return nil
 }
-func (f *pathRecordingIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, resp idempotency.CachedResponse) error {
+func (f *pathRecordingIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	return nil
 }
-func (f *pathRecordingIdem) Release(ctx context.Context, userID, key string) error { return nil }
+func (f *pathRecordingIdem) Release(ctx context.Context, userID, key string, _ idempotency.ClaimToken) error {
+	return nil
+}
 
 // TestSendIdempotencyRouteIncludesAgent is the regression for the cross-agent
 // replay hole introduced by moving the sender from the body (`from`) to the
@@ -124,7 +126,7 @@ func (m *memIdem) Claim(ctx context.Context, userID, key, path, bodyHash string)
 	return idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}, nil
 }
 
-func (m *memIdem) Complete(ctx context.Context, userID, key string, resp idempotency.CachedResponse) error {
+func (m *memIdem) Complete(ctx context.Context, userID, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if row, ok := m.rows[userID+"\x00"+key]; ok && !row.done {
@@ -136,11 +138,11 @@ func (m *memIdem) Complete(ctx context.Context, userID, key string, resp idempot
 // CompleteTx mirrors Complete for the in-memory fake (tx is irrelevant here).
 // Like the real store, completion is in_progress→completed only: a later
 // post-hoc Complete cannot overwrite the response committed in the business tx.
-func (m *memIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, resp idempotency.CachedResponse) error {
-	return m.Complete(ctx, userID, key, resp)
+func (m *memIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error {
+	return m.Complete(ctx, userID, key, token, resp)
 }
 
-func (m *memIdem) Release(ctx context.Context, userID, key string) error {
+func (m *memIdem) Release(ctx context.Context, userID, key string, _ idempotency.ClaimToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.rows, userID+"\x00"+key)

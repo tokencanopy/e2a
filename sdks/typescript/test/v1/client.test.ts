@@ -215,6 +215,22 @@ describe("E2AClient", () => {
     expect(new URL(lastCall().url).searchParams.get("permanent")).toBeNull();
   });
 
+  it("domains.delete forwards a stable caller idempotency key", async () => {
+    globalThis.fetch = mockFetch(200, {
+      deleted: true,
+      domain: "mail.example.test",
+      sending_teardown: "confirmed",
+    });
+    const result = await client.domains.delete("mail.example.test", {
+      idempotencyKey: "delete-domain-incarnation-1",
+    });
+    const { url, init, headers } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("/v1/domains/mail.example.test");
+    expect(headers["Idempotency-Key"]).toBe("delete-domain-incarnation-1");
+    expect(result.sendingTeardown).toBe("confirmed");
+  });
+
   it("agents.list returns an AutoPager over the agents array", async () => {
     globalThis.fetch = mockFetch(200, { items: [{ id: "ag_1", email: "bot@test.dev" }], next_cursor: null });
     const items = await client.agents.list().toArray({ limit: 10 });

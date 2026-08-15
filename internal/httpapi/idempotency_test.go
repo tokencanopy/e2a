@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -22,15 +23,15 @@ type fakeIdem struct {
 func (f *fakeIdem) Claim(ctx context.Context, userID, key, path, bodyHash string) (idempotency.ClaimResult, error) {
 	return f.claim, f.claimErr
 }
-func (f *fakeIdem) Complete(ctx context.Context, userID, key string, resp idempotency.CachedResponse) error {
+func (f *fakeIdem) Complete(ctx context.Context, userID, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	f.completed = &resp
 	return nil
 }
-func (f *fakeIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, resp idempotency.CachedResponse) error {
+func (f *fakeIdem) CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	f.completed = &resp
 	return nil
 }
-func (f *fakeIdem) Release(ctx context.Context, userID, key string) error {
+func (f *fakeIdem) Release(ctx context.Context, userID, key string, _ idempotency.ClaimToken) error {
 	f.released = true
 	return nil
 }
@@ -47,7 +48,7 @@ func serverWithIdem(f IdemStore) *Server {
 func TestIdempotentNoKeyRunsFn(t *testing.T) {
 	s := serverWithIdem(&fakeIdem{})
 	called := false
-	status, body, err := runIdempotent(s, context.Background(), "u", "", "/v1/x", nil, func() (int, sendBody, error) {
+	status, body, err := runIdempotent(s, context.Background(), "u", "", "/v1/x", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		called = true
 		return 201, sendBody{Status: "sent", MessageID: "m1"}, nil
 	})
@@ -56,10 +57,22 @@ func TestIdempotentNoKeyRunsFn(t *testing.T) {
 	}
 }
 
+func TestIdempotentExistingEndpointsDoNotGainGlobalKeyLimit(t *testing.T) {
+	// Existing GA endpoints historically accepted longer keys. Domain DELETE
+	// enforces its new 255-byte contract locally rather than silently tightening
+	// every endpoint that shares this helper.
+	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
+	_, _, err := runIdempotent(serverWithIdem(f), context.Background(), "u", strings.Repeat("k", idempotency.MaxKeyLength+1), "/v1/x", nil,
+		func(_ idemClaimToken) (int, sendBody, error) { return 200, sendBody{Status: "ok"}, nil })
+	if err != nil {
+		t.Fatalf("shared helper rejected existing long key: %v", err)
+	}
+}
+
 func TestIdempotentAcquiredCaches(t *testing.T) {
 	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
 	s := serverWithIdem(f)
-	status, body, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":1}`), func() (int, sendBody, error) {
+	status, body, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":1}`), func(_ idemClaimToken) (int, sendBody, error) {
 		return 201, sendBody{Status: "sent", MessageID: "m1"}, nil
 	})
 	if err != nil || status != 201 || body.MessageID != "m1" {
@@ -86,7 +99,7 @@ func TestIdempotentReplayReturnsCached(t *testing.T) {
 	}}
 	s := serverWithIdem(f)
 	called := false
-	status, body, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":1}`), func() (int, sendBody, error) {
+	status, body, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":1}`), func(_ idemClaimToken) (int, sendBody, error) {
 		called = true
 		return 500, sendBody{}, errors.New("should not run")
 	})
@@ -101,7 +114,7 @@ func TestIdempotentReplayReturnsCached(t *testing.T) {
 func TestIdempotentMismatch422(t *testing.T) {
 	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeMismatch}}
 	s := serverWithIdem(f)
-	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":2}`), func() (int, sendBody, error) {
+	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", []byte(`{"a":2}`), func(_ idemClaimToken) (int, sendBody, error) {
 		return 201, sendBody{}, nil
 	})
 	env, ok := err.(*ErrorEnvelope)
@@ -113,7 +126,7 @@ func TestIdempotentMismatch422(t *testing.T) {
 func TestIdempotentInFlight409(t *testing.T) {
 	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeInFlight}}
 	s := serverWithIdem(f)
-	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func() (int, sendBody, error) {
+	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		return 201, sendBody{}, nil
 	})
 	env, ok := err.(*ErrorEnvelope)
@@ -132,7 +145,7 @@ type unmarshalable struct {
 func TestIdempotentMarshalFailureStillCompletes(t *testing.T) {
 	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
 	s := serverWithIdem(f)
-	status, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func() (int, unmarshalable, error) {
+	status, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func(_ idemClaimToken) (int, unmarshalable, error) {
 		return 200, unmarshalable{Ch: make(chan int)}, nil // side effect "committed"
 	})
 	if err != nil || status != 200 {
@@ -153,7 +166,7 @@ func TestIdempotentFnErrorReleases(t *testing.T) {
 	f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
 	s := serverWithIdem(f)
 	sentinel := NewError(400, "bad", "nope")
-	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func() (int, sendBody, error) {
+	_, _, err := runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		return 0, sendBody{}, sentinel
 	})
 	if err != sentinel {
@@ -189,13 +202,13 @@ func TestIdempotentNamespaceSeparation(t *testing.T) {
 
 	fUser := &keyRecordingIdem{fakeIdem: fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}}
 	sUser := serverWithIdem(fUser)
-	_, _, _ = runIdempotent(sUser, context.Background(), "u", raw, "/v1/send", nil, func() (int, sendBody, error) {
+	_, _, _ = runIdempotent(sUser, context.Background(), "u", raw, "/v1/send", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		return 200, sendBody{}, nil
 	})
 
 	fAuto := &keyRecordingIdem{fakeIdem: fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}}
 	sAuto := serverWithIdem(fAuto)
-	_, _, _ = runIdempotentAuto(sAuto, context.Background(), "u", raw, "/v1/events/redeliver", nil, func() (int, sendBody, error) {
+	_, _, _ = runIdempotentAuto(sAuto, context.Background(), "u", raw, "/v1/events/redeliver", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		return 200, sendBody{}, nil
 	})
 
@@ -227,7 +240,7 @@ func TestIdempotentPanicReleases(t *testing.T) {
 			t.Fatal("panic must not Complete (cache) the key")
 		}
 	}()
-	_, _, _ = runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func() (int, sendBody, error) {
+	_, _, _ = runIdempotent(s, context.Background(), "u", "k1", "/v1/x", nil, func(_ idemClaimToken) (int, sendBody, error) {
 		panic("boom")
 	})
 }

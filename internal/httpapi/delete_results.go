@@ -33,10 +33,25 @@ type DeleteAgentResult struct {
 	MessagesDeleted int64  `json:"messages_deleted" doc:"Number of messages permanently removed by the cascade; zero when the agent is moved to trash."`
 } // @name DeleteAgentResult
 
+// Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
+// means e2a-managed teardown is complete: provider absence was confirmed, or
+// no provider is configured and the durable ledger proves e2a never managed
+// an identity for the domain. "manual_review" means a provider identity exists
+// but its ownership tag is absent, so e2a cannot safely mutate it or claim
+// absence.
+const (
+	SendingTeardownConfirmed    = "confirmed"
+	SendingTeardownPending      = "pending"
+	SendingTeardownManualReview = "manual_review"
+)
+
 // DeleteDomainResult confirms a domain delete.
 type DeleteDomainResult struct {
 	Deleted bool   `json:"deleted" doc:"Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false."`
 	Domain  string `json:"domain" doc:"The deleted domain."`
+	// omitempty keeps the field OPTIONAL in the schema: generated clients must
+	// accept responses from older servers that predate it.
+	SendingTeardown string `json:"sending_teardown,omitempty" doc:"Durable state of e2a-managed sending-identity teardown (open set — treat missing or unknown values as not confirmed). 'confirmed' means provider absence was proved, or no provider is configured and e2a's ledger proves it never managed an identity for this domain. 'pending' means durable asynchronous teardown is retrying, including when the provider is temporarily disabled but the ledger records a managed identity. 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. A retry with the original Idempotency-Key follows this logical deletion's incarnation-bound receipt as it advances and cannot delete a later registration; if a replacement is live, the DNS-release signal fails closed as pending. While the domain remains absent, an unkeyed repeat reads the newest owner-scoped teardown receipt. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."`
 } // @name DeleteDomainResult
 
 // DeleteSuppressionResult confirms a suppression-list removal.

@@ -1,5 +1,4 @@
 # coding: utf-8
-
 """
     e2a API
 
@@ -18,7 +17,7 @@ import re  # noqa: F401
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -28,8 +27,9 @@ class DeleteDomainResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false.")
     domain: StrictStr = Field(description="The deleted domain.")
+    sending_teardown: Optional[StrictStr] = Field(default=None, description="Durable state of e2a-managed sending-identity teardown (open set — treat missing or unknown values as not confirmed). 'confirmed' means provider absence was proved, or no provider is configured and e2a's ledger proves it never managed an identity for this domain. 'pending' means durable asynchronous teardown is retrying, including when the provider is temporarily disabled but the ledger records a managed identity. 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. A retry with the original Idempotency-Key follows this logical deletion's incarnation-bound receipt as it advances and cannot delete a later registration; if a replacement is live, the DNS-release signal fails closed as pending. While the domain remains absent, an unkeyed repeat reads the newest owner-scoped teardown receipt. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["deleted", "domain"]
+    __properties: ClassVar[List[str]] = ["deleted", "domain", "sending_teardown"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -90,7 +90,8 @@ class DeleteDomainResult(BaseModel):
 
         _obj = cls.model_validate({
             "deleted": obj.get("deleted"),
-            "domain": obj.get("domain")
+            "domain": obj.get("domain"),
+            "sending_teardown": obj.get("sending_teardown")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():
@@ -98,5 +99,3 @@ class DeleteDomainResult(BaseModel):
                 _obj.additional_properties[_key] = obj.get(_key)
 
         return _obj
-
-

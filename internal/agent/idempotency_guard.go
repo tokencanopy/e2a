@@ -100,7 +100,7 @@ func (a *API) idempotencyGuard(w http.ResponseWriter, r *http.Request, userID st
 				code = http.StatusOK
 			}
 			if shouldCacheResponse(code, cap.sideEffectCommitted) {
-				if err := a.idempotency.Complete(r.Context(), userID, key, idempotency.CachedResponse{
+				if err := a.idempotency.Complete(r.Context(), userID, key, res.Token, idempotency.CachedResponse{
 					StatusCode:  code,
 					ContentType: cap.Header().Get("Content-Type"),
 					Body:        cap.body.Bytes(),
@@ -109,7 +109,7 @@ func (a *API) idempotencyGuard(w http.ResponseWriter, r *http.Request, userID st
 				}
 				return
 			}
-			if err := a.idempotency.Release(r.Context(), userID, key); err != nil {
+			if err := a.idempotency.Release(r.Context(), userID, key, res.Token); err != nil {
 				log.Printf("[idempotency] release error: %v", err)
 			}
 		}

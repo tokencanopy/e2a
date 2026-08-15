@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { ContactsApiRequestFactory } from "../../src/v1/generated/apis/ContactsApi.js";
+import { DomainsApiRequestFactory } from "../../src/v1/generated/apis/DomainsApi.js";
 import { createConfiguration } from "../../src/v1/generated/configuration.js";
 import { ServerConfiguration } from "../../src/v1/generated/servers.js";
 
@@ -27,6 +28,7 @@ const config = createConfiguration({
   baseServer: new ServerConfiguration("http://contract.invalid", {}),
 });
 const factory = new ContactsApiRequestFactory(config);
+const domainsFactory = new DomainsApiRequestFactory(config);
 
 function headerNames(headers: Record<string, string>): string[] {
   return Object.keys(headers).map((name) => name.toLowerCase());
@@ -60,6 +62,25 @@ describe("optional If-Match header (generated request factories)", () => {
       'W/"e7"',
     );
     expect(ctx.getHeaders()["If-Match"]).toBe('W/"e7"');
+  });
+});
+
+describe("deleteDomain generated positional compatibility", () => {
+  it("keeps Configuration third and appends Idempotency-Key fourth", async () => {
+    // Configuration was the third argument before Idempotency-Key existed.
+    // A generated-header insertion must not reinterpret existing callers'
+    // transport options as a string header.
+    await expect(
+      domainsFactory.deleteDomain("safe-retry.example.test", "DELETE", config),
+    ).resolves.toBeDefined();
+
+    const ctx = await domainsFactory.deleteDomain(
+      "safe-retry.example.test",
+      "DELETE",
+      config,
+      "domain-delete-operation-1",
+    );
+    expect(ctx.getHeaders()["Idempotency-Key"]).toBe("domain-delete-operation-1");
   });
 });
 
