@@ -216,12 +216,14 @@ scenarios:
         method: DELETE
         path: /v1/domains/domain-crud.test.dev?confirm=DELETE
         # /v1 deleteDomain requires ?confirm=DELETE (D-5); returns 200 with the
-        # uniform deletion object {deleted:true, domain}.
+        # deletion receipt. With no sender provider configured, absence is
+        # immediately confirmed and DNS is safe to release.
         expect:
           status: 200
           body_match:
             deleted: true
             domain: domain-crud.test.dev
+            sending_teardown: confirmed
 
   - name: domain_agent_count
     description: >
