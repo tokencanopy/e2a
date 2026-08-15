@@ -117,10 +117,14 @@ for verified domains; (b) needed an aligned Return-Path.
   unknown future values require retaining DNS. `manual_review` means a
   provider identity exists but its ownership marker is absent, so e2a refuses
   to mutate it. The delete transaction also persists an owner-scoped teardown
-  receipt. Repeating the identical DELETE after the domain row is gone returns
-  that receipt, so a caller that lost the first HTTP response can poll until
-  `confirmed` without guessing from a 404. Re-registering the domain clears the
-  stale receipt before the new incarnation is created. If the sender provider
+  receipt. Each logical deletion should carry a unique `Idempotency-Key`; a
+  retry with the same key replays the original receipt without deleting a
+  same-name replacement registration. While the domain remains absent, an
+  unkeyed repeat reads the current receipt so teardown can be polled until
+  `confirmed`; never use an unkeyed retry across re-registration. Re-registering
+  the domain clears the stale mutable receipt before the new incarnation is
+  created, while the standard idempotency cache retains the original keyed
+  response for its published window. If the sender provider
   is disabled while the durable ledger still records a managed identity, the
   receipt remains `pending`; only a provider-absence check, or a disabled
   provider plus proof that no managed ledger row ever existed, can produce

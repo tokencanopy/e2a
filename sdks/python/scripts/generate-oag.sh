@@ -73,6 +73,13 @@ perl -0pi -e 's/\n+\z/\n/' \
   "$DEST/models/delete_domain_result.py" \
   "$DEST/models/event_envelope.py"
 
+# Ruff removes the generator's empty separator immediately after the encoding
+# cookie. Apply the same normalization during generation so freshness remains
+# stable after pre-commit formatting.
+perl -0pi -e 's/\A# coding: utf-8\n\n/# coding: utf-8\n/' \
+  "$DEST/api/domains_api.py" \
+  "$DEST/models/delete_domain_result.py"
+
 # Keep the expanded agents surface deterministic and diff-check clean.
 perl -pi -e 's/[ \t]+$//' "$DEST/api/agents_api.py"
 

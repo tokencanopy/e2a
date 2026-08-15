@@ -229,7 +229,7 @@ function makeStubClient(
       verified: true,
       sendingStatus: "verified",
     })),
-    deleteDomain: vi.fn(async (domain: string) => ({
+    deleteDomain: vi.fn(async (domain: string, _idempotencyKey?: string) => ({
       deleted: true,
       domain,
       sending_teardown: "confirmed",
@@ -2000,9 +2000,9 @@ describe("e2a MCP server", () => {
   it("delete_domain forwards on explicit confirm:true", async () => {
     const res = await client.callTool({
       name: "delete_domain",
-      arguments: { domain: "mail.acme.com", confirm: true },
+      arguments: { domain: "mail.acme.com", confirm: true, idempotency_key: "delete-mail-domain" },
     });
-    expect(stub.deleteDomain).toHaveBeenCalledWith("mail.acme.com");
+    expect(stub.deleteDomain).toHaveBeenCalledWith("mail.acme.com", "delete-mail-domain");
     const content = res.content as Array<{ type: string; text: string }>;
     expect(JSON.parse(content[0]!.text)).toEqual({
       deleted: true,

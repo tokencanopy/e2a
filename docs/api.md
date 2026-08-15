@@ -577,10 +577,13 @@ Custom sending/receiving domains and their DNS verification.
   fetch / delete (delete deprovisions the sending identity; irreversible).
   The deletion receipt's open `sending_teardown` value is the DNS-release
   contract: only `confirmed` proves provider absence. Keep DNS published for
-  `pending`, `manual_review`, missing, or unknown values. Repeating the same
-  DELETE after the domain row is gone polls the owner-scoped durable receipt,
-  which makes a lost HTTP response recoverable; re-registering invalidates the
-  old receipt.
+  `pending`, `manual_review`, missing, or unknown values. Send a unique
+  `Idempotency-Key` for each logical deletion and reuse it after an ambiguous
+  network failure: the server replays the original receipt instead of deleting
+  a later registration of the same domain. Use a new key to delete a replacement
+  registration. While the domain remains absent, an unkeyed repeat polls the
+  current owner-scoped receipt; never use an unkeyed retry across
+  re-registration.
 - `POST /v1/domains/{domain}/verify` — verify ownership via the TXT record.
 
 Every domain response (list, fetch, and register) carries **`capabilities`** —

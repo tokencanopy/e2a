@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 import type { ApiClient } from "./client.ts";
 
@@ -135,6 +136,10 @@ async function deleteWithRetry(
   sleep: (ms: number) => Promise<void>,
 ): Promise<{ reason: string | null; raw: string }> {
   const path = pathFor(t);
+  // Domain DELETE is only safe across an ambiguous transport failure when
+  // every retry carries the same logical-operation key. The server replays
+  // that receipt rather than deleting a same-name replacement registration.
+  const idempotencyKey = t.kind === "domain" ? randomUUID() : undefined;
   let reason = "no attempt made";
 	const maxAttempts = Math.max(attempts, conflictAttempts);
 	// The budget is monotonic: once any attempt observes a known transient 409,
@@ -147,7 +152,10 @@ async function deleteWithRetry(
 		let retryable: boolean;
     let waitMs = backoffMs * attempt;
     try {
-      const res = await client.delete(path);
+      const res = await client.delete(
+        path,
+        idempotencyKey === undefined ? {} : { headers: { "Idempotency-Key": idempotencyKey } },
+      );
 			if (TERMINAL_OK.has(res.status)) return { reason: null, raw: res.raw };
 			reason = `HTTP ${res.status}: ${res.raw.slice(0, 200)}`;
 			retryable = isRetryableResponse(res.status, res.raw);
@@ -155,8 +163,9 @@ async function deleteWithRetry(
       waitMs = Math.max(waitMs, retryAfterMs(res.headers));
     } catch (e) {
       // A thrown request is a transport failure (DNS, socket reset, abort).
-      // The DELETE may well have reached the server, but we cannot know — and
-      // this DELETE is idempotent, so retrying is always safe.
+      // The DELETE may well have reached the server, but we cannot know. Domain
+      // retries are safe because they reuse idempotencyKey above; the remaining
+      // cleanup deletes converge to the same resource-absent state.
       // errMessage(), not `(e as Error).message`: a rejection carrying a
       // non-object (null, a string) would otherwise throw a TypeError out of
       // this catch, out of cleanup()'s loop, and abandon every fixture after

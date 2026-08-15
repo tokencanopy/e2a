@@ -1511,6 +1511,13 @@ export interface DomainsApiDeleteDomainRequest {
      * @memberof DomainsApideleteDomain
      */
     confirm: 'DELETE'
+    /**
+     * Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
+     * Defaults to: undefined
+     * @type string
+     * @memberof DomainsApideleteDomain
+     */
+    idempotencyKey?: string
 }
 
 export interface DomainsApiGetDomainRequest {
@@ -1569,21 +1576,21 @@ export class ObjectDomainsApi {
     }
 
     /**
-     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param param the request object
      */
     public deleteDomainWithHttpInfo(param: DomainsApiDeleteDomainRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteDomainResult>> {
-        return this.api.deleteDomainWithHttpInfo(param.domain, param.confirm,  options).toPromise();
+        return this.api.deleteDomainWithHttpInfo(param.domain, param.confirm, param.idempotencyKey,  options).toPromise();
     }
 
     /**
-     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param param the request object
      */
     public deleteDomain(param: DomainsApiDeleteDomainRequest, options?: ConfigurationOptions): Promise<DeleteDomainResult> {
-        return this.api.deleteDomain(param.domain, param.confirm,  options).toPromise();
+        return this.api.deleteDomain(param.domain, param.confirm, param.idempotencyKey,  options).toPromise();
     }
 
     /**

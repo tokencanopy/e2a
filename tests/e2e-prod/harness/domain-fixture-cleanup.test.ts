@@ -170,9 +170,11 @@ test("confirmed sending-identity teardown proceeds to DNS removal", async () => 
 
 test("a lost DELETE response can recover through the durable confirmed receipt", async () => {
 	let deletes = 0;
+	const keys: string[] = [];
 	const client = {
-		delete(): Promise<RawResponse> {
+		delete(_path: string, opts?: { headers?: Record<string, string> }): Promise<RawResponse> {
 			deletes++;
+			keys.push(opts?.headers?.["Idempotency-Key"] ?? "");
 			if (deletes === 1) return Promise.reject(new Error("socket closed after server commit"));
 			return Promise.resolve({
 				status: 200,
@@ -195,6 +197,8 @@ test("a lost DELETE response can recover through the durable confirmed receipt",
 	);
 
 	assert.equal(deletes, 2);
+	assert.ok(keys[0], "domain cleanup must attach an idempotency key");
+	assert.equal(keys[1], keys[0], "a lost-response retry must reuse the same key");
 	assert.deepEqual(result.dnsFailed, []);
 	assert.deepEqual(dnsCalls, ["dns-ownership"]);
 	assert.deepEqual(getTracked(), []);

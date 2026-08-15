@@ -47,6 +47,7 @@ class DomainsApi:
         self,
         domain: StrictStr,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -62,12 +63,14 @@ class DomainsApi:
     ) -> DeleteDomainResult:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -93,6 +96,7 @@ class DomainsApi:
         _param = self._delete_domain_serialize(
             domain=domain,
             confirm=confirm,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -101,6 +105,8 @@ class DomainsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteDomainResult",
+            '409': "ErrorEnvelope",
+            '422': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -118,6 +124,7 @@ class DomainsApi:
         self,
         domain: StrictStr,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -133,12 +140,14 @@ class DomainsApi:
     ) -> ApiResponse[DeleteDomainResult]:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -164,6 +173,7 @@ class DomainsApi:
         _param = self._delete_domain_serialize(
             domain=domain,
             confirm=confirm,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -172,6 +182,8 @@ class DomainsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteDomainResult",
+            '409': "ErrorEnvelope",
+            '422': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -189,6 +201,7 @@ class DomainsApi:
         self,
         domain: StrictStr,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        idempotency_key: Annotated[Optional[StrictStr], Field(description="Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -204,12 +217,14 @@ class DomainsApi:
     ) -> RESTResponseType:
         """Delete a domain
 
-        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+        Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
 
         :param domain: (required)
         :type domain: str
         :param confirm: Must be the literal DELETE — this action is irreversible. (required)
         :type confirm: str
+        :param idempotency_key: Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight.
+        :type idempotency_key: str
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -235,6 +250,7 @@ class DomainsApi:
         _param = self._delete_domain_serialize(
             domain=domain,
             confirm=confirm,
+            idempotency_key=idempotency_key,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -243,6 +259,8 @@ class DomainsApi:
 
         _response_types_map: Dict[str, Optional[str]] = {
             '200': "DeleteDomainResult",
+            '409': "ErrorEnvelope",
+            '422': "ErrorEnvelope",
         }
         response_data = await self.api_client.call_api(
             *_param,
@@ -255,6 +273,7 @@ class DomainsApi:
         self,
         domain,
         confirm,
+        idempotency_key,
         _request_auth,
         _content_type,
         _headers,
@@ -284,6 +303,8 @@ class DomainsApi:
             _query_params.append(('confirm', confirm))
             
         # process the header parameters
+        if idempotency_key is not None:
+            _header_params['Idempotency-Key'] = idempotency_key
         # process the form parameters
         # process the body parameter
 

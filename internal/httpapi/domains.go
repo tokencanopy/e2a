@@ -323,8 +323,13 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
-		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
+		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
 		Security:    []map[string][]string{{"bearer": {}}},
+		Responses: map[string]*huma.Response{
+			"409":     s.idempotencyInFlightResponse(),
+			"422":     s.idempotencyReuseResponse(),
+			"default": s.errorEnvelopeResponse(),
+		},
 	}, s.handleDeleteDomain)
 
 	registerOp(s.API, huma.Operation{
@@ -553,7 +558,8 @@ type deleteDomainOutput struct{ Body DeleteDomainResult }
 // deprovisions its SES sending identity and breaks sending for every agent on
 // it, so it requires ?confirm=DELETE — uniform with deleteAccount/deleteAgent.
 type deleteDomainInput struct {
-	Domain string `path:"domain"`
+	Domain         string `path:"domain"`
+	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight."`
 	DeleteConfirm
 }
 
@@ -562,39 +568,47 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.deps.LookupDomain(ctx, in.Domain, user.ID); err != nil {
-		if s.deps.LookupDomainTeardown != nil {
-			teardown, receiptErr := s.deps.LookupDomainTeardown(ctx, in.Domain, user.ID)
-			if receiptErr == nil {
-				return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}}, nil
+	_, body, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
+		"/v1/domains/"+strings.ToLower(in.Domain), nil,
+		func() (int, DeleteDomainResult, error) {
+			if _, err := s.deps.LookupDomain(ctx, in.Domain, user.ID); err != nil {
+				if s.deps.LookupDomainTeardown != nil {
+					teardown, receiptErr := s.deps.LookupDomainTeardown(ctx, in.Domain, user.ID)
+					if receiptErr == nil {
+						return http.StatusOK, DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}, nil
+					}
+					if !errors.Is(receiptErr, pgx.ErrNoRows) {
+						return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to read domain teardown receipt")
+					}
+				}
+				return 0, DeleteDomainResult{}, NewError(http.StatusNotFound, "not_found", "domain not found")
 			}
-			if !errors.Is(receiptErr, pgx.ErrNoRows) {
-				return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to read domain teardown receipt")
+			// Confirm is enforced declaratively by Huma (required + enum:[DELETE] on
+			// DeleteConfirm): a missing/wrong ?confirm is a 422 before this handler.
+			live, trashed, err := s.deps.CountAgentsOnDomain(ctx, in.Domain, user.ID)
+			if err != nil {
+				return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to check domain agents")
 			}
-		}
-		return nil, NewError(http.StatusNotFound, "not_found", "domain not found")
-	}
-	// Confirm is enforced declaratively by Huma (required + enum:[DELETE] on
-	// DeleteConfirm): a missing/wrong ?confirm is a 422 before this handler.
-	live, trashed, err := s.deps.CountAgentsOnDomain(ctx, in.Domain, user.ID)
+			if live > 0 || trashed > 0 {
+				return 0, DeleteDomainResult{}, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
+			}
+			teardown, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
+			if err != nil {
+				switch {
+				case errors.Is(err, identity.ErrDomainHasAgents):
+					return 0, DeleteDomainResult{}, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
+				case errors.Is(err, identity.ErrDomainNotFound):
+					return 0, DeleteDomainResult{}, NewError(http.StatusNotFound, "not_found", "domain not found")
+				default:
+					return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
+				}
+			}
+			return http.StatusOK, DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}, nil
+		})
 	if err != nil {
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to check domain agents")
+		return nil, err
 	}
-	if live > 0 || trashed > 0 {
-		return nil, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
-	}
-	teardown, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
-	if err != nil {
-		switch {
-		case errors.Is(err, identity.ErrDomainHasAgents):
-			return nil, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
-		case errors.Is(err, identity.ErrDomainNotFound):
-			return nil, NewError(http.StatusNotFound, "not_found", "domain not found")
-		default:
-			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
-		}
-	}
-	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}}, nil
+	return &deleteDomainOutput{Body: body}, nil
 }
 
 // domainHasAgentsMessage explains WHICH agents are blocking a domain delete.

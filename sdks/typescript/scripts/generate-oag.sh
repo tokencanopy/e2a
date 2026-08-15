@@ -96,6 +96,12 @@ perl -0pi -e 's/\n+\z/\n/' \
   "$OUT/models/UnsubscribeOptions.ts" \
   "$OUT/types/PromiseAPI.ts"
 
+# The formatter removes the generator's extra separator after the middleware
+# imports in PromiseAPI. Normalize it here too so generation remains clean
+# after a committed tree has passed the pre-commit formatter.
+perl -0pi -e 's/(import \{ PromiseMiddleware[^\n]+\n)\n/$1/' \
+  "$OUT/types/PromiseAPI.ts"
+
 # OpenAPI Generator's TypeScript ObjectSerializer cannot serialize a oneOf of
 # SCALARS/arrays — reply_to is `string | string[]` (ForwardRequestReplyTo). It
 # registers the synthesized union class in typeMap but emits NO
