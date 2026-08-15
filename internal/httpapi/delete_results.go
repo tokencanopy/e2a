@@ -34,10 +34,11 @@ type DeleteAgentResult struct {
 } // @name DeleteAgentResult
 
 // Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
-// means e2a-managed teardown is complete: the provider identity is confirmed
-// removed or no provider is configured. "manual_review" means a provider
-// identity exists but its ownership tag is absent, so e2a cannot safely mutate
-// it or claim absence.
+// means e2a-managed teardown is complete: provider absence was confirmed, or
+// no provider is configured and the durable ledger proves e2a never managed
+// an identity for the domain. "manual_review" means a provider identity exists
+// but its ownership tag is absent, so e2a cannot safely mutate it or claim
+// absence.
 const (
 	SendingTeardownConfirmed    = "confirmed"
 	SendingTeardownPending      = "pending"
@@ -50,7 +51,7 @@ type DeleteDomainResult struct {
 	Domain  string `json:"domain" doc:"The deleted domain."`
 	// omitempty keeps the field OPTIONAL in the schema: generated clients must
 	// accept responses from older servers that predate it.
-	SendingTeardown string `json:"sending_teardown,omitempty" doc:"State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."`
+	SendingTeardown string `json:"sending_teardown,omitempty" doc:"Durable state of e2a-managed sending-identity teardown (open set — treat missing or unknown values as not confirmed). 'confirmed' means provider absence was proved, or no provider is configured and e2a's ledger proves it never managed an identity for this domain. 'pending' means durable asynchronous teardown is retrying, including when the provider is temporarily disabled but the ledger records a managed identity. 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Repeat the same DELETE to poll this owner-scoped receipt. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."`
 } // @name DeleteDomainResult
 
 // DeleteSuppressionResult confirms a suppression-list removal.

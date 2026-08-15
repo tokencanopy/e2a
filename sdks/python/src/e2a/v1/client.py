@@ -1110,7 +1110,8 @@ class DomainsResource:
         return await self._c._write_unsafe(lambda h: self._api.register_domain(req, _headers=h))
 
     async def delete(self, domain: str) -> DeleteDomainResult:
-        # Returns the deletion object ({deleted, domain}).
+        # Only sending_teardown="confirmed" permits DNS removal. Repeating
+        # this call after a lost response polls the durable teardown receipt.
         return await self._c._write_idempotent(lambda h: self._api.delete_domain(domain, confirm="DELETE", _headers=h))
 
     async def verify(self, domain: str) -> VerifyDomainView:

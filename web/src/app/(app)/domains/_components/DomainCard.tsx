@@ -316,8 +316,18 @@ export function DomainCard({
     setDeleteError("");
     setDeleting(true);
     try {
-      await deleteDomain(domain.domain);
-      onDeleted();
+      const result = await deleteDomain(domain.domain);
+      if (result.sending_teardown === "confirmed") {
+        onDeleted();
+      } else if (result.sending_teardown === "manual_review") {
+        setDeleteError(
+          "Domain registration deleted, but e2a could not confirm ownership of its sending identity. Keep its DNS records published and contact support before removing them.",
+        );
+      } else {
+        setDeleteError(
+          "Domain registration deleted, but its sending identity is still being removed. Keep its DNS records published and click Delete again later to re-check.",
+        );
+      }
     } catch (err) {
       setDeleteError(
         err instanceof Error ? err.message : "Failed to delete domain",

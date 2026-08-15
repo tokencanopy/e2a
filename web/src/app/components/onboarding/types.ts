@@ -103,6 +103,13 @@ export type DomainInfo = {
   sending_last_checked_at?: string | null;
 };
 
+export type DeleteDomainResult = {
+  deleted: boolean;
+  domain: string;
+  /** Open set: only "confirmed" proves provider absence and permits DNS removal. */
+  sending_teardown?: string;
+};
+
 /** Response from POST /v1/domains/{domain}/verify — per-record
  * diagnostic. `dkim` reports "found" or "missing" against the
  * per-domain public key registered at claim time. "deferred" is

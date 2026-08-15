@@ -168,6 +168,38 @@ test("confirmed sending-identity teardown proceeds to DNS removal", async () => 
 	assert.deepEqual(getTracked(), []);
 });
 
+test("a lost DELETE response can recover through the durable confirmed receipt", async () => {
+	let deletes = 0;
+	const client = {
+		delete(): Promise<RawResponse> {
+			deletes++;
+			if (deletes === 1) return Promise.reject(new Error("socket closed after server commit"));
+			return Promise.resolve({
+				status: 200,
+				ok: true,
+				headers: {},
+				body: null,
+				raw: JSON.stringify({ deleted: true, domain: "lost.example.test", sending_teardown: "confirmed" }),
+				latencyMs: 0,
+			});
+		},
+	} as unknown as ApiClient;
+	const dnsCalls: string[] = [];
+	track("domain", "lost.example.test");
+
+	const result = await cleanupDomainFixture(
+		client,
+		{ domain: "lost.example.test", dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.lost.example.test" }] },
+		async (record) => { dnsCalls.push(record.id!); },
+		{ attempts: 2, sleep: async () => {} },
+	);
+
+	assert.equal(deletes, 2);
+	assert.deepEqual(result.dnsFailed, []);
+	assert.deepEqual(dnsCalls, ["dns-ownership"]);
+	assert.deepEqual(getTracked(), []);
+});
+
 test("a 404 retry after a pending teardown must NOT release DNS", async () => {
 	// Second-review repro: pass 1 deletes the domain, server reports teardown
 	// pending → DNS retained. Pass 2 retries the (already-deleted) domain and

@@ -348,8 +348,10 @@ const bestEffortDeprovisionTimeout = 10 * time.Second
 // best-effort provider deprovision then runs post-commit, so the SES identity
 // is usually already confirmed absent when the response returns — but a
 // provider failure there (outage, throttle, foreign/untagged identity) is
-// logged and left to the committed job + hourly reaper to converge, never
-// surfaced to the client. Without SES configured, this is a plain delete.
+// logged and left to the committed job + hourly reaper to converge. A durable,
+// owner-scoped receipt exposes the convergence state to repeated DELETEs. With
+// no provider configured, a managed ledger row remains pending rather than
+// falsely claiming provider absence.
 func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
 	lookupReceipt := func(ctx context.Context, domain, userID string) (domainteardown.State, bool, error) {
 		state, err := p.Store.LookupDomainTeardownReceipt(ctx, domain, userID)

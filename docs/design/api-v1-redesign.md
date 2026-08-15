@@ -326,6 +326,12 @@ relative to that base):
      arbitrary identities from the shared SES account. This also retries after
      River exhausts a job's finite attempt budget. Re-registering a deleted
      domain updates the target incarnation and installs the replacement key.
+     The delete transaction also writes an owner-scoped teardown receipt.
+     Repeating the same DELETE after the row is gone polls that durable receipt:
+     only `sending_teardown: confirmed` releases DNS; `pending`,
+     `manual_review`, missing, and unknown values retain it. Re-registration
+     clears the old receipt. A disabled provider cannot claim confirmation when
+     the ledger still records an identity that e2a previously managed.
 5. **HITL: two explicit transitions, prefetch-safe.** A held draft
    (`status=pending_approval`) is resolved by a human reviewer via **two
    explicit sub-resources** — `POST …/messages/{id}/approve` and

@@ -28,7 +28,7 @@ class DeleteDomainResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the domain no longer exists. A failed delete is an error envelope, never deleted:false.")
     domain: StrictStr = Field(description="The deleted domain.")
-    sending_teardown: Optional[StrictStr] = Field(default=None, description="State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices.")
+    sending_teardown: Optional[StrictStr] = Field(default=None, description="Durable state of e2a-managed sending-identity teardown (open set — treat missing or unknown values as not confirmed). 'confirmed' means provider absence was proved, or no provider is configured and e2a's ledger proves it never managed an identity for this domain. 'pending' means durable asynchronous teardown is retrying, including when the provider is temporarily disabled but the ledger records a managed identity. 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Repeat the same DELETE to poll this owner-scoped receipt. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["deleted", "domain", "sending_teardown"]
 
@@ -100,5 +100,4 @@ class DeleteDomainResult(BaseModel):
                 _obj.additional_properties[_key] = obj.get(_key)
 
         return _obj
-
 

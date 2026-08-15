@@ -564,7 +564,8 @@ agents, `domain` for domains, `address` for suppressions. `deleted` is always
 Cascading deletes may additionally carry receipt counts (all additive):
 `DELETE /v1/agents/{email}` includes `messages_deleted`, and `DELETE
 /v1/account` returns the full per-table `DeleteUserDataResult` receipt on top
-of `deleted: true`.
+of `deleted: true`. Domain deletion adds the durable, open-set
+`sending_teardown` state described below.
 
 ### Domains (`/v1/domains`)
 
@@ -574,6 +575,12 @@ Custom sending/receiving domains and their DNS verification.
   TXT records and the DKIM selector/key).
 - `GET /v1/domains/{domain}`, `DELETE /v1/domains/{domain}?confirm=DELETE` —
   fetch / delete (delete deprovisions the sending identity; irreversible).
+  The deletion receipt's open `sending_teardown` value is the DNS-release
+  contract: only `confirmed` proves provider absence. Keep DNS published for
+  `pending`, `manual_review`, missing, or unknown values. Repeating the same
+  DELETE after the domain row is gone polls the owner-scoped durable receipt,
+  which makes a lost HTTP response recoverable; re-registering invalidates the
+  old receipt.
 - `POST /v1/domains/{domain}/verify` — verify ownership via the TXT record.
 
 Every domain response (list, fetch, and register) carries **`capabilities`** —

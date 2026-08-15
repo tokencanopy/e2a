@@ -746,8 +746,8 @@ class DomainsResource {
   delete(domain: string): Promise<DeleteDomainResult> {
     // Returns the deletion object ({deleted:true, domain, sending_teardown}).
     // Only sending_teardown:"confirmed" proves provider absence. "pending",
-    // "manual_review", and future unknown values require keeping the domain's
-    // DNS published.
+    // "manual_review", missing, and future unknown values require keeping the
+    // domain's DNS published. Repeating the delete polls the durable receipt.
     return call(() => this.api.deleteDomain(domain, "DELETE"));
   }
   verify(domain: string): Promise<VerifyDomainView> {

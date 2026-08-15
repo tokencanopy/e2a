@@ -65,6 +65,7 @@ describe.skipIf(!env)("ts sdk live e2e: domains", () => {
         const deleted = await client.domains.delete(domain);
         expect(deleted.deleted).toBe(true);
         expect(deleted.domain).toBe(domain);
+        expect(deleted.sendingTeardown).toBe("confirmed");
         cleaned = true;
         recordCovered("domains.delete");
 

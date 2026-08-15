@@ -3,6 +3,7 @@
 
 import type {
   DomainInfo,
+  DeleteDomainResult,
   AgentCreateResponse,
   ProtectionConfig,
 } from "./types";
@@ -78,7 +79,7 @@ export async function verifyDomain(
 
 // DELETE /v1/domains/{domain}. The v1 surface guards destructive deletes
 // behind an explicit `?confirm=DELETE` query param.
-export async function deleteDomain(domain: string): Promise<void> {
+export async function deleteDomain(domain: string): Promise<DeleteDomainResult> {
   return request("/v1/domains/" + encodeURIComponent(domain) + "?confirm=DELETE", {
     method: "DELETE",
   });

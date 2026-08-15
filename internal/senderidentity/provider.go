@@ -108,9 +108,9 @@ type Provider interface {
 	Deprovision(ctx context.Context, domain string) error
 
 	// List returns all domain identities visible to the provider principal.
-	// The reaper compares this with e2a's durable managed-domain ledger and
-	// never treats an unledgered identity as its own. SES caps each page; the
-	// implementation paginates and returns the full set.
+	// It is retained for the phase-1 compatibility worker only; the v2 reaper
+	// uses ListPage so one River job cannot inventory the whole provider account.
+	// Neither path treats an unledgered identity as its own.
 	List(ctx context.Context) ([]string, error)
 
 	// ListPage returns one provider-bounded page plus the opaque continuation

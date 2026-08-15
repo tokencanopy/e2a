@@ -323,7 +323,7 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
-		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
+		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteDomain)
 

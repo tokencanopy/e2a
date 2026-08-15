@@ -56,13 +56,11 @@ export async function cleanupDomainFixture(
 	// (best-effort deprovision failed; async teardown continues). DNS must
 	// outlive the identity, so DNS removal requires an EXPLICIT
 	// sending_teardown:"confirmed" — every other outcome fails closed. In
-	// particular, a retry of an already-deleted domain answers 404 with no
-	// teardown state at all. That response is ambiguous: the original DELETE
-	// may have committed while its pending receipt was lost, or another cleanup
-	// process may have observed it. A bodiless response therefore proves
-	// nothing about provider absence and DNS stays. Retained records are
-	// reported and the fixture stays tracked for manual follow-up once the
-	// identity is verifiably gone.
+	// current servers return the owner-scoped durable receipt when a retry sees
+	// that the domain row is already gone. A 404 from an older server or a
+	// missing receipt remains ambiguous and therefore proves nothing about
+	// provider absence. Retained records are reported and the fixture stays
+	// tracked for manual follow-up once the identity is verifiably gone.
 	const domainDelete = result.completed.find((c) => c.kind === "domain" && c.id === fixture.domain);
 	if (!sendingTeardownAllowsDnsRemoval(domainDelete?.raw ?? "")) {
 		return {

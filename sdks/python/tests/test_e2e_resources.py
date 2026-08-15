@@ -453,6 +453,7 @@ async def test_domains_register_get_list_verify_delete():
             deleted = await client.domains.delete(domain)
             assert deleted.deleted is True
             assert deleted.domain == domain
+            assert deleted.sending_teardown == "confirmed"
             mark_covered("domains.delete")
 
 

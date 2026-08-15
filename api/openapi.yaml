@@ -1337,7 +1337,7 @@ components:
           description: The deleted domain.
           type: string
         sending_teardown:
-          description: "State of e2a-managed sending-identity teardown (open set — treat unknown values as not confirmed): 'confirmed' means the provider identity is absent or no provider is configured; 'pending' means durable asynchronous teardown is retrying; 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices."
+          description: Durable state of e2a-managed sending-identity teardown (open set — treat missing or unknown values as not confirmed). 'confirmed' means provider absence was proved, or no provider is configured and e2a's ledger proves it never managed an identity for this domain. 'pending' means durable asynchronous teardown is retrying, including when the provider is temporarily disabled but the ledger records a managed identity. 'manual_review' means a provider identity exists but e2a cannot establish ownership and will not mutate it. Repeat the same DELETE to poll this owner-scoped receipt. Keep the domain's DNS records published unless this is 'confirmed', or the still-live identity may emit provider verification-failure notices.
           type: string
       required:
         - deleted
@@ -7845,7 +7845,7 @@ paths:
         - domains
   /v1/domains/{domain}:
     delete:
-      description: Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries) or manual_review (an identity exists but ownership cannot be established). Keep DNS published unless sending_teardown is confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+      description: Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Repeat the same DELETE after the domain row is gone to poll its owner-scoped durable receipt. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Re-registering the domain invalidates the old receipt. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
       operationId: deleteDomain
       parameters:
         - in: path

@@ -116,8 +116,16 @@ for verified domains; (b) needed an aligned Return-Path.
   only `confirmed` proves provider absence; `pending`, `manual_review`, and
   unknown future values require retaining DNS. `manual_review` means a
   provider identity exists but its ownership marker is absent, so e2a refuses
-  to mutate it. When a best-effort attempt fails transiently, teardown
-  converges via the committed job and the hourly reaper instead. (An earlier
+  to mutate it. The delete transaction also persists an owner-scoped teardown
+  receipt. Repeating the identical DELETE after the domain row is gone returns
+  that receipt, so a caller that lost the first HTTP response can poll until
+  `confirmed` without guessing from a 404. Re-registering the domain clears the
+  stale receipt before the new incarnation is created. If the sender provider
+  is disabled while the durable ledger still records a managed identity, the
+  receipt remains `pending`; only a provider-absence check, or a disabled
+  provider plus proof that no managed ledger row ever existed, can produce
+  `confirmed`. When a best-effort attempt fails transiently, teardown converges
+  via the committed job and the hourly reaper instead. (An earlier
   revision ran Deprovision
   synchronously inside the delete transaction; review showed that coupling
   only added failure modes — permanent 500s on foreign identities, deletes

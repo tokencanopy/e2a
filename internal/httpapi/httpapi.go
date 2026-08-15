@@ -204,10 +204,9 @@ type Deps struct {
 	SendingRampSnapshot func(ctx context.Context, userID, domain string, now time.Time) (sendramp.Snapshot, error)
 	ClaimDomain         func(ctx context.Context, domain, userID string) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
-	// DeleteDomain deletes the domain and reports whether provider-side
-	// sending-identity teardown is still pending (best-effort deprovision did
-	// not confirm; a durable job + hourly reconciler converge it). False when
-	// teardown was confirmed or there is nothing to tear down (no SES).
+	// DeleteDomain deletes the domain and returns its durable provider-side
+	// sending-identity teardown state. LookupDomainTeardown makes a repeated
+	// DELETE an owner-scoped poll after the domain row itself is gone.
 	DeleteDomain         func(ctx context.Context, domain, userID string) (teardown domainteardown.State, err error)
 	LookupDomainTeardown func(ctx context.Context, domain, userID string) (domainteardown.State, error)
 	CountAgentsOnDomain  func(ctx context.Context, domain, userID string) (live, trashed int, err error)
