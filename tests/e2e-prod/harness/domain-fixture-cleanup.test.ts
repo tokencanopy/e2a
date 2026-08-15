@@ -204,6 +204,53 @@ test("a lost DELETE response can recover through the durable confirmed receipt",
 	assert.deepEqual(getTracked(), []);
 });
 
+test("a pending domain reuses one deletion key across later cleanup passes", async () => {
+	const keys: string[] = [];
+	let pass = 0;
+	const client = {
+		delete(_path: string, opts?: { headers?: Record<string, string> }): Promise<RawResponse> {
+			keys.push(opts?.headers?.["Idempotency-Key"] ?? "");
+			pass++;
+			return Promise.resolve({
+				status: 200,
+				ok: true,
+				headers: {},
+				body: null,
+				raw: JSON.stringify({
+					deleted: true,
+					domain: "passes.example.test",
+					sending_teardown: pass === 1 ? "pending" : "confirmed",
+				}),
+				latencyMs: 0,
+			});
+		},
+	} as unknown as ApiClient;
+	const fixture = {
+		domain: "passes.example.test",
+		dnsRecords: [{ id: "dns-ownership", type: "TXT", name: "_verify.passes.example.test" }],
+	};
+	const dnsCalls: string[] = [];
+	track("domain", fixture.domain);
+
+	const first = await cleanupDomainFixture(client, fixture, async (record) => {
+		dnsCalls.push(record.id!);
+	});
+	assert.equal(first.dnsFailed.length, 1);
+	const second = await cleanupDomainFixture(client, fixture, async (record) => {
+		dnsCalls.push(record.id!);
+	});
+
+	assert.ok(keys[0]);
+	assert.equal(keys[1], keys[0], "a later cleanup pass must poll the original logical deletion");
+	assert.deepEqual(second.dnsFailed, []);
+	assert.deepEqual(dnsCalls, ["dns-ownership"]);
+	assert.deepEqual(getTracked(), []);
+
+	track("domain", fixture.domain);
+	await cleanupDomainFixture(client, fixture, async () => {});
+	assert.notEqual(keys[2], keys[1], "a new registration cleanup must receive a fresh logical deletion key");
+});
+
 test("a 404 retry after a pending teardown must NOT release DNS", async () => {
 	// Second-review repro: pass 1 deletes the domain, server reports teardown
 	// pending → DNS retained. Pass 2 retries the (already-deleted) domain and

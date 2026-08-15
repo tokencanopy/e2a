@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -54,6 +55,27 @@ func TestIdempotentNoKeyRunsFn(t *testing.T) {
 	if err != nil || !called || status != 201 || body.MessageID != "m1" {
 		t.Fatalf("no-key should run fn directly: status=%d body=%+v called=%v err=%v", status, body, called, err)
 	}
+}
+
+func TestIdempotencyKeyLengthBoundary(t *testing.T) {
+	t.Run("255 bytes accepted", func(t *testing.T) {
+		f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
+		_, _, err := runIdempotent(serverWithIdem(f), context.Background(), "u", strings.Repeat("k", idempotency.MaxKeyLength), "/v1/x", nil,
+			func() (int, sendBody, error) { return 200, sendBody{Status: "ok"}, nil })
+		if err != nil {
+			t.Fatalf("255-byte key rejected: %v", err)
+		}
+	})
+
+	t.Run("256 bytes rejected before store", func(t *testing.T) {
+		f := &fakeIdem{claim: idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}}
+		_, _, err := runIdempotent(serverWithIdem(f), context.Background(), "u", strings.Repeat("k", idempotency.MaxKeyLength+1), "/v1/x", nil,
+			func() (int, sendBody, error) { return 200, sendBody{Status: "wrong"}, nil })
+		env, ok := err.(*ErrorEnvelope)
+		if !ok || env.GetStatus() != 400 || env.Code() != "invalid_request" {
+			t.Fatalf("256-byte key = %v, want 400 invalid_request", err)
+		}
+	})
 }
 
 func TestIdempotentAcquiredCaches(t *testing.T) {

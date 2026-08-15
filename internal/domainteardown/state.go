@@ -7,6 +7,15 @@ package domainteardown
 // not confirmed.
 type State string
 
+// Receipt identifies one deleted domain registration. Incarnation is the
+// deleted row's verification token: immutable for that registration and
+// replaced on re-registration, so keyed retries can safely follow the old
+// teardown without acting on a same-name replacement.
+type Receipt struct {
+	Incarnation string
+	State       State
+}
+
 const (
 	Confirmed    State = "confirmed"
 	Pending      State = "pending"

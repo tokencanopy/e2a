@@ -263,7 +263,7 @@ func TestDeleteDomainTxUsesPinnedMutationConnection(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 	err = store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
-		return store.DeleteDomainTx(lockedCtx, domain, user.ID, nil)
+		return store.DeleteDomainTx(lockedCtx, domain, user.ID, nil, nil)
 	})
 	if err != nil {
 		t.Fatalf("DeleteDomainTx under one-connection mutation lock: %v", err)
@@ -289,11 +289,11 @@ func TestDeleteDomainTxSerializesSameOwnerReRegistration(t *testing.T) {
 	releaseDelete := make(chan struct{})
 	deleteDone := make(chan error, 1)
 	go func() {
-		deleteDone <- store.DeleteDomainTx(ctx, domain, user.ID, func(context.Context, pgx.Tx) error {
+		deleteDone <- store.DeleteDomainTx(ctx, domain, user.ID, func(context.Context, pgx.Tx, string) error {
 			close(deleteEntered)
 			<-releaseDelete
 			return nil
-		})
+		}, nil)
 	}()
 	<-deleteEntered
 

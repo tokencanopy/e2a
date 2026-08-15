@@ -1259,7 +1259,9 @@ func (s *Store) DomainOwner(ctx context.Context, domain string) (string, error) 
 	return *owner, nil
 }
 
-// DomainExists reports whether a live domain row exists (orphan reaper).
+// DomainExists reports whether any account currently owns the exact DNS name.
+// It deliberately returns only a boolean: the orphan reaper and historical
+// teardown-receipt safety checks need existence without owner disclosure.
 func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
@@ -1496,8 +1498,11 @@ func (s *Store) LookupDomain(ctx context.Context, domain, userID string) (*Domai
 		 FROM domains WHERE domain = $1 AND user_id = $2`,
 		normalizeDomain(domain), userID,
 	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrDomainNotFound
+	}
 	if err != nil {
-		return nil, fmt.Errorf("domain not found")
+		return nil, err
 	}
 	return d, nil
 }
@@ -1810,7 +1815,7 @@ var ErrReservedDomain = fmt.Errorf("domain is reserved for managed infrastructur
 // DeleteDomain deletes a domain only if owned by the user.
 // The handler should check for existing agents first.
 func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
-	return s.DeleteDomainTx(ctx, domain, userID, nil)
+	return s.DeleteDomainTx(ctx, domain, userID, nil, nil)
 }
 
 // DeleteDomainTx deletes a domain and, before committing, runs inTx within
@@ -1820,8 +1825,11 @@ func (s *Store) DeleteDomain(ctx context.Context, domain, userID string) error {
 // unreachable at delete time. A nil hook is a plain delete (dev / no SES).
 //
 // inTx runs only after the DELETE affected a row (the domain existed and was
-// owned by userID); it never runs for a not-found / FK-blocked delete.
-func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx) error) error {
+// owned by userID). onMissing, when non-nil, runs under the same domain locks
+// when no live row exists; domain DELETE uses it to atomically bind a new
+// idempotency key to an existing historical receipt. With no onMissing hook,
+// a missing/cross-owner domain returns ErrDomainNotFound.
+func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx func(ctx context.Context, tx pgx.Tx, incarnation string) error, onMissing func(ctx context.Context, tx pgx.Tx) error) error {
 	domain = normalizeDomain(domain)
 	tx, err := s.senderIdentityBegin(ctx)
 	if err != nil {
@@ -1840,21 +1848,28 @@ func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx 
 		}
 	}
 
-	tag, err := tx.Exec(ctx,
-		`DELETE FROM domains WHERE domain = $1 AND user_id = $2`,
+	var incarnation string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM domains WHERE domain = $1 AND user_id = $2 RETURNING verification_token`,
 		domain, userID,
-	)
+	).Scan(&incarnation)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if onMissing == nil {
+				return ErrDomainNotFound
+			}
+			if err := onMissing(ctx, tx); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		if strings.Contains(err.Error(), "violates foreign key") {
 			return ErrDomainHasAgents
 		}
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrDomainNotFound
-	}
 	if inTx != nil {
-		if err := inTx(ctx, tx); err != nil {
+		if err := inTx(ctx, tx, incarnation); err != nil {
 			return err
 		}
 	}
@@ -1867,7 +1882,7 @@ func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx 
 // that was never in the managed ledger is immediately confirmed; a ledgered
 // identity stays pending until the provider is enabled and the reaper can
 // prove absence.
-func (s *Store) BeginDomainTeardownReceiptTx(ctx context.Context, tx pgx.Tx, domain, userID string, providerConfigured bool) (domainteardown.State, error) {
+func (s *Store) BeginDomainTeardownReceiptTx(ctx context.Context, tx pgx.Tx, domain, incarnation, userID string, providerConfigured bool) (domainteardown.Receipt, error) {
 	domain = normalizeDomain(domain)
 	state := domainteardown.Confirmed
 	if providerConfigured {
@@ -1878,33 +1893,81 @@ func (s *Store) BeginDomainTeardownReceiptTx(ctx context.Context, tx pgx.Tx, dom
 			`SELECT EXISTS(SELECT 1 FROM sender_identity_managed_domains WHERE domain = $1)`,
 			domain,
 		).Scan(&managed); err != nil {
-			return "", err
+			return domainteardown.Receipt{}, err
 		}
 		if managed {
 			state = domainteardown.Pending
 		}
 	}
+	// The provider identity is domain-global, not registration-scoped. Starting
+	// teardown for a replacement registration therefore invalidates a prior
+	// incarnation's confirmed DNS-release signal until this newest teardown
+	// converges. Keep every historical keyed receipt fail-closed; the reaper's
+	// SetDomainTeardownState advances them together after proving absence.
+	if _, err := tx.Exec(ctx,
+		`UPDATE domain_teardown_receipts
+		 SET state = $2, updated_at = now()
+		 WHERE domain = $1 AND state IS DISTINCT FROM $2`,
+		domain, state,
+	); err != nil {
+		return domainteardown.Receipt{}, err
+	}
 	_, err := tx.Exec(ctx,
-		`INSERT INTO domain_teardown_receipts (domain, user_id, state, created_at, updated_at)
-		 VALUES ($1, $2, $3, now(), now())
-		 ON CONFLICT (domain) DO UPDATE
+		`INSERT INTO domain_teardown_receipts (domain, incarnation, user_id, state, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, now(), now())
+		 ON CONFLICT (domain, incarnation) DO UPDATE
 		 SET user_id = EXCLUDED.user_id,
 		     state = EXCLUDED.state,
 		     created_at = now(),
 		     updated_at = now()`,
-		domain, userID, state,
+		domain, incarnation, userID, state,
 	)
-	return state, err
+	return domainteardown.Receipt{Incarnation: incarnation, State: state}, err
 }
 
 // LookupDomainTeardownReceipt returns only the requesting owner's receipt.
 // pgx.ErrNoRows deliberately preserves DELETE's anti-enumeration behavior for
 // absent domains and receipts owned by another account.
 func (s *Store) LookupDomainTeardownReceipt(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+	receipt, err := s.LookupDomainTeardownReceiptRecord(ctx, domain, userID)
+	return receipt.State, err
+}
+
+// LookupDomainTeardownReceiptRecord returns the newest deletion receipt for
+// an absent domain, including the incarnation needed to bind a later keyed
+// poll to this deletion rather than a future same-name deletion.
+func (s *Store) LookupDomainTeardownReceiptRecord(ctx context.Context, domain, userID string) (domainteardown.Receipt, error) {
+	return lookupDomainTeardownReceiptRecord(ctx, s.pool, domain, userID)
+}
+
+// LookupDomainTeardownReceiptRecordTx is the transaction-bound form used when
+// binding an idempotency key to an already-deleted incarnation. The caller
+// holds the same advisory locks as registration/deletion, so a replacement
+// cannot appear between receipt selection and key completion.
+func (s *Store) LookupDomainTeardownReceiptRecordTx(ctx context.Context, tx pgx.Tx, domain, userID string) (domainteardown.Receipt, error) {
+	return lookupDomainTeardownReceiptRecord(ctx, tx, domain, userID)
+}
+
+func lookupDomainTeardownReceiptRecord(ctx context.Context, q senderIdentityExecutor, domain, userID string) (domainteardown.Receipt, error) {
+	var receipt domainteardown.Receipt
+	err := q.QueryRow(ctx,
+		`SELECT incarnation, state FROM domain_teardown_receipts
+		 WHERE domain = $1 AND user_id = $2
+		 ORDER BY receipt_id DESC LIMIT 1`,
+		normalizeDomain(domain), userID,
+	).Scan(&receipt.Incarnation, &receipt.State)
+	return receipt, err
+}
+
+// LookupDomainTeardownReceiptForIncarnation follows one historical deletion.
+// It is the safe polling path for a keyed retry after the DNS name has been
+// registered again: the lookup cannot drift onto the replacement receipt.
+func (s *Store) LookupDomainTeardownReceiptForIncarnation(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, error) {
 	var state domainteardown.State
 	err := s.pool.QueryRow(ctx,
-		`SELECT state FROM domain_teardown_receipts WHERE domain = $1 AND user_id = $2`,
-		normalizeDomain(domain), userID,
+		`SELECT state FROM domain_teardown_receipts
+		 WHERE domain = $1 AND incarnation = $2 AND user_id = $3`,
+		normalizeDomain(domain), incarnation, userID,
 	).Scan(&state)
 	return state, err
 }

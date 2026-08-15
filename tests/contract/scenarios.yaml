@@ -215,6 +215,8 @@ scenarios:
         action: request
         method: DELETE
         path: /v1/domains/domain-crud.test.dev?confirm=DELETE
+        headers_base64:
+          Idempotency-Key: Y29udHJhY3QtZG9tYWluLWRlbGV0ZS1vcmlnaW5hbA==
         # /v1 deleteDomain requires ?confirm=DELETE (D-5); returns 200 with the
         # deletion receipt. With no sender provider configured and no durable
         # managed-identity ledger row, absence is immediately confirmed and
@@ -225,6 +227,62 @@ scenarios:
             deleted: true
             domain: domain-crud.test.dev
             sending_teardown: confirmed
+
+      # Re-register the same DNS name, then retry the OLD logical deletion.
+      # The old key follows its incarnation-bound receipt and must not delete
+      # the replacement. Because replacement DNS is live, the release signal
+      # fails closed as pending even though the historical teardown confirmed.
+      - id: register_replacement
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: domain-crud.test.dev
+        expect:
+          status: 201
+          body_match:
+            domain: domain-crud.test.dev
+
+      - id: retry_old_delete
+        action: request
+        method: DELETE
+        path: /v1/domains/domain-crud.test.dev?confirm=DELETE
+        headers_base64:
+          Idempotency-Key: Y29udHJhY3QtZG9tYWluLWRlbGV0ZS1vcmlnaW5hbA==
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: domain-crud.test.dev
+            sending_teardown: pending
+
+      - id: replacement_survives_old_retry
+        action: request
+        method: GET
+        path: /v1/domains/domain-crud.test.dev
+        expect:
+          status: 200
+          body_match:
+            domain: domain-crud.test.dev
+
+      - id: delete_replacement
+        action: request
+        method: DELETE
+        path: /v1/domains/domain-crud.test.dev?confirm=DELETE
+        headers_base64:
+          Idempotency-Key: Y29udHJhY3QtZG9tYWluLWRlbGV0ZS1yZXBsYWNlbWVudA==
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: domain-crud.test.dev
+
+      - id: replacement_is_deleted_by_fresh_key
+        action: request
+        method: GET
+        path: /v1/domains/domain-crud.test.dev
+        expect:
+          status: 404
 
   - name: domain_agent_count
     description: >

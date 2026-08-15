@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -48,15 +49,18 @@ const (
 //   - Replay → the cached response, byte-faithful (unmarshaled back into T).
 //   - In-flight → 409; mismatch → 422.
 //   - Crash/panic safety: a panic between claim and completion releases the
-//     key (below) so retries aren't 409-locked for the stale window. As with a
-//     mid-flight process crash, the side-effect guarantee is therefore
-//     at-least-once, not exactly-once: a panic strictly after the side effect
-//     commits can let a retry re-run it.
+//     key (below) so retries aren't 409-locked for the stale window. The generic
+//     post-commit path is therefore at-least-once across a process crash. A
+//     handler that needs a stronger boundary may call CompleteTx from fn's
+//     side-effect transaction; domain DELETE does this to bind the key to the
+//     deleted registration's incarnation atomically.
 //
 // fn's contract: return a non-nil error ONLY before any irreversible side
 // effect (so the key is released and a retry can proceed); once the side
 // effect commits, return success with the final response so it is cached and
-// a retry replays it instead of re-doing the side effect.
+// a retry replays it instead of re-doing the side effect. Transactional callers
+// may have already completed the key; the final Complete below is then an
+// idempotent no-op.
 func runIdempotent[T any](s *Server, ctx context.Context, userID, key, route string, rawBody []byte, fn func() (int, T, error)) (int, T, error) {
 	return runIdempotentNS(s, ctx, userID, idemUserNS, key, route, rawBody, fn)
 }
@@ -70,6 +74,9 @@ func runIdempotentAuto[T any](s *Server, ctx context.Context, userID, key, route
 
 func runIdempotentNS[T any](s *Server, ctx context.Context, userID, ns, key, route string, rawBody []byte, fn func() (int, T, error)) (int, T, error) {
 	var zero T
+	if key != "" && (strings.TrimSpace(key) == "" || len(key) > idempotency.MaxKeyLength) {
+		return 0, zero, NewError(400, "invalid_request", "Idempotency-Key must be non-blank and at most 255 bytes")
+	}
 	if key == "" || s.deps.Idempotency == nil {
 		return fn()
 	}

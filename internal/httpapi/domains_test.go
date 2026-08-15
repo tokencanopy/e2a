@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
@@ -178,18 +177,11 @@ func TestDeleteDomainNotFound(t *testing.T) {
 
 func TestDeleteDomainReturnsOwnerScopedReceiptAfterRowIsGone(t *testing.T) {
 	srv := testServer(t, func(deps *Deps) {
-		deps.LookupDomain = func(context.Context, string, string) (*identity.Domain, error) {
-			return nil, pgx.ErrNoRows
-		}
-		deps.LookupDomainTeardown = func(_ context.Context, domain, userID string) (domainteardown.State, error) {
+		deps.DeleteDomain = func(_ context.Context, domain, userID string, _ DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
 			if domain != "already-deleted.example.test" || userID != "u_1" {
-				t.Fatalf("receipt lookup = %q, %q", domain, userID)
+				t.Fatalf("receipt resolution = %q, %q", domain, userID)
 			}
-			return domainteardown.Pending, nil
-		}
-		deps.DeleteDomain = func(context.Context, string, string) (domainteardown.State, error) {
-			t.Fatal("durable receipt retry must not execute deletion again")
-			return "", nil
+			return domainteardown.Receipt{Incarnation: "deleted-incarnation", State: domainteardown.Pending}, nil
 		}
 	})
 

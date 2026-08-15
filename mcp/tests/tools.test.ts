@@ -1997,6 +1997,15 @@ describe("e2a MCP server", () => {
     expect(stub.deleteDomain).not.toHaveBeenCalled();
   });
 
+  it("delete_domain requires a stable idempotency_key", async () => {
+    const res = await client.callTool({
+      name: "delete_domain",
+      arguments: { domain: "mail.acme.com", confirm: true },
+    });
+    expect(res.isError).toBe(true);
+    expect(stub.deleteDomain).not.toHaveBeenCalled();
+  });
+
   it("delete_domain forwards on explicit confirm:true", async () => {
     const res = await client.callTool({
       name: "delete_domain",

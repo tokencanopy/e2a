@@ -353,6 +353,10 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			return nil, errors.New("not found")
 		},
 		LookupDomain: fakeLookupDomain,
+		DomainExists: func(ctx context.Context, domain string) (bool, error) {
+			_, err := fakeLookupDomain(ctx, domain, "u_1")
+			return err == nil, nil
+		},
 		ListDomains: func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error) {
 			return []identity.Domain{{Domain: "acme.com", Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true, AgentCount: 2}}, nil
 		},
@@ -368,8 +372,11 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		DeleteDomain: func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
-			return domainteardown.Confirmed, nil
+		DeleteDomain: func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			if _, err := fakeLookupDomain(ctx, domain, userID); err != nil {
+				return domainteardown.Receipt{}, identity.ErrDomainNotFound
+			}
+			return domainteardown.Receipt{Incarnation: "test-incarnation", State: domainteardown.Confirmed}, nil
 		},
 		CountAgentsOnDomain: func(ctx context.Context, domain, userID string) (int, int, error) {
 			if domain == "busy.com" {

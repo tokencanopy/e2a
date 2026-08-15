@@ -47,9 +47,18 @@ export interface CleanupOpts {
   backoffMs?: number;
   /** Injectable so unit tests don't burn real wall-clock time. */
   sleep?: (ms: number) => Promise<void>;
+	/**
+	 * Domain-fixture plumbing: retain the logical delete key until DNS cleanup
+	 * also finishes. Ordinary resource cleanup should leave this false.
+	 */
+	retainDomainDeleteKeys?: boolean;
 }
 
 const tracked: CleanupFixture[] = [];
+// One key per tracked domain registration cleanup, retained across cleanup()
+// passes. A pending fixture may be retried by a later suite-finalizer pass;
+// minting again there would turn a poll into a fresh destructive operation.
+const domainDeleteKeys = new Map<string, string>();
 
 // A DELETE landing on one of these is terminal-good: the fixture is gone, or
 // A not-found response is the delete endpoints' anti-enumeration result for
@@ -77,6 +86,9 @@ export function track(kind: Kind, id: string): void {
   // a duplicated id gets reported as LEAKED even though its twin deleted fine.
   if (tracked.some((t) => t.kind === kind && t.id === id)) return;
   tracked.push({ kind, id });
+	if (kind === "domain" && !domainDeleteKeys.has(id)) {
+		domainDeleteKeys.set(id, randomUUID());
+	}
 }
 
 export function untrack(kind: Kind, id: string): void {
@@ -115,12 +127,32 @@ export async function cleanupFixtures(
 		if (outcome.reason === null) {
       succeeded++;
 			completed.push({ ...t, raw: outcome.raw });
+			if (
+				t.kind === "domain" &&
+				confirmedDomainTeardown(outcome.raw) &&
+				!opts.retainDomainDeleteKeys
+			) {
+				domainDeleteKeys.delete(t.id);
+			}
       untrack(t.kind, t.id);
     } else {
 			failed.push({ ...t, reason: outcome.reason });
     }
   }
 	return { attempted: batch.length, succeeded, failed, completed };
+}
+
+/** Finish one domain registration's cleanup after its DNS records are gone. */
+export function forgetDomainDeleteKey(domain: string): void {
+	domainDeleteKeys.delete(domain);
+}
+
+function confirmedDomainTeardown(raw: string): boolean {
+	try {
+		return (JSON.parse(raw) as { sending_teardown?: unknown }).sending_teardown === "confirmed";
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -139,7 +171,14 @@ async function deleteWithRetry(
   // Domain DELETE is only safe across an ambiguous transport failure when
   // every retry carries the same logical-operation key. The server replays
   // that receipt rather than deleting a same-name replacement registration.
-  const idempotencyKey = t.kind === "domain" ? randomUUID() : undefined;
+  let idempotencyKey: string | undefined;
+  if (t.kind === "domain") {
+		idempotencyKey = domainDeleteKeys.get(t.id);
+		if (idempotencyKey === undefined) {
+			idempotencyKey = randomUUID();
+			domainDeleteKeys.set(t.id, idempotencyKey);
+		}
+	}
   let reason = "no attempt made";
 	const maxAttempts = Math.max(attempts, conflictAttempts);
 	// The budget is monotonic: once any attempt observes a known transient 409,

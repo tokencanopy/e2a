@@ -96,6 +96,11 @@ perl -0pi -e 's/\n+\z/\n/' \
   "$DEST/models/page_agent_suppression_view.py" \
   "$DEST/models/unsubscribe_options.py"
 
+# Preserve the pre-existing positional transport options; append the newly
+# generated idempotency header after them.
+python3 "$ROOT/scripts/preserve-generated-domain-delete-signatures.py" \
+  python "$DEST"
+
 rm -f "$CODEGEN_SPEC"
 trap - EXIT
 

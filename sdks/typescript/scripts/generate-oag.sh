@@ -102,6 +102,11 @@ perl -0pi -e 's/\n+\z/\n/' \
 perl -0pi -e 's/(import \{ PromiseMiddleware[^\n]+\n)\n/$1/' \
   "$OUT/types/PromiseAPI.ts"
 
+# Adding an optional operation parameter normally displaces the generated
+# transport-options argument. Preserve its already-published positional slot.
+python3 "$ROOT/scripts/preserve-generated-domain-delete-signatures.py" \
+  typescript "$OUT"
+
 # OpenAPI Generator's TypeScript ObjectSerializer cannot serialize a oneOf of
 # SCALARS/arrays — reply_to is `string | string[]` (ForwardRequestReplyTo). It
 # registers the synthesized union class in typeMap but emits NO

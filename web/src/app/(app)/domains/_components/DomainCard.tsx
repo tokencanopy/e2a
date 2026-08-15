@@ -316,7 +316,14 @@ export function DomainCard({
     setDeleteError("");
     setDeleting(true);
     try {
-      const result = await deleteDomain(domain.domain);
+      // The verification token is the domain registration's immutable
+      // incarnation. Deriving the operation key from it keeps repeated clicks
+      // and ambiguous transport retries on this card bound to the same delete,
+      // while a replacement registration receives a different key.
+      const result = await deleteDomain(
+        domain.domain,
+        `dashboard-domain-delete:${domain.verification_token}`,
+      );
       if (result.sending_teardown === "confirmed") {
         onDeleted();
       } else if (result.sending_teardown === "manual_review") {

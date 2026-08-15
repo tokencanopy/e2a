@@ -8,17 +8,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/domainteardown"
+	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
 func TestDeleteDomainLostResponseCanPollConfirmedReceipt(t *testing.T) {
 	state := domainteardown.Pending
 	srv := testServer(t, func(deps *Deps) {
-		deps.LookupDomain = func(context.Context, string, string) (*identity.Domain, error) {
-			return nil, pgx.ErrNoRows // first DELETE already committed; response was lost
-		}
-		deps.LookupDomainTeardown = func(context.Context, string, string) (domainteardown.State, error) {
-			return state, nil
+		deps.DeleteDomain = func(context.Context, string, string, DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			return domainteardown.Receipt{Incarnation: "lost-response-incarnation", State: state}, nil
 		}
 	})
 
@@ -36,18 +34,36 @@ func TestDeleteDomainLostResponseCanPollConfirmedReceipt(t *testing.T) {
 func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 	live := true
 	deletions := 0
+	receiptState := domainteardown.Pending
+	const originalIncarnation = "e2a-verify=original-incarnation"
+	// Simulate the exact crash window from the review: the business transaction
+	// commits, but the generic post-response Complete never reaches Postgres.
+	// CompleteTx still works, because it is part of the business transaction.
+	idem := &atomicOnlyIdem{memIdem: newMemIdem()}
 	srv := testServer(t, func(deps *Deps) {
-		deps.Idempotency = newMemIdem()
+		deps.Idempotency = idem
 		deps.LookupDomain = func(context.Context, string, string) (*identity.Domain, error) {
-			if live {
-				return &identity.Domain{Domain: "replacement.example.test", VerificationToken: "e2a-verify=replacement"}, nil
-			}
+			// Model an account transfer: the receipt owner cannot read the
+			// replacement row, but the ownership-blind safety check still sees it.
 			return nil, pgx.ErrNoRows
 		}
-		deps.DeleteDomain = func(context.Context, string, string) (domainteardown.State, error) {
+		deps.DomainExists = func(context.Context, string) (bool, error) { return live, nil }
+		deps.LookupDomainTeardownForIncarnation = func(_ context.Context, _, incarnation, _ string) (domainteardown.State, error) {
+			if incarnation != originalIncarnation {
+				return "", pgx.ErrNoRows
+			}
+			return receiptState, nil
+		}
+		deps.DeleteDomain = func(ctx context.Context, _ string, _ string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
 			deletions++
 			live = false
-			return domainteardown.Confirmed, nil
+			receipt := domainteardown.Receipt{Incarnation: originalIncarnation, State: receiptState}
+			if complete != nil {
+				if err := complete(ctx, nil, receipt); err != nil {
+					return domainteardown.Receipt{}, err
+				}
+			}
+			return receipt, nil
 		}
 	})
 
@@ -71,7 +87,7 @@ func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 	}
 
 	code, body := deleteWithKey("replacement.example.test", "delete-original-incarnation")
-	if code != http.StatusOK || body["sending_teardown"] != SendingTeardownConfirmed {
+	if code != http.StatusOK || body["sending_teardown"] != SendingTeardownPending {
 		t.Fatalf("first delete = %d %v", code, body)
 	}
 	code, body = deleteWithKey("different.example.test", "delete-original-incarnation")
@@ -84,9 +100,15 @@ func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 
 	// The first response is lost, then the same account registers a new domain
 	// incarnation under the same name before the SDK retries the old request.
+	// Expire only an in-progress claim, mirroring Store's five-minute stale
+	// takeover. An atomically completed claim survives this step and replays.
+	idem.expireInProgress("u_1", idemUserNS+"delete-original-incarnation")
 	live = true
+	receiptState = domainteardown.Confirmed
 	code, body = deleteWithKey("replacement.example.test", "delete-original-incarnation")
-	if code != http.StatusOK || body["sending_teardown"] != SendingTeardownConfirmed {
+	// The old receipt advanced, but a live replacement means its DNS is in use;
+	// the public release signal must fail closed while the replacement exists.
+	if code != http.StatusOK || body["sending_teardown"] != SendingTeardownPending {
 		t.Fatalf("lost-response retry = %d %v", code, body)
 	}
 	if deletions != 1 {
@@ -102,5 +124,31 @@ func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 	}
 	if deletions != 2 || live {
 		t.Fatalf("fresh key must delete the replacement: deletions=%d live=%v", deletions, live)
+	}
+
+	code, body = deleteWithKey("replacement.example.test", "delete-original-incarnation")
+	if code != http.StatusOK || body["sending_teardown"] != SendingTeardownConfirmed {
+		t.Fatalf("old keyed poll after replacement teardown = %d %v", code, body)
+	}
+	if deletions != 2 {
+		t.Fatalf("old keyed poll re-executed deletion: deletions=%d", deletions)
+	}
+}
+
+// atomicOnlyIdem drops generic post-response completion to model request
+// cancellation/process death after the domain transaction commits. Its
+// transaction-bound completion retains the real memIdem behavior.
+type atomicOnlyIdem struct{ *memIdem }
+
+func (m *atomicOnlyIdem) Complete(context.Context, string, string, idempotency.CachedResponse) error {
+	return nil
+}
+
+func (m *atomicOnlyIdem) expireInProgress(userID, key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := userID + "\x00" + key
+	if row := m.rows[k]; row != nil && !row.done {
+		delete(m.rows, k)
 	}
 }

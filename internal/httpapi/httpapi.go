@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -76,9 +77,19 @@ type ConversationGetter func(ctx context.Context, agentID, conversationID string
 // legacy columns were dropped (migration 029). Handlers pass "".
 type AgentCreator func(ctx context.Context, email, domain, name, webhookURL, agentMode, userID string) (*identity.AgentIdentity, error)
 
+// DomainDeleteIdemCompleter commits the keyed operation record in the same
+// transaction as the domain deletion and its incarnation-bound teardown
+// receipt. A post-commit process crash therefore cannot leave the key stale
+// and available to delete a same-name replacement.
+type DomainDeleteIdemCompleter func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error
+
 // DomainLookup mirrors store.LookupDomain(domain, userID) — the create-time
 // ownership guard.
 type DomainLookup func(ctx context.Context, domain, userID string) (*identity.Domain, error)
+
+// DomainExists is an ownership-blind safety check used only to suppress a
+// historical DNS-release signal while any same-name registration is live.
+type DomainExists func(ctx context.Context, domain string) (bool, error)
 
 // CoveringDomainLookup mirrors store.LookupCoveringDomain(sub, userID): the
 // create-time fallback that finds the most-specific registered parent domain
@@ -204,12 +215,13 @@ type Deps struct {
 	SendingRampSnapshot func(ctx context.Context, userID, domain string, now time.Time) (sendramp.Snapshot, error)
 	ClaimDomain         func(ctx context.Context, domain, userID string) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
-	// DeleteDomain deletes the domain and returns its durable provider-side
-	// sending-identity teardown state. LookupDomainTeardown makes a repeated
-	// DELETE an owner-scoped poll after the domain row itself is gone.
-	DeleteDomain         func(ctx context.Context, domain, userID string) (teardown domainteardown.State, err error)
-	LookupDomainTeardown func(ctx context.Context, domain, userID string) (domainteardown.State, error)
-	CountAgentsOnDomain  func(ctx context.Context, domain, userID string) (live, trashed int, err error)
+	// DeleteDomain atomically either deletes the live incarnation or resolves
+	// the newest historical receipt when the row is already gone. The exact-
+	// incarnation lookup lets a completed key observe later state transitions.
+	DeleteDomain                       func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error)
+	LookupDomainTeardownForIncarnation func(ctx context.Context, domain, incarnation, userID string) (domainteardown.State, error)
+	DomainExists                       DomainExists
+	CountAgentsOnDomain                func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a
 	// domain must publish (config smtp.domain).

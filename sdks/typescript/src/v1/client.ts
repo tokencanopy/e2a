@@ -750,7 +750,7 @@ class DomainsResource {
     // domain's DNS published. Reuse opts.idempotencyKey after an ambiguous
     // failure so the server replays this deletion instead of deleting a later
     // registration; omit it and the SDK mints one for this call's retries.
-    return call(() => this.api.deleteDomain(domain, "DELETE", opts.idempotencyKey));
+    return call(() => this.api.deleteDomain(domain, "DELETE", undefined, opts.idempotencyKey));
   }
   verify(domain: string): Promise<VerifyDomainView> {
     return call(() => this.api.verifyDomain(domain));

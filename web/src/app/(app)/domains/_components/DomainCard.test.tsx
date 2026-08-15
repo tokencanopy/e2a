@@ -387,7 +387,10 @@ describe("DomainCard — delete flow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
-    expect(mockDelete).toHaveBeenCalledWith("mail.example.com");
+    expect(mockDelete).toHaveBeenCalledWith(
+      "mail.example.com",
+      "dashboard-domain-delete:e2a-verify=abc123",
+    );
   });
 
   it.each([

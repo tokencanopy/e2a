@@ -13,7 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
-func TestDomainTeardownReceiptSurvivesDeleteAndClearsOnReRegistration(t *testing.T) {
+func TestDomainTeardownReceiptSurvivesDeleteAndReRegistration(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
@@ -26,15 +26,15 @@ func TestDomainTeardownReceiptSurvivesDeleteAndClearsOnReRegistration(t *testing
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	var initial domainteardown.State
-	if err := store.DeleteDomainTx(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx) error {
+	var initial domainteardown.Receipt
+	if err := store.DeleteDomainTx(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
 		var err error
-		initial, err = store.BeginDomainTeardownReceiptTx(ctx, tx, domain, user.ID, true)
+		initial, err = store.BeginDomainTeardownReceiptTx(ctx, tx, domain, incarnation, user.ID, true)
 		return err
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("DeleteDomainTx: %v", err)
 	}
-	if initial != domainteardown.Pending {
+	if initial.State != domainteardown.Pending || initial.Incarnation == "" {
 		t.Fatalf("initial state = %q, want pending while a provider check is outstanding", initial)
 	}
 	got, err := store.LookupDomainTeardownReceipt(ctx, domain, user.ID)
@@ -56,8 +56,34 @@ func TestDomainTeardownReceiptSurvivesDeleteAndClearsOnReRegistration(t *testing
 	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
 		t.Fatalf("re-register domain: %v", err)
 	}
-	if _, err := store.LookupDomainTeardownReceipt(ctx, domain, user.ID); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("stale receipt survived a new domain incarnation: %v", err)
+	got, err = store.LookupDomainTeardownReceiptForIncarnation(ctx, domain, initial.Incarnation, user.ID)
+	if err != nil || got != domainteardown.Confirmed {
+		t.Fatalf("historical receipt after re-registration = %q, %v; want confirmed", got, err)
+	}
+
+	var replacement domainteardown.Receipt
+	if err := store.DeleteDomainTx(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
+		var err error
+		replacement, err = store.BeginDomainTeardownReceiptTx(ctx, tx, domain, incarnation, user.ID, true)
+		return err
+	}, nil); err != nil {
+		t.Fatalf("delete replacement: %v", err)
+	}
+	if replacement.Incarnation == initial.Incarnation {
+		t.Fatalf("replacement incarnation = initial incarnation %q", initial.Incarnation)
+	}
+	got, err = store.LookupDomainTeardownReceiptForIncarnation(ctx, domain, initial.Incarnation, user.ID)
+	if err != nil || got != domainteardown.Pending {
+		t.Fatalf("old receipt during replacement teardown = %q, %v; want pending", got, err)
+	}
+	if err := store.SetDomainTeardownState(ctx, domain, domainteardown.Confirmed); err != nil {
+		t.Fatalf("confirm replacement teardown: %v", err)
+	}
+	for _, incarnation := range []string{initial.Incarnation, replacement.Incarnation} {
+		got, err = store.LookupDomainTeardownReceiptForIncarnation(ctx, domain, incarnation, user.ID)
+		if err != nil || got != domainteardown.Confirmed {
+			t.Fatalf("receipt %q after replacement convergence = %q, %v; want confirmed", incarnation, got, err)
+		}
 	}
 }
 
@@ -81,15 +107,15 @@ func TestDomainTeardownReceiptWithoutProviderDependsOnManagedLedger(t *testing.T
 				t.Fatalf("MarkSendingIdentityManaged: %v", err)
 			}
 		}
-		var state domainteardown.State
-		if err := store.DeleteDomainTx(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx) error {
+		var receipt domainteardown.Receipt
+		if err := store.DeleteDomainTx(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
 			var err error
-			state, err = store.BeginDomainTeardownReceiptTx(ctx, tx, domain, user.ID, false)
+			receipt, err = store.BeginDomainTeardownReceiptTx(ctx, tx, domain, incarnation, user.ID, false)
 			return err
-		}); err != nil {
+		}, nil); err != nil {
 			t.Fatalf("DeleteDomainTx: %v", err)
 		}
-		return state
+		return receipt.State
 	}
 
 	if got := deleteWithReceipt(t, "never-managed.example.test", false); got != domainteardown.Confirmed {

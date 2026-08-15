@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/dkim"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
+	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/mailfrom"
 	"github.com/tokencanopy/e2a/internal/sendramp"
@@ -323,7 +326,7 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteDomain", Method: http.MethodDelete, Path: "/v1/domains/{domain}",
 		Summary: "Delete a domain", Tags: []string{"domains"},
-		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: the original receipt is replayed without deleting a later registration of the same domain. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
+		Description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).",
 		Security:    []map[string][]string{{"bearer": {}}},
 		Responses: map[string]*huma.Response{
 			"409":     s.idempotencyInFlightResponse(),
@@ -554,12 +557,21 @@ func (s *Server) domainViewWithRamp(ctx context.Context, userID string, d *ident
 
 type deleteDomainOutput struct{ Body DeleteDomainResult }
 
+// deleteDomainIdemResult is the private idempotency-cache representation. The
+// incarnation never reaches the public response, but lets a replay resolve the
+// current state of the exact historical receipt rather than replaying a stale
+// pending snapshot or drifting onto a replacement registration.
+type deleteDomainIdemResult struct {
+	DeleteDomainResult
+	ReceiptIncarnation string `json:"_receipt_incarnation,omitempty"`
+}
+
 // deleteDomainInput adds the confirmation guard (D-5). Deleting a domain
 // deprovisions its SES sending identity and breaks sending for every agent on
 // it, so it requires ?confirm=DELETE — uniform with deleteAccount/deleteAgent.
 type deleteDomainInput struct {
 	Domain         string `path:"domain"`
-	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional idempotency key for safe retries (unique per logical domain deletion). A retry with the same key replays the first deletion receipt instead of deleting a replacement registration of the same domain. Completed keys are remembered for at least 24 hours. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight."`
+	IdempotencyKey string `header:"Idempotency-Key" maxLength:"255" doc:"Optional idempotency key for safe retries (unique per logical domain deletion; at most 255 bytes). Within the key-retention window, a retry with the same key follows the original incarnation-bound deletion receipt without deleting a replacement registration of the same domain, and can observe pending advancing to confirmed. Completed keys are remembered for at least 24 hours; after retention expires, the same key starts a new operation. Reuse the original key after an ambiguous failure; use a new key only for a new domain incarnation. Same key on a different domain returns 422 idempotency_key_reuse; a concurrent request with the same key returns 409 idempotency_in_flight."`
 	DeleteConfirm
 }
 
@@ -568,47 +580,75 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	if err != nil {
 		return nil, err
 	}
+	var idemCompleteTx DomainDeleteIdemCompleter
+	if in.IdempotencyKey != "" && s.deps.Idempotency != nil {
+		nsKey := idemUserNS + in.IdempotencyKey
+		uid, domain := user.ID, in.Domain
+		idemCompleteTx = func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error {
+			raw, err := json.Marshal(deleteDomainIdemResult{
+				DeleteDomainResult: DeleteDomainResult{
+					Deleted: true, Domain: domain, SendingTeardown: string(receipt.State),
+				},
+				ReceiptIncarnation: receipt.Incarnation,
+			})
+			if err != nil {
+				return err
+			}
+			return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, idempotency.CachedResponse{
+				StatusCode: http.StatusOK, ContentType: "application/json", Body: raw,
+			})
+		}
+	}
+
 	_, body, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/domains/"+strings.ToLower(in.Domain), nil,
-		func() (int, DeleteDomainResult, error) {
-			if _, err := s.deps.LookupDomain(ctx, in.Domain, user.ID); err != nil {
-				if s.deps.LookupDomainTeardown != nil {
-					teardown, receiptErr := s.deps.LookupDomainTeardown(ctx, in.Domain, user.ID)
-					if receiptErr == nil {
-						return http.StatusOK, DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}, nil
-					}
-					if !errors.Is(receiptErr, pgx.ErrNoRows) {
-						return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to read domain teardown receipt")
-					}
-				}
-				return 0, DeleteDomainResult{}, NewError(http.StatusNotFound, "not_found", "domain not found")
-			}
+		func() (int, deleteDomainIdemResult, error) {
 			// Confirm is enforced declaratively by Huma (required + enum:[DELETE] on
 			// DeleteConfirm): a missing/wrong ?confirm is a 422 before this handler.
 			live, trashed, err := s.deps.CountAgentsOnDomain(ctx, in.Domain, user.ID)
 			if err != nil {
-				return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to check domain agents")
+				return 0, deleteDomainIdemResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to check domain agents")
 			}
 			if live > 0 || trashed > 0 {
-				return 0, DeleteDomainResult{}, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
+				return 0, deleteDomainIdemResult{}, NewError(http.StatusBadRequest, "domain_has_agents", domainHasAgentsMessage(live, trashed))
 			}
-			teardown, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID)
+			receipt, err := s.deps.DeleteDomain(ctx, in.Domain, user.ID, idemCompleteTx)
 			if err != nil {
 				switch {
 				case errors.Is(err, identity.ErrDomainHasAgents):
-					return 0, DeleteDomainResult{}, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
+					return 0, deleteDomainIdemResult{}, NewError(http.StatusBadRequest, "domain_has_agents", "cannot delete domain while agents exist — delete its agents first (including any in the trash: they hold the address until restored or permanently deleted)")
 				case errors.Is(err, identity.ErrDomainNotFound):
-					return 0, DeleteDomainResult{}, NewError(http.StatusNotFound, "not_found", "domain not found")
+					return 0, deleteDomainIdemResult{}, NewError(http.StatusNotFound, "not_found", "domain not found")
 				default:
-					return 0, DeleteDomainResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
+					return 0, deleteDomainIdemResult{}, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
 				}
 			}
-			return http.StatusOK, DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}, nil
+			return http.StatusOK, deleteDomainIdemResult{
+				DeleteDomainResult: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(receipt.State)},
+				ReceiptIncarnation: receipt.Incarnation,
+			}, nil
 		})
 	if err != nil {
 		return nil, err
 	}
-	return &deleteDomainOutput{Body: body}, nil
+	if body.ReceiptIncarnation != "" && s.deps.LookupDomainTeardownForIncarnation != nil {
+		teardown, lookupErr := s.deps.LookupDomainTeardownForIncarnation(ctx, in.Domain, body.ReceiptIncarnation, user.ID)
+		if lookupErr != nil {
+			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to read keyed domain teardown receipt")
+		}
+		body.SendingTeardown = string(teardown)
+		// A historical receipt may be confirmed, but if a replacement is live
+		// now its DNS is necessarily still in use. Fail closed for the public
+		// DNS-release signal while preserving the old key's no-delete behavior.
+		live, liveErr := s.deps.DomainExists(ctx, in.Domain)
+		if liveErr != nil {
+			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to check replacement domain")
+		}
+		if live {
+			body.SendingTeardown = SendingTeardownPending
+		}
+	}
+	return &deleteDomainOutput{Body: body.DeleteDomainResult}, nil
 }
 
 // domainHasAgentsMessage explains WHICH agents are blocking a domain delete.

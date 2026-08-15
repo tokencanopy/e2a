@@ -1,5 +1,5 @@
 import type { ApiClient } from "./client.ts";
-import { cleanupFixtures, track, untrack, type CleanupOpts, type CleanupResult } from "./cleanup.ts";
+import { cleanupFixtures, forgetDomainDeleteKey, track, untrack, type CleanupOpts, type CleanupResult } from "./cleanup.ts";
 import type { CloudflareDnsRecordRef } from "./cloudflare-dns.ts";
 
 export interface DomainFixture {
@@ -44,7 +44,10 @@ export async function cleanupDomainFixture(
     { kind: "domain" as const, id: fixture.domain },
     ...(fixture.agent ? [{ kind: "agent" as const, id: fixture.agent }] : []),
   ];
-  const result = await cleanupFixtures(client, resources, opts);
+  const result = await cleanupFixtures(client, resources, {
+		...opts,
+		retainDomainDeleteKeys: true,
+	});
   if (result.failed.length > 0) return { ...result, dnsFailed: [] };
 	// cleanupFixtures has removed the API domain from the registry. Re-arm it
 	// synchronously before the first DNS await so a signal/crash during DNS
@@ -94,7 +97,10 @@ export async function cleanupDomainFixture(
     if (reason !== "") dnsFailed.push({ id, reason });
   }
 
-	if (dnsFailed.length === 0) untrack("domain", fixture.domain);
+	if (dnsFailed.length === 0) {
+		untrack("domain", fixture.domain);
+		forgetDomainDeleteKey(fixture.domain);
+	}
   return { ...result, dnsFailed };
 }
 

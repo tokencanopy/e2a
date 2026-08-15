@@ -187,43 +187,44 @@ func BuildDeps(p Params) httpapi.Deps {
 		RestoreMessage:       p.Store.RestoreMessage,
 		PurgeMessage:         p.Store.PurgeMessage,
 
-		ListDomains:            p.Store.ListDomainsByUser,
-		SendingRampSnapshot:    rampSnapshot,
-		ClaimDomain:            p.Store.ClaimOrCreateDomain,
-		EnforceDomainCreate:    p.Enforcer.CheckDomainCreate,
-		DeleteDomain:           deleteDomainFunc(p),
-		LookupDomainTeardown:   p.Store.LookupDomainTeardownReceipt,
-		CountAgentsOnDomain:    p.Store.CountAgentsOnDomain,
-		SMTPDomain:             p.SMTPDomain,
-		SESRegion:              p.SESRegion,
-		CursorSecret:           p.SigningSecret,
-		EventsEnabled:          p.EventsEnabled,
-		Idempotency:            p.Idempotency,
-		DeliverOutbound:        p.API.DeliverOutbound,
-		SendTest:               p.API.SendTestCore,
-		PollSendOutcome:        p.Store.GetSendOutcome,
-		ApprovePending:         p.API.ApprovePendingCore,
-		SendLimit:              p.API.SendLimitAllow,
-		PollLimit:              p.API.PollLimitAllow,
-		RegLimit:               p.API.RegLimitAllow,
-		DownloadLimit:          p.API.DownloadLimitAllow,
-		UnsubscribeLimit:       p.API.UnsubscribeLimitAllow,
-		RejectPending:          p.API.RejectPendingCore,
-		GetReviewMessage:       p.Store.GetReviewMessage,
-		ApproveInboundReview:   p.API.ApproveInboundReviewCore,
-		RejectInboundReview:    p.API.RejectInboundReviewCore,
-		ListReviews:            p.Store.ListReviews,
-		GetReviewWithContent:   p.Store.GetReviewWithContent,
-		EnforceMessageSend:     p.Enforcer.CheckMessageSend,
-		GetRepliableMessage:    p.Store.GetRepliableMessage,
-		GetLimits:              p.Enforcer.Get,
-		ExportUserData:         p.API.ExportUserDataCore,
-		DeleteUserData:         p.API.DeleteUserDataCore,
-		ListSuppressions:       p.Store.ListSuppressions,
-		RemoveSuppression:      p.Store.RemoveSuppression,
-		AddAgentSuppression:    p.Store.AddAgentSuppression,
-		ListAgentSuppressions:  p.Store.ListAgentSuppressions,
-		RemoveAgentSuppression: p.Store.RemoveAgentSuppression,
+		ListDomains:                        p.Store.ListDomainsByUser,
+		SendingRampSnapshot:                rampSnapshot,
+		ClaimDomain:                        p.Store.ClaimOrCreateDomain,
+		EnforceDomainCreate:                p.Enforcer.CheckDomainCreate,
+		DeleteDomain:                       deleteDomainFunc(p),
+		LookupDomainTeardownForIncarnation: p.Store.LookupDomainTeardownReceiptForIncarnation,
+		DomainExists:                       p.Store.DomainExists,
+		CountAgentsOnDomain:                p.Store.CountAgentsOnDomain,
+		SMTPDomain:                         p.SMTPDomain,
+		SESRegion:                          p.SESRegion,
+		CursorSecret:                       p.SigningSecret,
+		EventsEnabled:                      p.EventsEnabled,
+		Idempotency:                        p.Idempotency,
+		DeliverOutbound:                    p.API.DeliverOutbound,
+		SendTest:                           p.API.SendTestCore,
+		PollSendOutcome:                    p.Store.GetSendOutcome,
+		ApprovePending:                     p.API.ApprovePendingCore,
+		SendLimit:                          p.API.SendLimitAllow,
+		PollLimit:                          p.API.PollLimitAllow,
+		RegLimit:                           p.API.RegLimitAllow,
+		DownloadLimit:                      p.API.DownloadLimitAllow,
+		UnsubscribeLimit:                   p.API.UnsubscribeLimitAllow,
+		RejectPending:                      p.API.RejectPendingCore,
+		GetReviewMessage:                   p.Store.GetReviewMessage,
+		ApproveInboundReview:               p.API.ApproveInboundReviewCore,
+		RejectInboundReview:                p.API.RejectInboundReviewCore,
+		ListReviews:                        p.Store.ListReviews,
+		GetReviewWithContent:               p.Store.GetReviewWithContent,
+		EnforceMessageSend:                 p.Enforcer.CheckMessageSend,
+		GetRepliableMessage:                p.Store.GetRepliableMessage,
+		GetLimits:                          p.Enforcer.Get,
+		ExportUserData:                     p.API.ExportUserDataCore,
+		DeleteUserData:                     p.API.DeleteUserDataCore,
+		ListSuppressions:                   p.Store.ListSuppressions,
+		RemoveSuppression:                  p.Store.RemoveSuppression,
+		AddAgentSuppression:                p.Store.AddAgentSuppression,
+		ListAgentSuppressions:              p.Store.ListAgentSuppressions,
+		RemoveAgentSuppression:             p.Store.RemoveAgentSuppression,
 
 		CreateContact:            p.Store.CreateContact,
 		GetContact:               p.Store.GetContactByAddress,
@@ -352,39 +353,38 @@ const bestEffortDeprovisionTimeout = 10 * time.Second
 // owner-scoped receipt exposes the convergence state to repeated DELETEs. With
 // no provider configured, a managed ledger row remains pending rather than
 // falsely claiming provider absence.
-func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
-	lookupReceipt := func(ctx context.Context, domain, userID string) (domainteardown.State, bool, error) {
-		state, err := p.Store.LookupDomainTeardownReceipt(ctx, domain, userID)
-		if err == nil {
-			return state, true, nil
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
+func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string, complete httpapi.DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
 	if p.SenderIdentity == nil {
-		return func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
-			if state, ok, err := lookupReceipt(ctx, domain, userID); err != nil || ok {
-				return state, err
-			}
-			var state domainteardown.State
-			if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+		return func(ctx context.Context, domain, userID string, complete httpapi.DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			var receipt domainteardown.Receipt
+			if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
 				var err error
-				state, err = p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, userID, false)
-				return err
+				receipt, err = p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, incarnation, userID, false)
+				if err != nil || complete == nil {
+					return err
+				}
+				return complete(ctx, tx, receipt)
+			}, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				receipt, err = p.Store.LookupDomainTeardownReceiptRecordTx(ctx, tx, domain, userID)
+				if err != nil || complete == nil {
+					return err
+				}
+				return complete(ctx, tx, receipt)
 			}); err != nil {
-				return "", err
+				return domainteardown.Receipt{}, err
 			}
-			return state, nil
+			return receipt, nil
 		}
 	}
-	return func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
-		if state, ok, err := lookupReceipt(ctx, domain, userID); err != nil || ok {
-			return state, err
-		}
-		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, userID, true); err != nil {
+	return func(ctx context.Context, domain, userID string, complete httpapi.DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+		var receipt domainteardown.Receipt
+		deletedNow := false
+		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
+			deletedNow = true
+			var err error
+			receipt, err = p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, incarnation, userID, true)
+			if err != nil {
 				return err
 			}
 			// The delete is the tombstone's latest mutation: stamping it keeps
@@ -395,9 +395,25 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 			if err := p.SenderIdentity.EnqueueDeprovisionTx(ctx, tx, domain); err != nil {
 				return err
 			}
-			return p.Store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
+			if err := p.Store.TouchSendingIdentityTombstoneTx(ctx, tx, domain); err != nil {
+				return err
+			}
+			if complete != nil {
+				return complete(ctx, tx, receipt)
+			}
+			return nil
+		}, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			receipt, err = p.Store.LookupDomainTeardownReceiptRecordTx(ctx, tx, domain, userID)
+			if err != nil || complete == nil {
+				return err
+			}
+			return complete(ctx, tx, receipt)
 		}); err != nil {
-			return "", err
+			return domainteardown.Receipt{}, err
+		}
+		if !deletedNow {
+			return receipt, nil
 		}
 		depCtx, cancel := context.WithTimeout(ctx, bestEffortDeprovisionTimeout)
 		defer cancel()
@@ -407,20 +423,25 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 			// Surfaced to the client as sending_teardown:"pending" so callers
 			// (e.g. the conformance harness) do not remove DNS from under a
 			// still-live provider identity.
-			return domainteardown.Pending, nil
+			receipt.State = domainteardown.Pending
+			return receipt, nil
 		}
 		if !confirmed {
 			if err := p.Store.SetDomainTeardownState(ctx, domain, domainteardown.ManualReview); err != nil {
 				log.Printf("[apiserver] persist manual-review teardown receipt for %s: %v", domain, err)
-				return domainteardown.Pending, nil
+				receipt.State = domainteardown.Pending
+				return receipt, nil
 			}
-			return domainteardown.ManualReview, nil
+			receipt.State = domainteardown.ManualReview
+			return receipt, nil
 		}
 		if err := p.Store.SetDomainTeardownState(ctx, domain, domainteardown.Confirmed); err != nil {
 			log.Printf("[apiserver] persist confirmed teardown receipt for %s: %v", domain, err)
-			return domainteardown.Pending, nil
+			receipt.State = domainteardown.Pending
+			return receipt, nil
 		}
-		return domainteardown.Confirmed, nil
+		receipt.State = domainteardown.Confirmed
+		return receipt, nil
 	}
 }
 

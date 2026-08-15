@@ -2,6 +2,7 @@ package apiserver_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/apiserver"
 	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/httpapi"
+	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/testutil"
@@ -99,11 +101,11 @@ func TestBuildDepsDeleteDomainWithSenderIdentity(t *testing.T) {
 		rowGoneAtTryTime = lookupErr != nil
 	}
 
-	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
 	if err != nil {
 		t.Fatalf("DeleteDomain: %v", err)
 	}
-	if teardown != httpapi.SendingTeardownConfirmed {
+	if teardown.State != domainteardown.Confirmed {
 		t.Fatalf("teardown = %q, want %q when best-effort deprovision succeeded", teardown, httpapi.SendingTeardownConfirmed)
 	}
 	if len(fake.deprovisioned) != 1 || fake.deprovisioned[0] != domain {
@@ -141,11 +143,11 @@ func TestBuildDepsDeleteDomainSucceedsWhenProviderUnavailable(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
 	if err != nil {
 		t.Fatalf("DeleteDomain must succeed while the provider is down, got %v", err)
 	}
-	if teardown != httpapi.SendingTeardownPending {
+	if teardown.State != domainteardown.Pending {
 		t.Fatalf("teardown = %q, want %q — callers gate DNS removal on this", teardown, httpapi.SendingTeardownPending)
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
@@ -171,11 +173,11 @@ func TestBuildDepsDeleteDomainReportsManualReviewWhenOwnershipCannotBeConfirmed(
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	teardown, err := deps.DeleteDomain(ctx, domain, user.ID)
+	teardown, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
 	if err != nil {
 		t.Fatalf("DeleteDomain must commit despite ownership drift: %v", err)
 	}
-	if teardown != httpapi.SendingTeardownManualReview {
+	if teardown.State != domainteardown.ManualReview {
 		t.Fatalf("teardown = %q, want %q", teardown, httpapi.SendingTeardownManualReview)
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
@@ -198,21 +200,160 @@ func TestBuildDepsDeleteDomainReceiptRecoversLostResponse(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	state, err := deps.DeleteDomain(ctx, domain, user.ID)
-	if err != nil || state != httpapi.SendingTeardownPending {
-		t.Fatalf("first delete = %q, %v; want pending", state, err)
+	receipt, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
+	if err != nil || receipt.State != domainteardown.Pending {
+		t.Fatalf("first delete = %q, %v; want pending", receipt.State, err)
 	}
-	state, err = deps.DeleteDomain(ctx, domain, user.ID)
-	if err != nil || state != httpapi.SendingTeardownPending {
-		t.Fatalf("repeat delete must return the durable receipt, got %q, %v", state, err)
+	receipt, err = deps.DeleteDomain(ctx, domain, user.ID, nil)
+	if err != nil || receipt.State != domainteardown.Pending {
+		t.Fatalf("repeat delete must return the durable receipt, got %q, %v", receipt.State, err)
 	}
 
 	if err := store.SetDomainTeardownState(ctx, domain, domainteardown.Confirmed); err != nil {
 		t.Fatalf("simulate durable worker confirmation: %v", err)
 	}
-	state, err = deps.DeleteDomain(ctx, domain, user.ID)
-	if err != nil || state != httpapi.SendingTeardownConfirmed {
-		t.Fatalf("repeat delete after convergence = %q, %v; want confirmed", state, err)
+	receipt, err = deps.DeleteDomain(ctx, domain, user.ID, nil)
+	if err != nil || receipt.State != domainteardown.Confirmed {
+		t.Fatalf("repeat delete after convergence = %q, %v; want confirmed", receipt.State, err)
+	}
+}
+
+func TestBuildDepsDeleteDomainCompletesIdempotencyInDeleteTransaction(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	p.SenderIdentity = &fakeSenderIdentity{tryErr: errors.New("provider still converging")}
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "atomic-delete@example.test", "Atomic Delete", "atomic-delete-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "atomic-delete.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	idem := idempotency.NewStore(p.Pool)
+	const key = "u:atomic-domain-delete"
+	const route = "/v1/domains/atomic-delete.example.test"
+	hash := idempotency.HashRequest(route, nil)
+	claim, err := idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || claim.Outcome != idempotency.OutcomeAcquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+	receipt, err := deps.DeleteDomain(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error {
+		body, marshalErr := json.Marshal(map[string]any{
+			"deleted": true, "domain": domain, "sending_teardown": receipt.State,
+			"_receipt_incarnation": receipt.Incarnation,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return idem.CompleteTx(ctx, tx, user.ID, key, idempotency.CachedResponse{
+			StatusCode: http.StatusOK, ContentType: "application/json", Body: body,
+		})
+	})
+	if err != nil || receipt.State != domainteardown.Pending {
+		t.Fatalf("DeleteDomain = %+v, %v", receipt, err)
+	}
+
+	// A process crash here means the generic post-hoc Complete never runs.
+	// Age the row past stale takeover anyway: transaction-bound completion must
+	// still replay, not reacquire.
+	if _, err := p.Pool.Exec(ctx, `UPDATE idempotency_keys SET created_at = now() - interval '10 minutes' WHERE user_id = $1 AND key = $2`, user.ID, key); err != nil {
+		t.Fatalf("age idempotency row: %v", err)
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("register replacement: %v", err)
+	}
+	claim, err = idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || claim.Outcome != idempotency.OutcomeReplay {
+		t.Fatalf("stale retry = %+v, %v; want replay", claim, err)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("replacement was deleted by old claim: %v", err)
+	}
+}
+
+func TestBuildDepsDeleteDomainAtomicallyBindsKeyToExistingReceipt(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	p.SenderIdentity = &fakeSenderIdentity{tryErr: errors.New("provider still converging")}
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "atomic-poll@example.test", "Atomic Poll", "atomic-poll-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "atomic-poll.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	first, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
+	if err != nil || first.State != domainteardown.Pending {
+		t.Fatalf("unkeyed delete = %+v, %v; want pending", first, err)
+	}
+
+	idem := idempotency.NewStore(p.Pool)
+	const key = "u:atomic-domain-poll"
+	const route = "/v1/domains/atomic-poll.example.test"
+	hash := idempotency.HashRequest(route, nil)
+	claim, err := idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || claim.Outcome != idempotency.OutcomeAcquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+	polled, err := deps.DeleteDomain(ctx, domain, user.ID, func(ctx context.Context, tx pgx.Tx, receipt domainteardown.Receipt) error {
+		body, marshalErr := json.Marshal(map[string]any{
+			"deleted": true, "domain": domain, "sending_teardown": receipt.State,
+			"_receipt_incarnation": receipt.Incarnation,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return idem.CompleteTx(ctx, tx, user.ID, key, idempotency.CachedResponse{
+			StatusCode: http.StatusOK, ContentType: "application/json", Body: body,
+		})
+	})
+	if err != nil || polled != first {
+		t.Fatalf("keyed poll = %+v, %v; want original receipt %+v", polled, err, first)
+	}
+
+	// Simulate loss of the HTTP response and age the claim beyond stale takeover.
+	// Completion occurred in the receipt-resolution transaction, so the old key
+	// must replay after a replacement is registered rather than deleting it.
+	if _, err := p.Pool.Exec(ctx, `UPDATE idempotency_keys SET created_at = now() - interval '10 minutes' WHERE user_id = $1 AND key = $2`, user.ID, key); err != nil {
+		t.Fatalf("age idempotency row: %v", err)
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("register replacement: %v", err)
+	}
+	claim, err = idem.Claim(ctx, user.ID, key, route, hash)
+	if err != nil || claim.Outcome != idempotency.OutcomeReplay {
+		t.Fatalf("stale keyed poll retry = %+v, %v; want replay", claim, err)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("replacement was deleted by old polling key: %v", err)
+	}
+}
+
+func TestBuildDepsDeleteDomainIdempotencyFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	deps := apiserver.BuildDeps(p)
+	user, err := store.CreateOrGetUser(ctx, "atomic-rollback@example.test", "Atomic Rollback", "atomic-rollback-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "atomic-rollback.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	completeErr := errors.New("idempotency completion failed")
+	if _, err := deps.DeleteDomain(ctx, domain, user.ID, func(context.Context, pgx.Tx, domainteardown.Receipt) error {
+		return completeErr
+	}); !errors.Is(err, completeErr) {
+		t.Fatalf("DeleteDomain error = %v, want %v", err, completeErr)
+	}
+	if _, err := store.LookupDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("domain delete committed without idempotency completion: %v", err)
 	}
 }
 
@@ -234,12 +375,12 @@ func TestBuildDepsDeleteDomainWithoutProviderDoesNotConfirmManagedIdentity(t *te
 		t.Fatalf("MarkSendingIdentityManaged: %v", err)
 	}
 
-	state, err := deps.DeleteDomain(ctx, domain, user.ID)
+	receipt, err := deps.DeleteDomain(ctx, domain, user.ID, nil)
 	if err != nil {
 		t.Fatalf("DeleteDomain: %v", err)
 	}
-	if state != httpapi.SendingTeardownPending {
-		t.Fatalf("managed identity with provider disabled = %q, want pending", state)
+	if receipt.State != domainteardown.Pending {
+		t.Fatalf("managed identity with provider disabled = %q, want pending", receipt.State)
 	}
 }
 
@@ -286,7 +427,7 @@ func TestBuildDepsDeleteDomainHookErrorRollsBack(t *testing.T) {
 		t.Fatalf("ClaimOrCreateDomain: %v", err)
 	}
 
-	_, err = deps.DeleteDomain(ctx, domain, user.ID)
+	_, err = deps.DeleteDomain(ctx, domain, user.ID, nil)
 	if !errors.Is(err, hookErr) {
 		t.Fatalf("DeleteDomain error = %v, want the hook error %v", err, hookErr)
 	}
@@ -314,7 +455,7 @@ func TestBuildDepsDeleteDomainFKFailureDoesNotTouchProvider(t *testing.T) {
 	if _, err := store.CreateAgent(ctx, "bot@"+domain, domain, "Bot", "", "", user.ID); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
-	if _, err := deps.DeleteDomain(ctx, domain, user.ID); !errors.Is(err, identity.ErrDomainHasAgents) {
+	if _, err := deps.DeleteDomain(ctx, domain, user.ID, nil); !errors.Is(err, identity.ErrDomainHasAgents) {
 		t.Fatalf("DeleteDomain error = %v, want ErrDomainHasAgents", err)
 	}
 	if len(fake.tried) != 0 {
