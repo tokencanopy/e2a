@@ -394,11 +394,13 @@ func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainIn
 	// owned domain in this same tx, before the cascade removes the domain
 	// rows. The orphan reaper is the backstop, but doing it transactionally
 	// here means a normal account delete never leaves a dangling SES identity.
+	var teardownDomains []Domain
 	if perDomainInTx != nil {
 		domains, derr := scanDomainsForUser(ctx, tx, userID)
 		if derr != nil {
 			return nil, fmt.Errorf("delete: load domains for teardown: %w", derr)
 		}
+		teardownDomains = domains
 		for _, d := range domains {
 			if err := perDomainInTx(ctx, tx, d.Domain); err != nil {
 				return nil, fmt.Errorf("delete: enqueue sender teardown for %s: %w", d.Domain, err)
@@ -414,6 +416,17 @@ func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainIn
 		return nil, fmt.Errorf("delete: users: %w", err)
 	}
 	res.UserDeleted = tag.RowsAffected() == 1
+
+	// The cascade above may remove a large account's messages and attachments.
+	// Restamp every retained sender-identity tombstone at the true end of the
+	// transaction so none is already older than the mixed-version drain window
+	// when this commit becomes visible. The enqueue hook stamped once too, but
+	// that earlier stamp protects only the work preceding the cascade.
+	for _, d := range teardownDomains {
+		if err := s.TouchSendingIdentityTombstoneTx(ctx, tx, d.Domain); err != nil {
+			return nil, fmt.Errorf("delete: restamp sender teardown for %s: %w", d.Domain, err)
+		}
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("delete: commit: %w", err)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
@@ -433,6 +434,44 @@ func TestDeleteUserData(t *testing.T) {
 		if n != 0 {
 			t.Errorf("orphan rows in %s: %d (cascade missed)", c.name, n)
 		}
+	}
+}
+
+func TestDeleteUserDataRestampsSenderIdentityTombstoneAfterCascade(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "restamp@example.test", "Restamp", "restamp-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const domain = "restamp.example.test"
+	claimed, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation, updated_at)
+		VALUES ($1, $2, $2, clock_timestamp() - interval '1 hour')`, domain, claimed.VerificationToken); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now().Add(-time.Second)
+	_, err = store.DeleteUserDataTx(ctx, user.ID, func(ctx context.Context, tx pgx.Tx, domain string) error {
+		// Simulate a long cascade after the normal enqueue/touch hook: the final
+		// store-owned restamp must be later than this deliberately aged value.
+		_, err := tx.Exec(ctx, `UPDATE sender_identity_managed_domains SET updated_at = clock_timestamp() - interval '1 hour' WHERE domain = $1`, domain)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("DeleteUserDataTx: %v", err)
+	}
+	var stamped time.Time
+	if err := pool.QueryRow(ctx, `SELECT updated_at FROM sender_identity_managed_domains WHERE domain = $1`, domain).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped.Before(started) {
+		t.Fatalf("tombstone stamp = %v, want final pre-commit restamp after %v", stamped, started)
 	}
 }
 
