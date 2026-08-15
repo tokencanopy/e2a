@@ -2,6 +2,8 @@ package senderidentity
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -37,6 +39,8 @@ type FakeProvider struct {
 	ProvisionCalls   []string
 	StatusCalls      []string
 	DeprovisionCalls []string
+	ListCalls        int
+	ListPageCalls    int
 }
 
 // NewFakeProvider returns a ready FakeProvider with default behavior.
@@ -163,9 +167,39 @@ func (f *FakeProvider) Deprovision(ctx context.Context, domain string) error {
 func (f *FakeProvider) List(ctx context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ListCalls++
 	out := make([]string, 0, len(f.identities))
 	for d := range f.identities {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+func (f *FakeProvider) ListPage(ctx context.Context, nextToken string, limit int) ([]string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ListPageCalls++
+	all := make([]string, 0, len(f.identities))
+	for domain := range f.identities {
+		all = append(all, domain)
+	}
+	sort.Strings(all)
+	start := 0
+	if nextToken != "" {
+		if _, err := fmt.Sscanf(nextToken, "%d", &start); err != nil || start < 0 || start > len(all) {
+			return nil, "", fmt.Errorf("invalid fake provider page token %q", nextToken)
+		}
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	following := ""
+	if end < len(all) {
+		following = fmt.Sprintf("%d", end)
+	}
+	return append([]string(nil), all[start:end]...), following, nil
 }

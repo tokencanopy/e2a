@@ -240,22 +240,47 @@ func awsString(value string) *string { return &value }
 
 func (p *SESProvider) List(ctx context.Context) ([]string, error) {
 	var out []string
-	var token *string
+	token := ""
 	for {
-		resp, err := p.api.ListEmailIdentities(ctx, &sesv2.ListEmailIdentitiesInput{NextToken: token})
+		page, next, err := p.ListPage(ctx, token, 1000)
 		if err != nil {
 			return nil, err
 		}
-		for _, id := range resp.EmailIdentities {
-			if id.IdentityType == ststypes.IdentityTypeDomain && id.IdentityName != nil {
-				out = append(out, *id.IdentityName)
-			}
-		}
-		if resp.NextToken == nil || *resp.NextToken == "" {
+		out = append(out, page...)
+		if next == "" {
 			return out, nil
 		}
-		token = resp.NextToken
+		token = next
 	}
+}
+
+func (p *SESProvider) ListPage(ctx context.Context, nextToken string, limit int) ([]string, string, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	pageSize := int32(limit)
+	input := &sesv2.ListEmailIdentitiesInput{PageSize: &pageSize}
+	if nextToken != "" {
+		input.NextToken = awsString(nextToken)
+	}
+	resp, err := p.api.ListEmailIdentities(ctx, input)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]string, 0, len(resp.EmailIdentities))
+	for _, id := range resp.EmailIdentities {
+		if id.IdentityType == ststypes.IdentityTypeDomain && id.IdentityName != nil {
+			out = append(out, *id.IdentityName)
+		}
+	}
+	next := ""
+	if resp.NextToken != nil {
+		next = *resp.NextToken
+	}
+	return out, next, nil
 }
 
 // mapSESStatus folds SES's verification axes onto our Status. Verified requires

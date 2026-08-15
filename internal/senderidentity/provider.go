@@ -112,4 +112,9 @@ type Provider interface {
 	// never treats an unledgered identity as its own. SES caps each page; the
 	// implementation paginates and returns the full set.
 	List(ctx context.Context) ([]string, error)
+
+	// ListPage returns one provider-bounded page plus the opaque continuation
+	// token. The v2 orphan audit uses this so one River job never inventories
+	// the whole provider account.
+	ListPage(ctx context.Context, nextToken string, limit int) (domains []string, followingToken string, err error)
 }

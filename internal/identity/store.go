@@ -1423,6 +1423,65 @@ func (s *Store) ListManagedSendingIdentityDomains(ctx context.Context) ([]string
 	return domains, needsProvision, rows.Err()
 }
 
+// ListManagedSendingIdentityDomainsPage keyset-pages the durable ledger so a
+// single v2 reaper job cannot monopolize the sender-identity queue as the
+// account grows. hasMore is derived with a limit+1 read; only limit rows are
+// returned.
+func (s *Store) ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT domain, applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains
+		  WHERE domain > $1
+		  ORDER BY domain
+		  LIMIT $2`,
+		normalizeDomain(afterDomain), limit+1,
+	)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer rows.Close()
+	domains := make([]string, 0, limit+1)
+	needsProvision := make(map[string]bool, limit+1)
+	for rows.Next() {
+		var domain string
+		var needs bool
+		if err := rows.Scan(&domain, &needs); err != nil {
+			return nil, nil, false, err
+		}
+		domains = append(domains, domain)
+		needsProvision[domain] = needs
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, false, err
+	}
+	hasMore := len(domains) > limit
+	if hasMore {
+		delete(needsProvision, domains[limit])
+		domains = domains[:limit]
+	}
+	return domains, needsProvision, hasMore, nil
+}
+
+// LookupManagedSendingIdentityDomain checks exact ledger membership for one
+// provider identity during the bounded orphan-audit phase.
+func (s *Store) LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (needsProvision, found bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT applied_incarnation IS DISTINCT FROM incarnation
+		   FROM sender_identity_managed_domains WHERE domain = $1`,
+		normalizeDomain(domain),
+	).Scan(&needsProvision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return needsProvision, true, nil
+}
+
 // LookupDomain returns a domain if it exists and is owned by the given user.
 // AgentCount is populated with the same correlated subquery ListDomainsByUser
 // uses (trashed agents excluded), so the single-resource and list responses

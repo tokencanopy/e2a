@@ -22,11 +22,15 @@ func (ReapArgs) Kind() string { return "sender_identity_reap" }
 // ReapV2Args prevents the old blue/green slot from claiming new convergence
 // sweeps during rollout.
 type ReapV2Args struct {
-	SweepID     int64  `json:"sweep_id,omitempty" river:"unique"`
-	AfterDomain string `json:"after_domain,omitempty" river:"unique"`
+	SweepID       int64  `json:"sweep_id,omitempty" river:"unique"`
+	AfterDomain   string `json:"after_domain,omitempty" river:"unique"`
+	Phase         string `json:"phase,omitempty" river:"unique"`
+	ProviderToken string `json:"provider_token,omitempty" river:"unique"`
 }
 
 func (ReapV2Args) Kind() string { return "sender_identity_reap_v2" }
+
+const reapPhaseOrphans = "orphan_audit"
 
 type LegacyReapWorker struct {
 	river.WorkerDefaults[ReapArgs]
@@ -56,17 +60,20 @@ type ReapWorker struct {
 	fire                EventFirer
 	maxReconcileAttempt int
 	legacyJobs          bool
-	// enqueueNext is injectable only so the page handoff can be proved without
-	// a live River client. Production workers leave it nil.
+	// enqueueNext is injected with the River continuation in production and a
+	// recorder/no-op in unit tests.
 	enqueueNext func(context.Context, ReapV2Args) error
 }
 
 func (w *ReapWorker) Work(ctx context.Context, job *river.Job[ReapV2Args]) error {
 	enqueueNext := w.enqueueNext
 	if enqueueNext == nil {
-		enqueueNext = enqueueReapPage
+		enqueueNext = func(context.Context, ReapV2Args) error { return nil }
 	}
-	return reapManagedIdentityPage(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs, job.Args.SweepID, job.Args.AfterDomain, 25, enqueueNext)
+	if job.Args.Phase == reapPhaseOrphans {
+		return reapProviderOrphanPage(ctx, w.store, w.provider, job.Args, 25, enqueueNext)
+	}
+	return reapManagedIdentityPage(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs, job.Args, 25, enqueueNext)
 }
 
 func enqueueReapPage(ctx context.Context, args ReapV2Args) error {
@@ -94,54 +101,23 @@ type PostDrainAuditWorker struct {
 }
 
 func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrainAuditArgs]) error {
-	managed, needsProvision, err := w.store.ListManagedSendingIdentityDomains(ctx)
+	needsProvision, managed, err := w.store.LookupManagedSendingIdentityDomain(ctx, job.Args.Domain)
 	if err != nil {
 		return err
 	}
-	for _, domain := range managed {
-		if domain != job.Args.Domain {
-			continue
-		}
-		_, statusErr := w.provider.Status(ctx, domain)
-		providerMissing := errors.Is(statusErr, ErrIdentityNotFound)
-		if statusErr != nil && !providerMissing && !errors.Is(statusErr, ErrIdentityNotOwned) {
-			return statusErr
-		}
-		_, err = syncProviderIdentity(ctx, domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, providerMissing || needsProvision[domain], true, w.legacyJobs)
-		return err
+	if !managed {
+		return nil
 	}
-	return nil
+	_, err = syncProviderIdentityForReaper(ctx, job.Args.Domain, w.store, w.provider, w.fire, w.maxReconcileAttempt, needsProvision, true, w.legacyJobs)
+	return err
 }
 
 func reapManagedIdentities(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool) error {
-	return reapManagedIdentityPage(ctx, store, provider, fire, maxReconcileAttempt, finalizeDeletion, legacyJobs, 0, "", 0, nil)
-}
-
-func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool, jobSweepID int64, afterDomain string, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
 	managed, needsProvision, err := store.ListManagedSendingIdentityDomains(ctx)
 	if err != nil {
 		return err
 	}
 	sort.Strings(managed)
-	page := managed
-	if pageSize > 0 {
-		start := sort.SearchStrings(managed, afterDomain)
-		for start < len(managed) && managed[start] <= afterDomain {
-			start++
-		}
-		end := start + pageSize
-		if end > len(managed) {
-			end = len(managed)
-		}
-		page = managed[start:end]
-		if end < len(managed) {
-			// Hand off the continuation before making provider calls. A slow or
-			// failing identity in this page therefore cannot starve later domains.
-			if err := enqueueNext(ctx, ReapV2Args{SweepID: jobSweepID, AfterDomain: page[len(page)-1]}); err != nil {
-				return err
-			}
-		}
-	}
 	providerDomains, err := provider.List(ctx)
 	if err != nil {
 		return err
@@ -150,47 +126,67 @@ func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider
 	for _, domain := range providerDomains {
 		present[domain] = struct{}{}
 	}
+	var errs []error
+	for _, domain := range managed {
+		_, providerPresent := present[domain]
+		if _, err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
+			recordReaperError(domain, err, &errs)
+		}
+	}
+	auditProviderOrphans(ctx, store, managed, providerDomains)
+	return errors.Join(errs...)
+}
+
+func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool, args ReapV2Args, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
+	page, needsProvision, hasMore, err := store.ListManagedSendingIdentityDomainsPage(ctx, args.AfterDomain, pageSize)
+	if err != nil {
+		return err
+	}
+	// Hand off before provider calls. The terminal ledger page starts the
+	// separately paged provider-only audit; neither phase can monopolize the
+	// single sender-identity-v2 worker.
+	next := ReapV2Args{SweepID: args.SweepID, Phase: reapPhaseOrphans}
+	if hasMore {
+		next = ReapV2Args{SweepID: args.SweepID, AfterDomain: page[len(page)-1]}
+	}
+	if err := enqueueNext(ctx, next); err != nil {
+		return err
+	}
 
 	var errs []error
 	for _, domain := range page {
-		_, providerPresent := present[domain]
-		// A missing provider identity must bypass the verified-state no-op and
-		// be recreated. Present identities take the normal desired-state path,
-		// which deletes them when their domain row is absent/unverified.
-		if _, err := syncProviderIdentity(ctx, domain, store, provider, fire, maxReconcileAttempt, !providerPresent || needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
-			if errors.Is(err, ErrIdentityNotOwned) {
-				log.Printf("[senderidentity:reaper] ALERT teardown blocked for %s: %v", domain, err)
-			}
-			errs = append(errs, fmt.Errorf("%s: %w", domain, err))
-			continue
+		if _, err := syncProviderIdentityForReaper(ctx, domain, store, provider, fire, maxReconcileAttempt, needsProvision[domain], finalizeDeletion, legacyJobs); err != nil {
+			recordReaperError(domain, err, &errs)
 		}
 	}
 	if len(page) > 0 {
 		log.Printf("[senderidentity:reaper] converged %d managed identity candidate(s), %d error(s)", len(page), len(errs))
 	}
+	return errors.Join(errs...)
+}
 
-	// Provider identities outside the ledger can never be converged (the
-	// ledger is the only deletion authority) and, when no live domain row
-	// backs them either, they are invisible to every other path: a delete
-	// whose teardown was lost under a pre-ledger release, for example — the
-	// migration backfill reads only live rows and could not adopt them.
-	// ALERT-only, exactly like the pre-ledger reaper: an unledgered identity
-	// may belong to another application in a shared SES account and must
-	// never be mutated.
-	ledgered := make(map[string]struct{}, len(managed))
-	for _, domain := range managed {
-		ledgered[domain] = struct{}{}
+func reapProviderOrphanPage(ctx context.Context, store Store, provider Provider, args ReapV2Args, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
+	providerDomains, nextToken, err := provider.ListPage(ctx, args.ProviderToken, pageSize)
+	if err != nil {
+		return err
+	}
+	if nextToken != "" {
+		if err := enqueueNext(ctx, ReapV2Args{SweepID: args.SweepID, Phase: reapPhaseOrphans, ProviderToken: nextToken}); err != nil {
+			return err
+		}
 	}
 	orphans := 0
 	for _, domain := range providerDomains {
-		if _, ok := ledgered[domain]; ok {
+		_, ledgered, err := store.LookupManagedSendingIdentityDomain(ctx, domain)
+		if err != nil {
+			log.Printf("[senderidentity:reaper] orphan ledger check for %s: %v", domain, err)
+			continue
+		}
+		if ledgered {
 			continue
 		}
 		exists, err := store.DomainExists(ctx, domain)
 		if err != nil {
-			// Diagnostic-only: a blip checking an unledgered identity must not
-			// red a sweep in which every ledgered domain converged. The next
-			// hourly sweep re-checks anyway.
 			log.Printf("[senderidentity:reaper] orphan check for %s: %v", domain, err)
 			continue
 		}
@@ -201,7 +197,35 @@ func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider
 		}
 	}
 	if orphans > 0 {
-		log.Printf("[senderidentity:reaper] swept %d provider identities, %d orphan(s) flagged", len(providerDomains), orphans)
+		log.Printf("[senderidentity:reaper] audited %d provider identities in this page, %d orphan(s) flagged", len(providerDomains), orphans)
 	}
-	return errors.Join(errs...)
+	return nil
+}
+
+func recordReaperError(domain string, err error, errs *[]error) {
+	if errors.Is(err, ErrIdentityNotOwned) {
+		log.Printf("[senderidentity:reaper] ALERT teardown blocked for %s: %v", domain, err)
+	}
+	*errs = append(*errs, fmt.Errorf("%s: %w", domain, err))
+}
+
+func auditProviderOrphans(ctx context.Context, store Store, managed, providerDomains []string) {
+	ledgered := make(map[string]struct{}, len(managed))
+	for _, domain := range managed {
+		ledgered[domain] = struct{}{}
+	}
+	for _, domain := range providerDomains {
+		if _, ok := ledgered[domain]; ok {
+			continue
+		}
+		exists, err := store.DomainExists(ctx, domain)
+		if err != nil {
+			log.Printf("[senderidentity:reaper] orphan check for %s: %v", domain, err)
+			continue
+		}
+		if !exists {
+			log.Printf("[senderidentity:reaper] ALERT orphan sending identity with no live domain: %s "+
+				"(provider identity exists but is neither ledgered nor backed by a domain row) — manual review required", domain)
+		}
+	}
 }

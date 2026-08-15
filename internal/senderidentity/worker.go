@@ -87,6 +87,8 @@ type Store interface {
 	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
 	SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
+	ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error)
+	LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (needsProvision, found bool, err error)
 	// DomainExists reports whether a live domain row exists. The reaper uses
 	// it to ALERT on provider identities that are neither ledgered nor backed
 	// by a row (pre-upgrade orphans the migration backfill could not see).
@@ -408,6 +410,18 @@ type syncOutcome struct {
 }
 
 func syncProviderIdentity(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs bool) (teardownConfirmed bool, retErr error) {
+	return syncProviderIdentityWithInspection(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, finalizeDeletion, legacyJobs, false)
+}
+
+// syncProviderIdentityForReaper inspects every live ledger candidate, including
+// terminal failed rows, so a missing provider identity is repaired without a
+// separate whole-account List. The observation is made and reused under the
+// domain mutation lock, keeping the job to one provider GET per candidate.
+func syncProviderIdentityForReaper(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs bool) (teardownConfirmed bool, retErr error) {
+	return syncProviderIdentityWithInspection(ctx, domain, store, provider, fire, maxReconcileAttempt, forceProvision, finalizeDeletion, legacyJobs, true)
+}
+
+func syncProviderIdentityWithInspection(ctx context.Context, domain string, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, forceProvision, finalizeDeletion, legacyJobs, inspectTerminal bool) (teardownConfirmed bool, retErr error) {
 	var out syncOutcome
 	err := store.WithSendingIdentityMutationLock(ctx, domain, func(lockedCtx context.Context) error {
 		state, err := store.LoadSendingIdentityState(lockedCtx, domain)
@@ -438,6 +452,16 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		if err != nil {
 			return err
 		}
+		var observedResult Result
+		var observedErr error
+		observed := false
+		providerStatus := func() (Result, error) {
+			if !observed {
+				observedResult, observedErr = provider.Status(lockedCtx, domain)
+				observed = true
+			}
+			return observedResult, observedErr
+		}
 		// The periodic sweep never MUTATES a healthy applied identity (that
 		// would flap a verified sender back to pending), but it does inspect
 		// the two states that can silently rot behind an applied, present
@@ -458,10 +482,10 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		// convergence; `failed` steady state costs no provider call.
 		force := forceProvision
 		if !force {
-			if state.Status != StatusPending && state.Status != StatusVerified {
+			if !inspectTerminal && state.Status != StatusPending && state.Status != StatusVerified {
 				return nil
 			}
-			res, serr := provider.Status(lockedCtx, domain)
+			res, serr := providerStatus()
 			switch {
 			case errors.Is(serr, ErrIdentityNotFound), errors.Is(serr, ErrIdentityNotOwned):
 				force = true
@@ -539,7 +563,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		// must invalidate applied_incarnation (or revisit this gate), or the
 		// forced re-check will silently stop re-installing.
 		if state.Status == StatusVerified && state.AppliedIncarnation == state.Incarnation {
-			res, serr := provider.Status(lockedCtx, domain)
+			res, serr := providerStatus()
 			if serr == nil && res.Status == StatusVerified {
 				return store.ClearSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation)
 			}

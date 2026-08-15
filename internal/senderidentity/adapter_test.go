@@ -57,6 +57,12 @@ func (f *fakeRawStore) ForgetSendingIdentityManaged(context.Context, string) err
 func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]string, map[string]bool, error) {
 	return nil, nil, nil
 }
+func (f *fakeRawStore) ListManagedSendingIdentityDomainsPage(context.Context, string, int) ([]string, map[string]bool, bool, error) {
+	return nil, nil, false, nil
+}
+func (f *fakeRawStore) LookupManagedSendingIdentityDomain(context.Context, string) (bool, bool, error) {
+	return false, false, nil
+}
 func (f *fakeRawStore) DomainExists(context.Context, string) (bool, error) { return false, nil }
 func (f *fakeRawStore) FinalizeSendingIdentityTombstone(context.Context, string, time.Duration) error {
 	return nil

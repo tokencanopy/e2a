@@ -27,6 +27,8 @@ type RawStore interface {
 	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
 	SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
+	ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error)
+	LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (bool, bool, error)
 	DomainExists(ctx context.Context, domain string) (bool, error)
 }
 
@@ -96,6 +98,14 @@ func (a *storeAdapter) ForgetSendingIdentityManaged(ctx context.Context, domain 
 
 func (a *storeAdapter) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
 	return a.raw.ListManagedSendingIdentityDomains(ctx)
+}
+
+func (a *storeAdapter) ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error) {
+	return a.raw.ListManagedSendingIdentityDomainsPage(ctx, afterDomain, limit)
+}
+
+func (a *storeAdapter) LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (bool, bool, error) {
+	return a.raw.LookupManagedSendingIdentityDomain(ctx, domain)
 }
 
 func (a *storeAdapter) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {

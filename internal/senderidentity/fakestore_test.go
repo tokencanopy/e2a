@@ -2,6 +2,7 @@ package senderidentity
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,8 +48,12 @@ type fakeStore struct {
 	domainExistsErr error
 
 	// recorded calls
-	SetStatusCalls []setStatusCall
-	TouchCalls     []string
+	SetStatusCalls       []setStatusCall
+	TouchCalls           []string
+	listManagedCalls     int
+	listManagedPageCalls int
+	lookupManagedCalls   int
+	domainExistsCalls    int
 }
 
 type setStatusCall struct {
@@ -336,6 +341,7 @@ func (s *fakeStore) SetDomainTeardownState(ctx context.Context, domain string, s
 func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.domainExistsCalls++
 	if s.domainExistsErr != nil {
 		return false, s.domainExistsErr
 	}
@@ -346,6 +352,7 @@ func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, erro
 func (s *fakeStore) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.listManagedCalls++
 	domains := make([]string, 0, len(s.managed))
 	needs := make(map[string]bool, len(s.managed))
 	for domain := range s.managed {
@@ -353,6 +360,36 @@ func (s *fakeStore) ListManagedSendingIdentityDomains(ctx context.Context) ([]st
 		needs[domain] = s.applied[domain] != s.managed[domain]
 	}
 	return domains, needs, nil
+}
+
+func (s *fakeStore) ListManagedSendingIdentityDomainsPage(ctx context.Context, afterDomain string, limit int) ([]string, map[string]bool, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listManagedPageCalls++
+	all := make([]string, 0, len(s.managed))
+	for domain := range s.managed {
+		if domain > afterDomain {
+			all = append(all, domain)
+		}
+	}
+	sort.Strings(all)
+	hasMore := len(all) > limit
+	if hasMore {
+		all = all[:limit]
+	}
+	needs := make(map[string]bool, len(all))
+	for _, domain := range all {
+		needs[domain] = s.applied[domain] != s.managed[domain]
+	}
+	return all, needs, hasMore, nil
+}
+
+func (s *fakeStore) LookupManagedSendingIdentityDomain(ctx context.Context, domain string) (bool, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookupManagedCalls++
+	incarnation, found := s.managed[domain]
+	return found && s.applied[domain] != incarnation, found, nil
 }
 
 // recordingFirer captures EventFirer invocations.

@@ -97,7 +97,7 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 	river.AddWorker(w, &ReconcileV2Worker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
 	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
 	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
-	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
+	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat, enqueueNext: enqueueReapPage})
 
 	reaperInterval := m.cfg.ReaperInterval
 	if reaperInterval <= 0 {

@@ -454,7 +454,7 @@ func TestFinalizeRespectsLatestMutationDrainWindow(t *testing.T) {
 		provider.SeedIdentity(domain)
 		w := &ReapWorker{store: store, provider: provider}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("reap: %v", err)
 		}
 		if store.managed[domain] == "" {
@@ -701,6 +701,27 @@ func reapJob(args ...ReapV2Args) *river.Job[ReapV2Args] {
 	}
 }
 
+func runReapWorkerChain(ctx context.Context, w *ReapWorker, first ReapV2Args) error {
+	queue := []ReapV2Args{first}
+	previous := w.enqueueNext
+	defer func() { w.enqueueNext = previous }()
+	w.enqueueNext = func(_ context.Context, args ReapV2Args) error {
+		queue = append(queue, args)
+		return nil
+	}
+	for jobs := 0; len(queue) > 0; jobs++ {
+		if jobs >= 100 {
+			return errors.New("reaper continuation chain exceeded 100 jobs")
+		}
+		args := queue[0]
+		queue = queue[1:]
+		if err := w.Work(ctx, reapJob(args)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestReapWorker_Work(t *testing.T) {
 	t.Run("deletes a managed orphan", func(t *testing.T) {
 		store := newFakeStore()
@@ -709,7 +730,7 @@ func TestReapWorker_Work(t *testing.T) {
 		prov.SeedIdentity("b.example")
 		w := &ReapWorker{store: store, provider: prov}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		identities, _ := prov.List(context.Background())
@@ -757,7 +778,7 @@ func TestReapWorker_Work(t *testing.T) {
 		defer log.SetOutput(prevOut)
 		w := &ReapWorker{store: store, provider: prov}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		logged := buf.String()
@@ -781,7 +802,7 @@ func TestReapWorker_Work(t *testing.T) {
 		defer log.SetOutput(prevOut)
 		w := &ReapWorker{store: store, provider: prov}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		if strings.Contains(buf.String(), "ALERT") {
@@ -799,7 +820,7 @@ func TestReapWorker_Work(t *testing.T) {
 		prov.SeedIdentity("someone-elses.example")
 		w := &ReapWorker{store: store, provider: prov}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("alert-only orphan check failed the sweep: %v", err)
 		}
 	})
@@ -810,7 +831,7 @@ func TestReapWorker_Work(t *testing.T) {
 		prov.SeedIdentity("shared.example")
 		w := &ReapWorker{store: store, provider: prov}
 
-		if err := w.Work(context.Background(), reapJob()); err != nil {
+		if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
 			t.Fatalf("Work returned error: %v", err)
 		}
 		identities, _ := prov.List(context.Background())
@@ -825,6 +846,7 @@ func TestReapWorker_Work(t *testing.T) {
 		store.setProvisionInputs("current-selector", []byte("current-key"), true)
 		store.managed["live.example"] = "live.example-incarnation"
 		prov := NewFakeProvider()
+		prov.SetStatusNotFound("live.example")
 		w := &ReapWorker{store: store, provider: prov}
 
 		if err := w.Work(context.Background(), reapJob()); err != nil {
@@ -1274,6 +1296,12 @@ func TestReapWorkerBoundsProviderCallsPerJob(t *testing.T) {
 	if got := len(provider.StatusCalls); got > 25 {
 		t.Fatalf("one sweep job made %d provider status calls, want at most 25 so later pages cannot starve", got)
 	}
+	if provider.ListCalls != 0 || provider.ListPageCalls != 0 {
+		t.Fatalf("ledger convergence performed whole-provider inventory: List=%d ListPage=%d", provider.ListCalls, provider.ListPageCalls)
+	}
+	if store.listManagedCalls != 0 || store.listManagedPageCalls != 1 {
+		t.Fatalf("first page ledger reads: full=%d page=%d, want 0/1", store.listManagedCalls, store.listManagedPageCalls)
+	}
 	if next == nil || next.SweepID != 42 || next.AfterDomain != "24-fair.example" {
 		t.Fatalf("continuation = %+v, want sweep 42 after 24-fair.example", next)
 	}
@@ -1282,6 +1310,55 @@ func TestReapWorkerBoundsProviderCallsPerJob(t *testing.T) {
 	}
 	if got := len(provider.StatusCalls); got != 30 {
 		t.Fatalf("two pages made %d total provider status calls, want all 30 domains converged", got)
+	}
+	if store.listManagedCalls != 0 || store.listManagedPageCalls != 2 {
+		t.Fatalf("two-page ledger reads: full=%d page=%d, want 0/2", store.listManagedCalls, store.listManagedPageCalls)
+	}
+}
+
+func TestReapWorkerBoundsOrphanAuditPerJob(t *testing.T) {
+	store := newFakeStore()
+	provider := NewFakeProvider()
+	for i := 0; i < 60; i++ {
+		provider.SeedIdentity(fmt.Sprintf("%02d-provider-only.example", i))
+	}
+	w := &ReapWorker{store: store, provider: provider}
+	var queued []ReapV2Args
+	w.enqueueNext = func(_ context.Context, args ReapV2Args) error {
+		queued = append(queued, args)
+		return nil
+	}
+
+	if err := w.Work(context.Background(), reapJob(ReapV2Args{SweepID: 84})); err != nil {
+		t.Fatalf("ledger phase: %v", err)
+	}
+	if len(queued) != 1 || queued[0].Phase != reapPhaseOrphans || queued[0].ProviderToken != "" {
+		t.Fatalf("ledger phase continuation = %+v, want first orphan page", queued)
+	}
+	if provider.ListCalls != 0 || provider.ListPageCalls != 0 || store.domainExistsCalls != 0 {
+		t.Fatalf("empty ledger phase did orphan work: full=%d page=%d exists=%d", provider.ListCalls, provider.ListPageCalls, store.domainExistsCalls)
+	}
+
+	firstOrphanPage := queued[0]
+	queued = nil
+	if err := w.Work(context.Background(), reapJob(firstOrphanPage)); err != nil {
+		t.Fatalf("first orphan page: %v", err)
+	}
+	if provider.ListCalls != 0 || provider.ListPageCalls != 1 {
+		t.Fatalf("first orphan inventory calls: full=%d page=%d, want 0/1", provider.ListCalls, provider.ListPageCalls)
+	}
+	if store.domainExistsCalls != 25 || store.lookupManagedCalls != 25 {
+		t.Fatalf("first orphan DB calls: exists=%d managed=%d, want 25/25", store.domainExistsCalls, store.lookupManagedCalls)
+	}
+	if len(queued) != 1 || queued[0].Phase != reapPhaseOrphans || queued[0].ProviderToken == "" {
+		t.Fatalf("orphan continuation = %+v, want next provider token", queued)
+	}
+
+	if err := w.Work(context.Background(), reapJob(queued[0])); err != nil {
+		t.Fatalf("second orphan page: %v", err)
+	}
+	if provider.ListPageCalls != 2 || store.domainExistsCalls != 50 || store.lookupManagedCalls != 50 {
+		t.Fatalf("two orphan pages are not bounded: provider=%d exists=%d managed=%d", provider.ListPageCalls, store.domainExistsCalls, store.lookupManagedCalls)
 	}
 }
 

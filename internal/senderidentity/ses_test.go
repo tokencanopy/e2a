@@ -243,6 +243,9 @@ type stubSESAPI struct {
 	createInput   *sesv2.CreateEmailIdentityInput
 	dkimInput     *sesv2.PutEmailIdentityDkimSigningAttributesInput
 	mailFromInput *sesv2.PutEmailIdentityMailFromAttributesInput
+	listOut       *sesv2.ListEmailIdentitiesOutput
+	listErr       error
+	listInput     *sesv2.ListEmailIdentitiesInput
 }
 
 func (s *stubSESAPI) CreateEmailIdentity(ctx context.Context, in *sesv2.CreateEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error) {
@@ -310,7 +313,36 @@ func (s *stubSESAPI) DeleteEmailIdentity(ctx context.Context, in *sesv2.DeleteEm
 }
 
 func (s *stubSESAPI) ListEmailIdentities(ctx context.Context, in *sesv2.ListEmailIdentitiesInput, optFns ...func(*sesv2.Options)) (*sesv2.ListEmailIdentitiesOutput, error) {
-	panic("not used")
+	s.listInput = in
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	if s.listOut == nil {
+		return &sesv2.ListEmailIdentitiesOutput{}, nil
+	}
+	return s.listOut, nil
+}
+
+func TestSESProvider_ListPageIsProviderBounded(t *testing.T) {
+	stub := &stubSESAPI{listOut: &sesv2.ListEmailIdentitiesOutput{
+		EmailIdentities: []ststypes.IdentityInfo{
+			{IdentityType: ststypes.IdentityTypeDomain, IdentityName: awsString("managed.example.test")},
+			{IdentityType: ststypes.IdentityTypeEmailAddress, IdentityName: awsString("ignored@example.test")},
+		},
+		NextToken: awsString("next-page-token"),
+	}}
+	p := NewSESProvider(stub, "us-east-2")
+
+	domains, next, err := p.ListPage(context.Background(), "current-page-token", 25)
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if len(domains) != 1 || domains[0] != "managed.example.test" || next != "next-page-token" {
+		t.Fatalf("ListPage = %v, %q", domains, next)
+	}
+	if stub.listInput == nil || stub.listInput.PageSize == nil || *stub.listInput.PageSize != 25 || stub.listInput.NextToken == nil || *stub.listInput.NextToken != "current-page-token" {
+		t.Fatalf("provider request was not bounded/tokened: %+v", stub.listInput)
+	}
 }
 
 func TestSESProvider_ProvisionConfiguresMailFrom(t *testing.T) {

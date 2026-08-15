@@ -3,6 +3,7 @@ package identity_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -409,6 +410,43 @@ func TestManagedSendingIdentityLedgerSurvivesDomainDelete(t *testing.T) {
 	}
 	if len(managed) != 0 {
 		t.Fatalf("ledger after confirmed provider delete = %v, want empty", managed)
+	}
+}
+
+func TestManagedSendingIdentityLedgerKeysetPage(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	for i := 0; i < 30; i++ {
+		domain := fmt.Sprintf("%02d-ledger.example.test", i)
+		incarnation := fmt.Sprintf("inc-%02d", i)
+		if err := store.MarkSendingIdentityManaged(ctx, domain, incarnation); err != nil {
+			t.Fatalf("MarkSendingIdentityManaged(%s): %v", domain, err)
+		}
+		if i%2 == 0 {
+			if err := store.MarkSendingIdentityApplied(ctx, domain, incarnation); err != nil {
+				t.Fatalf("MarkSendingIdentityApplied(%s): %v", domain, err)
+			}
+		}
+	}
+
+	domains, needs, more, err := store.ListManagedSendingIdentityDomainsPage(ctx, "09-ledger.example.test", 10)
+	if err != nil {
+		t.Fatalf("ListManagedSendingIdentityDomainsPage: %v", err)
+	}
+	if len(domains) != 10 || domains[0] != "10-ledger.example.test" || domains[9] != "19-ledger.example.test" || !more {
+		t.Fatalf("page = %v more=%v, want 10..19 with continuation", domains, more)
+	}
+	if needs["10-ledger.example.test"] || !needs["11-ledger.example.test"] {
+		t.Fatalf("page lost applied-incarnation state: %v", needs)
+	}
+
+	need, found, err := store.LookupManagedSendingIdentityDomain(ctx, "11-ledger.example.test")
+	if err != nil || !found || !need {
+		t.Fatalf("exact managed lookup = need:%v found:%v err:%v, want true/true/nil", need, found, err)
+	}
+	if _, found, err := store.LookupManagedSendingIdentityDomain(ctx, "absent.example.test"); err != nil || found {
+		t.Fatalf("absent managed lookup = found:%v err:%v", found, err)
 	}
 }
 
