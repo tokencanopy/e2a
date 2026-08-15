@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -562,6 +563,15 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 		return nil, err
 	}
 	if _, err := s.deps.LookupDomain(ctx, in.Domain, user.ID); err != nil {
+		if s.deps.LookupDomainTeardown != nil {
+			teardown, receiptErr := s.deps.LookupDomainTeardown(ctx, in.Domain, user.ID)
+			if receiptErr == nil {
+				return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}}, nil
+			}
+			if !errors.Is(receiptErr, pgx.ErrNoRows) {
+				return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to read domain teardown receipt")
+			}
+		}
 		return nil, NewError(http.StatusNotFound, "not_found", "domain not found")
 	}
 	// Confirm is enforced declaratively by Huma (required + enum:[DELETE] on
@@ -584,7 +594,7 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete domain")
 		}
 	}
-	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: teardown}}, nil
+	return &deleteDomainOutput{Body: DeleteDomainResult{Deleted: true, Domain: in.Domain, SendingTeardown: string(teardown)}}, nil
 }
 
 // domainHasAgentsMessage explains WHICH agents are blocking a domain delete.

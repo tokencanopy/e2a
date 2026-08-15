@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/jobs"
 )
 
@@ -84,6 +85,7 @@ type Store interface {
 	// legacy slot; the reaper (or that mutation's own audit) finalizes once
 	// the window has truly elapsed.
 	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
+	SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
 	// DomainExists reports whether a live domain row exists. The reaper uses
 	// it to ALERT on provider identities that are neither ledgered nor backed
@@ -416,9 +418,16 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 				// not authorized to delete it and must not claim absence. Keep the
 				// durable job/reaper red so this cannot disappear as a successful
 				// teardown after a lost HTTP response or account deletion.
-				return fmt.Errorf("provider identity ownership is unconfirmed; manual review required: %w", ErrIdentityNotOwned)
+				ownershipErr := fmt.Errorf("provider identity ownership is unconfirmed; manual review required: %w", ErrIdentityNotOwned)
+				if stateErr := store.SetDomainTeardownState(lockedCtx, domain, domainteardown.ManualReview); stateErr != nil {
+					return errors.Join(ownershipErr, fmt.Errorf("persist manual-review teardown receipt: %w", stateErr))
+				}
+				return ownershipErr
 			} else if err != nil {
 				return err
+			}
+			if err := store.SetDomainTeardownState(lockedCtx, domain, domainteardown.Confirmed); err != nil {
+				return fmt.Errorf("persist confirmed teardown receipt: %w", err)
 			}
 			teardownConfirmed = true
 			if finalizeDeletion {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -367,7 +368,9 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		DeleteDomain: func(ctx context.Context, domain, userID string) (string, error) { return SendingTeardownConfirmed, nil },
+		DeleteDomain: func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+			return domainteardown.Confirmed, nil
+		},
 		CountAgentsOnDomain: func(ctx context.Context, domain, userID string) (int, int, error) {
 			if domain == "busy.com" {
 				return 1, 0, nil

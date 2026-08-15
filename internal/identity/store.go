@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/dkim"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/emailauth"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/filterquery"
@@ -1799,6 +1800,65 @@ func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx 
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// BeginDomainTeardownReceiptTx persists the retry-visible outcome before the
+// domain-delete transaction commits. A configured provider always starts
+// pending until it confirms absence. With no provider configured, a domain
+// that was never in the managed ledger is immediately confirmed; a ledgered
+// identity stays pending until the provider is enabled and the reaper can
+// prove absence.
+func (s *Store) BeginDomainTeardownReceiptTx(ctx context.Context, tx pgx.Tx, domain, userID string, providerConfigured bool) (domainteardown.State, error) {
+	domain = normalizeDomain(domain)
+	state := domainteardown.Confirmed
+	if providerConfigured {
+		state = domainteardown.Pending
+	} else {
+		var managed bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sender_identity_managed_domains WHERE domain = $1)`,
+			domain,
+		).Scan(&managed); err != nil {
+			return "", err
+		}
+		if managed {
+			state = domainteardown.Pending
+		}
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO domain_teardown_receipts (domain, user_id, state, created_at, updated_at)
+		 VALUES ($1, $2, $3, now(), now())
+		 ON CONFLICT (domain) DO UPDATE
+		 SET user_id = EXCLUDED.user_id,
+		     state = EXCLUDED.state,
+		     created_at = now(),
+		     updated_at = now()`,
+		domain, userID, state,
+	)
+	return state, err
+}
+
+// LookupDomainTeardownReceipt returns only the requesting owner's receipt.
+// pgx.ErrNoRows deliberately preserves DELETE's anti-enumeration behavior for
+// absent domains and receipts owned by another account.
+func (s *Store) LookupDomainTeardownReceipt(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+	var state domainteardown.State
+	err := s.pool.QueryRow(ctx,
+		`SELECT state FROM domain_teardown_receipts WHERE domain = $1 AND user_id = $2`,
+		normalizeDomain(domain), userID,
+	).Scan(&state)
+	return state, err
+}
+
+// SetDomainTeardownState advances a receipt after provider convergence. It is
+// intentionally a no-op when no domain-delete receipt exists (for example an
+// account delete, whose user and receipts cascade together).
+func (s *Store) SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE domain_teardown_receipts SET state = $2, updated_at = now() WHERE domain = $1`,
+		normalizeDomain(domain), state,
+	)
+	return err
 }
 
 // --- Agent CRUD ---

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/apiserver"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/httpapi"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
@@ -179,6 +180,66 @@ func TestBuildDepsDeleteDomainReportsManualReviewWhenOwnershipCannotBeConfirmed(
 	}
 	if _, err := store.LookupDomain(ctx, domain, user.ID); err == nil {
 		t.Fatal("domain row still present after DeleteDomain")
+	}
+}
+
+func TestBuildDepsDeleteDomainReceiptRecoversLostResponse(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t)
+	p.SenderIdentity = &fakeSenderIdentity{tryErr: errors.New("provider timeout after delete commit")}
+	deps := apiserver.BuildDeps(p)
+
+	user, err := store.CreateOrGetUser(ctx, "lost-response@example.test", "Lost Response", "lost-response-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "lost-response.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+
+	state, err := deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil || state != httpapi.SendingTeardownPending {
+		t.Fatalf("first delete = %q, %v; want pending", state, err)
+	}
+	state, err = deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil || state != httpapi.SendingTeardownPending {
+		t.Fatalf("repeat delete must return the durable receipt, got %q, %v", state, err)
+	}
+
+	if err := store.SetDomainTeardownState(ctx, domain, domainteardown.Confirmed); err != nil {
+		t.Fatalf("simulate durable worker confirmation: %v", err)
+	}
+	state, err = deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil || state != httpapi.SendingTeardownConfirmed {
+		t.Fatalf("repeat delete after convergence = %q, %v; want confirmed", state, err)
+	}
+}
+
+func TestBuildDepsDeleteDomainWithoutProviderDoesNotConfirmManagedIdentity(t *testing.T) {
+	ctx := context.Background()
+	p, store := realParams(t) // SenderIdentity deliberately nil
+	deps := apiserver.BuildDeps(p)
+
+	user, err := store.CreateOrGetUser(ctx, "disabled-provider@example.test", "Disabled Provider", "disabled-provider-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	const domain = "disabled-provider.example.test"
+	d, err := store.ClaimOrCreateDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain, d.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+
+	state, err := deps.DeleteDomain(ctx, domain, user.ID)
+	if err != nil {
+		t.Fatalf("DeleteDomain: %v", err)
+	}
+	if state != httpapi.SendingTeardownPending {
+		t.Fatalf("managed identity with provider disabled = %q, want pending", state)
 	}
 }
 

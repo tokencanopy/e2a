@@ -17,6 +17,7 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertest"
 	"github.com/riverqueue/river/rivertype"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 )
 
 type blockingProvisionProvider struct {
@@ -308,6 +309,9 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 		if store.managed[domain] == "" {
 			t.Fatal("worker removed deletion tombstone before the post-drain sweep")
 		}
+		if store.teardownState[domain] != domainteardown.Confirmed {
+			t.Fatalf("durable receipt = %q, want confirmed", store.teardownState[domain])
+		}
 	})
 
 	t.Run("provider error propagates for retry", func(t *testing.T) {
@@ -338,6 +342,9 @@ func TestDeprovisionWorker_Work(t *testing.T) {
 		}
 		if store.managed[domain] == "" {
 			t.Fatal("ownership ambiguity removed the durable ledger tombstone")
+		}
+		if store.teardownState[domain] != domainteardown.ManualReview {
+			t.Fatalf("durable receipt = %q, want manual_review", store.teardownState[domain])
 		}
 		identities, _ := prov.List(context.Background())
 		if len(identities) != 1 || identities[0] != domain {

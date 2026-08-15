@@ -13,6 +13,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
@@ -207,8 +208,9 @@ type Deps struct {
 	// sending-identity teardown is still pending (best-effort deprovision did
 	// not confirm; a durable job + hourly reconciler converge it). False when
 	// teardown was confirmed or there is nothing to tear down (no SES).
-	DeleteDomain        func(ctx context.Context, domain, userID string) (teardown string, err error)
-	CountAgentsOnDomain func(ctx context.Context, domain, userID string) (live, trashed int, err error)
+	DeleteDomain         func(ctx context.Context, domain, userID string) (teardown domainteardown.State, err error)
+	LookupDomainTeardown func(ctx context.Context, domain, userID string) (domainteardown.State, error)
+	CountAgentsOnDomain  func(ctx context.Context, domain, userID string) (live, trashed int, err error)
 
 	// SMTPDomain is the relay's MX host, surfaced in the DNS records a
 	// domain must publish (config smtp.domain).

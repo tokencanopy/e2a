@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 )
 
 // fakeRawStore implements RawStore, recording the primitive (string/JSON) form
@@ -57,6 +59,9 @@ func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]str
 }
 func (f *fakeRawStore) DomainExists(context.Context, string) (bool, error) { return false, nil }
 func (f *fakeRawStore) FinalizeSendingIdentityTombstone(context.Context, string, time.Duration) error {
+	return nil
+}
+func (f *fakeRawStore) SetDomainTeardownState(context.Context, string, domainteardown.State) error {
 	return nil
 }
 

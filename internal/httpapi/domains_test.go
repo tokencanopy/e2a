@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 )
@@ -171,6 +173,29 @@ func TestDeleteDomainNotFound(t *testing.T) {
 	code, _ := sendJSON(t, "DELETE", srv.URL+"/v1/domains/unknown.com?confirm=DELETE", "good", nil)
 	if code != 404 {
 		t.Fatalf("want 404, got %d", code)
+	}
+}
+
+func TestDeleteDomainReturnsOwnerScopedReceiptAfterRowIsGone(t *testing.T) {
+	srv := testServer(t, func(deps *Deps) {
+		deps.LookupDomain = func(context.Context, string, string) (*identity.Domain, error) {
+			return nil, pgx.ErrNoRows
+		}
+		deps.LookupDomainTeardown = func(_ context.Context, domain, userID string) (domainteardown.State, error) {
+			if domain != "already-deleted.example.test" || userID != "u_1" {
+				t.Fatalf("receipt lookup = %q, %q", domain, userID)
+			}
+			return domainteardown.Pending, nil
+		}
+		deps.DeleteDomain = func(context.Context, string, string) (domainteardown.State, error) {
+			t.Fatal("durable receipt retry must not execute deletion again")
+			return "", nil
+		}
+	})
+
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/domains/already-deleted.example.test?confirm=DELETE", "good", nil)
+	if code != http.StatusOK || body["deleted"] != true || body["sending_teardown"] != SendingTeardownPending {
+		t.Fatalf("receipt response = %d %v, want 200 pending deletion receipt", code, body)
 	}
 }
 

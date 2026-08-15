@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 )
 
 // fakeStore is an in-memory Store for unit tests. Concurrency-safe so it can
@@ -29,6 +30,7 @@ type fakeStore struct {
 	// that don't care about the drain window keep their old behavior.
 	managedTouched       map[string]time.Time
 	providerPendingSince map[string]time.Time
+	teardownState        map[string]domainteardown.State
 
 	// provisionInputs feeds SendingProvisionInputs.
 	selector  string
@@ -68,6 +70,7 @@ func newFakeStore() *fakeStore {
 		applied:              map[string]string{},
 		managedTouched:       map[string]time.Time{},
 		providerPendingSince: map[string]time.Time{},
+		teardownState:        map[string]domainteardown.State{},
 	}
 }
 
@@ -320,6 +323,13 @@ func (s *fakeStore) FinalizeSendingIdentityTombstone(ctx context.Context, domain
 	delete(s.managed, domain)
 	delete(s.applied, domain)
 	delete(s.managedTouched, domain)
+	return nil
+}
+
+func (s *fakeStore) SetDomainTeardownState(ctx context.Context, domain string, state domainteardown.State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.teardownState[domain] = state
 	return nil
 }
 

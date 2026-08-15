@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/httpapi"
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -191,6 +192,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		ClaimDomain:            p.Store.ClaimOrCreateDomain,
 		EnforceDomainCreate:    p.Enforcer.CheckDomainCreate,
 		DeleteDomain:           deleteDomainFunc(p),
+		LookupDomainTeardown:   p.Store.LookupDomainTeardownReceipt,
 		CountAgentsOnDomain:    p.Store.CountAgentsOnDomain,
 		SMTPDomain:             p.SMTPDomain,
 		SESRegion:              p.SESRegion,
@@ -348,18 +350,41 @@ const bestEffortDeprovisionTimeout = 10 * time.Second
 // provider failure there (outage, throttle, foreign/untagged identity) is
 // logged and left to the committed job + hourly reaper to converge, never
 // surfaced to the client. Without SES configured, this is a plain delete.
-func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (string, error) {
+func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+	lookupReceipt := func(ctx context.Context, domain, userID string) (domainteardown.State, bool, error) {
+		state, err := p.Store.LookupDomainTeardownReceipt(ctx, domain, userID)
+		if err == nil {
+			return state, true, nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
 	if p.SenderIdentity == nil {
-		// No provider — nothing to tear down, so teardown is never pending.
-		return func(ctx context.Context, domain, userID string) (string, error) {
-			if err := p.Store.DeleteDomain(ctx, domain, userID); err != nil {
+		return func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+			if state, ok, err := lookupReceipt(ctx, domain, userID); err != nil || ok {
+				return state, err
+			}
+			var state domainteardown.State
+			if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				state, err = p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, userID, false)
+				return err
+			}); err != nil {
 				return "", err
 			}
-			return httpapi.SendingTeardownConfirmed, nil
+			return state, nil
 		}
 	}
-	return func(ctx context.Context, domain, userID string) (string, error) {
+	return func(ctx context.Context, domain, userID string) (domainteardown.State, error) {
+		if state, ok, err := lookupReceipt(ctx, domain, userID); err != nil || ok {
+			return state, err
+		}
 		if err := p.Store.DeleteDomainTx(ctx, domain, userID, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := p.Store.BeginDomainTeardownReceiptTx(ctx, tx, domain, userID, true); err != nil {
+				return err
+			}
 			// The delete is the tombstone's latest mutation: stamping it keeps
 			// any audit/sweep from finalizing the ledger row before THIS
 			// delete's drain window has elapsed. Stamp AFTER the job insert
@@ -380,12 +405,20 @@ func deleteDomainFunc(p Params) func(ctx context.Context, domain, userID string)
 			// Surfaced to the client as sending_teardown:"pending" so callers
 			// (e.g. the conformance harness) do not remove DNS from under a
 			// still-live provider identity.
-			return httpapi.SendingTeardownPending, nil
+			return domainteardown.Pending, nil
 		}
 		if !confirmed {
-			return httpapi.SendingTeardownManualReview, nil
+			if err := p.Store.SetDomainTeardownState(ctx, domain, domainteardown.ManualReview); err != nil {
+				log.Printf("[apiserver] persist manual-review teardown receipt for %s: %v", domain, err)
+				return domainteardown.Pending, nil
+			}
+			return domainteardown.ManualReview, nil
 		}
-		return httpapi.SendingTeardownConfirmed, nil
+		if err := p.Store.SetDomainTeardownState(ctx, domain, domainteardown.Confirmed); err != nil {
+			log.Printf("[apiserver] persist confirmed teardown receipt for %s: %v", domain, err)
+			return domainteardown.Pending, nil
+		}
+		return domainteardown.Confirmed, nil
 	}
 }
 
