@@ -92,7 +92,9 @@ perl -pi -e 's/[ \t]+$//' \
   "$OUT/apis/AgentsApi.ts" \
   "$OUT/types/ObjectParamAPI.ts"
 
-perl -0pi -e 's/\n+\z/\n/' "$OUT/models/UnsubscribeOptions.ts"
+perl -0pi -e 's/\n+\z/\n/' \
+  "$OUT/models/UnsubscribeOptions.ts" \
+  "$OUT/types/PromiseAPI.ts"
 
 # OpenAPI Generator's TypeScript ObjectSerializer cannot serialize a oneOf of
 # SCALARS/arrays — reply_to is `string | string[]` (ForwardRequestReplyTo). It

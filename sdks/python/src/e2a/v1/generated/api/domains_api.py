@@ -1,5 +1,4 @@
 # coding: utf-8
-
 """
     e2a API
 
@@ -1393,4 +1392,3 @@ class DomainsApi:
             _host=_host,
             _request_auth=_request_auth
         )
-

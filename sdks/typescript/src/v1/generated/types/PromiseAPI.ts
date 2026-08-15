@@ -1,7 +1,6 @@
 import { ResponseContext, RequestContext, HttpFile, HttpInfo } from '../http/http.js';
 import { Configuration, PromiseConfigurationOptions, wrapOptions } from '../configuration.js'
 import { PromiseMiddleware, Middleware, PromiseMiddlewareWrapper } from '../middleware.js';
-
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
@@ -2213,5 +2212,3 @@ export class PromiseWebhooksApi {
 
 
 }
-
-
