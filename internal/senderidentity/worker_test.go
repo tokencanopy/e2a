@@ -1213,14 +1213,14 @@ func TestReapWorkerBoundsProviderCallsPerJob(t *testing.T) {
 		return nil
 	}
 
-	if err := w.Work(context.Background(), reapJob()); err != nil {
+	if err := w.Work(context.Background(), reapJob(ReapV2Args{SweepID: 42})); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
 	if got := len(provider.StatusCalls); got > 25 {
 		t.Fatalf("one sweep job made %d provider status calls, want at most 25 so later pages cannot starve", got)
 	}
-	if next == nil || next.AfterDomain != "24-fair.example" {
-		t.Fatalf("continuation = %+v, want after 24-fair.example", next)
+	if next == nil || next.SweepID != 42 || next.AfterDomain != "24-fair.example" {
+		t.Fatalf("continuation = %+v, want sweep 42 after 24-fair.example", next)
 	}
 	if err := w.Work(context.Background(), reapJob(*next)); err != nil {
 		t.Fatalf("continuation Work: %v", err)

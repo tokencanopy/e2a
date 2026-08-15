@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"sort"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
@@ -22,7 +21,8 @@ func (ReapArgs) Kind() string { return "sender_identity_reap" }
 // ReapV2Args prevents the old blue/green slot from claiming new convergence
 // sweeps during rollout.
 type ReapV2Args struct {
-	AfterDomain string `json:"after_domain,omitempty"`
+	SweepID     int64  `json:"sweep_id,omitempty" river:"unique"`
+	AfterDomain string `json:"after_domain,omitempty" river:"unique"`
 }
 
 func (ReapV2Args) Kind() string { return "sender_identity_reap_v2" }
@@ -65,7 +65,7 @@ func (w *ReapWorker) Work(ctx context.Context, job *river.Job[ReapV2Args]) error
 	if enqueueNext == nil {
 		enqueueNext = enqueueReapPage
 	}
-	return reapManagedIdentityPage(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs, job.Args.AfterDomain, 25, enqueueNext)
+	return reapManagedIdentityPage(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs, job.Args.SweepID, job.Args.AfterDomain, 25, enqueueNext)
 }
 
 func enqueueReapPage(ctx context.Context, args ReapV2Args) error {
@@ -78,7 +78,7 @@ func enqueueReapPage(ctx context.Context, args ReapV2Args) error {
 		// A failed page is retried by River after it has already handed off its
 		// continuation. Keep that retry from multiplying the rest of the chain,
 		// while allowing the next hourly sweep to build a fresh chain.
-		UniqueOpts: river.UniqueOpts{ByArgs: true, ByQueue: true, ByPeriod: time.Hour},
+		UniqueOpts: river.UniqueOpts{ByArgs: true, ByQueue: true},
 	})
 	return err
 }
@@ -113,10 +113,10 @@ func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrai
 }
 
 func reapManagedIdentities(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool) error {
-	return reapManagedIdentityPage(ctx, store, provider, fire, maxReconcileAttempt, finalizeDeletion, legacyJobs, "", 0, nil)
+	return reapManagedIdentityPage(ctx, store, provider, fire, maxReconcileAttempt, finalizeDeletion, legacyJobs, 0, "", 0, nil)
 }
 
-func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool, afterDomain string, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
+func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool, jobSweepID int64, afterDomain string, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
 	managed, needsProvision, err := store.ListManagedSendingIdentityDomains(ctx)
 	if err != nil {
 		return err
@@ -136,7 +136,7 @@ func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider
 		if end < len(managed) {
 			// Hand off the continuation before making provider calls. A slow or
 			// failing identity in this page therefore cannot starve later domains.
-			if err := enqueueNext(ctx, ReapV2Args{AfterDomain: page[len(page)-1]}); err != nil {
+			if err := enqueueNext(ctx, ReapV2Args{SweepID: jobSweepID, AfterDomain: page[len(page)-1]}); err != nil {
 				return err
 			}
 		}

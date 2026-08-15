@@ -106,7 +106,7 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 				// must not dedup-block the next scheduled run (River can't drop
 				// `completed` from a unique state set). The reaper is idempotent
 				// anyway.
-				return ReapV2Args{}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2}
+				return ReapV2Args{SweepID: time.Now().UnixNano()}, &river.InsertOpts{Queue: jobs.QueueSenderIdentityV2}
 			},
 			// RunOnStart: the reaper is the version-agnostic convergence path for
 			// the ledger, so the first sweep after any (re)deploy — including a
