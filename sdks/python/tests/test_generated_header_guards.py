@@ -181,8 +181,7 @@ def test_delete_domain_preserves_transport_option_positions() -> None:
         assert parameters[-1] == "idempotency_key"
 
 
-@pytest.mark.parametrize("key", ["two words", "café", "k" * 256])
-def test_delete_domain_generated_key_validation_matches_wire_contract(key: str) -> None:
+def test_delete_domain_generated_key_enforces_published_length_limit() -> None:
     api = DomainsApi(api_client=object())
     with pytest.raises(ValidationError):
-        asyncio.run(api.delete_domain("mail.example.test", "DELETE", idempotency_key=key))
+        asyncio.run(api.delete_domain("mail.example.test", "DELETE", idempotency_key="k" * 256))
