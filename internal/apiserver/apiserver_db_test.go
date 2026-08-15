@@ -422,8 +422,17 @@ func TestBuildDepsDeleteDomainMissingAndCrossOwnerAreNotFound(t *testing.T) {
 		t.Fatalf("CreateOrGetUser other: %v", err)
 	}
 	const foreignDomain = "foreign-not-found.example.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, foreignDomain, owner.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain original owner: %v", err)
+	}
+	if err := store.DeleteDomainTx(ctx, foreignDomain, owner.ID, func(ctx context.Context, tx pgx.Tx, incarnation string) error {
+		_, err := store.BeginDomainTeardownReceiptTx(ctx, tx, foreignDomain, incarnation, owner.ID, false)
+		return err
+	}, nil); err != nil {
+		t.Fatalf("delete original owner domain: %v", err)
+	}
 	if _, err := store.ClaimOrCreateDomain(ctx, foreignDomain, other.ID); err != nil {
-		t.Fatalf("ClaimOrCreateDomain foreign: %v", err)
+		t.Fatalf("ClaimOrCreateDomain replacement owner: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -436,7 +445,11 @@ func TestBuildDepsDeleteDomainMissingAndCrossOwnerAreNotFound(t *testing.T) {
 			t.Fatal("idempotency completion called for absent domain")
 			return nil
 		}},
-		{name: "cross owner", domain: foreignDomain},
+		{name: "cross owner with requester history", domain: foreignDomain},
+		{name: "cross owner with requester history and fresh key", domain: foreignDomain, complete: func(context.Context, pgx.Tx, domainteardown.Receipt) error {
+			t.Fatal("idempotency completion called for cross-owner replacement")
+			return nil
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := deps.DeleteDomain(ctx, tc.domain, owner.ID, tc.complete); !errors.Is(err, identity.ErrDomainNotFound) {

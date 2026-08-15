@@ -34,6 +34,57 @@ func TestDeleteDomainLostResponseCanPollConfirmedReceipt(t *testing.T) {
 	}
 }
 
+func TestDeleteDomainLegacyCachedReplayFailsClosedWithoutIncarnation(t *testing.T) {
+	const (
+		domain = "legacy-cache.example.test"
+		key    = "legacy-domain-delete"
+	)
+	route := "/v1/domains/" + domain
+	legacyBody := []byte(`{"deleted":true,"domain":"legacy-cache.example.test","sending_teardown":"confirmed"}`)
+	idem := newMemIdem()
+	idem.rows["u_1\x00"+idemUserNS+key] = &memIdemRow{
+		hash: idempotency.HashRequest(route, nil),
+		done: true,
+		resp: idempotency.CachedResponse{
+			StatusCode: http.StatusOK, ContentType: "application/json", Body: legacyBody,
+		},
+	}
+	deletions := 0
+	srv := testServer(t, func(deps *Deps) {
+		deps.Idempotency = idem
+		deps.DeleteDomain = func(context.Context, string, string, DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			deletions++
+			return domainteardown.Receipt{}, nil
+		}
+		deps.LookupDomainTeardownSnapshot = func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			t.Fatal("legacy cache body has no safe incarnation to look up")
+			return "", false, nil
+		}
+	})
+
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+route+"?confirm=DELETE", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer good")
+	req.Header.Set("Idempotency-Key", key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || body["sending_teardown"] != SendingTeardownPending {
+		t.Fatalf("legacy replay = %d %v, want fail-closed pending", resp.StatusCode, body)
+	}
+	if deletions != 0 {
+		t.Fatalf("legacy replay re-executed delete: deletions=%d", deletions)
+	}
+}
+
 func TestDeleteDomainLostResponseRetryDoesNotDeleteReplacement(t *testing.T) {
 	live := true
 	deletions := 0

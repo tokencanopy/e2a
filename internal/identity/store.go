@@ -1855,6 +1855,20 @@ func (s *Store) DeleteDomainTx(ctx context.Context, domain, userID string, inTx 
 	).Scan(&incarnation)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// DELETE ... WHERE user_id cannot distinguish a globally absent row
+			// from a same-name registration owned by another account. Historical
+			// receipt polling is valid only for global absence; a live replacement
+			// must remain an ordinary ownership-scoped 404. The advisory locks above
+			// keep this check stable through the transaction.
+			var live bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM domains WHERE domain = $1)`, domain,
+			).Scan(&live); err != nil {
+				return err
+			}
+			if live {
+				return ErrDomainNotFound
+			}
 			if onMissing == nil {
 				return ErrDomainNotFound
 			}

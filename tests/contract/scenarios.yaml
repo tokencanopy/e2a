@@ -141,27 +141,10 @@ scenarios:
             "items.length": 0
 
   - name: domain_crud
-    description: Verify, delete, re-register, and safely retry a domain deletion
+    description: Register, delete, re-register, and safely retry a domain deletion
     setup:
       - register_domain: domain-crud.test.dev
-      - verify_domain: domain-crud.test.dev
     steps:
-      # VerifyDomainView has no capabilities field (it speaks the live-probe
-      # vocabulary), so pin the inbound result through GET, the documented poll
-      # target. Outbound is environment-dependent: local has no provider while
-      # staging provisions a real identity.
-      - id: get_after_verify
-        action: request
-        method: GET
-        path: /v1/domains/domain-crud.test.dev
-        expect:
-          status: 200
-          body_contains:
-            - capabilities
-          body_match:
-            verified: true
-            "capabilities.inbound": "verified"
-
       - id: delete
         action: request
         method: DELETE

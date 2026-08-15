@@ -633,6 +633,14 @@ func (s *Server) handleDeleteDomain(ctx context.Context, in *deleteDomainInput) 
 	if err != nil {
 		return nil, err
 	}
+	// Prerelease builds briefly cached only the public response body, before the
+	// private receipt incarnation was added. Such a replay cannot be bound to a
+	// historical deletion and may outlive a same-name replacement. Never repeat
+	// its old confirmed signal; a fresh key after retention can bind safely.
+	if in.IdempotencyKey != "" && body.ReceiptIncarnation == "" {
+		body.SendingTeardown = SendingTeardownPending
+		return &deleteDomainOutput{Body: body.DeleteDomainResult}, nil
+	}
 	if body.ReceiptIncarnation != "" && s.deps.LookupDomainTeardownSnapshot != nil {
 		teardown, live, lookupErr := s.deps.LookupDomainTeardownSnapshot(ctx, in.Domain, body.ReceiptIncarnation, user.ID)
 		if lookupErr != nil {

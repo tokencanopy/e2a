@@ -621,6 +621,12 @@ def test_runner_substitutes_stable_per_run_token_into_text_headers(monkeypatch):
     assert re.fullmatch(r"domain-delete-[0-9a-f]{12}", received)
 
 
+def test_domain_crud_is_runnable_without_store_access():
+    scenario = _scenario_by_name("domain_crud")
+    assert scenario["setup"] == [{"register_domain": "domain-crud.test.dev"}]
+    assert not scenario_needs_store(scenario)
+
+
 def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeypatch):
     scenario = {
         "name": "failure_cleanup",
