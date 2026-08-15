@@ -36,6 +36,12 @@ var errStillPending = errors.New("sending identity still pending verification")
 // forever — preserving the design's bounded-verification promise.
 const pendingVerificationBackstopTTL = 24 * time.Hour
 
+// verifiedProviderPendingGrace preserves a verified sender through transient
+// provider rechecks, but fails closed when the provider stays pending beyond
+// a full day. The first observation is persisted in the ownership ledger, so
+// restarts and hourly-job retries cannot reset the grace period.
+const verifiedProviderPendingGrace = 24 * time.Hour
+
 // Store is the narrow persistence surface the workers need. *identity.Store
 // satisfies it. Kept minimal so the workers don't depend on the whole store.
 type Store interface {
@@ -60,6 +66,15 @@ type Store interface {
 	// the provider account.
 	MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
+	// SendingIdentityLedgerExpired compares entirely on the database clock so
+	// application/DB clock skew cannot shorten or extend the pending TTL.
+	SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error)
+	// ObserveSendingIdentityProviderPending persists the first provider-pending
+	// observation for a DB-verified identity and reports whether its grace has
+	// expired, also using the database clock. Clear removes that drift marker
+	// once the provider agrees or a terminal transition is committed.
+	ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error)
+	ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
 	// FinalizeSendingIdentityTombstone removes the ledger row ONLY when its
 	// last mutation (updated_at) is older than olderThan. An audit or sweep
@@ -88,10 +103,8 @@ type SendingIdentityState struct {
 	// none). Equal to Incarnation only when THIS registration's key was
 	// confirmed installed — the gate for the healthy-recheck no-op.
 	AppliedIncarnation string
-	// LedgerUpdatedAt is the ledger row's last-mutation time (zero when no
-	// ledger row exists). Anchors the absolute pending-verification backstop
-	// TTL: a domain stuck pending with no live reconcile budget times out
-	// relative to this instead of being polled hourly forever.
+	// LedgerUpdatedAt remains available for diagnostics and adapters. Timeout
+	// decisions use Store.SendingIdentityLedgerExpired so clocks are not mixed.
 	LedgerUpdatedAt time.Time
 }
 
@@ -451,11 +464,16 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 					return err
 				}
 				out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
-				return nil
+				return store.ClearSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation)
 			case state.Status == StatusPending:
-				// Provider still verifying. Backstop TTL: a zero ledger time
-				// (no row — cannot happen for a provisioned domain) skips it.
-				if !state.LedgerUpdatedAt.IsZero() && time.Since(state.LedgerUpdatedAt) > pendingVerificationBackstopTTL {
+				// Provider still verifying. Keep the deadline entirely on the DB
+				// clock; comparing a DB timestamp with time.Now on this host makes
+				// clock skew part of the customer-visible state machine.
+				expired, err := store.SendingIdentityLedgerExpired(lockedCtx, domain, state.Incarnation, pendingVerificationBackstopTTL)
+				if err != nil {
+					return err
+				}
+				if expired {
 					const reason = "verification timed out"
 					changed, err := setFailedStatus(lockedCtx, store, domain, state, reason)
 					if err != nil {
@@ -466,8 +484,27 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 					}
 				}
 				return nil
+			case state.Status == StatusVerified && res.Status == StatusPending:
+				expired, err := store.ObserveSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation, verifiedProviderPendingGrace)
+				if err != nil {
+					return err
+				}
+				if !expired {
+					return nil
+				}
+				const reason = "provider verification remained pending"
+				changed, err := setFailedStatus(lockedCtx, store, domain, state, reason)
+				if err != nil {
+					return err
+				}
+				if changed {
+					out = syncOutcome{changed: true, statusChanged: true, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
+				}
+				return store.ClearSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation)
+			case state.Status == StatusVerified && res.Status == StatusVerified:
+				return store.ClearSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation)
 			default:
-				return nil // verified and provider agrees (or mid-recheck): healthy
+				return nil
 			}
 		}
 		// A durable mutation signal is usually a redundant re-check (POST
@@ -492,7 +529,7 @@ func syncProviderIdentity(ctx context.Context, domain string, store Store, provi
 		if state.Status == StatusVerified && state.AppliedIncarnation == state.Incarnation {
 			res, serr := provider.Status(lockedCtx, domain)
 			if serr == nil && res.Status == StatusVerified {
-				return nil
+				return store.ClearSendingIdentityProviderPending(lockedCtx, domain, state.Incarnation)
 			}
 			if serr != nil && !errors.Is(serr, ErrIdentityNotFound) && !errors.Is(serr, ErrIdentityNotOwned) {
 				return serr

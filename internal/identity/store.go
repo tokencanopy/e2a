@@ -1273,12 +1273,13 @@ func (s *Store) DomainExists(ctx context.Context, domain string) (bool, error) {
 // ambiguous transport failure still leaves a durable cleanup candidate.
 func (s *Store) MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error {
 	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
-		`INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation, updated_at)
-		 VALUES ($1, $2, NULL, now())
+		`INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation, updated_at, provider_pending_since)
+		 VALUES ($1, $2, NULL, clock_timestamp(), NULL)
 		 ON CONFLICT (domain) DO UPDATE
 		 SET incarnation = EXCLUDED.incarnation,
 		     applied_incarnation = NULL,
-		     updated_at = now()`,
+		     updated_at = clock_timestamp(),
+		     provider_pending_since = NULL`,
 		normalizeDomain(domain), incarnation,
 	)
 	return err
@@ -1291,7 +1292,9 @@ func (s *Store) MarkSendingIdentityManaged(ctx context.Context, domain, incarnat
 func (s *Store) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
 	tag, err := s.senderIdentityExecutor(ctx).Exec(ctx,
 		`UPDATE sender_identity_managed_domains
-		    SET applied_incarnation = $2, updated_at = now()
+		    SET applied_incarnation = $2,
+		        updated_at = clock_timestamp(),
+		        provider_pending_since = NULL
 		  WHERE domain = $1 AND incarnation = $2`,
 		normalizeDomain(domain), incarnation,
 	)
@@ -1302,6 +1305,51 @@ func (s *Store) MarkSendingIdentityApplied(ctx context.Context, domain, incarnat
 		return pgx.ErrNoRows
 	}
 	return nil
+}
+
+// SendingIdentityLedgerExpired evaluates the pending-verification backstop on
+// the database clock. Comparing this persisted timestamp with the application
+// host clock would make clock skew alter the state machine.
+func (s *Store) SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	var expired bool
+	err := s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`SELECT updated_at <= clock_timestamp() - make_interval(secs => $3)
+		   FROM sender_identity_managed_domains
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation, olderThan.Seconds(),
+	).Scan(&expired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return expired, err
+}
+
+// ObserveSendingIdentityProviderPending records the first time a DB-verified
+// identity is seen provider-pending and returns whether that persisted grace
+// period has elapsed. Repeated observations never reset the timestamp.
+func (s *Store) ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	var expired bool
+	err := s.senderIdentityExecutor(ctx).QueryRow(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET provider_pending_since = COALESCE(provider_pending_since, clock_timestamp())
+		  WHERE domain = $1 AND incarnation = $2
+		  RETURNING provider_pending_since <= clock_timestamp() - make_interval(secs => $3)`,
+		normalizeDomain(domain), incarnation, olderThan.Seconds(),
+	).Scan(&expired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return expired, err
+}
+
+func (s *Store) ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error {
+	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
+		`UPDATE sender_identity_managed_domains
+		    SET provider_pending_since = NULL
+		  WHERE domain = $1 AND incarnation = $2`,
+		normalizeDomain(domain), incarnation,
+	)
+	return err
 }
 
 // ForgetSendingIdentityManaged removes a cleanup candidate only after the

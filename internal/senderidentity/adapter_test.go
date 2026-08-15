@@ -42,7 +42,16 @@ func (f *fakeRawStore) TouchSendingCheckedForIncarnation(ctx context.Context, do
 
 func (f *fakeRawStore) MarkSendingIdentityManaged(context.Context, string, string) error { return nil }
 func (f *fakeRawStore) MarkSendingIdentityApplied(context.Context, string, string) error { return nil }
-func (f *fakeRawStore) ForgetSendingIdentityManaged(context.Context, string) error       { return nil }
+func (f *fakeRawStore) SendingIdentityLedgerExpired(context.Context, string, string, time.Duration) (bool, error) {
+	return false, nil
+}
+func (f *fakeRawStore) ObserveSendingIdentityProviderPending(context.Context, string, string, time.Duration) (bool, error) {
+	return false, nil
+}
+func (f *fakeRawStore) ClearSendingIdentityProviderPending(context.Context, string, string) error {
+	return nil
+}
+func (f *fakeRawStore) ForgetSendingIdentityManaged(context.Context, string) error { return nil }
 func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]string, map[string]bool, error) {
 	return nil, nil, nil
 }

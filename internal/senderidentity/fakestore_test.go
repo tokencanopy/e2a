@@ -27,7 +27,8 @@ type fakeStore struct {
 	// managedTouched models the ledger row's updated_at. Entries seeded
 	// directly into `managed` without a timestamp read as ancient, so tests
 	// that don't care about the drain window keep their old behavior.
-	managedTouched map[string]time.Time
+	managedTouched       map[string]time.Time
+	providerPendingSince map[string]time.Time
 
 	// provisionInputs feeds SendingProvisionInputs.
 	selector  string
@@ -59,14 +60,21 @@ type setStatusCall struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		status:         map[string]Status{},
-		owners:         map[string]string{},
-		incarnations:   map[string]string{},
-		verified:       map[string]bool{},
-		managed:        map[string]string{},
-		applied:        map[string]string{},
-		managedTouched: map[string]time.Time{},
+		status:               map[string]Status{},
+		owners:               map[string]string{},
+		incarnations:         map[string]string{},
+		verified:             map[string]bool{},
+		managed:              map[string]string{},
+		applied:              map[string]string{},
+		managedTouched:       map[string]time.Time{},
+		providerPendingSince: map[string]time.Time{},
 	}
+}
+
+func (s *fakeStore) ageProviderPending(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerPendingSince[domain] = time.Now().Add(-48 * time.Hour)
 }
 
 // touchTombstone stamps the ledger row as mutated "now" (what the delete tx
@@ -236,6 +244,7 @@ func (s *fakeStore) MarkSendingIdentityManaged(ctx context.Context, domain, inca
 	defer s.mu.Unlock()
 	s.managed[domain] = incarnation
 	delete(s.applied, domain)
+	delete(s.providerPendingSince, domain)
 	return nil
 }
 
@@ -249,6 +258,40 @@ func (s *fakeStore) MarkSendingIdentityApplied(ctx context.Context, domain, inca
 		return pgx.ErrNoRows
 	}
 	s.applied[domain] = incarnation
+	delete(s.providerPendingSince, domain)
+	return nil
+}
+
+func (s *fakeStore) SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managed[domain] != incarnation {
+		return false, nil
+	}
+	touched, ok := s.managedTouched[domain]
+	return ok && time.Since(touched) > olderThan, nil
+}
+
+func (s *fakeStore) ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managed[domain] != incarnation {
+		return false, nil
+	}
+	since, ok := s.providerPendingSince[domain]
+	if !ok {
+		s.providerPendingSince[domain] = time.Now()
+		return false, nil
+	}
+	return time.Since(since) > olderThan, nil
+}
+
+func (s *fakeStore) ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managed[domain] == incarnation {
+		delete(s.providerPendingSince, domain)
+	}
 	return nil
 }
 
@@ -261,6 +304,7 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	delete(s.managed, domain)
 	delete(s.applied, domain)
 	delete(s.managedTouched, domain)
+	delete(s.providerPendingSince, domain)
 	return nil
 }
 

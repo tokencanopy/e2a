@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sort"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
+
+	"github.com/tokencanopy/e2a/internal/jobs"
 )
 
 // ReapArgs is the legacy periodic kind. It stays registered so jobs inserted
@@ -16,7 +21,9 @@ func (ReapArgs) Kind() string { return "sender_identity_reap" }
 
 // ReapV2Args prevents the old blue/green slot from claiming new convergence
 // sweeps during rollout.
-type ReapV2Args struct{}
+type ReapV2Args struct {
+	AfterDomain string `json:"after_domain,omitempty"`
+}
 
 func (ReapV2Args) Kind() string { return "sender_identity_reap_v2" }
 
@@ -48,10 +55,32 @@ type ReapWorker struct {
 	fire                EventFirer
 	maxReconcileAttempt int
 	legacyJobs          bool
+	// enqueueNext is injectable only so the page handoff can be proved without
+	// a live River client. Production workers leave it nil.
+	enqueueNext func(context.Context, ReapV2Args) error
 }
 
-func (w *ReapWorker) Work(ctx context.Context, _ *river.Job[ReapV2Args]) error {
-	return reapManagedIdentities(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs)
+func (w *ReapWorker) Work(ctx context.Context, job *river.Job[ReapV2Args]) error {
+	enqueueNext := w.enqueueNext
+	if enqueueNext == nil {
+		enqueueNext = enqueueReapPage
+	}
+	return reapManagedIdentityPage(ctx, w.store, w.provider, w.fire, w.maxReconcileAttempt, true, w.legacyJobs, job.Args.AfterDomain, 25, enqueueNext)
+}
+
+func enqueueReapPage(ctx context.Context, args ReapV2Args) error {
+	client, err := river.ClientFromContextSafely[pgx.Tx](ctx)
+	if err != nil {
+		return err
+	}
+	_, err = client.Insert(ctx, args, &river.InsertOpts{
+		Queue: jobs.QueueSenderIdentityV2,
+		// A failed page is retried by River after it has already handed off its
+		// continuation. Keep that retry from multiplying the rest of the chain,
+		// while allowing the next hourly sweep to build a fresh chain.
+		UniqueOpts: river.UniqueOpts{ByArgs: true, ByQueue: true, ByPeriod: time.Hour},
+	})
+	return err
 }
 
 type PostDrainAuditWorker struct {
@@ -84,9 +113,33 @@ func (w *PostDrainAuditWorker) Work(ctx context.Context, job *river.Job[PostDrai
 }
 
 func reapManagedIdentities(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool) error {
+	return reapManagedIdentityPage(ctx, store, provider, fire, maxReconcileAttempt, finalizeDeletion, legacyJobs, "", 0, nil)
+}
+
+func reapManagedIdentityPage(ctx context.Context, store Store, provider Provider, fire EventFirer, maxReconcileAttempt int, finalizeDeletion, legacyJobs bool, afterDomain string, pageSize int, enqueueNext func(context.Context, ReapV2Args) error) error {
 	managed, needsProvision, err := store.ListManagedSendingIdentityDomains(ctx)
 	if err != nil {
 		return err
+	}
+	sort.Strings(managed)
+	page := managed
+	if pageSize > 0 {
+		start := sort.SearchStrings(managed, afterDomain)
+		for start < len(managed) && managed[start] <= afterDomain {
+			start++
+		}
+		end := start + pageSize
+		if end > len(managed) {
+			end = len(managed)
+		}
+		page = managed[start:end]
+		if end < len(managed) {
+			// Hand off the continuation before making provider calls. A slow or
+			// failing identity in this page therefore cannot starve later domains.
+			if err := enqueueNext(ctx, ReapV2Args{AfterDomain: page[len(page)-1]}); err != nil {
+				return err
+			}
+		}
 	}
 	providerDomains, err := provider.List(ctx)
 	if err != nil {
@@ -98,7 +151,7 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 	}
 
 	var errs []error
-	for _, domain := range managed {
+	for _, domain := range page {
 		_, providerPresent := present[domain]
 		// A missing provider identity must bypass the verified-state no-op and
 		// be recreated. Present identities take the normal desired-state path,
@@ -108,8 +161,8 @@ func reapManagedIdentities(ctx context.Context, store Store, provider Provider, 
 			continue
 		}
 	}
-	if len(managed) > 0 {
-		log.Printf("[senderidentity:reaper] converged %d managed identity candidate(s), %d error(s)", len(managed), len(errs))
+	if len(page) > 0 {
+		log.Printf("[senderidentity:reaper] converged %d managed identity candidate(s), %d error(s)", len(page), len(errs))
 	}
 
 	// Provider identities outside the ledger can never be converged (the

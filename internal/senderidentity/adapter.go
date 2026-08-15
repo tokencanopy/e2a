@@ -18,6 +18,9 @@ type RawStore interface {
 	TouchSendingCheckedForIncarnation(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityManaged(ctx context.Context, domain, incarnation string) error
 	MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error
+	SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error)
+	ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error)
+	ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
 	FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error
 	ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error)
@@ -70,6 +73,18 @@ func (a *storeAdapter) MarkSendingIdentityManaged(ctx context.Context, domain, i
 
 func (a *storeAdapter) MarkSendingIdentityApplied(ctx context.Context, domain, incarnation string) error {
 	return a.raw.MarkSendingIdentityApplied(ctx, domain, incarnation)
+}
+
+func (a *storeAdapter) SendingIdentityLedgerExpired(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	return a.raw.SendingIdentityLedgerExpired(ctx, domain, incarnation, olderThan)
+}
+
+func (a *storeAdapter) ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error) {
+	return a.raw.ObserveSendingIdentityProviderPending(ctx, domain, incarnation, olderThan)
+}
+
+func (a *storeAdapter) ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error {
+	return a.raw.ClearSendingIdentityProviderPending(ctx, domain, incarnation)
 }
 
 func (a *storeAdapter) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {

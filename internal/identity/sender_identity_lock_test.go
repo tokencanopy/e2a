@@ -478,3 +478,75 @@ func TestMarkSendingIdentityManagedClearsSameIncarnationAppliedState(t *testing.
 		t.Fatal("same-incarnation mutation intent retained stale applied state")
 	}
 }
+
+func TestSendingIdentityPendingDeadlinesUseDatabaseClock(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "pending-clock@example.com", "Pending Clock", "pending-clock-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	domain, err := store.ClaimOrCreateDomain(ctx, "pending-clock.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+
+	expired, err := store.SendingIdentityLedgerExpired(ctx, domain.Domain, domain.VerificationToken, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("SendingIdentityLedgerExpired fresh: %v", err)
+	}
+	if expired {
+		t.Fatal("fresh ledger row reported expired")
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE sender_identity_managed_domains SET updated_at = clock_timestamp() - interval '25 hours' WHERE domain = $1`,
+		domain.Domain,
+	); err != nil {
+		t.Fatalf("age ledger: %v", err)
+	}
+	expired, err = store.SendingIdentityLedgerExpired(ctx, domain.Domain, domain.VerificationToken, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("SendingIdentityLedgerExpired aged: %v", err)
+	}
+	if !expired {
+		t.Fatal("aged ledger row did not expire")
+	}
+
+	expired, err = store.ObserveSendingIdentityProviderPending(ctx, domain.Domain, domain.VerificationToken, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ObserveSendingIdentityProviderPending first: %v", err)
+	}
+	if expired {
+		t.Fatal("first provider-pending observation immediately expired")
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE sender_identity_managed_domains SET provider_pending_since = clock_timestamp() - interval '25 hours' WHERE domain = $1`,
+		domain.Domain,
+	); err != nil {
+		t.Fatalf("age provider-pending marker: %v", err)
+	}
+	expired, err = store.ObserveSendingIdentityProviderPending(ctx, domain.Domain, domain.VerificationToken, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ObserveSendingIdentityProviderPending aged: %v", err)
+	}
+	if !expired {
+		t.Fatal("aged provider-pending observation did not expire")
+	}
+	if err := store.ClearSendingIdentityProviderPending(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("ClearSendingIdentityProviderPending: %v", err)
+	}
+	var markerCleared bool
+	if err := pool.QueryRow(ctx,
+		`SELECT provider_pending_since IS NULL FROM sender_identity_managed_domains WHERE domain = $1`,
+		domain.Domain,
+	).Scan(&markerCleared); err != nil {
+		t.Fatalf("read provider-pending marker: %v", err)
+	}
+	if !markerCleared {
+		t.Fatal("provider-pending marker was not cleared")
+	}
+}

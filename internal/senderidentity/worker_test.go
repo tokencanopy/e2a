@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -658,10 +659,14 @@ func TestDeprovisionWorker_ConvergesReRegisteredDomain(t *testing.T) {
 	})
 }
 
-func reapJob() *river.Job[ReapV2Args] {
+func reapJob(args ...ReapV2Args) *river.Job[ReapV2Args] {
+	jobArgs := ReapV2Args{}
+	if len(args) > 0 {
+		jobArgs = args[0]
+	}
 	return &river.Job[ReapV2Args]{
 		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 1, Kind: ReapV2Args{}.Kind()},
-		Args:   ReapV2Args{},
+		Args:   jobArgs,
 	}
 }
 
@@ -931,6 +936,38 @@ func TestReapWorker_Work(t *testing.T) {
 		}
 	})
 
+	t.Run("verified identity that remains provider-pending past the grace period fails closed", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus("stuck-recheck.example", StatusVerified)
+		store.setOwner("stuck-recheck.example", "u-drift")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["stuck-recheck.example"] = "stuck-recheck.example-incarnation"
+		store.applied["stuck-recheck.example"] = "stuck-recheck.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("stuck-recheck.example")
+		prov.SetStatus("stuck-recheck.example", Result{Status: StatusPending})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("first Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "stuck-recheck.example"); got != StatusVerified {
+			t.Fatalf("first pending observation flapped status to %q", got)
+		}
+		store.ageProviderPending("stuck-recheck.example")
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("second Work: %v", err)
+		}
+		got, _ := store.lastSetStatus()
+		if got.Status != StatusFailed || got.ErrMsg != "provider verification remained pending" {
+			t.Fatalf("expected bounded provider-pending drift failure, got %+v", got)
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusFailed {
+			t.Fatalf("fired %+v ok=%v, want sending_failed", ev, ok)
+		}
+	})
+
 	t.Run("stuck-pending past the absolute backstop TTL times out", func(t *testing.T) {
 		// Second-review should-fix: the hourly read-only resolve would
 		// otherwise poll a never-resolving identity forever, bypassing the
@@ -1155,6 +1192,41 @@ func TestReapWorker_StuckFailedDomainDoesNotRefireHourly(t *testing.T) {
 	}
 	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
 		t.Fatalf("status = %q, want failed maintained", got)
+	}
+}
+
+func TestReapWorkerBoundsProviderCallsPerJob(t *testing.T) {
+	store := newFakeStore()
+	provider := NewFakeProvider()
+	for i := 0; i < 30; i++ {
+		domain := fmt.Sprintf("%02d-fair.example", i)
+		store.setStatus(domain, StatusVerified)
+		store.managed[domain] = domain + "-incarnation"
+		store.applied[domain] = domain + "-incarnation"
+		provider.SeedIdentity(domain)
+		provider.SetStatus(domain, Result{Status: StatusVerified})
+	}
+	w := &ReapWorker{store: store, provider: provider}
+	var next *ReapV2Args
+	w.enqueueNext = func(_ context.Context, args ReapV2Args) error {
+		next = &args
+		return nil
+	}
+
+	if err := w.Work(context.Background(), reapJob()); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if got := len(provider.StatusCalls); got > 25 {
+		t.Fatalf("one sweep job made %d provider status calls, want at most 25 so later pages cannot starve", got)
+	}
+	if next == nil || next.AfterDomain != "24-fair.example" {
+		t.Fatalf("continuation = %+v, want after 24-fair.example", next)
+	}
+	if err := w.Work(context.Background(), reapJob(*next)); err != nil {
+		t.Fatalf("continuation Work: %v", err)
+	}
+	if got := len(provider.StatusCalls); got != 30 {
+		t.Fatalf("two pages made %d total provider status calls, want all 30 domains converged", got)
 	}
 }
 
