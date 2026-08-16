@@ -189,7 +189,7 @@ func BuildDeps(p Params) httpapi.Deps {
 
 		ListDomains:                  p.Store.ListDomainsByUser,
 		SendingRampSnapshot:          rampSnapshot,
-		ClaimDomain:                  p.Store.ClaimOrCreateDomain,
+		ClaimDomain:                  p.Store.ClaimOrCreateDomainWithLimit,
 		EnforceDomainCreate:          p.Enforcer.CheckDomainCreate,
 		DeleteDomain:                 deleteDomainFunc(p),
 		LookupDomainTeardownSnapshot: p.Store.LookupDomainTeardownSnapshot,

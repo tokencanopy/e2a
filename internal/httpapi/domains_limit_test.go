@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 )
 
 // POST /v1/domains is idempotent for a domain the caller already owns: the
@@ -73,5 +74,43 @@ func TestRegisterDomainAtCapEnforcesWhenLookupErrors(t *testing.T) {
 	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "capped-owned.com"})
 	if code != 402 || errCode(body) != "limit_exceeded" {
 		t.Fatalf("want 402 limit_exceeded when the lookup fails, got %d %v", code, body)
+	}
+}
+
+// ClaimDomain is the race-proof source of truth for max_domains (#822): a
+// DomainLimitExceededError from it must still surface as 402 limit_exceeded,
+// even when EnforceDomainCreate's own pre-check already passed.
+func TestRegisterDomainClaimDomainLimitExceededMapsTo402(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.ClaimDomain = func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
+			return nil, &identity.DomainLimitExceededError{Limit: maxDomains, Current: maxDomains}
+		}
+	})
+	code, body := postJSON(t, srv.URL+"/v1/domains", "good", map[string]any{"domain": "raced.com"})
+	if code != 402 || errCode(body) != "limit_exceeded" {
+		t.Fatalf("want 402 limit_exceeded when ClaimDomain reports the cap, got %d %v", code, body)
+	}
+}
+
+// A GetLimits failure must not fall through with maxDomains left at its zero
+// value: that reads as "unlimited" to ClaimDomain and would silently drop
+// the cap for this request instead of failing safe.
+func TestRegisterDomainAtCapEnforcesWhenGetLimitsErrors(t *testing.T) {
+	claimedWith := -1
+	srv := testServer(t, func(d *Deps) {
+		d.GetLimits = func(ctx context.Context, userID string) (limits.Limits, error) {
+			return limits.Limits{}, errors.New("connection refused")
+		}
+		d.ClaimDomain = func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
+			claimedWith = maxDomains
+			return &identity.Domain{Domain: domain, Verified: false, VerificationToken: "e2a-verify=new"}, nil
+		}
+	})
+	code, body := postJSON(t, srv.URL+"/v1/domains", "good", map[string]any{"domain": "new-domain.com"})
+	if code != 500 || errCode(body) != "internal_error" {
+		t.Fatalf("want 500 internal_error when GetLimits fails, got %d %v", code, body)
+	}
+	if claimedWith != -1 {
+		t.Fatalf("ClaimDomain must not be called after GetLimits fails, but it was called with maxDomains=%d", claimedWith)
 	}
 }
