@@ -59,10 +59,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "ws": "^8.21.2"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^7.0.2",
