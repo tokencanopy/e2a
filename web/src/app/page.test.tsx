@@ -199,6 +199,30 @@ describe("Landing page", () => {
     const getStartedLinks = screen.getAllByText(/Get started free/i);
     expect(getStartedLinks.length).toBeGreaterThan(0);
   });
+
+  // Regression: the CTA button rows were `inline-flex`, so in the hero the
+  // "What is email infrastructure…" explainer link (itself inline) flowed
+  // onto the SAME line and sat jammed against "Get started free" instead of
+  // stacking above it. jsdom doesn't compute layout, so the guard is
+  // structural: every CTA row must be a block-level flex container.
+  it("renders the CTA button rows as block-level flex containers", () => {
+    render(<Home />);
+    const rows = screen
+      .getAllByRole("link", { name: /Get started free/ })
+      .map((link) => link.parentElement!);
+    expect(rows).toHaveLength(2); // hero + closing CTA
+    for (const row of rows) {
+      const classes = row.className.split(/\s+/);
+      expect(classes).toContain("flex");
+      expect(classes).not.toContain("inline-flex");
+    }
+    // The hero explainer link the row collided with is still present above.
+    expect(
+      screen.getByRole("link", {
+        name: /What is email infrastructure for AI agents\?/,
+      }),
+    ).toBeInTheDocument();
+  });
 });
 
 // The landing page is the site's main answer surface. These assertions guard
