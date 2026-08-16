@@ -91,6 +91,7 @@ type step struct {
 	// nothing, which is a scenario-authoring mistake all three runners refuse
 	// identically rather than one of them silently sending a zero-byte body.
 	RawBodyBase64 *string           `yaml:"raw_body_base64,omitempty"`
+	Headers       map[string]string `yaml:"headers,omitempty"`
 	HeadersBase64 map[string]string `yaml:"headers_base64,omitempty"`
 	AuthOverride  *string           `yaml:"auth_override,omitempty"`
 	AgentEmail    string            `yaml:"agent_email,omitempty"`
@@ -590,9 +591,17 @@ func (r *runner) execRequestError(s *step) error {
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for name, value := range s.Headers {
+		req.Header.Set(name, r.resolve(value))
+	}
 	// Go's http.Header is byte-transparent for obs-text (anything >= 0x80), so
 	// a decoded byte string reaches the wire unchanged.
 	for name, encoded := range s.HeadersBase64 {
+		for textName := range s.Headers {
+			if strings.EqualFold(name, textName) {
+				return fmt.Errorf("step %s: header %s is declared in both headers and headers_base64", s.ID, name)
+			}
+		}
 		value, decodeErr := decodeStrictBase64(encoded, fmt.Sprintf("step %s: headers_base64[%s]", s.ID, name))
 		if decodeErr != nil {
 			return decodeErr

@@ -355,7 +355,7 @@ func main() {
 			senderidentity.NewStoreAdapter(store),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
-			senderidentity.Config{},
+			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
 		)
 		registrars = append(registrars, senderMgr)
 	}
@@ -712,9 +712,18 @@ func main() {
 	api.SetSubscriberStore(subscriberStore)
 	// Account-delete cascade (decision 4 / Slice 4): when SES is configured,
 	// DELETE /account enqueues an SES teardown job for every owned domain in
-	// the delete tx. Per-domain DELETE teardown is wired in apiserver.
+	// the delete tx, after stamping each domain's ledger tombstone so no
+	// audit/sweep finalizes it inside this delete's drain window. Per-domain
+	// DELETE teardown is wired the same way in apiserver.
 	if senderEnqueuer != nil {
-		api.SetDomainTeardownHook(senderEnqueuer.EnqueueDeprovisionTx)
+		api.SetDomainTeardownHook(func(ctx context.Context, tx pgx.Tx, domain string) error {
+			// Enqueue first, stamp second — the stamp should sit as close to
+			// commit as the tx allows (see TouchSendingIdentityTombstoneTx).
+			if err := senderEnqueuer.EnqueueDeprovisionTx(ctx, tx, domain); err != nil {
+				return err
+			}
+			return store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
+		})
 	}
 	api.SetOutbox(webhookOutbox)
 	// The outbound accept-tx enqueuer is mandatory: DeliverOutbound always

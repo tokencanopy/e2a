@@ -743,9 +743,14 @@ class DomainsResource {
   create(body: RegisterDomainRequest): Promise<DomainView> {
     return call(() => this.api.registerDomain(body));
   }
-  delete(domain: string): Promise<DeleteDomainResult> {
-    // Returns the deletion object ({deleted:true, domain}).
-    return call(() => this.api.deleteDomain(domain, "DELETE"));
+  delete(domain: string, opts: RequestOptions = {}): Promise<DeleteDomainResult> {
+    // Returns the deletion object ({deleted:true, domain, sending_teardown}).
+    // Only sending_teardown:"confirmed" proves provider absence. "pending",
+    // "manual_review", missing, and future unknown values require keeping the
+    // domain's DNS published. Reuse opts.idempotencyKey after an ambiguous
+    // failure so the server replays this deletion instead of deleting a later
+    // registration; omit it and the SDK mints one for this call's retries.
+    return call(() => this.api.deleteDomain(domain, "DELETE", undefined, opts.idempotencyKey));
   }
   verify(domain: string): Promise<VerifyDomainView> {
     return call(() => this.api.verifyDomain(domain));

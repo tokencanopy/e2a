@@ -232,7 +232,7 @@ func (s *Server) handleImportContacts(ctx context.Context, in *importContactsInp
 	// is what makes that retry safe.
 	_, result, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/contacts/import", in.RawBody,
-		func() (int, ContactImportResult, error) {
+		func(_ idemClaimToken) (int, ContactImportResult, error) {
 			batchID := identity.NewImportBatchID()
 			var outcomes []identity.ContactImportOutcome
 			var ierr error

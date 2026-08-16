@@ -91,9 +91,17 @@ export function registerDomainTools(server: McpServer, client: McpClient): void 
       title: "Delete a custom mail domain (DESTRUCTIVE)",
       annotations: { destructiveHint: true, idempotentHint: true },
       description:
-        "Permanently remove a domain registration and deprovision its sending identity. The operation succeeds only when the domain has no agents: permanently delete every live or trashed agent on the domain first. Moving an agent to trash is not sufficient because trashed agents still belong to the domain. Irreversible. Requires `confirm: true` — set it explicitly to acknowledge the destructive scope.",
+        "Permanently remove a domain registration and deprovision its sending identity. The operation succeeds only when the domain has no agents: permanently delete every live or trashed agent on the domain first. Moving an agent to trash is not sufficient because trashed agents still belong to the domain. The returned `sending_teardown` receipt is the DNS-release contract: only `confirmed` proves the provider identity is absent. Keep DNS published for `pending`, `manual_review`, missing, or unknown values. A unique `idempotency_key` is REQUIRED for this logical deletion; reuse it after an ambiguous network failure so, within the published retention window (at least 24 hours), the server follows the original incarnation-bound receipt without deleting a later registration of the same domain. After retention, the same key is a new operation. Use a new key only to delete a replacement registration. `manual_review` requires operator support. Irreversible. Requires `confirm: true` — set it explicitly to acknowledge the destructive scope.",
       inputSchema: strictInputSchema({
         domain: z.string().min(1).describe("Domain to delete."),
+        idempotency_key: z
+          .string()
+          .min(1)
+          .max(255)
+          .regex(/^[!-~]+$/, "must contain only printable ASCII characters without spaces")
+          .describe(
+            "Stable key for this logical deletion. Reuse it after an ambiguous failure; use a new key only for a replacement domain registration.",
+          ),
         confirm: z
           .literal(true)
           .describe(
@@ -108,8 +116,9 @@ export function registerDomainTools(server: McpServer, client: McpClient): void 
             "delete_domain requires confirm:true — refusing to proceed without explicit confirmation.",
           );
         }
-        // Return the server's deletion object verbatim: {deleted:true, domain}.
-        return client.deleteDomain(args.domain);
+        // Return the server's durable deletion receipt verbatim:
+        // {deleted:true, domain, sending_teardown}.
+        return client.deleteDomain(args.domain, args.idempotency_key);
       }),
   );
 }

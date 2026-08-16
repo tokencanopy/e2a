@@ -155,13 +155,31 @@ notifications:
 # "none" and outbound keeps the relay "… via e2a" From — the fail-closed
 # default for dev/self-host without SES. Needs AWS credentials in the ambient
 # environment (env vars / instance role) with ses:CreateEmailIdentity,
+# ses:TagResource (CreateEmailIdentity supplies the required
+# e2a-managed=sender-identity-v1 tag),
+# ses:PutEmailIdentityDkimSigningAttributes,
 # ses:PutEmailIdentityMailFromAttributes, ses:GetEmailIdentity,
 # ses:DeleteEmailIdentity, ses:ListEmailIdentities. (Provisioning calls
-# PutEmailIdentityMailFromAttributes for the custom MAIL FROM — a role missing
-# it fails at that step even though CreateEmailIdentity succeeds.)
+# both Put operations when refreshing an existing identity — a role missing
+# either permission fails closed and River retries.) For least privilege,
+# require aws:RequestTag/e2a-managed=sender-identity-v1 on Create/Tag and
+# aws:ResourceTag/e2a-managed=sender-identity-v1 on Delete/Put. Before upgrading
+# an existing SES-enabled install, follow the audited legacy-tag adoption steps
+# in docs/design/sender-identity-mailfrom.md; untagged identities are deliberately
+# treated as foreign and are never updated or deleted.
 # Override with E2A_SENDER_IDENTITY_SES_REGION.
 sender_identity:
   ses_region: ""  # e.g. "us-east-1"
+  # Two-phase blue/green rollout switch for the versioned sender-identity job
+  # lanes. Phase 1: deploy the new release with this true — it produces the
+  # LEGACY job kinds (consumable by the previous release, so rollback strands
+  # no teardown work) while consuming both lanes. This is job-lane
+  # compatibility only: before a pre-ownership binary overlaps, follow the
+  # design's tag-conditioned IAM setup and sender-identity mutation freeze.
+  # Phase 2: once this release is the stable rollback target, flip to false
+  # (config-only deploy) to switch producers to the versioned v2 lane.
+  # Single-instance deployments have no overlap and can leave this false.
+  legacy_job_compat: false
 
 # Operator-managed recipient-volume ramp for newly verified custom sender
 # domains. Disabled by default for self-hosts. When enabled, the schedule is

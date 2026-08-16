@@ -138,6 +138,20 @@ signing:
 	}
 }
 
+func TestLoadRejectsInvalidSenderIdentityLegacyCompatEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("env: development\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT", "tru")
+
+	_, err := Load(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT") {
+		t.Fatalf("Load error = %v, want invalid rollout flag error", err)
+	}
+}
+
 func TestValidateProductionRejectsPlaceholderHMAC(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

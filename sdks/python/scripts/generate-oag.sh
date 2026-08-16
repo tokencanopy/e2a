@@ -66,9 +66,19 @@ python3 "$ROOT/scripts/strip-unused-generated-imports.py" \
   re "$DEST/models/sending_ramp_view.py" \
   re "$DEST/models/domain_capabilities.py"
 
-# OpenAPI Generator leaves multiple terminal newlines on standalone component
-# models. Keep the dedicated push envelope deterministic for diff hygiene.
-perl -0pi -e 's/\n+\z/\n/' "$DEST/models/event_envelope.py"
+# OpenAPI Generator leaves multiple terminal newlines on some generated
+# surfaces. Keep touched API/model output deterministic for diff hygiene.
+perl -0pi -e 's/\n+\z/\n/' \
+  "$DEST/api/domains_api.py" \
+  "$DEST/models/delete_domain_result.py" \
+  "$DEST/models/event_envelope.py"
+
+# Ruff removes the generator's empty separator immediately after the encoding
+# cookie. Apply the same normalization during generation so freshness remains
+# stable after pre-commit formatting.
+perl -0pi -e 's/\A# coding: utf-8\n\n/# coding: utf-8\n/' \
+  "$DEST/api/domains_api.py" \
+  "$DEST/models/delete_domain_result.py"
 
 # Keep the expanded agents surface deterministic and diff-check clean.
 perl -pi -e 's/[ \t]+$//' "$DEST/api/agents_api.py"
@@ -85,6 +95,11 @@ perl -0pi -e 's/\n+\z/\n/' \
   "$DEST/models/create_agent_suppression_request.py" \
   "$DEST/models/page_agent_suppression_view.py" \
   "$DEST/models/unsubscribe_options.py"
+
+# Preserve the pre-existing positional transport options; append the newly
+# generated idempotency header after them.
+python3 "$ROOT/scripts/preserve-generated-domain-delete-signatures.py" \
+  python "$DEST"
 
 rm -f "$CODEGEN_SPEC"
 trap - EXIT

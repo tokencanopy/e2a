@@ -107,22 +107,22 @@ func (s *Server) approveHeld(ctx context.Context, userID, msgID, agentEmail stri
 	// Async approval resolves the hold and enqueues delivery in one transaction.
 	// Complete a keyed request in that SAME transaction so a crash after commit
 	// still replays the exact accepted response instead of re-running approval.
-	var idemCompleteTx agent.ApproveIdemCompleter
-	if idemKey != "" && s.deps.Idempotency != nil {
-		nsKey := idemUserNS + idemKey
-		uid := userID
-		idemCompleteTx = func(ctx context.Context, tx pgx.Tx, sent *identity.Message) error {
-			status, view := approveResult(sent)
-			raw, marshalErr := json.Marshal(view)
-			if marshalErr != nil {
-				raw = []byte("{}")
+	status, view, err := runIdempotent(s, ctx, userID, idemKey, "/v1/approve/"+msgID, rawBody, func(claimToken idemClaimToken) (int, SendResultView, error) {
+		var idemCompleteTx agent.ApproveIdemCompleter
+		if idemKey != "" && s.deps.Idempotency != nil {
+			nsKey := idemUserNS + idemKey
+			uid := userID
+			idemCompleteTx = func(ctx context.Context, tx pgx.Tx, sent *identity.Message) error {
+				status, view := approveResult(sent)
+				raw, marshalErr := json.Marshal(view)
+				if marshalErr != nil {
+					raw = []byte("{}")
+				}
+				return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, claimToken, idempotency.CachedResponse{
+					StatusCode: status, ContentType: "application/json", Body: raw,
+				})
 			}
-			return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, idempotency.CachedResponse{
-				StatusCode: status, ContentType: "application/json", Body: raw,
-			})
 		}
-	}
-	status, view, err := runIdempotent(s, ctx, userID, idemKey, "/v1/approve/"+msgID, rawBody, func() (int, SendResultView, error) {
 		// Mutable rate-limit state is evaluated only after the idempotency claim,
 		// so a completed keyed retry replays its cached response without consuming
 		// another token or being replaced by a later 429.

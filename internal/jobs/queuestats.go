@@ -24,7 +24,7 @@ var queueStatsStates = []string{"available", "running", "retryable", "scheduled"
 // simply stops being set when its queue empties would freeze at its last
 // value on most metric backends.
 func knownQueues() []string {
-	return []string{QueueOutbound, QueueInbound, QueueWebhook, QueueMaintenance, QueueNotify, QueueDefault}
+	return []string{QueueOutbound, QueueInbound, QueueWebhook, QueueMaintenance, QueueNotify, QueueSenderIdentityV2, QueueDefault}
 }
 
 // QueueStatsMetrics is the narrow gauge surface the sampler sets. Satisfied

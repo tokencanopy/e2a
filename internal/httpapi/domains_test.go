@@ -4,12 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tokencanopy/e2a/internal/domainteardown"
+	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 )
+
+func TestDeleteDomainIdempotencyKeyBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{name: "absent is optional", key: "", want: true},
+		{name: "one printable ASCII", key: "k", want: true},
+		{name: "255 printable ASCII", key: strings.Repeat("k", idempotency.MaxKeyLength), want: true},
+		{name: "256 rejected", key: strings.Repeat("k", idempotency.MaxKeyLength+1), want: false},
+		{name: "space rejected", key: "two words", want: false},
+		{name: "non ASCII rejected", key: "café", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validDeleteDomainIdempotencyKey(tc.key); got != tc.want {
+				t.Fatalf("validDeleteDomainIdempotencyKey(%q) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestGetDomainIncludesReadOnlySendingRamp(t *testing.T) {
 	srv := testServer(t, func(deps *Deps) {
@@ -143,8 +167,8 @@ func TestDeleteDomain(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body["deleted"] != true || body["domain"] != "acme.com" {
-		t.Fatalf("want {deleted:true, domain:acme.com}, got %v", body)
+	if body["deleted"] != true || body["domain"] != "acme.com" || body["sending_teardown"] != SendingTeardownConfirmed {
+		t.Fatalf("want {deleted:true, domain:acme.com, sending_teardown:confirmed}, got %v", body)
 	}
 }
 
@@ -171,6 +195,25 @@ func TestDeleteDomainNotFound(t *testing.T) {
 	code, _ := sendJSON(t, "DELETE", srv.URL+"/v1/domains/unknown.com?confirm=DELETE", "good", nil)
 	if code != 404 {
 		t.Fatalf("want 404, got %d", code)
+	}
+}
+
+func TestDeleteDomainReturnsOwnerScopedReceiptAfterRowIsGone(t *testing.T) {
+	srv := testServer(t, func(deps *Deps) {
+		deps.DeleteDomain = func(_ context.Context, domain, userID string, _ DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			if domain != "already-deleted.example.test" || userID != "u_1" {
+				t.Fatalf("receipt resolution = %q, %q", domain, userID)
+			}
+			return domainteardown.Receipt{Incarnation: "deleted-incarnation", State: domainteardown.Pending}, nil
+		}
+		deps.LookupDomainTeardownSnapshot = func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			return domainteardown.Pending, false, nil
+		}
+	})
+
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/domains/already-deleted.example.test?confirm=DELETE", "good", nil)
+	if code != http.StatusOK || body["deleted"] != true || body["sending_teardown"] != SendingTeardownPending {
+		t.Fatalf("receipt response = %d %v, want 200 pending deletion receipt", code, body)
 	}
 }
 

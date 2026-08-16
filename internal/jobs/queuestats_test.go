@@ -86,12 +86,12 @@ func TestQueueStatsWorker_SampleDepthsAgesAndZeroFill(t *testing.T) {
 		t.Fatalf("Sample: %v", err)
 	}
 
-	// 6 known queues × 4 states, every pair set every pass.
-	if rec.depthCalls != 24 {
-		t.Errorf("depth calls = %d, want 24 (6 queues × 4 states)", rec.depthCalls)
+	// 7 known queues × 4 states, every pair set every pass.
+	if rec.depthCalls != 28 {
+		t.Errorf("depth calls = %d, want 28 (7 queues × 4 states)", rec.depthCalls)
 	}
-	if rec.ageCalls != 6 {
-		t.Errorf("age calls = %d, want 6 (one per known queue)", rec.ageCalls)
+	if rec.ageCalls != 7 {
+		t.Errorf("age calls = %d, want 7 (one per known queue)", rec.ageCalls)
 	}
 
 	for _, tc := range []struct {
@@ -105,7 +105,8 @@ func TestQueueStatsWorker_SampleDepthsAgesAndZeroFill(t *testing.T) {
 		{jobs.QueueNotify, "scheduled", 1},
 		{jobs.QueueInbound, "available", 1},
 		{jobs.QueueMaintenance, "available", 0}, // zero-filled: no rows at all
-		{jobs.QueueDefault, "available", 0},     // zero-filled: no rows at all
+		{jobs.QueueSenderIdentityV2, "available", 0},
+		{jobs.QueueDefault, "available", 0}, // zero-filled: no rows at all
 	} {
 		got, ok := rec.depths[[2]string{tc.queue, tc.state}]
 		if !ok {
@@ -122,7 +123,7 @@ func TestQueueStatsWorker_SampleDepthsAgesAndZeroFill(t *testing.T) {
 		t.Errorf("outbound oldest age = %.1fs, want ~120s", age)
 	}
 	// Not-yet-due available job must not register an age; empty queues get 0.
-	for _, queue := range []string{jobs.QueueInbound, jobs.QueueWebhook, jobs.QueueMaintenance, jobs.QueueNotify, jobs.QueueDefault} {
+	for _, queue := range []string{jobs.QueueInbound, jobs.QueueWebhook, jobs.QueueMaintenance, jobs.QueueNotify, jobs.QueueSenderIdentityV2, jobs.QueueDefault} {
 		age, ok := rec.ages[queue]
 		if !ok {
 			t.Errorf("SetQueueOldestAge(%s) never called", queue)

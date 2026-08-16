@@ -4,6 +4,9 @@ import { Resolver } from "node:dns/promises";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ApiClient } from "../../harness/client.ts";
+import { cleanupDomainFixture } from "../../harness/domain-fixture-cleanup.ts";
+import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "../../harness/cloudflare-dns.ts";
+import { track } from "../../harness/cleanup.ts";
 import { uniqueSlug } from "../../harness/fixtures.ts";
 import { writeReport, info, warn, fail } from "../../harness/report.ts";
 
@@ -45,7 +48,8 @@ import { writeReport, info, warn, fail } from "../../harness/report.ts";
 //      place. This suite does NOT fake completion.
 //   6. create a custom-domain agent, confirming domain_verified=true.
 //   7. teardown: agent BEFORE domain (domain_has_agents guard), then all 5
-//      Cloudflare records unconditionally.
+//      Cloudflare records only after the API confirms SES deletion and commits
+//      its durable convergence backstop. Failed API cleanup preserves DNS.
 const SUITE = "prod/35-domain-sending-identity";
 const client = new ApiClient();
 
@@ -68,7 +72,7 @@ const skip =
     ? false
     : "CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID + CLOUDFLARE_ZONE_NAME not set (isolated conformance DNS zone)";
 
-const CF_API = "https://api.cloudflare.com/client/v4";
+const cfDns = new CloudflareDnsClient(CF_ZONE ?? "", CF_TOKEN ?? "");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface DNSRecordView {
@@ -86,33 +90,6 @@ interface DomainView {
   sending_status: string;
   sending_error?: string;
   capabilities: { inbound: string; outbound: string };
-}
-
-async function cfCreateRecord(rec: { type: string; name: string; content: string; priority?: number }): Promise<string> {
-  const res = await fetch(`${CF_API}/zones/${CF_ZONE}/dns_records`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ ...rec, ttl: 60, comment: "e2a conformance domain-sending-identity (temporary)" }),
-  });
-  const j = (await res.json()) as { success: boolean; result?: { id: string }; errors?: unknown };
-  if (!j.success || !j.result?.id) throw new Error(`CF ${rec.type} ${rec.name} create failed: ${JSON.stringify(j.errors)}`);
-  return j.result.id;
-}
-
-async function cfDeleteRecord(id: string): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetch(`${CF_API}/zones/${CF_ZONE}/dns_records/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${CF_TOKEN}` },
-    });
-  } catch (e) {
-    warn(SUITE, "cf-cleanup", `CF record ${id} delete threw — MANUAL CLEANUP NEEDED: ${String(e)}`);
-    return;
-  }
-  if (!res.ok) {
-    warn(SUITE, "cf-cleanup", `CF record ${id} delete failed HTTP ${res.status} — MANUAL CLEANUP NEEDED`);
-  }
 }
 
 // waitForPublicDns — see 22-domain-lifecycle.test.ts's identical helper for
@@ -157,14 +134,13 @@ const SENDING_STATUS_POLL_MS = 15000;
 
 test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL FROM) -> verify -> [best-effort] sending_status -> custom-domain agent -> teardown", { skip }, async () => {
   const domain = `${uniqueSlug("dsi")}.${CF_ZONE_NAME}`;
-  const dnsIds: string[] = [];
-  let registered = false;
-  let agentEmail = "";
+  const dnsRecords: CloudflareDnsRecordRef[] = [];
+  let agentEmail: string | undefined;
+  track("domain", domain);
   try {
     // 1. register
     const reg = await client.post<DomainView>("/v1/domains", { body: { domain } });
     assert.equal(reg.status, 201, `register ${domain}: ${reg.raw.slice(0, 200)}`);
-    registered = true;
 
     const records = reg.body?.dns_records ?? [];
     const ownership = records.find((r) => r.purpose === "ownership" && r.type === "TXT");
@@ -180,11 +156,12 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
     assert.ok(mailFromSpf, "register returns a mail_from_spf TXT record (SESRegion is configured in prod)");
 
     // 2. publish ALL FIVE records in the isolated zone.
-    dnsIds.push(await cfCreateRecord({ type: "TXT", name: ownership!.name, content: ownership!.value }));
-    dnsIds.push(await cfCreateRecord({ type: "MX", name: inboundMx!.name, content: inboundMx!.value, priority: inboundMx!.priority ?? 10 }));
-    dnsIds.push(await cfCreateRecord({ type: "TXT", name: dkim!.name, content: dkim!.value }));
-    dnsIds.push(await cfCreateRecord({ type: "MX", name: mailFromMx!.name, content: mailFromMx!.value, priority: mailFromMx!.priority ?? 10 }));
-    dnsIds.push(await cfCreateRecord({ type: "TXT", name: mailFromSpf!.name, content: mailFromSpf!.value }));
+    const comment = cloudflareFixtureComment("domain-sending-identity", domain);
+    await cfDns.create({ type: "TXT", name: ownership!.name, content: ownership!.value }, dnsRecords, comment);
+    await cfDns.create({ type: "MX", name: inboundMx!.name, content: inboundMx!.value, priority: inboundMx!.priority ?? 10 }, dnsRecords, comment);
+    await cfDns.create({ type: "TXT", name: dkim!.name, content: dkim!.value }, dnsRecords, comment);
+    await cfDns.create({ type: "MX", name: mailFromMx!.name, content: mailFromMx!.value, priority: mailFromMx!.priority ?? 10 }, dnsRecords, comment);
+    await cfDns.create({ type: "TXT", name: mailFromSpf!.name, content: mailFromSpf!.value }, dnsRecords, comment);
 
     // 3. wait for ownership TXT + inbound MX to be publicly visible BEFORE
     //    the first verify (negative-cache trap; see module doc).
@@ -276,45 +253,31 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
     // 6. custom-domain agent, regardless of the sending-identity outcome
     //    above (inbound verification, not sending, is what create-agent needs).
     agentEmail = `bot@${domain}`;
+    track("agent", agentEmail);
     const ag = await client.post<{ email: string; domain_verified: boolean }>("/v1/agents", {
       body: { email: agentEmail, name: "sending-identity bot" },
     });
     assert.equal(ag.status, 201, `create custom-domain agent: ${ag.raw.slice(0, 200)}`);
     assert.equal(ag.body?.domain_verified, true, "custom-domain agent reports domain_verified=true on create");
   } finally {
-    // 7. teardown — agent BEFORE domain (domain_has_agents guard), then every
-    //    Cloudflare record, unconditionally.
-    if (agentEmail) {
-      try {
-        // permanent=true, not a plain trash-move: HasAgentsOnDomain (and the
-        // resulting domain_has_agents 400 on delete-domain below) counts a
-        // TRASHED agent as still "on" the domain — internal/httpapi/domains.go's
-        // own error text says so explicitly ("including any in the trash: they
-        // hold the address until restored or permanently deleted"). A plain
-        // ?confirm=DELETE here would strand the domain (live-verified during
-        // authoring: the domain delete below 400'd domain_has_agents even
-        // though this agent delete had already "succeeded"). permanent=true
-        // frees the address immediately so the domain delete that follows can
-        // actually succeed.
-        const del = await client.delete(`/v1/agents/${encodeURIComponent(agentEmail)}?confirm=DELETE&permanent=true`);
-        if (![200, 204, 404].includes(del.status)) {
-          fail(SUITE, "agent-cleanup-failed", `permanent delete of agent ${agentEmail} returned ${del.status}: ${del.raw.slice(0, 200)} — MANUAL CLEANUP MAY BE NEEDED (would strand the domain on the next run)`);
-        }
-      } catch (e) {
-        warn(SUITE, "cleanup", `agent ${agentEmail} delete threw: ${String(e)}`);
-      }
+    // 7. teardown — permanent agent purge first, then the transactional
+    //    domain delete (commits the durable teardown job; a best-effort
+    //    immediate deprovision usually confirms provider absence before the
+    //    200, with async convergence as the guarantee), then DNS. If API
+    //    teardown fails, retain DNS so a still-live provider identity does
+    //    not lose verification.
+    const result = await cleanupDomainFixture(client, { domain, agent: agentEmail, dnsRecords }, (record) => cfDns.delete(record));
+    if (result.failed.length > 0) {
+      fail(
+        SUITE,
+        "resource-cleanup-failed",
+        `preserved ${dnsRecords.length} DNS record(s) because ${result.failed.length} API fixture(s) survived teardown`,
+        result.failed,
+      );
     }
-    if (registered) {
-      try {
-        const del = await client.delete(`/v1/domains/${domain}?confirm=DELETE`);
-        if (![200, 204, 404].includes(del.status)) {
-          fail(SUITE, "domain-cleanup-failed", `delete domain ${domain} returned ${del.status}: ${del.raw.slice(0, 200)} — MANUAL CLEANUP MAY BE NEEDED`);
-        }
-      } catch (e) {
-        warn(SUITE, "cleanup", `domain ${domain} delete threw: ${String(e)}`);
-      }
+    if (result.dnsFailed.length > 0) {
+      fail(SUITE, "dns-cleanup-failed", `${result.dnsFailed.length} DNS record(s) survived teardown`, result.dnsFailed);
     }
-    for (const id of dnsIds) await cfDeleteRecord(id);
   }
 });
 

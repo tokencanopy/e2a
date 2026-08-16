@@ -165,7 +165,7 @@ func (s *Server) handleRedeliverEvent(ctx context.Context, in *RedeliverEventInp
 	// this endpoint — uniqueness/replay is decided entirely by the key. That's
 	// intentional, not a missing body hash.
 	key := "replay:" + in.ID + ":" + webhookID
-	_, body, err := runIdempotentAuto(s, ctx, user.ID, key, "/v1/events/redeliver", nil, func() (int, RedeliverView, error) {
+	_, body, err := runIdempotentAuto(s, ctx, user.ID, key, "/v1/events/redeliver", nil, func(_ idemClaimToken) (int, RedeliverView, error) {
 		row, lerr := s.deps.LoadReplayEvent(ctx, user.ID, in.ID)
 		if lerr != nil {
 			switch {

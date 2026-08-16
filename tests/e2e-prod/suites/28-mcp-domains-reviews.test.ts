@@ -1,7 +1,8 @@
 import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { ApiClient } from "../harness/client.ts";
-import { cleanup, track, untrack } from "../harness/cleanup.ts";
+import { cleanup, forgetDomainDeleteKey, track, untrack } from "../harness/cleanup.ts";
 import { HttpMcpClient, callTool } from "../harness/mcp.ts";
 import { uniqueSlug, uniqueSubject, runId, SINK_EMAIL, holdAllOutbound } from "../harness/fixtures.ts";
 import { info, warn, writeReport } from "../harness/report.ts";
@@ -142,7 +143,7 @@ test("mcp-domains: register_domain / get_domain / list_domains / verify_domain (
   // delete_domain — DESTRUCTIVE, requires confirm:true (schema-level literal
   // guard against an LLM hallucinating a delete). No agents were ever
   // created on this domain (it never verified), so no domain_has_agents risk.
-  const del = await callTool(mcp, "delete_domain", { domain, confirm: true });
+  const del = await callTool(mcp, "delete_domain", { domain, confirm: true, idempotency_key: randomUUID() });
   assert.equal(del.isError, undefined, `delete_domain isError: ${extractText(del).slice(0, 200)}`);
   const delParsed = JSON.parse(extractText(del)) as { deleted?: boolean; domain?: string };
   assert.equal(delParsed.deleted, true, "delete_domain result has deleted:true");
@@ -150,6 +151,7 @@ test("mcp-domains: register_domain / get_domain / list_domains / verify_domain (
   // Already deleted via the tool call above — untrack so the redundant
   // afterEach cleanup DELETE (which would 404, itself harmless) is skipped.
   untrack("domain", domain);
+  forgetDomainDeleteKey(domain);
 });
 
 test("mcp-domains-reviews: list_pending_messages + get_pending_message + approve_message round-trip", async () => {

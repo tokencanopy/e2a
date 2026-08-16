@@ -997,24 +997,24 @@ func (s *Server) deliver(ctx context.Context, user *identity.User, ag *identity.
 	// request carries no Idempotency-Key or no store is wired (then agent skips it,
 	// and the synchronous path is unaffected). Uses the same user namespace + key
 	// runIdempotent Claims/Completes under, so its in-tx Complete and runIdempotent's
-	// post-hoc Complete address the same row (the latter no-ops on the in_progress
-	// guard once this has run).
-	var idemCompleteTx agent.AcceptIdemCompleter
-	if idemKey != "" && s.deps.Idempotency != nil {
-		nsKey := idemUserNS + idemKey
-		uid := user.ID
-		idemCompleteTx = func(ctx context.Context, tx pgx.Tx, result *agent.OutboundResult) error {
-			status, view := outboundResultView(result)
-			raw, mErr := json.Marshal(view)
-			if mErr != nil {
-				raw = []byte("{}")
+	// post-hoc Complete address the same row (the latter observes ErrClaimLost and
+	// is deliberately ignored once this transaction has made the response durable).
+	status, view, err := runIdempotent(s, ctx, user.ID, idemKey, route, rawBody, func(claimToken idemClaimToken) (int, SendResultView, error) {
+		var idemCompleteTx agent.AcceptIdemCompleter
+		if idemKey != "" && s.deps.Idempotency != nil {
+			nsKey := idemUserNS + idemKey
+			uid := user.ID
+			idemCompleteTx = func(ctx context.Context, tx pgx.Tx, result *agent.OutboundResult) error {
+				status, view := outboundResultView(result)
+				raw, mErr := json.Marshal(view)
+				if mErr != nil {
+					raw = []byte("{}")
+				}
+				return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, claimToken, idempotency.CachedResponse{
+					StatusCode: status, ContentType: "application/json", Body: raw,
+				})
 			}
-			return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, idempotency.CachedResponse{
-				StatusCode: status, ContentType: "application/json", Body: raw,
-			})
 		}
-	}
-	status, view, err := runIdempotent(s, ctx, user.ID, idemKey, route, rawBody, func() (int, SendResultView, error) {
 		req, env := prepare()
 		if env != nil {
 			return 0, SendResultView{}, env

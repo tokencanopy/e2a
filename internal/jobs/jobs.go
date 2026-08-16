@@ -44,12 +44,13 @@ type Registrar interface {
 
 // Config sizes the per-queue worker pools. Zero values get sane defaults.
 type Config struct {
-	OutboundWorkers    int // QueueOutbound concurrency (default 8)
-	InboundWorkers     int // QueueInbound concurrency (default 8)
-	WebhookWorkers     int // QueueWebhook concurrency (default 16)
-	MaintenanceWorkers int // QueueMaintenance concurrency (default 2)
-	NotifyWorkers      int // QueueNotify concurrency (default 4)
-	DefaultWorkers     int // QueueDefault concurrency (default 5)
+	OutboundWorkers       int // QueueOutbound concurrency (default 8)
+	InboundWorkers        int // QueueInbound concurrency (default 8)
+	WebhookWorkers        int // QueueWebhook concurrency (default 16)
+	MaintenanceWorkers    int // QueueMaintenance concurrency (default 2)
+	NotifyWorkers         int // QueueNotify concurrency (default 4)
+	SenderIdentityWorkers int // QueueSenderIdentityV2 concurrency (default 1)
+	DefaultWorkers        int // QueueDefault concurrency (default 5)
 }
 
 func (c Config) withDefaults() Config {
@@ -67,6 +68,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.NotifyWorkers <= 0 {
 		c.NotifyWorkers = 4
+	}
+	if c.SenderIdentityWorkers <= 0 {
+		c.SenderIdentityWorkers = 1
 	}
 	if c.DefaultWorkers <= 0 {
 		c.DefaultWorkers = 5

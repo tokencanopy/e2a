@@ -204,7 +204,7 @@ func (s *Server) handleCreateAPIKey(ctx context.Context, in *createAPIKeyInput) 
 	// key the mint runs unguarded (idempotency is opt-in). See issue #493.
 	_, body, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/account/api-keys", in.RawBody,
-		func() (int, CreateAPIKeyResponse, error) {
+		func(_ idemClaimToken) (int, CreateAPIKeyResponse, error) {
 			key, kerr := s.deps.CreateScopedAPIKey(ctx, user.ID, in.Body.Name, scope, agentID, expiresAt)
 			if kerr != nil {
 				return 0, CreateAPIKeyResponse{}, NewError(http.StatusInternalServerError, "internal_error", "failed to create API key")
