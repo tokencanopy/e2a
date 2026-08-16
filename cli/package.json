@@ -1,6 +1,6 @@
 {
   "name": "@e2a/cli",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "CLI for e2a — give any AI agent a real, authenticated email inbox",
   "bin": {
     "e2a": "./dist/bin/e2a.js"
@@ -31,7 +31,7 @@
   "homepage": "https://github.com/tokencanopy/e2a/tree/main/cli",
   "bugs": "https://github.com/tokencanopy/e2a/issues",
   "dependencies": {
-    "@e2a/sdk": "^5.0.0"
+    "@e2a/sdk": "^5.7.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
