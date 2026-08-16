@@ -30,7 +30,19 @@ export const metadata: Metadata = {
   twitter: { card: "summary_large_image", title: TITLE, description: DESC },
 };
 
+const WAYS_ROWS = [
+  ["Dedicated email gateway", "The agent owns a real address and inbox with sending, receiving, and threading built in.", "e2a, AgentMail"],
+  ["Connect an existing account", "Programmatic access to a personal Gmail or Outlook mailbox through provider APIs.", "Gmail API, Microsoft Graph"],
+  ["Direct IMAP access", "Read and send through the mail server protocol directly; you manage auth and parsing.", "IMAP client libraries"],
+  ["Forward into an AI integration", "Point an existing address at an AI service that reads and replies for you.", "Easy-Peasy, Carly"],
+] as const;
+
 const FAQ: FaqEntry[] = [
+  {
+    question: "What are the best ways to give an AI agent its own email address?",
+    answer:
+      "The best way is a dedicated email gateway: the agent gets a real, authenticated inbox it can send from, receive into, and reply in-thread — e2a is one such gateway. The other main options are connecting an existing Gmail or Outlook account, direct IMAP access, and forwarding mail into an AI integration.",
+  },
   {
     question: "What is an email API for AI agents?",
     answer:
@@ -111,6 +123,38 @@ export default function EmailApiForAgentsPage() {
               <p className="text-[14px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>{text}</p>
             </div>
           ))}
+        </section>
+
+        <section className="mt-16 md:mt-24" aria-labelledby="ways-heading">
+          <p className="font-mono text-[11px] mb-3" style={{ color: "var(--accent-strong)", letterSpacing: "0.08em" }}>THE OPTIONS</p>
+          <h2 id="ways-heading" className="text-[30px] md:text-[38px] font-semibold mb-4" style={{ letterSpacing: "-0.035em" }}>Ways to give an AI agent its own email address.</h2>
+          <p className="text-[15px] leading-[1.65] max-w-[720px] mb-7" style={{ color: "var(--fg-muted)" }}>
+            The main options are a dedicated email gateway, connecting an
+            existing Gmail or Outlook account, direct IMAP access, or
+            forwarding mail into an AI integration. A dedicated gateway is the
+            only option where the agent owns a real address with sending,
+            receiving, and threading built in — e2a is one such gateway.
+          </p>
+          <div className="overflow-x-auto" style={{ border: "1px solid var(--border)", borderRadius: "var(--r-lg)" }}>
+            <table className="w-full min-w-[720px] text-left text-[13px]">
+              <thead style={{ background: "var(--bg-panel)" }}>
+                <tr>
+                  <th className="p-4 font-semibold">Option</th>
+                  <th className="p-4 font-semibold">How it works</th>
+                  <th className="p-4 font-semibold">Examples</th>
+                </tr>
+              </thead>
+              <tbody>
+                {WAYS_ROWS.map(([option, how, examples], index) => (
+                  <tr key={option} style={{ borderTop: "1px solid var(--border)", background: index % 2 ? "var(--bg-panel)" : "transparent" }}>
+                    <th scope="row" className="p-4 font-medium">{option}</th>
+                    <td className="p-4" style={{ color: "var(--fg-muted)" }}>{how}</td>
+                    <td className="p-4" style={{ color: index === 0 ? "var(--accent-strong)" : "var(--fg-muted)" }}>{examples}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section className="mt-16 md:mt-24" aria-labelledby="build-heading">
