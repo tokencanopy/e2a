@@ -5,12 +5,17 @@
 Additive only — no flag, output-field, or exit-code meaning changes to any
 command that shipped in 2.3.0.
 
-**Added:** `e2a metrics --by-day` prints UTC per-day account buckets, including
-loopback-aware rates and zero-filled days for trend analysis.
+**Added:** `e2a metrics [<agent-email>]` prints account or per-inbox delivery
+counters. `--by-agent` breaks down account totals, and `--by-day` prints UTC
+per-day buckets with loopback-aware rates and zero-filled days for trend
+analysis.
 
 **Added:** `e2a reply --quote-history` (beta) asks the server to append
 mail-client-style quoted history beneath the reply body. This flag may change
 before it is declared stable.
+
+**Added:** `e2a messages list --filter <expr>` passes a server-side boolean
+message filter while preserving it across pagination.
 
 **Changed:** metric output reports loopback separately and keeps it out of
 external-delivery rate denominators, matching the API and SDKs.

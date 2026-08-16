@@ -5,6 +5,11 @@
 Additive only. Every 5.6.0 call site keeps compiling and behaving identically.
 
 ### Added
+- **Message filtering** via the `filter` option on `client.messages.list`.
+  The server pins the expression into continuation cursors so paged results
+  keep the same filter.
+- **Beta per-agent metrics** via `client.messages.getMetrics(email, ...)` for
+  cohort-window delivery counters and null-safe rates.
 - **Per-day account metrics** via `client.account.metrics({ bucket: "day" })`.
   Buckets are UTC-day aligned and gap-filled with zeroes for charting; rate
   denominators continue to exclude loopback traffic.
