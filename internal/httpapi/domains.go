@@ -503,24 +503,34 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 	// parent/child claim is a genuinely new row that no exact-match lookup
 	// finds. Anything other than a clean hit — dep unwired, lookup failed,
 	// nil row — falls through to enforcing, so a limit is never skipped by
-	// accident. The check is deliberately outside the claim transaction: it
-	// is the same non-transactional shape the cap already had, so two racing
-	// creates could still both pass, exactly as before this change.
+	// accident.
 	alreadyOwned := false
 	if s.deps.LookupDomain != nil {
 		if existing, lookupErr := s.deps.LookupDomain(ctx, normalized, user.ID); lookupErr == nil && existing != nil {
 			alreadyOwned = true
 		}
 	}
-	if !alreadyOwned && s.deps.EnforceDomainCreate != nil {
-		if err := s.deps.EnforceDomainCreate(ctx, user.ID); err != nil {
-			if env, ok := limitEnvelope(err); ok {
-				return nil, env
+	maxDomains := 0
+	if !alreadyOwned {
+		// A richly-detailed pre-check (plan code, upgrade URL); ClaimDomain
+		// below is the race-proof source of truth for the cap itself.
+		if s.deps.EnforceDomainCreate != nil {
+			if err := s.deps.EnforceDomainCreate(ctx, user.ID); err != nil {
+				if env, ok := limitEnvelope(err); ok {
+					return nil, env
+				}
+				return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
 			}
-			return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
+		}
+		if s.deps.GetLimits != nil {
+			lim, err := s.deps.GetLimits(ctx, user.ID)
+			if err != nil {
+				return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
+			}
+			maxDomains = lim.MaxDomains
 		}
 	}
-	d, err := s.deps.ClaimDomain(ctx, normalized, user.ID)
+	d, err := s.deps.ClaimDomain(ctx, normalized, user.ID, maxDomains)
 	if err != nil {
 		if errors.Is(err, identity.ErrReservedDomain) {
 			return nil, NewError(http.StatusBadRequest, "reserved_domain", "reserved domain")
@@ -528,10 +538,13 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 		if errors.Is(err, identity.ErrDomainTaken) {
 			return nil, NewError(http.StatusConflict, "domain_taken", "domain is already claimed by another account")
 		}
-		// Any non-taken failure here is a store/lookup error, not a client
-		// error (ClaimOrCreateDomain returns a domain, ErrDomainTaken, or a
-		// wrapped DB error — never nil, nil), so it is a 500 — the former
-		// 400 "domain_unavailable" misclassified it as the caller's fault.
+		var limErr *identity.DomainLimitExceededError
+		if errors.As(err, &limErr) {
+			return nil, NewError(http.StatusPaymentRequired, "limit_exceeded", limErr.Error()).
+				WithDetails(LimitExceededDetails{Resource: "domains", Limit: int64(limErr.Limit), Current: int64(limErr.Current)})
+		}
+		// Any other failure here is a store/lookup error, not a client error,
+		// so it is a 500 (the former 400 "domain_unavailable" misclassified it).
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to register domain")
 	}
 	view, err := s.domainViewWithRamp(ctx, user.ID, d)

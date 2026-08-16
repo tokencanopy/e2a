@@ -789,7 +789,21 @@ func (s *Store) EnsureSharedDomain(ctx context.Context, domain string) error {
 	return nil
 }
 
-// ClaimOrCreateDomain atomically claims a DNS namespace. A row reserves its
+// ClaimOrCreateDomain atomically claims a DNS namespace, with no cap on how
+// many domains userID may hold. See ClaimOrCreateDomainWithLimit for the
+// account-facing, cap-enforcing form used outside this unlimited case.
+func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) (*Domain, error) {
+	return s.claimOrCreateDomain(ctx, domain, userID, 0)
+}
+
+// ClaimOrCreateDomainWithLimit is ClaimOrCreateDomain plus an atomic
+// max_domains check in the same advisory-locked transaction as the INSERT,
+// closing the pre-insert-count race (#822). maxDomains <= 0 means unlimited.
+func (s *Store) ClaimOrCreateDomainWithLimit(ctx context.Context, domain, userID string, maxDomains int) (*Domain, error) {
+	return s.claimOrCreateDomain(ctx, domain, userID, maxDomains)
+}
+
+// claimOrCreateDomain atomically claims a DNS namespace. A row reserves its
 // exact name plus every ancestor/descendant against other accounts; the same
 // account may explicitly register a child. The
 // verification_token and DKIM keypair are minted on first INSERT and remain
@@ -800,7 +814,7 @@ func (s *Store) EnsureSharedDomain(ctx context.Context, domain string) error {
 // owner could verify against a TXT record the original owner already
 // published. The managed bounce.<domain> subtree is reserved once an account
 // owns the parent because SES custom MAIL FROM uses that namespace.
-func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) (*Domain, error) {
+func (s *Store) claimOrCreateDomain(ctx context.Context, domain, userID string, maxDomains int) (*Domain, error) {
 	domain = normalizeDomain(domain)
 
 	verificationToken := "e2a-verify=" + generateID()
@@ -841,6 +855,15 @@ func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) 
 	// serializable without forcing unrelated registrable domains to contend.
 	for _, name := range domainClaimLockNames(domain) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, name); err != nil {
+			return nil, err
+		}
+	}
+
+	// A cap-enforcing caller also takes a per-user lock (keyspace 1, distinct
+	// from the domain-name locks above), on the SAME connection as the count
+	// check and insert below, serializing this user's creates against a race.
+	if maxDomains > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, userID); err != nil {
 			return nil, err
 		}
 	}
@@ -891,6 +914,18 @@ func (s *Store) ClaimOrCreateDomain(ctx context.Context, domain, userID string) 
 		 FROM domains WHERE domain = $1`, domain,
 	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Only a genuine new row is chargeable (a re-claim already returned
+		// above). Read under the per-user lock, so this reflects every insert
+		// already committed by a concurrent request, not a stale count (#822).
+		if maxDomains > 0 {
+			var count int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM domains WHERE user_id = $1`, userID).Scan(&count); err != nil {
+				return nil, err
+			}
+			if count >= maxDomains {
+				return nil, &DomainLimitExceededError{Limit: maxDomains, Current: count}
+			}
+		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO domains (domain, user_id, verified, verification_token, dkim_selector, dkim_public_key, dkim_private_key)
 			 VALUES ($1, $2, false, $3, $4, $5, $6)
@@ -1811,6 +1846,17 @@ var ErrDomainTaken = fmt.Errorf("domain not available: already claimed by anothe
 // manages beneath an owned domain (currently the bounce.<domain> MAIL FROM
 // subtree). The API maps it to reserved_domain.
 var ErrReservedDomain = fmt.Errorf("domain is reserved for managed infrastructure")
+
+// DomainLimitExceededError is returned by ClaimOrCreateDomainWithLimit when
+// userID is already at maxDomains. Identity's own type, so this package does
+// not need to import limits for the shared LimitExceededError shape.
+type DomainLimitExceededError struct {
+	Limit, Current int
+}
+
+func (e *DomainLimitExceededError) Error() string {
+	return fmt.Sprintf("domain limit exceeded: %d/%d domains", e.Current, e.Limit)
+}
 
 // DeleteDomain deletes a domain only if owned by the user.
 // The handler should check for existing agents first.

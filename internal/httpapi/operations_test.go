@@ -362,7 +362,7 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 		ListDomains: func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error) {
 			return []identity.Domain{{Domain: "acme.com", Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true, AgentCount: 2}}, nil
 		},
-		ClaimDomain: func(ctx context.Context, domain, userID string) (*identity.Domain, error) {
+		ClaimDomain: func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
 			if domain == "taken.com" {
 				return nil, identity.ErrDomainTaken
 			}

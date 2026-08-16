@@ -125,7 +125,7 @@ func TestRegisterDomainReserved(t *testing.T) {
 
 func TestRegisterDomainReservedMailFromSubtree(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.ClaimDomain = func(ctx context.Context, domain, userID string) (*identity.Domain, error) {
+		d.ClaimDomain = func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
 			return nil, identity.ErrReservedDomain
 		}
 	})

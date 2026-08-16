@@ -209,7 +209,9 @@ type Deps struct {
 	// page).
 	ListDomains         func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error)
 	SendingRampSnapshot func(ctx context.Context, userID, domain string, now time.Time) (sendramp.Snapshot, error)
-	ClaimDomain         func(ctx context.Context, domain, userID string) (*identity.Domain, error)
+	// ClaimDomain atomically enforces maxDomains (<=0 means unlimited) and
+	// claims the domain: the race-proof backstop behind EnforceDomainCreate.
+	ClaimDomain         func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
 	// DeleteDomain atomically either deletes the live incarnation or resolves
 	// the newest historical receipt when the row is already gone. The exact-
