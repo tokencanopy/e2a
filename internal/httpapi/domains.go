@@ -511,25 +511,14 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 		}
 	}
 	maxDomains := 0
-	if !alreadyOwned {
-		// A richly-detailed pre-check (plan code, upgrade URL); ClaimDomain
-		// below is the race-proof source of truth for the cap itself.
-		if s.deps.EnforceDomainCreate != nil {
-			if err := s.deps.EnforceDomainCreate(ctx, user.ID); err != nil {
-				if env, ok := limitEnvelope(err); ok {
-					return nil, env
-				}
-				return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
-			}
+	if !alreadyOwned && s.deps.GetLimits != nil {
+		lim, err := s.deps.GetLimits(ctx, user.ID)
+		if err != nil {
+			return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
 		}
-		if s.deps.GetLimits != nil {
-			lim, err := s.deps.GetLimits(ctx, user.ID)
-			if err != nil {
-				return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
-			}
-			maxDomains = lim.MaxDomains
-		}
+		maxDomains = lim.MaxDomains
 	}
+	// ClaimDomain checks a cross-account conflict before the cap (#825).
 	d, err := s.deps.ClaimDomain(ctx, normalized, user.ID, maxDomains)
 	if err != nil {
 		if errors.Is(err, identity.ErrReservedDomain) {
@@ -540,6 +529,15 @@ func (s *Server) handleRegisterDomain(ctx context.Context, in *registerDomainInp
 		}
 		var limErr *identity.DomainLimitExceededError
 		if errors.As(err, &limErr) {
+			// Ask EnforceDomainCreate for the plan/upgrade-URL details a bare
+			// DomainLimitExceededError doesn't carry.
+			if s.deps.EnforceDomainCreate != nil {
+				if enfErr := s.deps.EnforceDomainCreate(ctx, user.ID); enfErr != nil {
+					if env, ok := limitEnvelope(enfErr); ok {
+						return nil, env
+					}
+				}
+			}
 			return nil, NewError(http.StatusPaymentRequired, "limit_exceeded", limErr.Error()).
 				WithDetails(LimitExceededDetails{Resource: "domains", Limit: int64(limErr.Limit), Current: int64(limErr.Current)})
 		}
