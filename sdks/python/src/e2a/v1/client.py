@@ -1109,9 +1109,17 @@ class DomainsResource:
         req = _coerce(RegisterDomainRequest, body)
         return await self._c._write_unsafe(lambda h: self._api.register_domain(req, _headers=h))
 
-    async def delete(self, domain: str) -> DeleteDomainResult:
-        # Returns the deletion object ({deleted, domain}).
-        return await self._c._write_idempotent(lambda h: self._api.delete_domain(domain, confirm="DELETE", _headers=h))
+    async def delete(
+        self, domain: str, *, idempotency_key: Optional[str] = None
+    ) -> DeleteDomainResult:
+        # Only sending_teardown="confirmed" permits DNS removal. Reuse a
+        # caller-supplied key after an ambiguous failure so the original
+        # deletion is replayed instead of deleting a later registration;
+        # omitted keys are minted once and reused across this call's retries.
+        return await self._c._write_keyed(
+            lambda h: self._api.delete_domain(domain, confirm="DELETE", _headers=h),
+            idempotency_key,
+        )
 
     async def verify(self, domain: str) -> VerifyDomainView:
         return await self._c._write_unsafe(lambda h: self._api.verify_domain(domain, _headers=h))

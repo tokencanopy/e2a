@@ -303,6 +303,16 @@ class Runner:
         body = self.resolve_value(step["body"]) if "body" in step else None
         content = step_raw_body(step)
         raw_headers = step_raw_headers(step)
+        text_headers = {
+            name: self.resolve(value)
+            for name, value in (step.get("headers") or {}).items()
+        }
+        text_names = {name.lower() for name in text_headers}
+        for name in raw_headers:
+            if name.lower() in text_names:
+                raise ValueError(
+                    f"step {step['id']}: header {name} is declared in both headers and headers_base64"
+                )
         ex = step.get("expect") or {}
 
         headers: dict[str, Any] | None = None
@@ -310,9 +320,10 @@ class Runner:
             # Auth-override scenarios bypass SDK auth by design.
             override = self.auth_override(step)
             headers = {} if override == "none" else {"Authorization": self.resolve(override)}
-        if raw_headers:
+        if text_headers or raw_headers:
             if headers is None:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
+            headers.update(text_headers)
             headers.update(raw_headers)
 
         resp = self._raw(step["method"], path, body, content=content, headers=headers)
@@ -575,6 +586,45 @@ def test_runner_assigns_unique_lowercase_hex_token_per_scenario():
     finally:
         first.close()
         second.close()
+
+
+def test_runner_substitutes_stable_per_run_token_into_text_headers(monkeypatch):
+    scenario = {
+        "name": "dynamic_header",
+        "description": "text headers support placeholders",
+        "steps": [
+            {
+                "id": "delete",
+                "action": "request",
+                "method": "DELETE",
+                "path": "/v1/domains/dynamic.test?confirm=DELETE",
+                "headers": {"Idempotency-Key": "domain-delete-{scenario_token}"},
+                "expect": {"status": 200},
+            }
+        ],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    received = ""
+
+    def fake_raw(method: str, path: str, body: Any = None, **kwargs: Any) -> httpx.Response:
+        nonlocal received
+        del method, path, body
+        received = kwargs["headers"]["Idempotency-Key"]
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(runner, "_raw", fake_raw)
+    try:
+        runner.execute_steps()
+    finally:
+        runner.close()
+
+    assert re.fullmatch(r"domain-delete-[0-9a-f]{12}", received)
+
+
+def test_domain_crud_is_runnable_without_store_access():
+    scenario = _scenario_by_name("domain_crud")
+    assert scenario["setup"] == [{"register_domain": "domain-crud.test.dev"}]
+    assert not scenario_needs_store(scenario)
 
 
 def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeypatch):

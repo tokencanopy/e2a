@@ -44,7 +44,7 @@ func (m *statefulIdem) Claim(_ context.Context, _, key, _, _ string) (idempotenc
 	return idempotency.ClaimResult{Outcome: idempotency.OutcomeAcquired}, nil
 }
 
-func (m *statefulIdem) Complete(_ context.Context, _, key string, resp idempotency.CachedResponse) error {
+func (m *statefulIdem) Complete(_ context.Context, _, key string, _ idempotency.ClaimToken, resp idempotency.CachedResponse) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cached[key] = resp
@@ -52,11 +52,11 @@ func (m *statefulIdem) Complete(_ context.Context, _, key string, resp idempoten
 	return nil
 }
 
-func (m *statefulIdem) CompleteTx(_ context.Context, _ pgx.Tx, uid, key string, resp idempotency.CachedResponse) error {
-	return m.Complete(context.Background(), uid, key, resp)
+func (m *statefulIdem) CompleteTx(_ context.Context, _ pgx.Tx, uid, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error {
+	return m.Complete(context.Background(), uid, key, token, resp)
 }
 
-func (m *statefulIdem) Release(_ context.Context, _, key string) error {
+func (m *statefulIdem) Release(_ context.Context, _, key string, _ idempotency.ClaimToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.inflight, key)

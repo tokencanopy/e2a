@@ -213,15 +213,16 @@ export class RetryHttpLibrary implements HttpLibrary {
   }
 
   // Mint an Idempotency-Key once, before the first attempt, for a server-deduped
-  // POST the caller didn't already key. Setting it on the shared RequestContext
-  // means every retry of this request reuses the same key.
+  // POST or DELETE the caller didn't already key. Setting it on the shared
+  // RequestContext means every retry of this request reuses the same key.
   //
   // The generated layer calls setHeaderParam("Idempotency-Key", serialize(undefined))
   // on send/reply/forward/approve/create-api-key, leaving the header *present but
   // empty* when the caller passed no key. So "present" isn't enough to mean "caller-supplied" —
   // only a non-empty value counts; otherwise we mint (overwriting the empty stub).
   private ensureIdempotencyKey(request: RequestContext): void {
-    if (request.getHttpMethod() !== HttpMethod.POST) return;
+    const method = request.getHttpMethod();
+    if (method !== HttpMethod.POST && method !== HttpMethod.DELETE) return;
     const headers = request.getHeaders();
     let present = false;
     for (const k of Object.keys(headers)) {

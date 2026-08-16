@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 )
 
 // fakeRawStore implements RawStore, recording the primitive (string/JSON) form
@@ -18,11 +21,15 @@ type fakeRawStore struct {
 	getStatusReturn    string
 }
 
-func (f *fakeRawStore) SendingProvisionInputs(ctx context.Context, domain string) (string, []byte, bool, error) {
-	return "sel", []byte("der"), true, nil
+func (f *fakeRawStore) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) error {
+	return fn(ctx)
 }
 
-func (f *fakeRawStore) SetSendingStatus(ctx context.Context, domain, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error {
+func (f *fakeRawStore) LoadSendingIdentityState(ctx context.Context, domain string) (string, string, bool, string, string, []byte, string, time.Time, error) {
+	return "inc-1", "user_1", true, f.getStatusReturn, "sel", []byte("der"), "inc-applied", time.Unix(1_700_000_000, 0), nil
+}
+
+func (f *fakeRawStore) SetSendingStatusForIncarnation(ctx context.Context, domain, incarnation, status, dkimStatus, mailFromStatus, errMsg string, recordsJSON []byte) error {
 	f.lastStatus = status
 	f.lastDkimStatus = dkimStatus
 	f.lastMailFromStatus = mailFromStatus
@@ -31,18 +38,37 @@ func (f *fakeRawStore) SetSendingStatus(ctx context.Context, domain, status, dki
 	return nil
 }
 
-func (f *fakeRawStore) TouchSendingChecked(ctx context.Context, domain string) error { return nil }
-
-func (f *fakeRawStore) GetSendingStatus(ctx context.Context, domain string) (string, error) {
-	return f.getStatusReturn, nil
+func (f *fakeRawStore) TouchSendingCheckedForIncarnation(ctx context.Context, domain, incarnation string) error {
+	return nil
 }
 
-func (f *fakeRawStore) DomainOwner(ctx context.Context, domain string) (string, error) {
-	return "user_1", nil
+func (f *fakeRawStore) MarkSendingIdentityManaged(context.Context, string, string) error { return nil }
+func (f *fakeRawStore) MarkSendingIdentityApplied(context.Context, string, string) error { return nil }
+func (f *fakeRawStore) SendingIdentityLedgerExpired(context.Context, string, string, time.Duration) (bool, error) {
+	return false, nil
 }
-
-func (f *fakeRawStore) DomainExists(ctx context.Context, domain string) (bool, error) {
-	return true, nil
+func (f *fakeRawStore) ObserveSendingIdentityProviderPending(context.Context, string, string, time.Duration) (bool, error) {
+	return false, nil
+}
+func (f *fakeRawStore) ClearSendingIdentityProviderPending(context.Context, string, string) error {
+	return nil
+}
+func (f *fakeRawStore) ForgetSendingIdentityManaged(context.Context, string) error { return nil }
+func (f *fakeRawStore) ListManagedSendingIdentityDomains(context.Context) ([]string, map[string]bool, error) {
+	return nil, nil, nil
+}
+func (f *fakeRawStore) ListManagedSendingIdentityDomainsPage(context.Context, string, int) ([]string, map[string]bool, bool, error) {
+	return nil, nil, false, nil
+}
+func (f *fakeRawStore) LookupManagedSendingIdentityDomain(context.Context, string) (bool, bool, error) {
+	return false, false, nil
+}
+func (f *fakeRawStore) DomainExists(context.Context, string) (bool, error) { return false, nil }
+func (f *fakeRawStore) FinalizeSendingIdentityTombstone(context.Context, string, time.Duration) error {
+	return nil
+}
+func (f *fakeRawStore) SetDomainTeardownState(context.Context, string, domainteardown.State) error {
+	return nil
 }
 
 func TestStoreAdapter_SetSendingStatus(t *testing.T) {
@@ -50,7 +76,7 @@ func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 	store := NewStoreAdapter(raw)
 	records := []DNSRecord{{Type: "TXT", Name: "_dmarc", Value: "v=DMARC1"}}
 
-	if err := store.SetSendingStatus(context.Background(), "example.com", StatusVerified, StatusVerified, StatusFailed, "ok", records); err != nil {
+	if err := store.SetSendingStatus(context.Background(), "example.com", "inc-1", StatusVerified, StatusVerified, StatusFailed, "ok", records); err != nil {
 		t.Fatalf("SetSendingStatus: %v", err)
 	}
 	if raw.lastStatus != "verified" {
@@ -74,7 +100,7 @@ func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 func TestStoreAdapter_SetSendingStatus_NoRecords(t *testing.T) {
 	raw := &fakeRawStore{}
 	store := NewStoreAdapter(raw)
-	if err := store.SetSendingStatus(context.Background(), "example.com", StatusPending, "", "", "", nil); err != nil {
+	if err := store.SetSendingStatus(context.Background(), "example.com", "inc-1", StatusPending, "", "", "", nil); err != nil {
 		t.Fatalf("SetSendingStatus: %v", err)
 	}
 	if raw.lastRecordsJSON != nil {
@@ -85,14 +111,14 @@ func TestStoreAdapter_SetSendingStatus_NoRecords(t *testing.T) {
 	}
 }
 
-func TestStoreAdapter_GetSendingStatus(t *testing.T) {
+func TestStoreAdapter_LoadSendingIdentityState(t *testing.T) {
 	raw := &fakeRawStore{getStatusReturn: "pending"}
 	store := NewStoreAdapter(raw)
-	got, err := store.GetSendingStatus(context.Background(), "example.com")
+	got, err := store.LoadSendingIdentityState(context.Background(), "example.com")
 	if err != nil {
 		t.Fatalf("GetSendingStatus: %v", err)
 	}
-	if got != StatusPending {
-		t.Fatalf("string→Status conversion failed: got %q", got)
+	if got.Status != StatusPending || got.Incarnation != "inc-1" || got.Owner != "user_1" || !got.Verified || got.AppliedIncarnation != "inc-applied" || !got.LedgerUpdatedAt.Equal(time.Unix(1_700_000_000, 0)) {
+		t.Fatalf("primitive state conversion failed: got %+v", got)
 	}
 }

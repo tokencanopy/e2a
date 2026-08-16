@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
@@ -19,6 +20,7 @@ import (
 // AWS-touching calls themselves are exercised only against live SES).
 type sesAPI interface {
 	CreateEmailIdentity(ctx context.Context, in *sesv2.CreateEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error)
+	PutEmailIdentityDkimSigningAttributes(ctx context.Context, in *sesv2.PutEmailIdentityDkimSigningAttributesInput, optFns ...func(*sesv2.Options)) (*sesv2.PutEmailIdentityDkimSigningAttributesOutput, error)
 	PutEmailIdentityMailFromAttributes(ctx context.Context, in *sesv2.PutEmailIdentityMailFromAttributesInput, optFns ...func(*sesv2.Options)) (*sesv2.PutEmailIdentityMailFromAttributesOutput, error)
 	GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error)
 	DeleteEmailIdentity(ctx context.Context, in *sesv2.DeleteEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.DeleteEmailIdentityOutput, error)
@@ -30,12 +32,20 @@ type sesAPI interface {
 // so the DKIM d= aligns with the From domain (DMARC passes on DKIM
 // alignment), and configures a custom MAIL FROM subdomain (bounce.<domain>) so
 // the Return-Path aligns too (SPF passes on the From org-domain → no "via e2a").
-// NOTE: only exercised against live AWS — CI/tests use FakeProvider; the
-// status-mapping helpers below are unit-tested with a stub.
+// Every created identity carries an e2a ownership tag. Existing untagged
+// identities are never adopted or mutated; IAM independently applies the same
+// resource-tag condition to close the client-side check/mutation race.
 type SESProvider struct {
-	api    sesAPI
-	region string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
+	api                sesAPI
+	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
+	deleteConfirmDelay func(attempt int) time.Duration
 }
+
+const (
+	managedIdentityTagKey   = "e2a-managed"
+	managedIdentityTagValue = "sender-identity-v1"
+	deleteConfirmAttempts   = 6
+)
 
 // NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL FROM
 // MX record target.
@@ -59,19 +69,47 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 		// A malformed key is not retryable — fail closed with a reason.
 		return Result{Status: StatusFailed, Error: "dkim private key not usable for BYODKIM: " + err.Error()}, nil
 	}
+	dkimAttributes := &ststypes.DkimSigningAttributes{
+		DomainSigningSelector:         &dkimSelector,
+		DomainSigningPrivateKey:       &privB64,
+		DomainSigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+	}
 	_, err = p.api.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{
-		EmailIdentity: &domain,
-		DkimSigningAttributes: &ststypes.DkimSigningAttributes{
-			DomainSigningSelector:         &dkimSelector,
-			DomainSigningPrivateKey:       &privB64,
-			DomainSigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
-		},
+		EmailIdentity:         &domain,
+		DkimSigningAttributes: dkimAttributes,
+		Tags: []ststypes.Tag{{
+			Key:   awsString(managedIdentityTagKey),
+			Value: awsString(managedIdentityTagValue),
+		}},
 	})
 	if err != nil {
-		// AlreadyExists is success (idempotent): the identity is registered;
-		// fall through to also (re)configure the custom MAIL FROM below.
+		// AlreadyExists means the domain may belong to an older registration.
+		// Update BYODKIM explicitly before touching MAIL FROM: Create's input is
+		// ignored on this path, and keeping the old selector/key would make a
+		// re-registered domain fail verification forever.
 		var already *ststypes.AlreadyExistsException
 		if !errors.As(err, &already) {
+			return Result{}, err // transient/permission — retry
+		}
+		existing, getErr := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+		if getErr != nil {
+			return Result{}, getErr
+		}
+		if !isManagedIdentity(existing) {
+			return Result{}, ErrIdentityNotOwned
+		}
+		// Put's nested shape deliberately omits DomainSigningAttributesOrigin.
+		// SES rejects every nested Origin value for this operation; EXTERNAL
+		// belongs only on the top-level SigningAttributesOrigin field.
+		putAttributes := &ststypes.DkimSigningAttributes{
+			DomainSigningSelector:   &dkimSelector,
+			DomainSigningPrivateKey: &privB64,
+		}
+		if _, err := p.api.PutEmailIdentityDkimSigningAttributes(ctx, &sesv2.PutEmailIdentityDkimSigningAttributesInput{
+			EmailIdentity:           &domain,
+			SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			SigningAttributes:       putAttributes,
+		}); err != nil {
 			return Result{}, err // transient/permission — retry
 		}
 	}
@@ -113,6 +151,9 @@ func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error)
 		}
 		return Result{}, err
 	}
+	if !isManagedIdentity(out) {
+		return Result{}, ErrIdentityNotOwned
+	}
 	// Re-emit the MAIL FROM records on every poll so the verify/failed transition
 	// preserves them (ReconcileWorker writes res.DNSRecords) — a verified domain's
 	// view keeps showing the MX/SPF the customer must KEEP published.
@@ -126,7 +167,18 @@ func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error)
 }
 
 func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
-	_, err := p.api.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: &domain})
+	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		var notFound *ststypes.NotFoundException
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return err
+	}
+	if !isManagedIdentity(out) {
+		return ErrIdentityNotOwned
+	}
+	_, err = p.api.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
 		var notFound *ststypes.NotFoundException
 		if errors.As(err, &notFound) {
@@ -134,27 +186,101 @@ func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 		}
 		return err
 	}
-	return nil
+	// DELETE success is followed by bounded absence polling so the HTTP
+	// domain-delete boundary can safely release DNS without false-red failures
+	// during normal SES eventual consistency. The outer job/reaper remains the
+	// durable retry path if this short confirmation window is exhausted.
+	for attempt := 0; attempt < deleteConfirmAttempts; attempt++ {
+		_, err = p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+		if err != nil {
+			var notFound *ststypes.NotFoundException
+			if errors.As(err, &notFound) {
+				return nil
+			}
+			return err
+		}
+		if attempt+1 < deleteConfirmAttempts {
+			delay := p.confirmDelay(attempt)
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return errors.New("senderidentity: provider identity still present after delete")
 }
+
+func (p *SESProvider) confirmDelay(attempt int) time.Duration {
+	if p.deleteConfirmDelay != nil {
+		return p.deleteConfirmDelay(attempt)
+	}
+	delay := 100 * time.Millisecond * time.Duration(1<<attempt)
+	if delay > time.Second {
+		return time.Second
+	}
+	return delay
+}
+
+func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
+	if out == nil {
+		return false
+	}
+	for _, tag := range out.Tags {
+		if tag.Key != nil && tag.Value != nil && *tag.Key == managedIdentityTagKey && *tag.Value == managedIdentityTagValue {
+			return true
+		}
+	}
+	return false
+}
+
+func awsString(value string) *string { return &value }
 
 func (p *SESProvider) List(ctx context.Context) ([]string, error) {
 	var out []string
-	var token *string
+	token := ""
 	for {
-		resp, err := p.api.ListEmailIdentities(ctx, &sesv2.ListEmailIdentitiesInput{NextToken: token})
+		page, next, err := p.ListPage(ctx, token, 1000)
 		if err != nil {
 			return nil, err
 		}
-		for _, id := range resp.EmailIdentities {
-			if id.IdentityType == ststypes.IdentityTypeDomain && id.IdentityName != nil {
-				out = append(out, *id.IdentityName)
-			}
-		}
-		if resp.NextToken == nil || *resp.NextToken == "" {
+		out = append(out, page...)
+		if next == "" {
 			return out, nil
 		}
-		token = resp.NextToken
+		token = next
 	}
+}
+
+func (p *SESProvider) ListPage(ctx context.Context, nextToken string, limit int) ([]string, string, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	pageSize := int32(limit)
+	input := &sesv2.ListEmailIdentitiesInput{PageSize: &pageSize}
+	if nextToken != "" {
+		input.NextToken = awsString(nextToken)
+	}
+	resp, err := p.api.ListEmailIdentities(ctx, input)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]string, 0, len(resp.EmailIdentities))
+	for _, id := range resp.EmailIdentities {
+		if id.IdentityType == ststypes.IdentityTypeDomain && id.IdentityName != nil {
+			out = append(out, *id.IdentityName)
+		}
+	}
+	next := ""
+	if resp.NextToken != nil {
+		next = *resp.NextToken
+	}
+	return out, next, nil
 }
 
 // mapSESStatus folds SES's verification axes onto our Status. Verified requires

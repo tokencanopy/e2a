@@ -13,13 +13,15 @@ import (
 // as an interface so handlers are unit-testable without Postgres.
 type IdemStore interface {
 	Claim(ctx context.Context, userID, key, path, bodyHash string) (idempotency.ClaimResult, error)
-	Complete(ctx context.Context, userID, key string, resp idempotency.CachedResponse) error
+	Complete(ctx context.Context, userID, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error
 	// CompleteTx records the completion inside the caller's transaction — used by
 	// the async accept path to commit the idempotency key atomically with the
 	// message insert + send-job enqueue. See idempotency.Store.CompleteTx.
-	CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, resp idempotency.CachedResponse) error
-	Release(ctx context.Context, userID, key string) error
+	CompleteTx(ctx context.Context, tx pgx.Tx, userID, key string, token idempotency.ClaimToken, resp idempotency.CachedResponse) error
+	Release(ctx context.Context, userID, key string, token idempotency.ClaimToken) error
 }
+
+type idemClaimToken = idempotency.ClaimToken
 
 // Idempotency-Key namespaces. The store is keyed on a flat (user_id, key),
 // so a server-minted automatic key (e.g. event redeliver) and a caller-
@@ -48,30 +50,33 @@ const (
 //   - Replay → the cached response, byte-faithful (unmarshaled back into T).
 //   - In-flight → 409; mismatch → 422.
 //   - Crash/panic safety: a panic between claim and completion releases the
-//     key (below) so retries aren't 409-locked for the stale window. As with a
-//     mid-flight process crash, the side-effect guarantee is therefore
-//     at-least-once, not exactly-once: a panic strictly after the side effect
-//     commits can let a retry re-run it.
+//     key (below) so retries aren't 409-locked for the stale window. The generic
+//     post-commit path is therefore at-least-once across a process crash. A
+//     handler that needs a stronger boundary may call CompleteTx from fn's
+//     side-effect transaction; domain DELETE does this to bind the key to the
+//     deleted registration's incarnation atomically.
 //
 // fn's contract: return a non-nil error ONLY before any irreversible side
 // effect (so the key is released and a retry can proceed); once the side
 // effect commits, return success with the final response so it is cached and
-// a retry replays it instead of re-doing the side effect.
-func runIdempotent[T any](s *Server, ctx context.Context, userID, key, route string, rawBody []byte, fn func() (int, T, error)) (int, T, error) {
+// a retry replays it instead of re-doing the side effect. Transactional callers
+// may have already completed the key; the final Complete below then returns
+// ErrClaimLost and is deliberately ignored because the response is durable.
+func runIdempotent[T any](s *Server, ctx context.Context, userID, key, route string, rawBody []byte, fn func(idemClaimToken) (int, T, error)) (int, T, error) {
 	return runIdempotentNS(s, ctx, userID, idemUserNS, key, route, rawBody, fn)
 }
 
 // runIdempotentAuto is runIdempotent for SERVER-MINTED keys (never derived
 // from client input), kept in a namespace disjoint from caller `Idempotency-
 // Key` headers so the two can't collide in the flat (user_id, key) store.
-func runIdempotentAuto[T any](s *Server, ctx context.Context, userID, key, route string, rawBody []byte, fn func() (int, T, error)) (int, T, error) {
+func runIdempotentAuto[T any](s *Server, ctx context.Context, userID, key, route string, rawBody []byte, fn func(idemClaimToken) (int, T, error)) (int, T, error) {
 	return runIdempotentNS(s, ctx, userID, idemAutoNS, key, route, rawBody, fn)
 }
 
-func runIdempotentNS[T any](s *Server, ctx context.Context, userID, ns, key, route string, rawBody []byte, fn func() (int, T, error)) (int, T, error) {
+func runIdempotentNS[T any](s *Server, ctx context.Context, userID, ns, key, route string, rawBody []byte, fn func(idemClaimToken) (int, T, error)) (int, T, error) {
 	var zero T
 	if key == "" || s.deps.Idempotency == nil {
-		return fn()
+		return fn(idemClaimToken{})
 	}
 	nsKey := ns + key
 	hash := idempotency.HashRequest(route, rawBody)
@@ -100,13 +105,13 @@ func runIdempotentNS[T any](s *Server, ctx context.Context, userID, ns, key, rou
 	// the same guarantee a mid-flight crash already gives.
 	defer func() {
 		if r := recover(); r != nil {
-			_ = s.deps.Idempotency.Release(ctx, userID, nsKey)
+			_ = s.deps.Idempotency.Release(ctx, userID, nsKey, claim.Token)
 			panic(r)
 		}
 	}()
-	status, body, ferr := fn()
+	status, body, ferr := fn(claim.Token)
 	if ferr != nil {
-		_ = s.deps.Idempotency.Release(ctx, userID, nsKey)
+		_ = s.deps.Idempotency.Release(ctx, userID, nsKey, claim.Token)
 		return 0, zero, ferr
 	}
 	// The side effect has committed. We MUST Complete the key — never leave
@@ -119,7 +124,7 @@ func runIdempotentNS[T any](s *Server, ctx context.Context, userID, ns, key, rou
 	if marshalErr != nil {
 		raw = []byte("{}")
 	}
-	_ = s.deps.Idempotency.Complete(ctx, userID, nsKey, idempotency.CachedResponse{
+	_ = s.deps.Idempotency.Complete(ctx, userID, nsKey, claim.Token, idempotency.CachedResponse{
 		StatusCode: status, ContentType: "application/json", Body: raw,
 	})
 	return status, body, nil

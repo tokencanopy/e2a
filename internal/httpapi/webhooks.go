@@ -54,10 +54,10 @@ type WebhookFiltersRequest struct {
 // carries NO signing secret (WH-3): the secret is shown once, only in the
 // create response (CreateWebhookResponse) and on rotate (rotateSecretResponse).
 type WebhookView struct {
-	ID              string             `json:"id"`
-	URL             string             `json:"url"`
-	Description     string             `json:"description"`
-	Events          []string           `json:"events" nullable:"false" doc:"The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."`
+	ID             string             `json:"id"`
+	URL            string             `json:"url"`
+	Description    string             `json:"description"`
+	Events         []string           `json:"events" nullable:"false" doc:"The event types this webhook matches. Open set: new event types may be added over time, so treat these as strings and tolerate unknown values. Known values: email.received, email.sent, email.failed, email.delivered, email.bounced, email.complained, email.flagged, email.blocked, email.review_requested, email.review_approved, email.review_rejected, domain.sending_verified, domain.sending_failed, domain.suppression_added, agent.suppression_added, contact.due. Beta: the screening, review-hold, agent.suppression_added, and contact.due events are unstable — their payload may change before they are declared stable."`
 	Filters        WebhookFiltersView `json:"filters"`
 	Enabled        bool               `json:"enabled"`
 	AutoDisabledAt *time.Time         `json:"auto_disabled_at,omitempty" format:"date-time"`
@@ -580,7 +580,7 @@ func (s *Server) handleRotateWebhookSecret(ctx context.Context, in *rotateSecret
 	}
 	_, body, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey,
 		"/v1/webhooks/"+in.ID+"/rotate-secret", nil,
-		func() (int, rotateSecretResponse, error) {
+		func(_ idemClaimToken) (int, rotateSecretResponse, error) {
 			secret, prevExpires, rerr := s.deps.RotateSecret(ctx, in.ID, user.ID)
 			if rerr != nil {
 				if errors.Is(rerr, identity.ErrWebhookNotFound) {
@@ -614,24 +614,11 @@ func (s *Server) handleCreateWebhook(ctx context.Context, in *createWebhookInput
 	// — intended: a same-account byte-identical keyed retry re-reads the secret
 	// it already owns, and the row lives in the same TTL-swept idempotency
 	// store that already caches the createApiKey plaintext key. nil when the
-	// request has no Idempotency-Key or no store is wired; runIdempotent's
-	// post-hoc Complete then no-ops on the in_progress guard (or, unkeyed, the
-	// create runs unguarded — idempotency is opt-in). Mirrors deliver()'s
+	// request has no Idempotency-Key or no store is wired; after an in-transaction
+	// completion, runIdempotent's post-hoc Complete observes ErrClaimLost and is
+	// deliberately ignored (or, unkeyed, the create runs unguarded — idempotency
+	// is opt-in). Mirrors deliver()'s
 	// AcceptIdemCompleter.
-	var idemCompleteTx identity.WebhookIdemCompleter
-	if in.IdempotencyKey != "" && s.deps.Idempotency != nil {
-		nsKey := idemUserNS + in.IdempotencyKey
-		uid := user.ID
-		idemCompleteTx = func(ctx context.Context, tx pgx.Tx, wh *identity.Webhook) error {
-			raw, mErr := json.Marshal(CreateWebhookResponse{WebhookView: webhookView(wh), SigningSecret: wh.SigningSecret})
-			if mErr != nil {
-				raw = []byte("{}")
-			}
-			return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, idempotency.CachedResponse{
-				StatusCode: http.StatusCreated, ContentType: "application/json", Body: raw,
-			})
-		}
-	}
 	// Validation runs INSIDE the claimed execution (like the send path): a
 	// keyed replay short-circuits before it — byte-faithful even if mutable
 	// state (agent-filter ownership, the webhook cap) has changed since the
@@ -639,7 +626,21 @@ func (s *Server) handleCreateWebhook(ctx context.Context, in *createWebhookInput
 	// before the insert, so runIdempotent releases the key for reuse instead
 	// of consuming it.
 	_, body, err := runIdempotent(s, ctx, user.ID, in.IdempotencyKey, "/v1/webhooks", in.RawBody,
-		func() (int, CreateWebhookResponse, error) {
+		func(claimToken idemClaimToken) (int, CreateWebhookResponse, error) {
+			var idemCompleteTx identity.WebhookIdemCompleter
+			if in.IdempotencyKey != "" && s.deps.Idempotency != nil {
+				nsKey := idemUserNS + in.IdempotencyKey
+				uid := user.ID
+				idemCompleteTx = func(ctx context.Context, tx pgx.Tx, wh *identity.Webhook) error {
+					raw, mErr := json.Marshal(CreateWebhookResponse{WebhookView: webhookView(wh), SigningSecret: wh.SigningSecret})
+					if mErr != nil {
+						raw = []byte("{}")
+					}
+					return s.deps.Idempotency.CompleteTx(ctx, tx, uid, nsKey, claimToken, idempotency.CachedResponse{
+						StatusCode: http.StatusCreated, ContentType: "application/json", Body: raw,
+					})
+				}
+			}
 			var filters WebhookFiltersView
 			if in.Body.Filters != nil {
 				filters = WebhookFiltersView(*in.Body.Filters)

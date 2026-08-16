@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/domainteardown"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -352,6 +353,12 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			return nil, errors.New("not found")
 		},
 		LookupDomain: fakeLookupDomain,
+		// DeleteDomain's base fixture models a completed deletion, so the
+		// post-delete snapshot has a confirmed receipt and no live replacement.
+		// Receipt-transition and ABA tests override both values explicitly.
+		LookupDomainTeardownSnapshot: func(context.Context, string, string, string) (domainteardown.State, bool, error) {
+			return domainteardown.Confirmed, false, nil
+		},
 		ListDomains: func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error) {
 			return []identity.Domain{{Domain: "acme.com", Verified: true, VerificationToken: "e2a-verify=tok", IsPrimary: true, AgentCount: 2}}, nil
 		},
@@ -367,7 +374,12 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			}
 			return nil
 		},
-		DeleteDomain: func(ctx context.Context, domain, userID string) error { return nil },
+		DeleteDomain: func(ctx context.Context, domain, userID string, complete DomainDeleteIdemCompleter) (domainteardown.Receipt, error) {
+			if _, err := fakeLookupDomain(ctx, domain, userID); err != nil {
+				return domainteardown.Receipt{}, identity.ErrDomainNotFound
+			}
+			return domainteardown.Receipt{Incarnation: "test-incarnation", State: domainteardown.Confirmed}, nil
+		},
 		CountAgentsOnDomain: func(ctx context.Context, domain, userID string) (int, int, error) {
 			if domain == "busy.com" {
 				return 1, 0, nil

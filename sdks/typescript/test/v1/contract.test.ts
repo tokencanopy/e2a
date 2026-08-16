@@ -278,6 +278,35 @@ it("resolves future_rfc3339 once per scenario to a future UTC instant", () => {
   expect(first).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
 });
 
+it("substitutes a stable per-run token into ordinary request headers", async () => {
+  let received = "";
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+    received = (init?.headers as Record<string, string>)["Idempotency-Key"] ?? "";
+    return new Response("{}", { status: 200 });
+  });
+  const scenario = {
+    name: "dynamic_header",
+    description: "text headers support placeholders",
+    steps: [
+      {
+        id: "delete",
+        action: "request",
+        method: "DELETE",
+        path: "/v1/domains/dynamic.test?confirm=DELETE",
+        headers: { "Idempotency-Key": "domain-delete-{scenario_token}" },
+        expect: { status: 200 },
+      },
+    ],
+  } satisfies Scenario;
+  const runner = new Runner("https://contract.test", "key", scenario);
+  try {
+    await executeRunner(runner);
+  } finally {
+    fetchMock.mockRestore();
+  }
+  expect(received).toMatch(/^domain-delete-[0-9a-f]{12}$/);
+});
+
 it("assigns a unique lowercase-hex token to each scenario", () => {
   const first = new Runner("https://contract.test", "key", {
     name: "first",
@@ -635,6 +664,8 @@ interface Step {
    *  VERBATIM (never through JSON.stringify) so a scenario can transmit bytes
    *  YAML cannot spell — see the scenarios.yaml header. */
   raw_body_base64?: string;
+  /** Ordinary printable request headers. Values support scenario placeholders. */
+  headers?: Record<string, string>;
   /** Raw request-header values, base64 per header name. Also verbatim. */
   headers_base64?: Record<string, string>;
   auth_override?: string;
@@ -988,7 +1019,19 @@ class Runner {
     if (jsonBody !== undefined || rawBodyBytes !== undefined) {
       headers["Content-Type"] = "application/json";
     }
+    for (const [name, value] of Object.entries(step.headers ?? {})) {
+      headers[name] = this.resolve(value);
+    }
     for (const [name, encoded] of Object.entries(step.headers_base64 ?? {})) {
+      if (
+        Object.keys(step.headers ?? {}).some(
+          (textName) => textName.toLowerCase() === name.toLowerCase(),
+        )
+      ) {
+        throw new Error(
+          `step ${step.id}: header ${name} is declared in both headers and headers_base64`,
+        );
+      }
       headers[name] = decodeHeaderBytes(step.id, name, encoded);
     }
 
@@ -1185,7 +1228,6 @@ const apiKey = process.env.E2A_TEST_API_KEY;
 // isolated/empty account — not the shared staging conformance account (it holds
 // the shared domain + concurrent seeded domains + other suites' fresh agents):
 //   agent_crud            — items.length:0 after delete
-//   domain_crud           — items.length:1 on /v1/domains
 //   placeholder_resolution — items[0].email == {agent_email} (i.e. "my agent is
 //                            the account-newest"; races with concurrent suites)
 // Their behavior is covered by the resource-scoped e2e-prod suites; the Go/local
@@ -1195,7 +1237,6 @@ const apiKey = process.env.E2A_TEST_API_KEY;
 // target does not control. The Go runner owns it in-process.
 const ACCOUNT_GLOBAL = new Set([
   "agent_crud",
-  "domain_crud",
   "placeholder_resolution",
   "account_metrics_rollup",
 ]);

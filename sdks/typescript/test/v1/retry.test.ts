@@ -303,6 +303,19 @@ describe("RetryHttpLibrary per-operation gating", () => {
     expect(fake.methods.length).toBe(2);
   });
 
+  it("mints one key for server-deduped domain DELETE retries", async () => {
+    const req = del("https://api.e2a.dev/v1/domains/mail.example.test?confirm=DELETE");
+    req.setHeaderParam("Idempotency-Key", "");
+    const fake = new FakeHttp([{ status: 500 }, { status: 200 }]);
+    const retry = new RetryHttpLibrary(fake, {
+      sleep: noSleep,
+      genIdempotencyKey: () => "domain-delete-key",
+    });
+    const resp = await retry.send(req).toPromise();
+    expect(resp.httpStatusCode).toBe(200);
+    expect(fake.seenKeys).toEqual(["domain-delete-key", "domain-delete-key"]);
+  });
+
   it("DOES retry an idempotent PATCH on 500", async () => {
     const fake = new FakeHttp([{ status: 500 }, { status: 200 }]);
     const retry = new RetryHttpLibrary(fake, { sleep: noSleep });

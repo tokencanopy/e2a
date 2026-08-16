@@ -290,6 +290,25 @@ async def test_get_agent_sends_bearer_and_encodes_address(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_delete_domain_forwards_stable_idempotency_key(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "domain": "mail.example.test",
+            "sending_teardown": "confirmed",
+        }
+    )
+    async with _client() as c:
+        result = await c.domains.delete(
+            "mail.example.test", idempotency_key="delete-domain-incarnation-1"
+        )
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert req.headers["idempotency-key"] == "delete-domain-incarnation-1"
+    assert result.sending_teardown == "confirmed"
+
+
+@pytest.mark.anyio
 async def test_get_attachment_hits_endpoint_and_maps_view(httpx_mock):
     httpx_mock.add_response(
         json=_valid(

@@ -45,8 +45,15 @@ retry layer does not use that mechanism, so the list starts empty).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import re
 from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from e2a.v1.generated.api.domains_api import DomainsApi
 
 GENERATED_API_DIR = (
     Path(__file__).resolve().parent.parent / "src" / "e2a" / "v1" / "generated" / "api"
@@ -160,3 +167,21 @@ def test_audit_discrimination() -> None:
     for line in out_of_scope:
         offenders, _ = audit_lines([line])
         assert not offenders, f"audit false-positived on generator plumbing: {line!r}"
+
+
+def test_delete_domain_preserves_transport_option_positions() -> None:
+    """The new header appends after every pre-existing positional option."""
+    for method_name in (
+        "delete_domain",
+        "delete_domain_with_http_info",
+        "delete_domain_without_preload_content",
+    ):
+        parameters = list(inspect.signature(getattr(DomainsApi, method_name)).parameters)
+        assert parameters[:4] == ["self", "domain", "confirm", "_request_timeout"]
+        assert parameters[-1] == "idempotency_key"
+
+
+def test_delete_domain_generated_key_enforces_published_length_limit() -> None:
+    api = DomainsApi(api_client=object())
+    with pytest.raises(ValidationError):
+        asyncio.run(api.delete_domain("mail.example.test", "DELETE", idempotency_key="k" * 256))

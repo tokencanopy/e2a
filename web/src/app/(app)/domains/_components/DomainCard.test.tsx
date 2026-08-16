@@ -367,9 +367,13 @@ describe("DomainCard — delete flow", () => {
     expect(mockDelete).not.toHaveBeenCalled();
   });
 
-  it("deletes the domain and notifies the parent on confirm", async () => {
+  it("deletes the domain and notifies the parent on confirmed teardown", async () => {
     jest.spyOn(window, "confirm").mockReturnValue(true);
-    mockDelete.mockResolvedValue(undefined);
+    mockDelete.mockResolvedValue({
+      deleted: true,
+      domain: "mail.example.com",
+      sending_teardown: "confirmed",
+    });
     const onDeleted = jest.fn();
     render(
       <DomainCard
@@ -383,8 +387,43 @@ describe("DomainCard — delete flow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
-    expect(mockDelete).toHaveBeenCalledWith("mail.example.com");
+    expect(mockDelete).toHaveBeenCalledWith(
+      "mail.example.com",
+      "dashboard-domain-delete:e2a-verify=abc123",
+    );
   });
+
+  it.each([
+    ["pending", /still being removed.*keep its DNS records.*delete again/i],
+    ["manual_review", /could not confirm ownership.*keep its DNS records.*support/i],
+    ["future_state", /still being removed.*keep its DNS records.*delete again/i],
+    [undefined, /still being removed.*keep its DNS records.*delete again/i],
+  ])(
+    "keeps the deleted domain visible with actionable %s teardown guidance",
+    async (sending_teardown, message) => {
+      jest.spyOn(window, "confirm").mockReturnValue(true);
+      mockDelete.mockResolvedValue({
+        deleted: true,
+        domain: "mail.example.com",
+        sending_teardown,
+      });
+      const onDeleted = jest.fn();
+      render(
+        <DomainCard
+          domain={makeDomain()}
+          agentCount={0}
+          onVerified={jest.fn()}
+          onDeleted={onDeleted}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(message);
+      expect(onDeleted).not.toHaveBeenCalled();
+    },
+  );
 
   it("shows an inline alert when deletion fails", async () => {
     jest.spyOn(window, "confirm").mockReturnValue(true);

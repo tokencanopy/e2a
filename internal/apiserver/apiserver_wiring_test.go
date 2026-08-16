@@ -37,8 +37,10 @@ func minimalParams() Params {
 type fakeSenderIdentity struct {
 	provisionErr   error
 	deprovisionErr error
+	tryErr         error
 	provisioned    []string
 	deprovisioned  []string
+	tried          []string
 }
 
 func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, domain string) error {
@@ -46,9 +48,23 @@ func (f *fakeSenderIdentity) EnqueueProvision(_ context.Context, domain string) 
 	return f.provisionErr
 }
 
+func (f *fakeSenderIdentity) EnqueueProvisionTx(_ context.Context, _ pgx.Tx, domain string) error {
+	f.provisioned = append(f.provisioned, domain)
+	return f.provisionErr
+}
+
 func (f *fakeSenderIdentity) EnqueueDeprovisionTx(_ context.Context, _ pgx.Tx, domain string) error {
 	f.deprovisioned = append(f.deprovisioned, domain)
 	return f.deprovisionErr
+}
+
+// TryDeprovisionNow records separately from EnqueueDeprovisionTx: the former
+// is the post-commit best-effort provider call, the latter the in-tx durable
+// enqueue — conflating them would let a test pass while asserting the wrong
+// half of the delete contract.
+func (f *fakeSenderIdentity) TryDeprovisionNow(_ context.Context, domain string) (bool, error) {
+	f.tried = append(f.tried, domain)
+	return true, f.tryErr
 }
 
 func TestNewServesOpenAPISpec(t *testing.T) {
@@ -210,13 +226,13 @@ func TestEnqueueSenderProvisionFunc(t *testing.T) {
 }
 
 func TestDeleteDomainFuncSelection(t *testing.T) {
-	t.Run("without sender identity it is the plain store delete", func(t *testing.T) {
-		store := &identity.Store{}
+	t.Run("without sender identity it wraps the plain store delete", func(t *testing.T) {
+		// Since deleteDomain reports teardown state, the no-SES path is a
+		// wrapper (always teardownPending=false) rather than the bare method
+		// value; the behavioral contract is pinned by the DB-backed tests.
 		p := minimalParams()
-		p.Store = store
-		got := deleteDomainFunc(p)
-		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(store.DeleteDomain).Pointer() {
-			t.Fatal("without SES, deleteDomainFunc should be exactly Store.DeleteDomain")
+		if got := deleteDomainFunc(p); got == nil {
+			t.Fatal("expected a delete function without SES configured")
 		}
 	})
 

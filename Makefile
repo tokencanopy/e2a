@@ -49,8 +49,12 @@ test-e2e:
 # cover-check enforces the per-package floors in .testcoverage.yml. CI runs the
 # same gate via the vladopajic/go-test-coverage action.
 GO_TEST_COVERAGE_VERSION ?= v2.14.3
+# -timeout 15m: atomic coverage instrumentation plus CI DB contention pushed
+# internal/identity past Go's default 10-minute per-package timeout (observed
+# in shared-DB cleanup, not a hang). 15m stays under the workflow's 18-minute
+# job cap so a genuine wedge still fails the job with a usable stack.
 cover:
-	go test -p 4 -covermode=atomic -coverprofile=cover.out ./internal/...
+	go test -p 4 -timeout 15m -covermode=atomic -coverprofile=cover.out ./internal/...
 
 cover-check: cover
 	go run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml
@@ -114,6 +118,8 @@ generate-sdk-check: generate-sdk
 	python3 -m unittest scripts/test_strip_unused_generated_imports.py
 	@echo "==> Testing optional-header-param guard normalization"
 	python3 -m unittest scripts/test_guard_optional_header_params.py
+	@echo "==> Testing generated domain-delete signature compatibility"
+	python3 -m unittest scripts/test_preserve_generated_domain_delete_signatures.py
 	@echo "==> Checking generated code is up to date"
 	git diff --exit-code sdks/typescript/src/v1/generated/ sdks/python/src/e2a/v1/generated/
 

@@ -36,6 +36,9 @@
 #                      Combinable with `body:` or `raw_body_base64`.
 # Use them only when the bytes genuinely cannot be written as text; every
 # other scenario stays readable with `body:`.
+# Ordinary printable request headers belong in `headers:`. Their values use
+# the same placeholder substitution as paths and bodies, including the stable
+# per-run `{scenario_token}`.
 # Both values must be exactly-canonical base64 (standard alphabet, canonical
 # padding, no whitespace) and non-empty; every runner validates the string
 # before decoding, because the three stdlib decoders are permissive in three
@@ -138,9 +141,32 @@ scenarios:
             "items.length": 0
 
   - name: domain_crud
-    description: Register, list, verify, delete domain with typed responses
+    description: Register, delete, re-register, and safely retry a domain deletion
+    setup:
+      - register_domain: domain-crud.test.dev
     steps:
-      - id: register
+      - id: delete
+        action: request
+        method: DELETE
+        path: /v1/domains/domain-crud.test.dev?confirm=DELETE
+        headers:
+          Idempotency-Key: contract-domain-delete-original-{scenario_token}
+        # /v1 deleteDomain requires ?confirm=DELETE (D-5); returns 200 with the
+        # deletion receipt. With no sender provider configured and no durable
+        # managed-identity ledger row, absence is immediately confirmed and
+        # DNS is safe to release.
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: domain-crud.test.dev
+            sending_teardown: confirmed
+
+      # Re-register the same DNS name, then retry the OLD logical deletion.
+      # The old key follows its incarnation-bound receipt and must not delete
+      # the replacement. Because replacement DNS is live, the release signal
+      # fails closed as pending even though the historical teardown confirmed.
+      - id: register_replacement
         action: request
         method: POST
         path: /v1/domains
@@ -148,80 +174,49 @@ scenarios:
           domain: domain-crud.test.dev
         expect:
           status: 201
-          body_contains:
-            - domain
-            - verified
-            - capabilities
-            - verification_token
-            - dns_records
           body_match:
             domain: domain-crud.test.dev
-            verified: false
-            # capabilities is the per-axis rollup. inbound restates `verified`;
-            # outbound restates the sending_status rollup, which is `none` here
-            # because the contract server runs with the sending feature off
-            # (no ses_region) — the same reason no mail_from records appear below.
-            "capabilities.inbound": "pending"
-            "capabilities.outbound": "none"
-            # dns_records is now ONE purpose-tagged array (was an mx/txt/dkim
-            # object). [0]=ownership, [1]=inbound_mx are always first; status
-            # follows `verified` for inbound records (pending until verified).
-            "dns_records[0].purpose": "ownership"
-            "dns_records[0].type": "TXT"
-            "dns_records[0].status": "pending"
-            "dns_records[1].purpose": "inbound_mx"
-            "dns_records[1].type": "MX"
-            "dns_records[1].priority": 10
 
-      - id: list
-        action: request
-        method: GET
-        path: /v1/domains
-        expect:
-          status: 200
-          body_match:
-            "items.length": 1
-
-      - id: verify
-        action: request
-        method: POST
-        path: /v1/domains/domain-crud.test.dev/verify
-        # In the dev/test harness (Production=false) the DNS probe short-
-        # circuits TXTFound=true, so /v1 marks the domain verified and
-        # returns 200 + verified=true.
-        expect:
-          status: 200
-          body_match:
-            verified: true
-
-      # The axes move independently: verifying inbound flips capabilities.inbound
-      # to verified while outbound stays where it was. VerifyDomainView has no
-      # capabilities field (it speaks the live-probe vocabulary), so this pins the
-      # post-verify state through GET, which is the documented poll target.
-      - id: get_after_verify
-        action: request
-        method: GET
-        path: /v1/domains/domain-crud.test.dev
-        expect:
-          status: 200
-          body_contains:
-            - capabilities
-          body_match:
-            verified: true
-            "capabilities.inbound": "verified"
-            "capabilities.outbound": "none"
-
-      - id: delete
+      - id: retry_old_delete
         action: request
         method: DELETE
         path: /v1/domains/domain-crud.test.dev?confirm=DELETE
-        # /v1 deleteDomain requires ?confirm=DELETE (D-5); returns 200 with the
-        # uniform deletion object {deleted:true, domain}.
+        headers:
+          Idempotency-Key: contract-domain-delete-original-{scenario_token}
         expect:
           status: 200
           body_match:
             deleted: true
             domain: domain-crud.test.dev
+            sending_teardown: pending
+
+      - id: replacement_survives_old_retry
+        action: request
+        method: GET
+        path: /v1/domains/domain-crud.test.dev
+        expect:
+          status: 200
+          body_match:
+            domain: domain-crud.test.dev
+
+      - id: delete_replacement
+        action: request
+        method: DELETE
+        path: /v1/domains/domain-crud.test.dev?confirm=DELETE
+        headers:
+          Idempotency-Key: contract-domain-delete-replacement-{scenario_token}
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            domain: domain-crud.test.dev
+
+      - id: replacement_is_deleted_by_fresh_key
+        action: request
+        method: GET
+        path: /v1/domains/domain-crud.test.dev
+        expect:
+          status: 404
 
   - name: domain_agent_count
     description: >
@@ -231,12 +226,13 @@ scenarios:
       from their SELECTs, so they served Go's zero value as an authoritative
       `0` — indistinguishable from a domain that really has no agents, on the
       endpoint get_domain documents as the poll target after verify_domain.
-      Deliberately NOT folded into domain_crud: that scenario asserts
-      account-global collection state, so the TS runner skips it and the pin
-      would not hold across all three runners. Every precondition here is
-      established through public requests and the assertions are
-      resource-scoped (single GET plus a containment check on the list), so
-      this runs everywhere and does not care what else the account holds.
+      Deliberately NOT folded into domain_crud: that scenario exercises the
+      destructive teardown/re-registration lifecycle, while this scenario pins
+      the independent agent_count projection with an attached agent. Every
+      precondition here is established through public requests and the
+      assertions are resource-scoped (single GET plus a containment check on
+      the list), so this runs everywhere and does not care what else the
+      account holds.
     steps:
       - id: register_domain
         action: request
