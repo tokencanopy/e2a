@@ -45,7 +45,7 @@ describe("email API category page", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: "Ways to give an AI agent its own email address." }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/a dedicated gateway is the only option where the agent owns a real address/i)).toBeInTheDocument();
+    expect(screen.getByText(/a dedicated gateway is the only option purpose-built to give the agent its own real address/i)).toBeInTheDocument();
     for (const option of ["Dedicated email gateway", "Connect an existing account", "Direct IMAP access", "Forward into an AI integration"]) {
       expect(screen.getByText(option)).toBeInTheDocument();
     }

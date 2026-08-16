@@ -132,8 +132,9 @@ export default function EmailApiForAgentsPage() {
             The main options are a dedicated email gateway, connecting an
             existing Gmail or Outlook account, direct IMAP access, or
             forwarding mail into an AI integration. A dedicated gateway is the
-            only option where the agent owns a real address with sending,
-            receiving, and threading built in — e2a is one such gateway.
+            only option purpose-built to give the agent its own real address
+            with sending, receiving, and threading built in — e2a is one such
+            gateway.
           </p>
           <div className="overflow-x-auto" style={{ border: "1px solid var(--border)", borderRadius: "var(--r-lg)" }}>
             <table className="w-full min-w-[720px] text-left text-[13px]">
