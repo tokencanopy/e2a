@@ -357,11 +357,8 @@ function ConsentForm({
               className="mt-1"
             />
             <span className="text-sm">
-              <span
-                className="font-medium"
-                style={pickingAccount ? { color: "var(--danger-strong)" } : undefined}
-              >
-                Account — full workspace admin ⚠
+              <span className="font-medium">
+                Account — full workspace admin
               </span>
               <span className="block text-xs text-muted">
                 Everything Agent can do, plus: create/delete inboxes, manage
@@ -381,12 +378,7 @@ function ConsentForm({
         {pickingAccount && (
           <div
             role="alert"
-            className="p-3 text-xs border rounded"
-            style={{
-              background: "var(--danger-bg)",
-              color: "var(--danger-strong)",
-              borderColor: "var(--danger-bg)",
-            }}
+            className="p-3 text-xs border border-border rounded"
           >
             <strong>{client.client_name}</strong> will be able to administer your
             entire e2a workspace. Only continue if you started this from a tool
