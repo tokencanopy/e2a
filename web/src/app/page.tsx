@@ -373,7 +373,7 @@ export default function Home() {
           >
             What is email infrastructure for AI agents? <span className="font-mono ml-1">→</span>
           </Link>
-          <div className="inline-flex flex-wrap items-center justify-center gap-2.5">
+          <div className="flex flex-wrap items-center justify-center gap-2.5">
             <Link
               href="/get-started"
               className="inline-flex items-center gap-2 px-4 py-2.5 text-[14px] font-medium transition"
@@ -1027,7 +1027,7 @@ export default function Home() {
           >
             Free to start. No credit card. Up and running in under two minutes.
           </p>
-          <div className="inline-flex flex-wrap items-center justify-center gap-2.5">
+          <div className="flex flex-wrap items-center justify-center gap-2.5">
             <Link
               href="/get-started"
               className="inline-flex items-center gap-2 px-4 py-2.5 text-[14px] font-medium"
