@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 // @e2a/ui component classes (loft-*). Imported before globals.css so the app's
 // globals.css stays authoritative for design tokens and the Tailwind theme.
 import "@e2a/ui/styles.css";
@@ -11,23 +11,37 @@ import { UmamiTracker } from "./components/UmamiTracker";
 import { SITE_URL, SITE_NAME, GOOGLE_SITE_VERIFICATION } from "../lib/site";
 import { organization, softwareApplication, website } from "../lib/jsonld";
 
-const inter = Inter({
+const inter = localFont({
+  src: "../fonts/inter-latin-wght-normal.woff2",
   variable: "--f-ui",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+  weight: "100 900",
+  style: "normal",
+  display: "swap",
 });
 
-const jetbrainsMono = JetBrains_Mono({
+const jetbrainsMono = localFont({
+  src: "../fonts/jetbrains-mono-latin-wght-normal.woff2",
   variable: "--f-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+  weight: "100 800",
+  style: "normal",
+  display: "swap",
 });
 
-const fraunces = Fraunces({
+const fraunces = localFont({
+  src: [
+    {
+      path: "../fonts/fraunces-latin-full-normal.woff2",
+      weight: "100 900",
+      style: "normal",
+    },
+    {
+      path: "../fonts/fraunces-latin-full-italic.woff2",
+      weight: "100 900",
+      style: "italic",
+    },
+  ],
   variable: "--f-editorial",
-  subsets: ["latin"],
-  style: ["normal", "italic"],
-  axes: ["opsz"],
+  display: "swap",
 });
 
 const ROOT_TITLE = "e2a — Authenticated Email for AI Agents";
