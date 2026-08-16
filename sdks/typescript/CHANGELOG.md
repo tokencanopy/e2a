@@ -1,5 +1,26 @@
 # Changelog
 
+## 5.7.0
+
+Additive only. Every 5.6.0 call site keeps compiling and behaving identically.
+
+### Added
+- **Message filtering** via the `filter` option on `client.messages.list`.
+  The server pins the expression into continuation cursors so paged results
+  keep the same filter.
+- **Beta per-agent metrics** via `client.messages.getMetrics(email, ...)` for
+  cohort-window delivery counters and null-safe rates.
+- **Per-day account metrics** via `client.account.metrics({ bucket: "day" })`.
+  Buckets are UTC-day aligned and gap-filled with zeroes for charting; rate
+  denominators continue to exclude loopback traffic.
+- **Beta `quoteHistory` on `client.messages.reply`** — when enabled, the
+  server appends mail-client-style quoted history beneath the reply body.
+  This option may change before it is declared stable.
+- **Durable domain-delete receipts** via `client.domains.delete`. The result's
+  `sendingTeardown` state indicates whether provider teardown is still pending;
+  pass and reuse `idempotencyKey` when retrying an ambiguous request so a later
+  registration is not deleted accidentally.
+
 ## 5.6.0
 
 Additive only. Every 5.5.0 call site keeps compiling and behaving identically.
