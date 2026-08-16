@@ -37,5 +37,18 @@ describe("email API category page", () => {
     expect(screen.getByText("What is an email API for AI agents?")).toBeInTheDocument();
     expect(screen.getByText("What is the difference between e2a and a transactional email API?")).toBeInTheDocument();
     expect(screen.getByText("How does e2a authenticate inbound email?")).toBeInTheDocument();
+    expect(screen.getByText("What are the best ways to give an AI agent its own email address?")).toBeInTheDocument();
+  });
+
+  it("enumerates the ways to give an agent an email address", () => {
+    render(<EmailApiForAgentsPage />);
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Ways to give an AI agent its own email address." }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/a dedicated gateway is the only option purpose-built to give the agent its own real address/i)).toBeInTheDocument();
+    for (const option of ["Dedicated email gateway", "Connect an existing account", "Direct IMAP access", "Forward into an AI integration"]) {
+      expect(screen.getByText(option)).toBeInTheDocument();
+    }
+    expect(screen.getByText("e2a, AgentMail")).toBeInTheDocument();
   });
 });
