@@ -210,7 +210,9 @@ type Deps struct {
 	ListDomains         func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterDomain string) ([]identity.Domain, error)
 	SendingRampSnapshot func(ctx context.Context, userID, domain string, now time.Time) (sendramp.Snapshot, error)
 	// ClaimDomain atomically enforces maxDomains (<=0 means unlimited) and
-	// claims the domain: the race-proof backstop behind EnforceDomainCreate.
+	// claims the domain. It is the source of truth for both the cap and a
+	// cross-account conflict, checked before EnforceDomainCreate is asked
+	// for a richer plan/upgrade-URL error.
 	ClaimDomain         func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error)
 	EnforceDomainCreate func(ctx context.Context, userID string) error
 	// DeleteDomain atomically either deletes the live incarnation or resolves

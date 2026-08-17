@@ -366,6 +366,14 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 			if domain == "taken.com" {
 				return nil, identity.ErrDomainTaken
 			}
+			// Mirror claimOrCreateDomain's real ordering: a cross-account
+			// name is ErrDomainTaken regardless of the caller's cap (#825).
+			if owner, ok := soleOwnerDomains[domain]; ok && owner != userID {
+				return nil, identity.ErrDomainTaken
+			}
+			if maxDomains > 0 && userID == "u_overcap" {
+				return nil, &identity.DomainLimitExceededError{Limit: maxDomains, Current: maxDomains}
+			}
 			return &identity.Domain{Domain: domain, Verified: false, VerificationToken: "e2a-verify=new"}, nil
 		},
 		EnforceDomainCreate: func(ctx context.Context, userID string) error {
@@ -916,6 +924,13 @@ func TestLegacyFallback(t *testing.T) {
 	}
 }
 
+// soleOwnerDomains are singly-owned fixtures shared by fakeLookupDomain and
+// the default ClaimDomain fake, so both agree on who owns what.
+var soleOwnerDomains = map[string]string{
+	"other-account.com": "u_1",
+	"capped-owned.com":  "u_overcap",
+}
+
 // fakeLookupDomain mirrors identity.Store.LookupDomain's USER SCOPING
 // (`WHERE domain = $1 AND user_id = $2`). Modeling ownership matters: a fake
 // that switched on the domain alone — as this one used to — cannot observe
@@ -940,14 +955,7 @@ func fakeLookupDomain(ctx context.Context, domain, userID string) (*identity.Dom
 	if row, ok := shared[domain]; ok {
 		return &row, nil
 	}
-	// Singly-owned fixtures. These are what let a test observe the user id:
-	// each is invisible to every account but its owner, so a handler that
-	// passes "" — or any other account's id — misses.
-	soleOwner := map[string]string{
-		"other-account.com": "u_1",
-		"capped-owned.com":  "u_overcap",
-	}
-	if owner, ok := soleOwner[domain]; ok && owner == userID {
+	if owner, ok := soleOwnerDomains[domain]; ok && owner == userID {
 		return &identity.Domain{Domain: domain, Verified: true}, nil
 	}
 	return nil, errors.New("not registered")

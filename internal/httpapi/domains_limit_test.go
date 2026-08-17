@@ -32,22 +32,23 @@ func TestRegisterDomainAtCapAllowsReclaimOfOwnedDomain(t *testing.T) {
 	}
 }
 
-// The skip is scoped to domains the caller actually owns, so it cannot become
-// a way to bypass the cap: LookupDomain filters on user_id, so another
-// account's domain is not "already owned" and stays charged (and would then
-// be rejected as a conflict by the claim itself).
-//
-// This runs against the SHARED ownership-aware fake, not a local override, and
-// that is the point: "other-account.com" is owned by u_1 alone, so the request
-// below only 402s if the handler passes the AUTHENTICATED caller's id. An
-// earlier version of this test used a domain no fake matched for anyone, which
-// meant it exercised the fake's not-found branch and passed even with the
-// scoping removed — the mutation it exists to catch.
-func TestRegisterDomainAtCapStillChargesAnotherAccountsDomain(t *testing.T) {
-	srv := testServer(t)
+// #825: an at-cap caller asking for a domain someone else already owns
+// must get 409 domain_taken, not a 402 that tells them to upgrade a plan
+// that would not fix anything.
+func TestRegisterDomainAtCapStillReturnsConflictForAnotherAccountsDomain(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		// Model claimOrCreateDomain's real ordering: a cross-account name
+		// is ErrDomainTaken no matter what maxDomains is.
+		d.ClaimDomain = func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
+			if domain == "other-account.com" {
+				return nil, identity.ErrDomainTaken
+			}
+			return &identity.Domain{Domain: domain, Verified: false, VerificationToken: "e2a-verify=new"}, nil
+		}
+	})
 	code, body := postJSON(t, srv.URL+"/v1/domains", "overcap", map[string]any{"domain": "other-account.com"})
-	if code != 402 || errCode(body) != "limit_exceeded" {
-		t.Fatalf("want 402 limit_exceeded for a domain owned by another account, got %d %v", code, body)
+	if code != 409 || errCode(body) != "domain_taken" {
+		t.Fatalf("want 409 domain_taken for a domain owned by another account even when the caller is at cap, got %d %v", code, body)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestRegisterDomainAtCapEnforcesWhenLookupErrors(t *testing.T) {
 
 // ClaimDomain is the race-proof source of truth for max_domains (#822): a
 // DomainLimitExceededError from it must still surface as 402 limit_exceeded,
-// even when EnforceDomainCreate's own pre-check already passed.
+// with EnforceDomainCreate consulted only afterward for the richer details (#825).
 func TestRegisterDomainClaimDomainLimitExceededMapsTo402(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
 		d.ClaimDomain = func(ctx context.Context, domain, userID string, maxDomains int) (*identity.Domain, error) {
