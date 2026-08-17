@@ -819,31 +819,6 @@ func (s *Store) claimOrCreateDomain(ctx context.Context, domain, userID string, 
 
 	verificationToken := "e2a-verify=" + generateID()
 
-	// Generate a DKIM keypair for this domain. Failures here are
-	// non-fatal — the columns are nullable and the outbound signer
-	// treats a missing key as "skip DKIM". We still log because key gen
-	// failing is a hard signal (entropy exhaustion or an OS-level
-	// CSPRNG bug) that ops should see.
-	var dkimSelector string
-	var dkimPubKey string
-	var dkimPrivKey []byte
-	if kp, kerr := dkim.GenerateKeypair(); kerr == nil {
-		// Encrypt the private key at rest (#144). On seal failure (catastrophic
-		// RNG) drop ALL three DKIM columns so we never publish a public key /
-		// selector without a usable private key — non-fatal, same posture as a
-		// keygen failure (the signer treats a missing key as "skip DKIM").
-		sealed, serr := s.sealDKIM(kp.PrivateKeyDER, domain)
-		if serr != nil {
-			log.Printf("[identity] dkim key seal failed for %s: %v", domain, serr)
-		} else {
-			dkimSelector = kp.Selector
-			dkimPubKey = kp.PublicKeyDNS
-			dkimPrivKey = sealed
-		}
-	} else {
-		log.Printf("[identity] dkim keygen failed for %s: %v", domain, kerr)
-	}
-
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err
@@ -926,6 +901,32 @@ func (s *Store) claimOrCreateDomain(ctx context.Context, domain, userID string, 
 				return nil, &DomainLimitExceededError{Limit: maxDomains, Current: count}
 			}
 		}
+
+		// Generate a DKIM keypair for this domain. Only reached on a genuine
+		// new row (#826); a re-claim returns above via SELECT and never runs
+		// this. Non-fatal on failure (nullable columns; signer treats a
+		// missing key as "skip DKIM"), logged since it signals RNG/entropy
+		// trouble.
+		var dkimSelector string
+		var dkimPubKey string
+		var dkimPrivKey []byte
+		if kp, kerr := dkim.GenerateKeypair(); kerr == nil {
+			// Encrypt the private key at rest (#144). On seal failure (catastrophic
+			// RNG) drop ALL three DKIM columns so we never publish a public key /
+			// selector without a usable private key, non-fatal, same posture as a
+			// keygen failure (the signer treats a missing key as "skip DKIM").
+			sealed, serr := s.sealDKIM(kp.PrivateKeyDER, domain)
+			if serr != nil {
+				log.Printf("[identity] dkim key seal failed for %s: %v", domain, serr)
+			} else {
+				dkimSelector = kp.Selector
+				dkimPubKey = kp.PublicKeyDNS
+				dkimPrivKey = sealed
+			}
+		} else {
+			log.Printf("[identity] dkim keygen failed for %s: %v", domain, kerr)
+		}
+
 		err = tx.QueryRow(ctx,
 			`INSERT INTO domains (domain, user_id, verified, verification_token, dkim_selector, dkim_public_key, dkim_private_key)
 			 VALUES ($1, $2, false, $3, $4, $5, $6)
