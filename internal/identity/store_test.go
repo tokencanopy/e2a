@@ -2,8 +2,10 @@ package identity_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -137,6 +139,51 @@ func TestClaimOrCreateDomain_StableOnReclaim(t *testing.T) {
 	}
 	if !second.CreatedAt.Equal(first.CreatedAt) {
 		t.Errorf("CreatedAt changed on reclaim: first=%v second=%v", first.CreatedAt, second.CreatedAt)
+	}
+}
+
+// countingRandReader counts bytes read through crypto/rand.Reader, so a test
+// can detect an RSA-2048 keygen (tens of KB, vs. 16 bytes for a plain
+// token/ID read) without depending on timing.
+type countingRandReader struct {
+	orig io.Reader
+	n    int
+}
+
+func (c *countingRandReader) Read(p []byte) (int, error) {
+	n, err := c.orig.Read(p)
+	c.n += n
+	return n, err
+}
+
+// TestClaimOrCreateDomain_ReclaimSkipsDKIMKeygen pins #826: a reclaim must
+// not generate and discard a fresh DKIM keypair. Swaps crypto/rand.Reader
+// for a counter; the threshold sits well above generateID's 16 bytes.
+func TestClaimOrCreateDomain_ReclaimSkipsDKIMKeygen(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+
+	user, _ := store.CreateOrGetUser(ctx, "owner-keygen@example.com", "Owner", "google-keygen-token")
+
+	if _, err := store.ClaimOrCreateDomain(ctx, "keygen.example.com", user.ID); err != nil {
+		t.Fatalf("first ClaimOrCreateDomain: %v", err)
+	}
+
+	orig := rand.Reader
+	counter := &countingRandReader{orig: orig}
+	rand.Reader = counter
+	_, err := store.ClaimOrCreateDomain(ctx, "keygen.example.com", user.ID)
+	rand.Reader = orig
+	if err != nil {
+		t.Fatalf("reclaim ClaimOrCreateDomain: %v", err)
+	}
+
+	// generateID() alone reads 16 bytes; RSA-2048 keygen reads tens of
+	// thousands. 256 cleanly separates "just the ID" from "also a keypair".
+	const maxExpectedBytes = 256
+	if counter.n > maxExpectedBytes {
+		t.Errorf("reclaim of an already-owned domain read %d bytes from crypto/rand (want <= %d): a DKIM keypair was generated and discarded", counter.n, maxExpectedBytes)
 	}
 }
 
