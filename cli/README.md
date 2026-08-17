@@ -257,6 +257,25 @@ a server-owned, read-only mailbox-local identity. Human-readable formats do
 not change, and there is no `threadId` request flag, filter, or thread
 endpoint.
 
+### `e2a metrics`
+
+Print delivery counters for the account, or a single inbox.
+
+```bash
+e2a metrics                                          # account rollup
+e2a metrics bot@acme.com                              # one inbox
+e2a metrics --by-agent --json                         # account rollup broken down per agent
+e2a metrics --by-day --start 2026-08-01T00:00:00Z --json
+```
+
+With no positional argument this prints the account rollup; with one, that
+inbox's counters (accepted/submitted/delivered, bounces by class, complaints,
+suppressions, inbound DMARC results, review outcomes, and webhook delivery
+health). Flags: `--start`/`--end` (RFC 3339 window bounds), `--by-agent`
+(break the account rollup down per agent — account rollup only), `--by-day`
+(UTC daily buckets — account rollup only), `--json` (print the full metrics
+view as JSON instead of the human-readable summary).
+
 ### `e2a contacts` (beta)
 
 Manage account-level contact identity and per-agent outreach state, with

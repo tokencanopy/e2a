@@ -319,6 +319,7 @@ domains/webhooks in the **web dashboard**.
 | `e2a suppressions list\|add\|remove` | Inspect and manage recipient block lists (account-wide GA; agent-scoped is beta) |
 | `e2a send` / `e2a reply` | Send an email as the agent, or reply in-thread |
 | `e2a messages list\|get` | List or fetch messages for an agent |
+| `e2a metrics [<email>]` | Print delivery counters — account rollup, or one inbox (`--by-agent`, `--by-day`, `--json`) |
 | `e2a listen --agent <email>` | Stream inbound email for an agent over WebSocket (real-time; `--json` for raw, `--forward <url>` to bridge to a local HTTP handler) |
 | `e2a config [list\|get\|set]` | View or update the local config |
 

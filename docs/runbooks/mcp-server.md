@@ -116,7 +116,7 @@ design.
 
 - **Symptoms**: requests succeed, but the credential is served at
   least-privilege **agent scope**: account-scoped callers see the tool list
-  shrink from 76 tools to the 20 runtime tools, and the per-request default
+  shrink from 78 tools to the 21 runtime tools, and the per-request default
   agent is unset (explicit `email` required).
 - **Detection**: `auth_resolution` WARNING `whoami probe failed; serving
   least-privilege fallback`; `mcp_auth_resolutions_total{result="fallback"}`.
