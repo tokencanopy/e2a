@@ -171,6 +171,23 @@ describe("PendingRow", () => {
     expect(screen.queryByText("Subject")).not.toBeInTheDocument();
   });
 
+  it("renders an HTML body the way the recipient's inbox would (sandboxed iframe), not the (HTML body) placeholder", async () => {
+    stage({ body: { text: "", html: "<p>Hello, please see the <b>attached update</b>.</p>" } });
+    render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
+    await waitFor(() => {
+      const frame = screen.getByTitle("Email body") as HTMLIFrameElement;
+      expect(frame.getAttribute("srcdoc")).toContain("please see the <b>attached update</b>");
+    });
+    expect(screen.queryByText("(HTML body)")).not.toBeInTheDocument();
+  });
+
+  it("falls back to plain text (no iframe) when the draft has no HTML part", async () => {
+    stage();
+    render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
+    await waitFor(() => expect(screen.getByText(/your refund is on the way/)).toBeInTheDocument());
+    expect(screen.queryByTitle("Email body")).not.toBeInTheDocument();
+  });
+
   it("loads the lifecycle lazily beside Details", async () => {
     stage();
     const user = userEvent.setup();

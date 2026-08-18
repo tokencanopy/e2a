@@ -29,6 +29,7 @@ import { Chip, Dot } from "@e2a/ui";
 import { diffApproveEdits, joinCSV } from "./edits";
 import { categoryLabel, holdReasonSummary } from "./reviewReason";
 import { MessageLifecycleData } from "../../../components/messages/MessageLifecycleTimeline";
+import { EmailHtmlBody } from "../../../components/messages/EmailHtmlBody";
 
 function formatQueuedAgo(iso: string): string {
   const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -447,13 +448,24 @@ export function PendingRow({
                       <MessageLifecycleData email={agentEmail} messageId={id} />
                     </div>
                   )}
-                  <div
-                    className="text-[13px] whitespace-pre-wrap"
-                    style={{ color: "var(--fg)", lineHeight: 1.6 }}
-                  >
-                    {msg.body_text ||
-                      (msg.body_html ? "(HTML body)" : "(empty body)")}
-                  </div>
+                  {msg.body_html && msg.body_html.trim() !== "" ? (
+                    // Render the way it would actually look in the recipient's
+                    // inbox (Gmail-style) — sanitized + sandboxed, same
+                    // component the inbox thread view uses.
+                    <EmailHtmlBody
+                      html={msg.body_html}
+                      attachments={msg.attachments}
+                      email={agentEmail}
+                      messageId={id}
+                    />
+                  ) : (
+                    <div
+                      className="text-[13px] whitespace-pre-wrap"
+                      style={{ color: "var(--fg)", lineHeight: 1.6 }}
+                    >
+                      {msg.body_text || "(empty body)"}
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* EDITOR — opt-in via Edit draft */
