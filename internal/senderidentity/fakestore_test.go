@@ -110,12 +110,17 @@ func (s *fakeStore) setStatus(domain string, st Status) {
 	s.verified[domain] = true
 }
 
+// deleteDomain models a genuine `domains` row delete: gone from status
+// (LoadSendingIdentityState reads pgx.ErrNoRows, mirroring the real d.domain
+// join) AND ownerless (DomainOwner reads "" for an absent row in production,
+// COALESCE(d.user_id::text, '') — never leave a stale owner behind).
 func (s *fakeStore) deleteDomain(domain string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.status, domain)
 	delete(s.incarnations, domain)
 	delete(s.verified, domain)
+	delete(s.owners, domain)
 }
 
 func (s *fakeStore) setOwner(domain, owner string) {
@@ -303,11 +308,20 @@ func (s *fakeStore) ClearSendingIdentityProviderPending(ctx context.Context, dom
 	return nil
 }
 
+// ForgetSendingIdentityManaged mirrors the production guard: never delete the
+// ledger row for a domain that still has a live owner (owners[domain] != "",
+// matching DomainOwner/COALESCE(d.user_id::text, '') reading non-empty for a
+// live owned row). forgetErr simulates a query-level failure and is checked
+// first, same as the real conditional DELETE still round-tripping to the DB
+// even when its WHERE clause matches nothing.
 func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forgetErr != nil {
 		return s.forgetErr
+	}
+	if s.owners[domain] != "" {
+		return nil
 	}
 	delete(s.managed, domain)
 	delete(s.applied, domain)

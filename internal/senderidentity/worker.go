@@ -271,7 +271,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			return nil // already resolved (forced re-check, dup job, etc.)
 		}
 
-		res, err := provider.Status(ctx, domain)
+		res, err := provider.Status(ctx, domain, state.Selector)
 		if errors.Is(err, ErrIdentityNotFound) {
 			// The old blue/green slot may have deleted the replacement after v2
 			// installed it. Repair desired state immediately instead of turning a
@@ -457,7 +457,7 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		observed := false
 		providerStatus := func() (Result, error) {
 			if !observed {
-				observedResult, observedErr = provider.Status(lockedCtx, domain)
+				observedResult, observedErr = provider.Status(lockedCtx, domain, state.Selector)
 				observed = true
 			}
 			return observedResult, observedErr

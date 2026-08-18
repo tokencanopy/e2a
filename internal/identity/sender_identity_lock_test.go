@@ -413,6 +413,46 @@ func TestManagedSendingIdentityLedgerSurvivesDomainDelete(t *testing.T) {
 	}
 }
 
+// TestForgetSendingIdentityManagedRetainsLedgerForLiveOwnedDomain pins the
+// ledger-retention fix: an ownership failure (ErrIdentityNotOwned) on a
+// domain that is still live and owned must NOT delete the domain's only
+// durable retry authority. Before the fix, ForgetSendingIdentityManaged
+// unconditionally deleted the row, so once the domain's provider identity
+// lost its ownership tag (e.g. across the v1.7.8 upgrade, before the identity
+// had a chance to be adopted), the domain was permanently stranded `failed`
+// with nothing left to revisit it.
+func TestForgetSendingIdentityManagedRetainsLedgerForLiveOwnedDomain(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "live-ledger@example.com", "Live Ledger", "live-ledger-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	domain, err := store.ClaimOrCreateDomain(ctx, "live-ledger.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+
+	// The domain row is untouched — still live, still owned by user.ID — when
+	// an ownership failure calls Forget (mirroring
+	// internal/senderidentity/worker.go's two ErrIdentityNotOwned handlers).
+	if err := store.ForgetSendingIdentityManaged(ctx, domain.Domain); err != nil {
+		t.Fatalf("ForgetSendingIdentityManaged: %v", err)
+	}
+
+	managed, _, err := store.ListManagedSendingIdentityDomains(ctx)
+	if err != nil {
+		t.Fatalf("ListManagedSendingIdentityDomains: %v", err)
+	}
+	if len(managed) != 1 || managed[0] != domain.Domain {
+		t.Fatalf("ledger after a live-domain ownership failure = %v, want [%s] retained", managed, domain.Domain)
+	}
+}
+
 func TestManagedSendingIdentityLedgerKeysetPage(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)

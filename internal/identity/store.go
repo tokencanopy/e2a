@@ -1391,12 +1391,28 @@ func (s *Store) ClearSendingIdentityProviderPending(ctx context.Context, domain,
 	return err
 }
 
-// ForgetSendingIdentityManaged removes a cleanup candidate only after the
-// provider has confirmed deletion (NotFound is confirmed by the provider as
-// success). A DB failure leaves the ledger row for a later retry.
+// ForgetSendingIdentityManaged removes the ledger row for domain UNLESS
+// domain still exists in domains with a live owner (a non-NULL user_id). Only
+// the ErrIdentityNotOwned handlers in internal/senderidentity/worker.go call
+// this (an ownership failure, not a confirmed provider deletion — that path
+// is FinalizeSendingIdentityTombstone instead); forgetting the ledger row for
+// a domain that is still live and owned would permanently strand it, because
+// nothing else ever revisits a domain absent from this ledger. The guard is
+// expressed as part of the DELETE's WHERE clause rather than a
+// check-then-act at the call site: WithSendingIdentityMutationLock (held by
+// both callers) and the domain-delete transaction's advisory locks use
+// different lock names and do not exclude each other, so a separate
+// existence check beforehand could race a concurrent domain delete. A
+// genuinely deleted (or ownerless system) domain still has its row removed
+// here exactly as before; a DB failure leaves the ledger row for a later
+// retry either way.
 func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
 	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
-		`DELETE FROM sender_identity_managed_domains WHERE domain = $1`,
+		`DELETE FROM sender_identity_managed_domains m
+		  WHERE m.domain = $1
+		    AND NOT EXISTS (
+		      SELECT 1 FROM domains d WHERE d.domain = m.domain AND d.user_id IS NOT NULL
+		    )`,
 		normalizeDomain(domain),
 	)
 	return err

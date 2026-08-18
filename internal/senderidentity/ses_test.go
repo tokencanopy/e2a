@@ -174,8 +174,8 @@ func TestSESProvider_StatusReportsAxes(t *testing.T) {
 		DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
 		MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusFailed},
 	}}
-	p := NewSESProvider(stub, "us-east-1")
-	res, err := p.Status(context.Background(), "acme.com")
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+	res, err := p.Status(context.Background(), "acme.com", "")
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -221,6 +221,10 @@ func TestPKCS8Base64(t *testing.T) {
 	})
 }
 
+// testAccountID is a synthetic AWS account id used only to exercise ARN
+// construction; it is not a real account.
+const testAccountID = "123456789012"
+
 // stubSESAPI implements sesAPI; only the methods under test return real
 // behavior, the rest panic if unexpectedly called.
 type stubSESAPI struct {
@@ -229,6 +233,7 @@ type stubSESAPI struct {
 	createErr       error
 	putDkimErr      error
 	putErr          error
+	tagErr          error
 	unmanaged       bool
 	deleted         bool
 	deleteLags      bool
@@ -246,6 +251,9 @@ type stubSESAPI struct {
 	listOut       *sesv2.ListEmailIdentitiesOutput
 	listErr       error
 	listInput     *sesv2.ListEmailIdentitiesInput
+
+	// tagInputs records every TagResource call (adoption path).
+	tagInputs []*sesv2.TagResourceInput
 }
 
 func (s *stubSESAPI) CreateEmailIdentity(ctx context.Context, in *sesv2.CreateEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error) {
@@ -323,6 +331,17 @@ func (s *stubSESAPI) ListEmailIdentities(ctx context.Context, in *sesv2.ListEmai
 	return s.listOut, nil
 }
 
+func (s *stubSESAPI) TagResource(ctx context.Context, in *sesv2.TagResourceInput, optFns ...func(*sesv2.Options)) (*sesv2.TagResourceOutput, error) {
+	s.tagInputs = append(s.tagInputs, in)
+	if s.tagErr != nil {
+		return nil, s.tagErr
+	}
+	// Adoption: once tagged, subsequent GetEmailIdentity calls report the
+	// identity as managed, mirroring real SES.
+	s.unmanaged = false
+	return &sesv2.TagResourceOutput{}, nil
+}
+
 func TestSESProvider_ListPageIsProviderBounded(t *testing.T) {
 	stub := &stubSESAPI{listOut: &sesv2.ListEmailIdentitiesOutput{
 		EmailIdentities: []ststypes.IdentityInfo{
@@ -331,7 +350,7 @@ func TestSESProvider_ListPageIsProviderBounded(t *testing.T) {
 		},
 		NextToken: awsString("next-page-token"),
 	}}
-	p := NewSESProvider(stub, "us-east-2")
+	p := NewSESProvider(stub, "us-east-2", testAccountID)
 
 	domains, next, err := p.ListPage(context.Background(), "current-page-token", 25)
 	if err != nil {
@@ -349,7 +368,7 @@ func TestSESProvider_ProvisionConfiguresMailFrom(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{}
-	p := NewSESProvider(stub, "eu-west-1")
+	p := NewSESProvider(stub, "eu-west-1", testAccountID)
 
 	res, err := p.Provision(context.Background(), "acme.com", "e2a202606", pkcs1)
 	if err != nil {
@@ -398,7 +417,7 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	// CreateEmailIdentity returns AlreadyExists (idempotent re-provision); MAIL
 	// FROM must still be (re)configured.
 	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}}
-	p := NewSESProvider(stub, "us-east-1")
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
 	res, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1)
 	if err != nil {
 		t.Fatalf("Provision error: %v", err)
@@ -425,11 +444,309 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	}
 }
 
+// TestCanAdoptIdentity pins the pure adoption-criteria truth table: ALL three
+// conditions (key material on file, BYODKIM/EXTERNAL origin, exact selector
+// match) must hold before an untagged identity is provably e2a's own. The
+// mismatched-selector and AWS-managed-origin cases are the security-critical
+// negative: a too-loose rule here would let e2a silently adopt a foreign
+// application's SES identity in a shared AWS account.
+func TestCanAdoptIdentity(t *testing.T) {
+	tests := []struct {
+		name             string
+		out              *sesv2.GetEmailIdentityOutput
+		expectedSelector string
+		want             bool
+	}{
+		{
+			name: "external origin + matching selector token → adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             true,
+		},
+		{
+			name: "external origin + mismatched selector → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"someone-elses-selector"},
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+		{
+			name: "aws-managed (easy DKIM) origin, even with a coincidentally matching token → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+		{
+			name: "external origin but no expected selector on file → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+			expectedSelector: "",
+			want:             false,
+		},
+		{
+			name: "external origin with no tokens at all → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+		{
+			name:             "nil DkimAttributes → not adoptable",
+			out:              &sesv2.GetEmailIdentityOutput{},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+		{
+			name:             "nil output → not adoptable",
+			out:              nil,
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canAdoptIdentity(tt.out, tt.expectedSelector); got != tt.want {
+				t.Fatalf("canAdoptIdentity = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSESProvider_ProvisionAdoptsProvablyOwnIdentity covers adoption case 1:
+// an untagged identity whose installed BYODKIM selector matches e2a's stored
+// selector for that exact domain is provably e2a's own (created before
+// v1.7.8 introduced the ownership tag). Provision must tag it and then
+// proceed exactly as it would for an already-owned identity — no
+// ErrIdentityNotOwned, no stranded domain.
+func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	res, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1)
+	if err != nil {
+		t.Fatalf("Provision error = %v, want adoption to succeed", err)
+	}
+	if res.Status != StatusPending {
+		t.Fatalf("want pending after adopted provision, got %q", res.Status)
+	}
+	if len(stub.tagInputs) != 1 {
+		t.Fatalf("want exactly one TagResource call, got %d: %+v", len(stub.tagInputs), stub.tagInputs)
+	}
+	tagIn := stub.tagInputs[0]
+	wantARN := "arn:aws:ses:us-east-1:" + testAccountID + ":identity/legacy.example"
+	if tagIn.ResourceArn == nil || *tagIn.ResourceArn != wantARN {
+		t.Fatalf("TagResource ARN = %v, want %q", tagIn.ResourceArn, wantARN)
+	}
+	if len(tagIn.Tags) != 1 || tagIn.Tags[0].Key == nil || *tagIn.Tags[0].Key != managedIdentityTagKey ||
+		tagIn.Tags[0].Value == nil || *tagIn.Tags[0].Value != managedIdentityTagValue {
+		t.Fatalf("TagResource applied the wrong tag: %+v", tagIn.Tags)
+	}
+	// Adoption proceeds normally: the BYODKIM selector/key and MAIL FROM are
+	// still (re)installed exactly as for an already-owned identity.
+	if stub.dkimInput == nil || stub.mailFromInput == nil {
+		t.Fatalf("adopted identity was not provisioned normally: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+}
+
+// TestSESProvider_ProvisionRefusesMismatchedSelector covers adoption case 2,
+// the security-critical negative: an untagged BYODKIM identity whose
+// installed selector does NOT match e2a's stored selector must be refused
+// exactly like today — no tag, no mutation. A too-loose rule here would let
+// e2a hijack a different application's SES identity in a shared AWS account.
+func TestSESProvider_ProvisionRefusesMismatchedSelector(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"someone-elses-selector"},
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Provision(context.Background(), "shared.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("mismatched selector must never be tagged, got %+v", stub.tagInputs)
+	}
+	if stub.dkimInput != nil || stub.mailFromInput != nil {
+		t.Fatalf("unowned identity was mutated: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+}
+
+// TestSESProvider_ProvisionRefusesAWSManagedDkimOrigin covers adoption case
+// 3: an untagged identity configured with SES-generated (Easy DKIM) keys —
+// AWS_SES origin, not EXTERNAL — can never have been e2a's own Provision
+// call (e2a only ever supplies BYODKIM key material), so it must be refused
+// even though it happens to expose a matching token.
+func TestSESProvider_ProvisionRefusesAWSManagedDkimOrigin(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
+				Tokens:                  []string{"e2a202607"},
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Provision(context.Background(), "easy-dkim.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("AWS-managed DKIM origin must never be tagged, got %+v", stub.tagInputs)
+	}
+}
+
+// TestSESProvider_ProvisionAlreadyTaggedDoesNotRetag covers adoption case 4:
+// an identity that already carries the ownership tag must behave exactly as
+// before — no redundant TagResource call.
+func TestSESProvider_ProvisionAlreadyTaggedDoesNotRetag(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	// unmanaged defaults to false: stubSESAPI.GetEmailIdentity auto-appends the
+	// ownership tag, modeling an already-adopted/always-owned identity.
+	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Provision(context.Background(), "already-owned.example", "e2a202607", pkcs1); err != nil {
+		t.Fatalf("Provision error: %v", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("an already-tagged identity must not be retagged, got %+v", stub.tagInputs)
+	}
+	if stub.dkimInput == nil || stub.mailFromInput == nil {
+		t.Fatalf("already-owned identity was not provisioned: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+}
+
+// TestSESProvider_ProvisionAdoptionTagFailurePropagates: a transient/permission
+// error on the TagResource call itself must propagate (so River retries),
+// not silently fall back to ErrIdentityNotOwned.
+func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	boom := errors.New("tag-resource throttled")
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		tagErr:    boom,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, boom) {
+		t.Fatalf("Provision error = %v, want the TagResource error to propagate", err)
+	}
+	if stub.dkimInput != nil || stub.mailFromInput != nil {
+		t.Fatalf("must not proceed to mutate before adoption is confirmed: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+}
+
+// TestSESProvider_StatusAdoptsProvablyOwnIdentity proves Status() makes the
+// identical adoption judgement as Provision() — the interface widening this
+// fix relies on — and that it self-heals an ownership tag removed
+// out-of-band (not just the one-time pre-release migration case).
+func TestSESProvider_StatusAdoptsProvablyOwnIdentity(t *testing.T) {
+	stub := &stubSESAPI{
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			VerifiedForSendingStatus: true,
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
+			},
+			MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	res, err := p.Status(context.Background(), "legacy.example", "e2a202607")
+	if err != nil {
+		t.Fatalf("Status error = %v, want adoption to succeed", err)
+	}
+	if res.Status != StatusVerified {
+		t.Fatalf("adopted identity should report its real status, got %q", res.Status)
+	}
+	if len(stub.tagInputs) != 1 {
+		t.Fatalf("want exactly one TagResource call, got %d", len(stub.tagInputs))
+	}
+}
+
+// TestSESProvider_StatusRefusesMismatchedSelector mirrors the Provision
+// security-critical negative for the Status() path.
+func TestSESProvider_StatusRefusesMismatchedSelector(t *testing.T) {
+	stub := &stubSESAPI{
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"someone-elses-selector"},
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Status(context.Background(), "shared.example", "e2a202607"); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Status error = %v, want ErrIdentityNotOwned", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("mismatched selector must never be tagged, got %+v", stub.tagInputs)
+	}
+}
+
 func TestSESProvider_RefusesUnmanagedExistingIdentity(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}, unmanaged: true}
-	p := NewSESProvider(stub, "us-east-1")
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
 	if _, err := p.Provision(context.Background(), "shared.example", "sel", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
@@ -448,7 +765,7 @@ func TestSESProvider_ProvisionPropagatesMailFromError(t *testing.T) {
 	// CreateEmailIdentity ok, but the MAIL FROM call fails (transient) → Provision
 	// must surface the error so River retries (not silently return pending).
 	stub := &stubSESAPI{putErr: errors.New("throttled")}
-	p := NewSESProvider(stub, "us-east-1")
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
 	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1); err == nil {
 		t.Fatal("expected PutEmailIdentityMailFromAttributes error to propagate")
 	}
@@ -459,7 +776,7 @@ func TestSESProvider_ProvisionPropagatesReplacementDkimError(t *testing.T) {
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	boom := errors.New("dkim update denied")
 	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}, putDkimErr: boom}
-	p := NewSESProvider(stub, "us-east-1")
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
 	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1); !errors.Is(err, boom) {
 		t.Fatalf("expected DKIM update error to propagate, got %v", err)
@@ -472,8 +789,8 @@ func TestSESProvider_ProvisionPropagatesReplacementDkimError(t *testing.T) {
 func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 	// Status re-emits the MAIL FROM records so the verify/failed transition
 	// preserves them (records aren't wiped when a domain goes verified).
-	p := NewSESProvider(&stubSESAPI{}, "eu-west-1")
-	res, err := p.Status(context.Background(), "acme.com")
+	p := NewSESProvider(&stubSESAPI{}, "eu-west-1", testAccountID)
+	res, err := p.Status(context.Background(), "acme.com", "")
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -489,15 +806,15 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 
 func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status maps NotFoundException to ErrIdentityNotFound", func(t *testing.T) {
-		p := NewSESProvider(&stubSESAPI{getErr: &ststypes.NotFoundException{}}, "us-east-1")
-		_, err := p.Status(context.Background(), "example.com")
+		p := NewSESProvider(&stubSESAPI{getErr: &ststypes.NotFoundException{}}, "us-east-1", testAccountID)
+		_, err := p.Status(context.Background(), "example.com", "")
 		if !errors.Is(err, ErrIdentityNotFound) {
 			t.Fatalf("expected ErrIdentityNotFound, got %v", err)
 		}
 	})
 
 	t.Run("Deprovision treats NotFoundException as success", func(t *testing.T) {
-		p := NewSESProvider(&stubSESAPI{delErr: &ststypes.NotFoundException{}}, "us-east-1")
+		p := NewSESProvider(&stubSESAPI{delErr: &ststypes.NotFoundException{}}, "us-east-1", testAccountID)
 		if err := p.Deprovision(context.Background(), "example.com"); err != nil {
 			t.Fatalf("expected nil for missing identity, got %v", err)
 		}
@@ -505,14 +822,14 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 
 	t.Run("Status propagates other errors", func(t *testing.T) {
 		boom := errors.New("throttled")
-		p := NewSESProvider(&stubSESAPI{getErr: boom}, "us-east-1")
-		if _, err := p.Status(context.Background(), "example.com"); !errors.Is(err, boom) {
+		p := NewSESProvider(&stubSESAPI{getErr: boom}, "us-east-1", testAccountID)
+		if _, err := p.Status(context.Background(), "example.com", ""); !errors.Is(err, boom) {
 			t.Fatalf("expected boom to propagate, got %v", err)
 		}
 	})
 
 	t.Run("Deprovision waits for confirmed absence", func(t *testing.T) {
-		p := NewSESProvider(&stubSESAPI{deleteLags: true}, "us-east-1")
+		p := NewSESProvider(&stubSESAPI{deleteLags: true}, "us-east-1", testAccountID)
 		p.deleteConfirmDelay = func(int) time.Duration { return 0 }
 		if err := p.Deprovision(context.Background(), "example.com"); err == nil {
 			t.Fatal("expected a retry while GetEmailIdentity still reports the identity")
@@ -521,7 +838,7 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 
 	t.Run("Deprovision absorbs brief eventual consistency", func(t *testing.T) {
 		stub := &stubSESAPI{deleteLagReads: 2}
-		p := NewSESProvider(stub, "us-east-1")
+		p := NewSESProvider(stub, "us-east-1", testAccountID)
 		p.deleteConfirmDelay = func(int) time.Duration { return 0 }
 		if err := p.Deprovision(context.Background(), "example.com"); err != nil {
 			t.Fatalf("expected bounded confirmation to observe absence, got %v", err)

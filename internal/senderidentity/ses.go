@@ -11,6 +11,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/tokencanopy/e2a/internal/mailfrom"
 )
@@ -25,6 +26,7 @@ type sesAPI interface {
 	GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error)
 	DeleteEmailIdentity(ctx context.Context, in *sesv2.DeleteEmailIdentityInput, optFns ...func(*sesv2.Options)) (*sesv2.DeleteEmailIdentityOutput, error)
 	ListEmailIdentities(ctx context.Context, in *sesv2.ListEmailIdentitiesInput, optFns ...func(*sesv2.Options)) (*sesv2.ListEmailIdentitiesOutput, error)
+	TagResource(ctx context.Context, in *sesv2.TagResourceInput, optFns ...func(*sesv2.Options)) (*sesv2.TagResourceOutput, error)
 }
 
 // SESProvider is the real Provider backed by AWS SES v2. It registers
@@ -32,12 +34,17 @@ type sesAPI interface {
 // so the DKIM d= aligns with the From domain (DMARC passes on DKIM
 // alignment), and configures a custom MAIL FROM subdomain (bounce.<domain>) so
 // the Return-Path aligns too (SPF passes on the From org-domain → no "via e2a").
-// Every created identity carries an e2a ownership tag. Existing untagged
-// identities are never adopted or mutated; IAM independently applies the same
-// resource-tag condition to close the client-side check/mutation race.
+// Every created identity carries an e2a ownership tag. An existing untagged
+// identity is ADOPTED (tagged, then treated as owned) only when it is provably
+// e2a's own — see canAdoptIdentity — which is what lets a domain created before
+// the ownership tag shipped recover instead of being permanently stranded.
+// Every other untagged identity is never adopted or mutated; IAM independently
+// applies the same resource-tag condition to close the client-side
+// check/mutation race.
 type SESProvider struct {
 	api                sesAPI
 	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
+	accountID          string // for the identity ARN TagResource needs (arn:aws:ses:<region>:<accountID>:identity/<domain>)
 	deleteConfirmDelay func(attempt int) time.Duration
 }
 
@@ -47,20 +54,34 @@ const (
 	deleteConfirmAttempts   = 6
 )
 
-// NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL FROM
-// MX record target.
-func NewSESProvider(api sesAPI, region string) *SESProvider {
-	return &SESProvider{api: api, region: region}
+// NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL
+// FROM MX record target; accountID feeds the identity ARN adoption's
+// TagResource call needs (GetEmailIdentity/ListEmailIdentities never return
+// one).
+func NewSESProvider(api sesAPI, region, accountID string) *SESProvider {
+	return &SESProvider{api: api, region: region, accountID: accountID}
 }
 
 // NewSESProviderFromConfig builds a provider from ambient AWS config
-// (env/instance role) for the given region.
+// (env/instance role) for the given region. It resolves the caller's AWS
+// account ID via STS once at startup (GetCallerIdentity requires no IAM
+// grant of its own) because adoption's TagResource call needs a fully
+// qualified identity ARN and neither GetEmailIdentity nor ListEmailIdentities
+// returns one.
 func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	return &SESProvider{api: sesv2.NewFromConfig(cfg), region: region}, nil
+	callerIdentity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("resolve aws account id: %w", err)
+	}
+	var accountID string
+	if callerIdentity.Account != nil {
+		accountID = *callerIdentity.Account
+	}
+	return &SESProvider{api: sesv2.NewFromConfig(cfg), region: region, accountID: accountID}, nil
 }
 
 func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
@@ -96,7 +117,12 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 			return Result{}, getErr
 		}
 		if !isManagedIdentity(existing) {
-			return Result{}, ErrIdentityNotOwned
+			if !canAdoptIdentity(existing, dkimSelector) {
+				return Result{}, ErrIdentityNotOwned
+			}
+			if err := p.adoptIdentity(ctx, domain); err != nil {
+				return Result{}, err // transient/permission on the tag call — retry
+			}
 		}
 		// Put's nested shape deliberately omits DomainSigningAttributesOrigin.
 		// SES rejects every nested Origin value for this operation; EXTERNAL
@@ -142,7 +168,7 @@ func mailFromRecords(domain, region string) []DNSRecord {
 	}
 }
 
-func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error) {
+func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector string) (Result, error) {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
 		var notFound *ststypes.NotFoundException
@@ -152,7 +178,15 @@ func (p *SESProvider) Status(ctx context.Context, domain string) (Result, error)
 		return Result{}, err
 	}
 	if !isManagedIdentity(out) {
-		return Result{}, ErrIdentityNotOwned
+		// Self-heals an ownership tag removed out-of-band on an identity e2a
+		// otherwise still provably owns (matching BYODKIM selector), not just
+		// the initial adoption of a pre-tag-release identity.
+		if !canAdoptIdentity(out, expectedSelector) {
+			return Result{}, ErrIdentityNotOwned
+		}
+		if err := p.adoptIdentity(ctx, domain); err != nil {
+			return Result{}, err // transient/permission on the tag call — retry
+		}
 	}
 	// Re-emit the MAIL FROM records on every poll so the verify/failed transition
 	// preserves them (ReconcileWorker writes res.DNSRecords) — a verified domain's
@@ -234,6 +268,68 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 		}
 	}
 	return false
+}
+
+// canAdoptIdentity reports whether an UNTAGGED existing identity is provably
+// e2a's own, making the missing ownership tag a migration artifact (created
+// before release v1.7.8 introduced it, or removed out-of-band) rather than
+// evidence of a foreign identity. All three must hold:
+//
+//   - expectedSelector is non-empty: e2a has DKIM key material on file for
+//     this domain (the caller already required this to reach Provision/Status
+//     at all — SendingProvisionInputs/LoadSendingIdentityState gate on it —
+//     but a defensive check here keeps this function correct standalone).
+//   - the identity's DKIM was configured via BYODKIM (SigningAttributesOrigin
+//     == EXTERNAL). Only e2a's own Provision supplies signing key material;
+//     AWS_SES (Easy DKIM, SES-generated keys) can never be e2a's doing.
+//   - the selector SES reports installed (DkimAttributes.Tokens — for an
+//     EXTERNAL-origin identity this holds the BYODKIM selector, not a set of
+//     Easy-DKIM CNAME tokens) matches expectedSelector EXACTLY.
+//
+// The selector match is scoped to one domain by construction: both sides come
+// from a single domain's GetEmailIdentity call and a single domain's stored
+// row, so this can never adopt a DIFFERENT domain's identity even though the
+// monthly selector convention (dkim.SelectorForNow) is not itself globally
+// unique. This is the security-critical negative case: a too-loose adoption
+// rule would let e2a silently take over another application's SES identity in
+// a shared AWS account — the exact scenario the ownership tag exists to
+// prevent. Every other combination (no key material, AWS_SES origin, a
+// mismatched or absent selector) must keep returning ErrIdentityNotOwned.
+func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string) bool {
+	if out == nil || out.DkimAttributes == nil || expectedSelector == "" {
+		return false
+	}
+	if out.DkimAttributes.SigningAttributesOrigin != ststypes.DkimSigningAttributesOriginExternal {
+		return false
+	}
+	for _, token := range out.DkimAttributes.Tokens {
+		if token == expectedSelector {
+			return true
+		}
+	}
+	return false
+}
+
+// adoptIdentity applies the ownership tag to an identity canAdoptIdentity has
+// already cleared. TagResource needs the identity's full ARN — neither
+// GetEmailIdentity nor ListEmailIdentities returns one — so it's built from
+// the region and the account ID resolved once at construction time.
+func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
+	arn := p.identityARN(domain)
+	_, err := p.api.TagResource(ctx, &sesv2.TagResourceInput{
+		ResourceArn: &arn,
+		Tags: []ststypes.Tag{{
+			Key:   awsString(managedIdentityTagKey),
+			Value: awsString(managedIdentityTagValue),
+		}},
+	})
+	return err
+}
+
+// identityARN builds the SES v2 email-identity ARN for domain:
+// arn:aws:ses:<region>:<account-id>:identity/<domain>.
+func (p *SESProvider) identityARN(domain string) string {
+	return fmt.Sprintf("arn:aws:ses:%s:%s:identity/%s", p.region, p.accountID, domain)
 }
 
 func awsString(value string) *string { return &value }

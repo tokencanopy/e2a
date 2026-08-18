@@ -36,7 +36,7 @@ type blockingStatusProvider struct {
 	provisionOnce    sync.Once
 }
 
-func (p *blockingStatusProvider) Status(ctx context.Context, domain string) (Result, error) {
+func (p *blockingStatusProvider) Status(ctx context.Context, domain, expectedSelector string) (Result, error) {
 	p.statusOnce.Do(func() { close(p.statusStarted) })
 	select {
 	case <-p.statusRelease:
@@ -1237,6 +1237,92 @@ func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
 	}
 	if firer.count() != 1 {
 		t.Fatalf("fired %d events over 4 attempts, want exactly 1 (no duplicate per retry)", firer.count())
+	}
+}
+
+// TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain pins the
+// ledger-retention fix (case 5): an ownership failure on a domain that is
+// still live and owned must retain the sender-identity ledger row, not
+// delete it. Before the fix, ForgetSendingIdentityManaged unconditionally
+// deleted the row here, so the domain was never revisited by the periodic
+// reaper — permanently stranded `failed` even after an operator fixed the
+// ownership problem out-of-band (e.g. by tagging the identity manually).
+func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
+	const domain = "not-owned-live.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusPending)
+	store.setOwner(domain, "u-live")
+	store.managed[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SetStatusErr(domain, ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed", got)
+	}
+	if store.managed[domain] == "" {
+		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
+	}
+}
+
+// TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain is the sync (provision)
+// path's counterpart to the reconcile test above.
+func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
+	const domain = "sync-not-owned-live.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusNone)
+	store.setOwner(domain, "u-live2")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	prov := NewFakeProvider()
+	prov.SetProvisionErr(ErrIdentityNotOwned)
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed", got)
+	}
+	if store.managed[domain] == "" {
+		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
+	}
+}
+
+// TestReapWorker_GenuineDeleteStillFinalizesTombstone pins case 6: a
+// genuinely deleted domain's teardown/tombstone path is unaffected by the
+// ledger-retention fix above. It goes through FinalizeSendingIdentityTombstone
+// (age-gated on the ledger row's last mutation), never through
+// ForgetSendingIdentityManaged — the two are called from disjoint branches of
+// syncProviderIdentityWithInspection (deletion vs. ownership-failure) — so
+// this still removes the ledger row once the post-drain window has elapsed.
+func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
+	const domain = "genuinely-deleted.example"
+	store := newFakeStore()
+	// No setStatus/setOwner: the domain row is gone, mirroring a real delete
+	// (LoadSendingIdentityState reads pgx.ErrNoRows).
+	store.managed[domain] = domain + "-incarnation"
+	store.ageTombstone(domain) // past the post-drain convergence delay
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	w := &ReapWorker{store: store, provider: prov}
+
+	if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
+		t.Fatalf("Work returned error: %v", err)
+	}
+	identities, err := prov.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(identities) != 0 {
+		t.Fatalf("provider identity survived deprovision: %v", identities)
+	}
+	if len(store.managed) != 0 {
+		t.Fatalf("genuinely deleted domain's tombstone must still finalize, ledger = %v", store.managed)
 	}
 }
 

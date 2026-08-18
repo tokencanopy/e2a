@@ -158,6 +158,33 @@ for verified domains; (b) needed an aligned Return-Path.
 
 ## Upgrading an existing SES-enabled installation
 
+**Amendment:** steps 1–3 and 5 below described a MANUAL, human-reviewed
+tagging pass that was expected to run once, before the ownership-tag release
+first deployed. In practice every identity created before that release
+reached production untagged, `Provision`/`Status` then hit
+`AlreadyExistsException`/an untagged `GetEmailIdentity` response and returned
+`ErrIdentityNotOwned`, and the `ErrIdentityNotOwned` handler unconditionally
+deleted the domain's row from the durable managed-identity ledger — so the
+domain was marked `sending_status=failed` and never automatically revisited.
+`SESProvider` now performs the equivalent of steps 1–3 automatically and
+per-domain, inline in `Provision`/`Status`, using a criterion strictly
+narrower than "no tag": an untagged identity is adopted (tagged, then treated
+as owned) only when it is configured with BYODKIM
+(`DkimAttributes.SigningAttributesOrigin == EXTERNAL`) using EXACTLY the
+selector e2a has on file for that domain (`canAdoptIdentity` in
+`internal/senderidentity/ses.go`). Anything else — no key material on file, an
+AWS-managed (Easy DKIM) identity, or a selector mismatch — still returns
+`ErrIdentityNotOwned` untouched, same as before adoption existed; that keeps
+the "do not bulk-adopt" property below true per-identity instead of relying on
+a one-time human review. The ledger-deletion bug above is fixed separately:
+`ForgetSendingIdentityManaged` (`internal/identity/store.go`) no longer
+deletes the row for a domain that still exists with a live owner, so even a
+domain that fails adoption (e.g. it was never BYODKIM, or the selector was
+rotated in a way the ledger doesn't reflect) stays in the ledger for the
+reaper to retry after manual review — it is no longer stranded. Steps 4, 6,
+and 7 (IAM hardening, the blue/green rollout choreography) are unaffected and
+still apply to a from-scratch rollout of this feature.
+
 The ownership tag is a deliberate migration gate. Do not bulk-adopt everything
 returned by `ListEmailIdentities`: an AWS account/region may contain identities
 owned by another application.
@@ -198,6 +225,15 @@ owned by another application.
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits
   MX/SPF (incl. `AlreadyExists`); `mailfrom` convention; `envelopeSender`
   (verified → aligned, else relay/fail-closed).
+- Unit (adoption amendment): `canAdoptIdentity`'s truth table plus
+  `Provision`/`Status` wiring — matching selector + EXTERNAL origin adopts and
+  proceeds; a mismatched selector or an AWS-managed origin still returns
+  `ErrIdentityNotOwned` with no tag applied; an already-tagged identity is not
+  retagged; a transient `TagResource` error propagates for retry instead of a
+  false `ErrIdentityNotOwned`. Ledger retention: an ownership failure on a
+  still-live, still-owned domain keeps its `sender_identity_managed_domains`
+  row; a genuinely deleted domain's row is still removed via
+  `FinalizeSendingIdentityTombstone` as before.
 - Local-service e2e (real binary + Mailpit): seeded a `sending_status=verified`
   domain and a `none` domain; over real SMTP confirmed verified → `From:
   bot@acme.e2etest` (no "via") + `Return-Path: bounces@bounce.acme.e2etest`;
