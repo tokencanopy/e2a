@@ -130,7 +130,7 @@ func (f *FakeProvider) Provision(ctx context.Context, domain, dkimSelector strin
 	return Result{Status: StatusPending, DNSRecords: mailFromRecords(domain, "us-east-1")}, nil
 }
 
-func (f *FakeProvider) Status(ctx context.Context, domain, expectedSelector string) (Result, error) {
+func (f *FakeProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.StatusCalls = append(f.StatusCalls, domain)

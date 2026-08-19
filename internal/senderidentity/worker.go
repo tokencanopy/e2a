@@ -271,7 +271,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			return nil // already resolved (forced re-check, dup job, etc.)
 		}
 
-		res, err := provider.Status(ctx, domain, state.Selector)
+		res, err := provider.Status(ctx, domain, state.Selector, len(state.PrivateKey) > 0)
 		if errors.Is(err, ErrIdentityNotFound) {
 			// The old blue/green slot may have deleted the replacement after v2
 			// installed it. Repair desired state immediately instead of turning a
@@ -457,7 +457,13 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		observed := false
 		providerStatus := func() (Result, error) {
 			if !observed {
-				observedResult, observedErr = provider.Status(lockedCtx, domain, state.Selector)
+				// state.PrivateKey backs the adoption judgement Status may make
+				// internally (see canAdoptIdentity's doc): a non-empty selector
+				// with no key material must never be treated as adoptable, or
+				// Status would tag an identity e2a cannot sign for — and the
+				// no-key branch below would then find it tagged and let
+				// Deprovision actually delete it.
+				observedResult, observedErr = provider.Status(lockedCtx, domain, state.Selector, len(state.PrivateKey) > 0)
 				observed = true
 			}
 			return observedResult, observedErr

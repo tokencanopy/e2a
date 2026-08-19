@@ -36,7 +36,7 @@ type blockingStatusProvider struct {
 	provisionOnce    sync.Once
 }
 
-func (p *blockingStatusProvider) Status(ctx context.Context, domain, expectedSelector string) (Result, error) {
+func (p *blockingStatusProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
 	p.statusOnce.Do(func() { close(p.statusStarted) })
 	select {
 	case <-p.statusRelease:

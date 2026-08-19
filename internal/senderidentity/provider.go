@@ -109,13 +109,22 @@ type Provider interface {
 	Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error)
 
 	// Status polls the current verification state from the provider.
-	// expectedSelector is e2a's stored DKIM selector for domain, the same
-	// value Provision was called with — Status needs it to make the same
-	// adoption judgement as Provision (including self-healing an ownership
-	// tag that was removed out-of-band on an identity e2a otherwise still
-	// provably owns). Returns ErrIdentityNotFound if no identity exists for
+	// expectedSelector is e2a's stored DKIM selector for domain, and
+	// haveKeyMaterial reports whether e2a ALSO has a private key on file for
+	// that selector — Status needs both to make the same adoption judgement
+	// as Provision (including self-healing an ownership tag that was removed
+	// out-of-band on an identity e2a otherwise still provably owns).
+	// haveKeyMaterial matters independently of expectedSelector being
+	// non-empty: a caller's stored state can carry a selector with no private
+	// key (e.g. mid domain-reclaim), and adopting on the selector alone would
+	// tag an identity e2a cannot actually sign for — see canAdoptIdentity.
+	// Callers that have no adoption judgement to make for this poll (no
+	// selector, or selector without key material) should pass
+	// expectedSelector="" and/or haveKeyMaterial=false; this never affects
+	// polling an ALREADY-owned identity, whose status reporting doesn't
+	// consult either. Returns ErrIdentityNotFound if no identity exists for
 	// domain.
-	Status(ctx context.Context, domain, expectedSelector string) (Result, error)
+	Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error)
 
 	// Deprovision removes the sending identity. A missing identity MUST be
 	// reported as success (idempotent teardown).

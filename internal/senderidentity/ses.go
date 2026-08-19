@@ -117,7 +117,7 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 			return Result{}, getErr
 		}
 		if !isManagedIdentity(existing) {
-			if !canAdoptIdentity(existing, dkimSelector) {
+			if !canAdoptIdentity(existing, dkimSelector, len(dkimPrivateKeyDER) > 0) {
 				return Result{}, ErrIdentityNotOwned
 			}
 			if err := p.adoptIdentity(ctx, domain); err != nil {
@@ -168,7 +168,7 @@ func mailFromRecords(domain, region string) []DNSRecord {
 	}
 }
 
-func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector string) (Result, error) {
+func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
 		var notFound *ststypes.NotFoundException
@@ -181,7 +181,7 @@ func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector strin
 		// Self-heals an ownership tag removed out-of-band on an identity e2a
 		// otherwise still provably owns (matching BYODKIM selector), not just
 		// the initial adoption of a pre-tag-release identity.
-		if !canAdoptIdentity(out, expectedSelector) {
+		if !canAdoptIdentity(out, expectedSelector, haveKeyMaterial) {
 			return Result{}, ErrIdentityNotOwned
 		}
 		if err := p.adoptIdentity(ctx, domain); err != nil {
@@ -285,13 +285,53 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 //     recipient addresses; a policy can grant another AWS account send
 //     permissions on it. This is checked first and independent of the
 //     BYODKIM/selector reasoning below.
-//   - expectedSelector is non-empty: e2a has DKIM key material on file for
-//     this domain (the caller already required this to reach Provision/Status
-//     at all — SendingProvisionInputs/LoadSendingIdentityState gate on it —
-//     but a defensive check here keeps this function correct standalone).
+//   - haveKeyMaterial is true: e2a actually has DKIM private key material on
+//     file for this domain — NOT merely a stored selector. expectedSelector
+//     non-empty is a DIFFERENT fact than key material being present:
+//     LoadSendingIdentityState can return a non-empty selector with a
+//     nil/empty private key (e.g. mid domain-reclaim — see
+//     internal/identity's key lifecycle), and adopting on the selector alone
+//     would tag an identity e2a cannot actually sign for. That is not inert:
+//     the caller's own no-key branch (worker.go) then finds the identity
+//     tagged and calls Deprovision, which now SUCCEEDS and DELETES it —
+//     pre-adoption behavior refused that delete outright. Provision passes
+//     len(dkimPrivateKeyDER)>0 directly, since it already receives the raw
+//     key bytes. Status's own interface carries no key bytes, so ITS caller
+//     (worker.go, at both provider.Status call sites) is responsible for
+//     passing accurate signal — see Provider.Status's doc.
+//   - expectedSelector is non-empty: e2a has a stored DKIM selector on file
+//     for this domain.
 //   - the identity's DKIM was configured via BYODKIM (SigningAttributesOrigin
 //     == EXTERNAL). Only e2a's own Provision supplies signing key material;
 //     AWS_SES (Easy DKIM, SES-generated keys) can never be e2a's doing.
+//   - DkimAttributes.Status == SUCCESS: SES has independently matched the
+//     private key material IT holds against the DNS TXT published at
+//     <selector>._domainkey.<domain> — that is what DKIM verification means
+//     for a BYODKIM identity, and it costs no extra provider call (Get
+//     already returns it). This is materially stronger than the token match
+//     below: dkim.SelectorForNow's monthly convention is a publicly-derivable
+//     OSS constant with zero entropy of its own, so the token match alone
+//     proves only that SOME identity was configured with e2a's naming
+//     scheme — not that SES has cryptographically confirmed e2a's key
+//     against that domain's DNS. Requiring SUCCESS closes that gap without
+//     e2a resolving DNS itself (deliberately out of scope for the provider
+//     layer — a DNS-comparing follow-up is a possible future hardening, not
+//     required here).
+//     Design choice, made explicit because it trades off against a real
+//     population: SUCCESS is required STRICTLY, with no fallback for
+//     PENDING. A legacy BYODKIM identity that is still provider-side PENDING
+//     is refused (ErrIdentityNotOwned) rather than adopted. This is
+//     deliberately conservative rather than exhaustive: every domain this
+//     feature exists to unstrand was, by construction, already at e2a's own
+//     `sending_status=verified` before the ownership-tag regression that
+//     stranded it (mapSESStatus's all-or-nothing rollup already required
+//     DKIM SUCCESS to reach `verified`), so a legacy identity's SES-side DKIM
+//     status does not change independent of the tag — the incident
+//     population is SUCCESS by construction. A genuinely-still-PENDING
+//     legacy identity was never verified through e2a in the first place and
+//     is not this feature's target; refusing it fails exactly as adoption
+//     not existing at all would have. Revisit only with concrete evidence of
+//     a real non-SUCCESS legacy population left behind by this rule.
 //   - the selector SES reports installed (DkimAttributes.Tokens — for an
 //     EXTERNAL-origin identity this holds the BYODKIM selector, not a set of
 //     Easy-DKIM CNAME tokens) matches expectedSelector EXACTLY.
@@ -304,9 +344,21 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 // rule would let e2a silently take over another application's SES identity in
 // a shared AWS account — the exact scenario the ownership tag exists to
 // prevent. Every other combination (no key material, AWS_SES origin, a
-// mismatched or absent selector) must keep returning ErrIdentityNotOwned.
-func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string) bool {
-	if out == nil || out.DkimAttributes == nil || expectedSelector == "" {
+// mismatched or absent selector, DKIM not yet SUCCESS) must keep returning
+// ErrIdentityNotOwned.
+//
+// Reachability bound on attacker-controlled input: adoption is only ever
+// ATTEMPTED for a domain e2a's own database has independently confirmed the
+// caller controls. Provision/Status are invoked from
+// internal/senderidentity/worker.go only once LoadSendingIdentityState
+// reports Verified==true (domains.verified=true) — which itself requires a
+// live DNS probe of BOTH the ownership TXT record AND an apex MX record
+// pointing at the e2a relay (see internal/httpapi/domains.go's
+// handleVerifyDomain/VerifyDomain). No customer can aim adoption at a domain
+// they don't control; a matching selector token is necessary but this
+// verification gate is what makes it sufficient to trust at all.
+func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string, haveKeyMaterial bool) bool {
+	if out == nil || out.DkimAttributes == nil || expectedSelector == "" || !haveKeyMaterial {
 		return false
 	}
 	// A configuration set or an identity policy is FOREIGN configuration e2a
@@ -325,6 +377,12 @@ func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string
 		return false
 	}
 	if out.DkimAttributes.SigningAttributesOrigin != ststypes.DkimSigningAttributesOriginExternal {
+		return false
+	}
+	// SES has cryptographically matched the key material IT holds against the
+	// DNS TXT at <selector>._domainkey.<domain> — see the doc comment above
+	// for why this is required strictly, with no PENDING fallback.
+	if out.DkimAttributes.Status != ststypes.DkimStatusSuccess {
 		return false
 	}
 	for _, token := range out.DkimAttributes.Tokens {

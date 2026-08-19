@@ -175,7 +175,7 @@ func TestSESProvider_StatusReportsAxes(t *testing.T) {
 		MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusFailed},
 	}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
-	res, err := p.Status(context.Background(), "acme.com", "")
+	res, err := p.Status(context.Background(), "acme.com", "", false)
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -444,28 +444,33 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	}
 }
 
-// TestCanAdoptIdentity pins the pure adoption-criteria truth table: ALL three
-// conditions (key material on file, BYODKIM/EXTERNAL origin, exact selector
-// match) must hold before an untagged identity is provably e2a's own. The
-// mismatched-selector and AWS-managed-origin cases are the security-critical
-// negative: a too-loose rule here would let e2a silently adopt a foreign
-// application's SES identity in a shared AWS account.
+// TestCanAdoptIdentity pins the pure adoption-criteria truth table: ALL of
+// key material actually on file, BYODKIM/EXTERNAL origin, DKIM verification
+// SUCCESS, and an exact selector match must hold before an untagged identity
+// is provably e2a's own. The mismatched-selector, AWS-managed-origin,
+// no-key-material, and DKIM-not-yet-SUCCESS cases are the security-critical
+// negatives: a too-loose rule here would let e2a silently adopt a foreign
+// application's SES identity in a shared AWS account, or tag an identity it
+// cannot actually sign for.
 func TestCanAdoptIdentity(t *testing.T) {
 	tests := []struct {
 		name             string
 		out              *sesv2.GetEmailIdentityOutput
 		expectedSelector string
+		haveKeyMaterial  bool
 		want             bool
 	}{
 		{
-			name: "external origin + matching selector token → adoptable",
+			name: "external origin + dkim success + key material + matching selector token → adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             true,
 		},
 		{
@@ -474,9 +479,11 @@ func TestCanAdoptIdentity(t *testing.T) {
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"someone-elses-selector"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
@@ -485,9 +492,11 @@ func TestCanAdoptIdentity(t *testing.T) {
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
@@ -496,9 +505,58 @@ func TestCanAdoptIdentity(t *testing.T) {
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "",
+			haveKeyMaterial:  true,
+			want:             false,
+		},
+		{
+			// The core fix for finding 2: a stored selector alone is NOT proof
+			// e2a has key material — LoadSendingIdentityState can return a
+			// non-empty selector with a nil private key (e.g. mid domain-reclaim).
+			// Everything else here matches; only haveKeyMaterial is false.
+			name: "external origin + dkim success + matching selector but NO key material on file → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
+				},
+			},
+			expectedSelector: "e2a202607",
+			haveKeyMaterial:  false,
+			want:             false,
+		},
+		{
+			// The core fix for finding 3: DKIM PENDING means SES has not yet
+			// matched the key it holds against DNS — a weaker signal than the
+			// selector-token match alone (which is a publicly-derivable OSS
+			// constant). Strict SUCCESS is required, no PENDING fallback.
+			name: "external origin + matching selector but DKIM still pending → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusPending,
+				},
+			},
+			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
+			want:             false,
+		},
+		{
+			name: "external origin + matching selector but DKIM failed → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusFailed,
+				},
+			},
+			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
@@ -506,21 +564,25 @@ func TestCanAdoptIdentity(t *testing.T) {
 			out: &sesv2.GetEmailIdentityOutput{
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
 			name:             "nil DkimAttributes → not adoptable",
 			out:              &sesv2.GetEmailIdentityOutput{},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
 			name:             "nil output → not adoptable",
 			out:              nil,
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
@@ -534,9 +596,11 @@ func TestCanAdoptIdentity(t *testing.T) {
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 		{
@@ -549,15 +613,17 @@ func TestCanAdoptIdentity(t *testing.T) {
 				DkimAttributes: &ststypes.DkimAttributes{
 					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  ststypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
+			haveKeyMaterial:  true,
 			want:             false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := canAdoptIdentity(tt.out, tt.expectedSelector); got != tt.want {
+			if got := canAdoptIdentity(tt.out, tt.expectedSelector, tt.haveKeyMaterial); got != tt.want {
 				t.Fatalf("canAdoptIdentity = %v, want %v", got, tt.want)
 			}
 		})
@@ -634,6 +700,7 @@ func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
 			DkimAttributes: &ststypes.DkimAttributes{
 				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -680,6 +747,7 @@ func TestSESProvider_ProvisionRefusesMismatchedSelector(t *testing.T) {
 			DkimAttributes: &ststypes.DkimAttributes{
 				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"someone-elses-selector"},
+				Status:                  ststypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -711,6 +779,7 @@ func TestSESProvider_ProvisionRefusesAWSManagedDkimOrigin(t *testing.T) {
 			DkimAttributes: &ststypes.DkimAttributes{
 				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
 				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -761,6 +830,7 @@ func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
 			DkimAttributes: &ststypes.DkimAttributes{
 				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -793,7 +863,7 @@ func TestSESProvider_StatusAdoptsProvablyOwnIdentity(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	res, err := p.Status(context.Background(), "legacy.example", "e2a202607")
+	res, err := p.Status(context.Background(), "legacy.example", "e2a202607", true)
 	if err != nil {
 		t.Fatalf("Status error = %v, want adoption to succeed", err)
 	}
@@ -819,11 +889,66 @@ func TestSESProvider_StatusRefusesMismatchedSelector(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Status(context.Background(), "shared.example", "e2a202607"); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Status(context.Background(), "shared.example", "e2a202607", true); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Status error = %v, want ErrIdentityNotOwned", err)
 	}
 	if len(stub.tagInputs) != 0 {
 		t.Fatalf("mismatched selector must never be tagged, got %+v", stub.tagInputs)
+	}
+}
+
+// TestSESProvider_StatusRefusesAdoptionWithoutKeyMaterial pins finding 2: a
+// caller that passes haveKeyMaterial=false must never adopt even when the
+// selector token matches AND DKIM is SUCCESS — everything canAdoptIdentity
+// can observe from the provider alone says "adopt", but e2a has no private
+// key on file for this domain (state.PrivateKey nil/empty, e.g. mid a domain
+// reclaim) and cannot actually sign for it. Before this fix, Status only
+// checked expectedSelector != "" and would tag it — and the caller's own
+// no-key branch (worker.go) would then find it tagged and let Deprovision
+// actually delete the identity.
+func TestSESProvider_StatusRefusesAdoptionWithoutKeyMaterial(t *testing.T) {
+	stub := &stubSESAPI{
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Status(context.Background(), "no-key.example", "e2a202607", false); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Status error = %v, want ErrIdentityNotOwned when e2a has no key material on file", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("must never tag an identity e2a cannot sign for, got %+v", stub.tagInputs)
+	}
+}
+
+// TestSESProvider_StatusRefusesAdoptionWhileDkimPending pins finding 3: an
+// otherwise-adoptable identity (matching selector, EXTERNAL origin, real key
+// material) whose DKIM verification has not yet reached SUCCESS at the
+// provider must stay refused — no PENDING fallback.
+func TestSESProvider_StatusRefusesAdoptionWhileDkimPending(t *testing.T) {
+	stub := &stubSESAPI{
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusPending,
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Status(context.Background(), "still-pending.example", "e2a202607", true); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Status error = %v, want ErrIdentityNotOwned while DKIM is still pending", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("must never tag while DKIM has not reached SUCCESS, got %+v", stub.tagInputs)
 	}
 }
 
@@ -875,7 +1000,7 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 	// Status re-emits the MAIL FROM records so the verify/failed transition
 	// preserves them (records aren't wiped when a domain goes verified).
 	p := NewSESProvider(&stubSESAPI{}, "eu-west-1", testAccountID)
-	res, err := p.Status(context.Background(), "acme.com", "")
+	res, err := p.Status(context.Background(), "acme.com", "", false)
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -892,7 +1017,7 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status maps NotFoundException to ErrIdentityNotFound", func(t *testing.T) {
 		p := NewSESProvider(&stubSESAPI{getErr: &ststypes.NotFoundException{}}, "us-east-1", testAccountID)
-		_, err := p.Status(context.Background(), "example.com", "")
+		_, err := p.Status(context.Background(), "example.com", "", false)
 		if !errors.Is(err, ErrIdentityNotFound) {
 			t.Fatalf("expected ErrIdentityNotFound, got %v", err)
 		}
@@ -908,7 +1033,7 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status propagates other errors", func(t *testing.T) {
 		boom := errors.New("throttled")
 		p := NewSESProvider(&stubSESAPI{getErr: boom}, "us-east-1", testAccountID)
-		if _, err := p.Status(context.Background(), "example.com", ""); !errors.Is(err, boom) {
+		if _, err := p.Status(context.Background(), "example.com", "", false); !errors.Is(err, boom) {
 			t.Fatalf("expected boom to propagate, got %v", err)
 		}
 	})
