@@ -64,3 +64,56 @@ cli/test/reports/
 
 # Isolated feature worktrees.
 .worktrees/
+
+# --- Accidental-publication guards -------------------------------------------
+# On 2026-08-08 three commits pushed a 48,147-file agent sandbox HOME into this
+# PUBLIC repo (Go module cache, macOS Library, npm cache, .codex state) because
+# an agent working directory was neither ignored nor reviewed before `git add`.
+# Buried in it were a .e2a/config.json and a bootstrap.log containing a
+# plaintext `e2a_acct_` API key. That key turned out to be minted against an
+# ephemeral localhost instance and has no production account, so it was inert —
+# but the same path would have published a live credential just as easily.
+# GitHub still serves those (now unreferenced) commits by SHA, and forks share
+# the object store, so publication is effectively irreversible.
+#
+# These entries are cheap insurance against a repeat. Do not remove them
+# without replacing them with something better.
+
+# Agent/tool scratch output. `outputs/` in particular has held a full sandbox
+# HOME; it must never be committed to a public repo.
+outputs/
+.playwright-mcp/
+
+# Screenshots dropped at the repo root by browser tooling. Real UI screenshots
+# can carry account identifiers, addresses, and message content.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+
+# Credential-bearing file types. Absent before 2026-08-19; `*.pem` / `*.key`
+# is the one that matters most for a mail service — DKIM private keys.
+*.pem
+*.key
+*.p12
+*.pfx
+*-credentials.json
+*_credentials.json
+service-account*.json
+
+# Terraform state embeds provider secrets in plaintext.
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Only bare `.env` was matched before, so `.env.local` / `.env.production`
+# could be committed. `.env.example` stays tracked via the negation below.
+.env.*
+!.env.example
+!.env*.example
+
+# Database dumps and captured HTTP sessions.
+*.dump
+dump.sql
+cookies.txt

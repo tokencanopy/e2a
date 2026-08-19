@@ -163,6 +163,21 @@ func main() {
 		}
 		fmt.Printf("User:    %s (id=%s)\nAPI key: %s\n", user.Email, user.ID, key.PlaintextKey)
 		fmt.Fprintln(os.Stderr, "save the API key now — it will not be shown again")
+		// Printing the key IS the feature — there is no other way to hand it
+		// over. The realistic failure is not the print, it is the print being
+		// REDIRECTED: on 2026-08-08 a `-bootstrap-email … > bootstrap.log`
+		// captured a live key into a file that was then committed to a public
+		// repo, where it remains served by SHA (and by every fork) even after
+		// the commit was unreferenced. Publication is effectively irreversible,
+		// so the only useful moment to intervene is here, before the redirect
+		// lands. A non-TTY stdout is exactly that signal.
+		if !isTerminal(os.Stdout) {
+			fmt.Fprintln(os.Stderr,
+				"WARNING: stdout is not a terminal — this output contains a LIVE credential.\n"+
+					"         If you are redirecting to a file, delete it once the key is stored\n"+
+					"         somewhere safe, and never commit it. A key committed to a public\n"+
+					"         repository cannot be fully retracted; treat it as burned and rotate.")
+		}
 		return
 	}
 
@@ -1025,4 +1040,20 @@ func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
 		return limitErr.Resource == "messages_month", nil
 	}
 	return false, err
+}
+
+// isTerminal reports whether f is an interactive terminal rather than a pipe or
+// a file. Used only to decide whether printing a bootstrap credential warrants
+// an extra "this is going somewhere persistent" warning.
+//
+// Stdlib-only on purpose — a TTY check is not worth a dependency. Note the
+// failure direction: any error, or an unexpected mode, returns false and so
+// prints the warning. An unnecessary warning costs a line of output; a missed
+// one costs a published credential.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
