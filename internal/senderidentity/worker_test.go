@@ -1242,11 +1242,22 @@ func TestPostDrainAuditWorker_FiresStatusEvents(t *testing.T) {
 // the SES identity forever. store.forgetErr is deliberately poisoned: Work
 // succeeding proves Forget is never even invoked on this path (a
 // reintroduced call would surface the poisoned error).
+//
+// A retained row that never buys anything is worthless — checking
+// store.managed[domain] alone (as this test used to) only proves the fake's
+// own bookkeeping still has an entry; reverting the store.go NOT EXISTS
+// guard entirely would leave this test passing exactly the same, since it
+// never touches real SQL and the ledger row is never actually forgotten on
+// this code path either way. Phase 2 proves the CONSEQUENCE the incident
+// cared about: once the ownership problem resolves, the retained row lets
+// the reaper's hourly sweep actually re-provision and converge the domain to
+// verified — not merely that a map entry survived.
 func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	const domain = "not-owned-live.example"
 	store := newFakeStore()
 	store.setStatus(domain, StatusPending)
 	store.setOwner(domain, "u-live")
+	store.setProvisionInputs("sel", []byte("der"), true)
 	store.managed[domain] = domain + "-incarnation"
 	store.forgetErr = errors.New("Forget must never be called from an ownership failure")
 	prov := NewFakeProvider()
@@ -1254,6 +1265,8 @@ func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	firer := &recordingFirer{}
 	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
 
+	// Phase 1: the first poll discovers an untagged (foreign-looking)
+	// identity. Fails closed; the ledger row must survive.
 	if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
 		t.Fatalf("Work: %v (Forget must never be called on this path)", err)
 	}
@@ -1263,10 +1276,36 @@ func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	if store.managed[domain] == "" {
 		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
 	}
+
+	// Phase 2: the problem resolves (e.g. the ownership tag reappears, or an
+	// operator fixes IAM). Nothing about a domain sitting `failed` due to an
+	// ownership issue is ever revisited by another reconcile poll (the
+	// reconcile path only acts while status==pending) — it's the hourly
+	// reaper, driven off the ledger's applied-vs-incarnation mismatch, that
+	// keeps retrying. A forced re-provision always reports pending first
+	// (matching real SES semantics), so convergence takes two sweeps: the
+	// first re-installs and the second confirms verified.
+	prov.SetStatusErr(domain, nil)
+	reap := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 1: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status after recovery sweep 1 = %q, want pending (re-provisioned)", got)
+	}
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 2: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status after recovery sweep 2 = %q, want verified — the retained ledger row must buy a retry that actually converges", got)
+	}
 }
 
 // TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain is the sync (provision)
-// path's counterpart to the reconcile test above.
+// path's counterpart to the reconcile test above — see its doc comment for
+// why phase 2 (convergence via the reaper) is what makes this test earn its
+// place rather than only checking the fake's own bookkeeping.
 func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	const domain = "sync-not-owned-live.example"
 	store := newFakeStore()
@@ -1279,6 +1318,7 @@ func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	firer := &recordingFirer{}
 	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
 
+	// Phase 1: the initial provision attempt hits a foreign-looking identity.
 	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
@@ -1288,6 +1328,26 @@ func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	if store.managed[domain] == "" {
 		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
 	}
+
+	// Phase 2: the problem resolves; the reaper's forced re-provision (driven
+	// by the ledger's applied-vs-incarnation mismatch, independent of
+	// sending_status) picks the retained row back up and converges it — same
+	// two-sweep shape as the reconcile-path test above.
+	prov.SetProvisionErr(nil)
+	reap := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 1: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status after recovery sweep 1 = %q, want pending (re-provisioned)", got)
+	}
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 2: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status after recovery sweep 2 = %q, want verified — the retained ledger row must buy a retry that actually converges", got)
+	}
 }
 
 // TestReapWorker_GenuineDeleteStillFinalizesTombstone pins case 6: a
@@ -1295,8 +1355,14 @@ func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 // ledger-retention fix above. It goes through FinalizeSendingIdentityTombstone
 // (age-gated on the ledger row's last mutation), never through
 // ForgetSendingIdentityManaged — the two are called from disjoint branches of
-// syncProviderIdentityWithInspection (deletion vs. ownership-failure) — so
-// this still removes the ledger row once the post-drain window has elapsed.
+// syncProviderIdentityWithInspection (deletion vs. ownership-failure).
+//
+// The `len(store.managed)` check alone can't tell WHICH of the two deletion
+// methods emptied the ledger map — both simply delete the same entry in the
+// fake. What actually pins "never through ForgetSendingIdentityManaged" is
+// the explicit ForgetCalls/FinalizeTombstoneCalls assertion below; the
+// prov.List() check is independent, real evidence that Deprovision itself
+// genuinely ran (not implied by the ledger going empty).
 func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
 	const domain = "genuinely-deleted.example"
 	store := newFakeStore()
@@ -1320,6 +1386,12 @@ func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
 	}
 	if len(store.managed) != 0 {
 		t.Fatalf("genuinely deleted domain's tombstone must still finalize, ledger = %v", store.managed)
+	}
+	if len(store.ForgetCalls) != 0 {
+		t.Fatalf("genuine teardown must never call ForgetSendingIdentityManaged, got %v", store.ForgetCalls)
+	}
+	if len(store.FinalizeTombstoneCalls) != 1 {
+		t.Fatalf("expected exactly one FinalizeSendingIdentityTombstone call, got %v", store.FinalizeTombstoneCalls)
 	}
 }
 

@@ -48,12 +48,20 @@ type fakeStore struct {
 	domainExistsErr error
 
 	// recorded calls
-	SetStatusCalls       []setStatusCall
-	TouchCalls           []string
-	listManagedCalls     int
-	listManagedPageCalls int
-	lookupManagedCalls   int
-	domainExistsCalls    int
+	SetStatusCalls []setStatusCall
+	TouchCalls     []string
+	// ForgetCalls / FinalizeTombstoneCalls record every successful call to
+	// each deletion method separately (they share forgetErr for injected
+	// failures, but distinct call logs let a test prove WHICH of the two
+	// disjoint branches — ownership-failure vs. genuine-teardown — actually
+	// fired, rather than only observing the shared side effect of both
+	// (deleting the same map entry).
+	ForgetCalls            []string
+	FinalizeTombstoneCalls []string
+	listManagedCalls       int
+	listManagedPageCalls   int
+	lookupManagedCalls     int
+	domainExistsCalls      int
 }
 
 type setStatusCall struct {
@@ -320,6 +328,7 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	if s.forgetErr != nil {
 		return s.forgetErr
 	}
+	s.ForgetCalls = append(s.ForgetCalls, domain)
 	if s.owners[domain] != "" {
 		return nil
 	}
@@ -342,6 +351,7 @@ func (s *fakeStore) FinalizeSendingIdentityTombstone(ctx context.Context, domain
 	if s.forgetErr != nil {
 		return s.forgetErr
 	}
+	s.FinalizeTombstoneCalls = append(s.FinalizeTombstoneCalls, domain)
 	if s.owners[domain] != "" {
 		return nil // still live and owned: never finalize
 	}
