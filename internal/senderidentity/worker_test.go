@@ -1264,6 +1264,40 @@ func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
 	}
 }
 
+// TestReapWorker_NoKeyMaterialLiveDomainRetainsLedger pins finding 7's
+// concrete gap: a verified, live, owned domain with NO DKIM key material on
+// file (selector/key never set — e.g. a stuck migration) hits the no-key
+// branch of syncProviderIdentityWithInspection, which calls
+// FinalizeSendingIdentityTombstone under the reaper's finalizeDeletion=true.
+// The tombstone is backdated well past the drain window so only the
+// live-owner guard (not the age gate) is under test — before that guard
+// existed on this method, the domain would be stranded exactly like the
+// original ForgetSendingIdentityManaged incident, just reached via a
+// different trigger (missing key material instead of a missing ownership
+// tag).
+func TestReapWorker_NoKeyMaterialLiveDomainRetainsLedger(t *testing.T) {
+	const domain = "no-key-live.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u-live3")
+	// setProvisionInputs deliberately left uncalled: selector/privKey stay ""/nil,
+	// mirroring a live domain with NULL dkim_selector/dkim_private_key.
+	store.managed[domain] = domain + "-incarnation" // unapplied ⇒ forced (reaches the no-key branch directly)
+	store.ageTombstone(domain)                      // past the post-drain convergence delay
+	prov := NewFakeProvider()
+	w := &ReapWorker{store: store, provider: prov}
+
+	if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
+		t.Fatalf("Work returned error: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed (no key material)", got)
+	}
+	if store.managed[domain] == "" {
+		t.Fatal("a live owned domain's ledger row must survive FinalizeSendingIdentityTombstone on the no-key branch")
+	}
+}
+
 // TestReapWorker_StuckFailedDomainDoesNotRefireHourly pins the independent
 // review's deploy-burst finding: with fire wired into the reaper, a domain
 // stuck in `failed` whose identity is missing/foreign would re-emit

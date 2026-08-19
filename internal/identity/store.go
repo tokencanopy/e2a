@@ -1418,17 +1418,35 @@ func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string)
 	return err
 }
 
-// FinalizeSendingIdentityTombstone removes the ledger row only when its last
-// mutation (updated_at — bumped by provision marks, the migration trigger, and
-// TouchSendingIdentityTombstoneTx on delete) is older than olderThan. This is
-// what stops an audit or sweep running inside a LATER mutation's drain window
-// from finalizing that mutation's tombstone; a younger row survives as a no-op
-// and a later audit or the hourly reaper finalizes it once the window has
-// elapsed.
+// FinalizeSendingIdentityTombstone removes the ledger row only when BOTH:
+// its last mutation (updated_at — bumped by provision marks, the migration
+// trigger, and TouchSendingIdentityTombstoneTx on delete) is older than
+// olderThan, AND domain no longer exists in domains with a live owner (the
+// same NOT EXISTS guard ForgetSendingIdentityManaged uses). The age gate
+// alone stops an audit or sweep running inside a LATER mutation's drain
+// window from finalizing that mutation's tombstone. The live-owner guard is
+// what makes "never forget a live owned domain's row" a genuine STORE
+// invariant rather than something only ForgetSendingIdentityManaged upholds:
+// this method's own callers include the no-key branch of
+// syncProviderIdentityWithInspection, which can run against a domain that is
+// verified, live, and owned but has NULL dkim_selector/dkim_private_key
+// (e.g. a stuck migration) — without this guard that call strands the ledger
+// row exactly like the original incident, just via a different trigger.
+// Despite the name, this method's contract was never actually "only ever
+// called for a genuinely torn-down domain" — that was true of every
+// call site, not of the method itself. A domain that is torn down for real
+// (DELETE FROM domains) satisfies NOT EXISTS immediately, so this is a
+// tightening, not a behavior change for genuine teardown. A row that fails
+// either gate survives as a no-op; a later audit or the hourly reaper
+// finalizes it once both hold.
 func (s *Store) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
 	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
-		`DELETE FROM sender_identity_managed_domains
-		  WHERE domain = $1 AND updated_at <= now() - ($2 * interval '1 second')`,
+		`DELETE FROM sender_identity_managed_domains m
+		  WHERE m.domain = $1
+		    AND m.updated_at <= now() - ($2 * interval '1 second')
+		    AND NOT EXISTS (
+		      SELECT 1 FROM domains d WHERE d.domain = m.domain AND d.user_id IS NOT NULL
+		    )`,
 		normalizeDomain(domain), olderThan.Seconds(),
 	)
 	return err

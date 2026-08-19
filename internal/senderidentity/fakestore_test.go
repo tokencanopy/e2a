@@ -330,11 +330,20 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	return nil
 }
 
+// FinalizeSendingIdentityTombstone mirrors the production guard (see
+// internal/identity's store.go): it deletes the ledger row only when BOTH
+// the age gate (updated_at older than olderThan) AND the live-owner guard
+// (owners[domain] == "", matching domains d.user_id IS NOT NULL) allow it —
+// "never forget a live owned domain's row" is a store-wide invariant, not
+// just ForgetSendingIdentityManaged's.
 func (s *fakeStore) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forgetErr != nil {
 		return s.forgetErr
+	}
+	if s.owners[domain] != "" {
+		return nil // still live and owned: never finalize
 	}
 	if touched, ok := s.managedTouched[domain]; ok && time.Since(touched) < olderThan {
 		return nil // a mutation inside the drain window: keep the tombstone

@@ -130,6 +130,14 @@ func TestSendingIdentityTombstoneFinalizeRespectsAge(t *testing.T) {
 	if err := store.MarkSendingIdentityManaged(ctx, domain, inc); err != nil {
 		t.Fatalf("MarkSendingIdentityManaged: %v", err)
 	}
+	// FinalizeSendingIdentityTombstone now also requires domain to be gone
+	// from `domains` (see TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain
+	// for that guard in isolation) — delete it here so the rest of this test
+	// exercises the age gate alone, matching how the method is actually
+	// invoked in production (only ever on a torn-down domain).
+	if err := store.DeleteDomain(ctx, domain, user.ID); err != nil {
+		t.Fatalf("DeleteDomain: %v", err)
+	}
 	ledgered := func() bool {
 		var n int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sender_identity_managed_domains WHERE domain=$1`, domain).Scan(&n); err != nil {
@@ -450,6 +458,52 @@ func TestForgetSendingIdentityManagedRetainsLedgerForLiveOwnedDomain(t *testing.
 	}
 	if len(managed) != 1 || managed[0] != domain.Domain {
 		t.Fatalf("ledger after a live-domain ownership failure = %v, want [%s] retained", managed, domain.Domain)
+	}
+}
+
+// TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain pins
+// the same ledger-retention invariant for FinalizeSendingIdentityTombstone
+// (finding 7): "never forget a live owned domain's row" was previously only
+// true of ForgetSendingIdentityManaged, not a store-wide guarantee.
+// Concrete gap this closes: a verified, live, owned domain with NULL
+// dkim_selector/dkim_private_key hits the no-key branch of
+// syncProviderIdentityWithInspection, which calls THIS method under the
+// reaper's finalizeDeletion=true — and, pre-fix, an aged ledger row would be
+// deleted even though the domain is still live, stranding it exactly like
+// the original incident. The row is backdated well past any drain window so
+// only the live-owner guard (not the age gate, covered separately by
+// TestSendingIdentityTombstoneFinalizeRespectsAge) is under test.
+func TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "finalize-live@example.com", "Finalize Live", "finalize-live-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	domain, err := store.ClaimOrCreateDomain(ctx, "finalize-live.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sender_identity_managed_domains SET updated_at = now() - interval '1 hour' WHERE domain=$1`, domain.Domain); err != nil {
+		t.Fatalf("backdate past the drain window: %v", err)
+	}
+
+	// The domain row is untouched — still live, still owned by user.ID — when
+	// the no-key branch calls Finalize with a well-aged window.
+	if err := store.FinalizeSendingIdentityTombstone(ctx, domain.Domain, 15*time.Minute); err != nil {
+		t.Fatalf("FinalizeSendingIdentityTombstone: %v", err)
+	}
+
+	managed, _, err := store.ListManagedSendingIdentityDomains(ctx)
+	if err != nil {
+		t.Fatalf("ListManagedSendingIdentityDomains: %v", err)
+	}
+	if len(managed) != 1 || managed[0] != domain.Domain {
+		t.Fatalf("ledger after finalize on a live-owned domain = %v, want [%s] retained", managed, domain.Domain)
 	}
 }
 
