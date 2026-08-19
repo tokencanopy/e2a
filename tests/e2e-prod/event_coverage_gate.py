@@ -59,13 +59,24 @@ ENVIRONMENT-AWARE ALLOWLIST: two tiers.
     production run REQUIRES them — an allowlisted-forever entry would let a
     genuine prod gap hide behind a staging-only excuse.
 
-    domain.sending_verified is in this tier for a different reason worth
-    knowing: suites/prod/35-domain-sending-identity.test.ts verifies it for
-    real, but that suite lives in suites/prod/ and so runs only under
-    `npm run test:prod`. On a staging run it never executes, and staging has
-    no real SES sending identity to produce the event anyway — so requiring
-    it there would fail the gate for something staging structurally cannot
-    do. Required on prod, where the suite does run.
+    HISTORY: domain.sending_verified used to live in this tier, because the
+    suite that verifies it (now suites/35-domain-sending-identity.test.ts)
+    used to live in suites/prod/ and only ever ran under `npm run test:prod`
+    — staging had no real SES sending identity to produce the event with at
+    all (config.staging.yaml omitted `sender_identity` entirely), so
+    requiring it there would have failed the gate for something staging
+    structurally could not do. That was also the same reason a real
+    sender-identity regression shipped straight to production on
+    2026-08-16: staging could not execute the code path, so nothing there
+    ever exercised it. e2a-ops PR #318 gave staging its own
+    `sender_identity.ses_region` plus an AWS IAM policy that Deny-fences
+    every mutating SES action to identity/*.staging.trymnexa.com, and the
+    suite moved to suites/ (so it now runs under plain `npm test` too, using
+    fixture domains under that exact namespace). domain.sending_verified is
+    therefore REQUIRED on every target now — removed from this tier, not
+    just deleted quietly, because the reasoning that put it here no longer
+    holds and a future reader should not have to reconstruct that from git
+    blame alone.
 
 Usage: python3 event_coverage_gate.py [--openapi PATH] [--reports DIR] [--target-dir DIR]
 Exit 0 = every event type verified (or explicitly allowlisted); 1 = coverage
@@ -85,11 +96,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Allowlisted no matter what the run targeted — see the module doc above.
 ALWAYS_ALLOWLIST = {
     "domain.sending_failed": "requires a real SES sending-identity FAILURE "
-    "outcome, as opposed to domain.sending_verified which suites/prod/"
-    "33-domain-sending-identity.test.ts now verifies for real. That suite has "
-    "only ever observed the success path against a correctly-published DNS set; "
-    "deliberately breaking a record to induce a real AWS-classified failure (as "
-    "opposed to a merely-pending state) has not been attempted.",
+    "outcome, as opposed to domain.sending_verified which "
+    "suites/35-domain-sending-identity.test.ts now verifies for real on every "
+    "target. That suite has only ever observed the success path against a "
+    "correctly-published DNS set; deliberately breaking a record to induce a "
+    "real AWS-classified failure (as opposed to a merely-pending state) has "
+    "not been attempted.",
 }
 
 # Allowlisted ONLY on a non-production run — REQUIRED once the run's target
@@ -120,18 +132,9 @@ STAGING_ONLY_ALLOWLIST = {
     "staging-only-allowlisted rather than un-allowlisted everywhere because no "
     "staging suite wires a webhook to it yet — a reasonable follow-up, not done "
     "here to keep this change scoped to the prod-only suite.",
-    "domain.sending_verified": "verified for real in PRODUCTION by suites/prod/"
-    "33-domain-sending-identity.test.ts — register a custom domain on the "
-    "isolated trymnexa.com zone, publish every returned DNS record (ownership "
-    "TXT, inbound MX, dkim TXT, mail_from_mx, mail_from_spf), verify inbound, "
-    "then poll GET /v1/domains/{domain} until sending_status reaches verified "
-    "and confirm the event via listEvents. Reproduced across separate domains "
-    "and runs, not a fluke. It sits in the STAGING-ONLY tier rather than being "
-    "un-allowlisted outright for a structural reason: that suite lives in "
-    "suites/prod/, so it runs only under `npm run test:prod`. On a staging run "
-    "it never executes, and requiring the event there would fail the gate for "
-    "an event staging cannot produce anyway (no real SES sending identity). "
-    "Required on prod, where the suite does run.",
+    # domain.sending_verified used to be allowlisted here — see the module
+    # doc's STAGING_ONLY_ALLOWLIST section (HISTORY) for why it was removed
+    # rather than just deleted quietly. It is REQUIRED on every target now.
 }
 
 

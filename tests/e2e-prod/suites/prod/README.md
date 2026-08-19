@@ -31,9 +31,17 @@ Only things staging cannot do. As of writing, staging cannot:
   `ses:SendRawEmail` to the bounce/complaint simulators, so `email.delivered`,
   `email.bounced`, `email.complained` and the suppression events they cause can
   never fire there
-- provision a real **SES sending identity** (DKIM) for `domain.sending_verified`
-  / `domain.sending_failed`
 - serve the prod-only marketing routes (e.g. `/pricing`)
+
+Staging CAN now provision a real SES sending identity (DKIM + custom MAIL
+FROM) — e2a-ops PR #318 gave it its own `sender_identity.ses_region` plus an
+AWS IAM policy that Deny-fences every mutating SES action to
+`identity/*.staging.trymnexa.com`. That is why
+`../35-domain-sending-identity.test.ts` lives in `suites/` (one directory up),
+not here: per the rule above, if staging can do it, the test does not belong
+in `suites/prod/`. Fixture domains there MUST carry the `.staging.` infix
+(see that suite's `fixtureDomainSuffix()`) or the IAM fence denies the
+provisioning call.
 
 If staging *can* do it, the test belongs in `suites/`, not here — a prod-only
 test that didn't need to be prod-only just narrows where it runs.
