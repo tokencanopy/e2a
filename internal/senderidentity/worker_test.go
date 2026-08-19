@@ -274,6 +274,65 @@ func TestReconcileWorker_Work(t *testing.T) {
 	})
 }
 
+// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial pins
+// FakeProvider.Status actually recording its arguments (it used to discard
+// expectedSelector/haveKeyMaterial and record only the domain, so a call
+// site that regressed to passing "", a stale selector, or the wrong boolean
+// would still pass every worker test — the compiler cannot catch a
+// wrong-but-same-typed argument). This exercises the real call site,
+// reconcileProviderIdentity's provider.Status(ctx, domain, state.Selector,
+// len(state.PrivateKey) > 0) in worker.go, and asserts it passes the store's
+// actual selector and an accurate key-material signal — the exact inputs
+// canAdoptIdentity depends on in the real SES provider (see ses.go).
+func TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial(t *testing.T) {
+	const domain = "adopt-signal.example.com"
+	const owner = "user_1"
+	const selector = "e2a202608"
+
+	t.Run("known key material passes the real selector and true", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusPending)
+		store.setOwner(domain, owner)
+		store.setProvisionInputs(selector, []byte("real-der-key-material"), true)
+		prov := NewFakeProvider()
+		prov.SetStatus(domain, Result{Status: StatusVerified})
+		w := &ReconcileWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.StatusCalls) != 1 {
+			t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+		}
+		if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: selector, HaveKey: true}); got != want {
+			t.Fatalf("Status call = %+v, want %+v — the reconcile path must pass the real stored selector and haveKeyMaterial=true when key material is on file", got, want)
+		}
+	})
+
+	t.Run("no key material passes false", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusPending)
+		store.setOwner(domain, owner)
+		// Selector on file but no private key — e.g. mid domain-reclaim (see
+		// canAdoptIdentity's doc comment in ses.go for why this distinction
+		// matters: a non-empty selector alone must never read as adoptable).
+		store.setProvisionInputs(selector, nil, true)
+		prov := NewFakeProvider()
+		prov.SetStatus(domain, Result{Status: StatusVerified})
+		w := &ReconcileWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.StatusCalls) != 1 {
+			t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+		}
+		if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: selector, HaveKey: false}); got != want {
+			t.Fatalf("Status call = %+v, want %+v — no private key on file must never report haveKeyMaterial=true", got, want)
+		}
+	})
+}
+
 func TestReconcileWorker_GetStatusRealError(t *testing.T) {
 	store := newFakeStore()
 	boom := errors.New("db down")
@@ -1610,6 +1669,16 @@ func TestSyncWorker_AlreadyVerifiedNoOp(t *testing.T) {
 	}
 	if firer.count() != 0 {
 		t.Fatalf("healthy re-check fired %d event(s), want none", firer.count())
+	}
+	// The other provider.Status call site (syncProviderIdentityWithInspection's
+	// providerStatus closure) must carry the same real selector/key-material
+	// signal as the reconcile path — see
+	// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial.
+	if len(prov.StatusCalls) != 1 {
+		t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+	}
+	if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: "sel", HaveKey: true}); got != want {
+		t.Fatalf("Status call = %+v, want %+v", got, want)
 	}
 }
 
