@@ -303,6 +303,19 @@ metrics:
 
 
 # — Content screening (piguard) ——————————————————————————————————————————————
+# Master switch: set the environment variable E2A_CONTENT_SCAN_ENABLED=true
+# to turn content screening on for this deployment (internal/identity/
+# protection.go). Off by default, including here in the self-host example —
+# this is what "self-host to use it today" (README → Content screening)
+# means in practice. There is no YAML key for this; it is env-only.
+#
+# This is a deployment-level unlock, not a per-agent one: while it's unset
+# or false, PUT /v1/agents/{email}/protection clamps every agent's
+# scan_sensitivity to "off" no matter what a caller requests. With it
+# enabled, still set each agent's scan_sensitivity to low/medium/high via
+# that endpoint (or the dashboard) to actually turn scanning on for that
+# agent — the two below only affect which detector runs once scanning is on.
+#
 # The Gemini LLM-as-detector layer is enabled by setting the environment
 # variable GEMINI_API_KEY (or GOOGLE_API_KEY) to a Google AI Studio key.
 # When the variable is absent the Gemini detector is silently skipped and
