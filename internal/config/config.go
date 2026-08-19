@@ -26,9 +26,14 @@ func splitAndTrim(s string) []string {
 }
 
 // placeholderHMACSecret is the example value shipped in config.example.yaml.
-// It must be overridden in any production deployment — the server refuses
-// to start with this value when env: production.
-const placeholderHMACSecret = "change-me-in-production"
+// It is deliberately >=32 bytes so the documented `cp config.example.yaml
+// config.yaml && make run` path boots in development without edits — see
+// deriveOAuthSigningKey in internal/oauth/provider.go, which requires
+// >=32 regardless of env. It must still be overridden in any production
+// deployment: the server refuses to start with this exact value when
+// env: production. Keep this in sync with config.example.yaml's
+// signing.hmac_secret.
+const placeholderHMACSecret = "change-me-in-production-this-is-not-a-real-secret"
 
 // minHMACSecretBytes is the minimum HMAC secret length enforced in
 // production. RFC 2104 §3 recommends keys be at least the output length

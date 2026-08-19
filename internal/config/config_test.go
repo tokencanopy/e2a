@@ -155,14 +155,22 @@ func TestLoadRejectsInvalidSenderIdentityLegacyCompatEnv(t *testing.T) {
 func TestValidateProductionRejectsPlaceholderHMAC(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 env: "production"
 signing:
-  hmac_secret: "change-me-in-production"
-`), 0644)
+  hmac_secret: %q
+`, placeholderHMACSecret)), 0644)
 
-	if _, err := Load(cfgPath); err == nil {
+	// placeholderHMACSecret is deliberately >=32 bytes (so `make run` boots
+	// in development without edits — see its doc comment), so this must be
+	// rejected on the placeholder-equality check, not merely the length
+	// check TestValidateProductionRejectsShortHMAC exercises below.
+	_, err := Load(cfgPath)
+	if err == nil {
 		t.Fatal("Load should refuse placeholder HMAC secret in production")
+	}
+	if !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("Load error = %v, want it to mention the placeholder rejection specifically", err)
 	}
 }
 
@@ -211,11 +219,11 @@ signing:
 func TestValidateDevelopmentAllowsPlaceholder(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 env: "development"
 signing:
-  hmac_secret: "change-me-in-production"
-`), 0644)
+  hmac_secret: %q
+`, placeholderHMACSecret)), 0644)
 
 	if _, err := Load(cfgPath); err != nil {
 		t.Fatalf("Load should accept placeholder in development, got: %v", err)

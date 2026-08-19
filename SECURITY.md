@@ -67,9 +67,10 @@ In scope (please report):
 
 Out of scope:
 
-- Deployments running with the example `change-me-in-production` HMAC
-  secret (the server refuses to start with it only when `env=production`;
-  outside production the example value is the shipped default, and such a
+- Deployments running with the example
+  `change-me-in-production-this-is-not-a-real-secret` HMAC secret (the
+  server refuses to start with it only when `env=production`; outside
+  production the example value is the shipped default, and such a
   deployment must never be exposed to the network)
 - Lack of features (e.g. "no rate limit on X" — open an issue or PR)
 - Vulnerabilities in dependencies that don't have a reachable code

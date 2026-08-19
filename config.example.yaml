@@ -88,8 +88,11 @@ provisioning:
 
 signing:
   # Generate with: openssl rand -hex 32
-  # Production refuses to start with this placeholder or with anything < 32 bytes.
-  hmac_secret: "change-me-in-production"
+  # This placeholder is >=32 bytes so `make run` boots for local dev
+  # without edits. Production refuses to start with this exact placeholder
+  # value or with anything < 32 bytes — see placeholderHMACSecret in
+  # internal/config/config.go (keep the two in sync if you ever change this).
+  hmac_secret: "change-me-in-production-this-is-not-a-real-secret"
 
 outbound_smtp:
   # Upstream SMTP relay for outbound mail (HITL approval notifications,
