@@ -498,8 +498,8 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		}
 		// The periodic sweep never MUTATES the DB record for a healthy applied
 		// identity through this inspect block (that would flap a verified
-		// sender back to pending), but it does inspect the two DB states that
-		// can silently rot behind an applied, present identity:
+		// sender back to pending), but it does inspect the DB states that can
+		// silently rot behind an applied, present identity:
 		//
 		//   - stuck `pending`: the reconcile budget is gone (enqueue failed or
 		//     exhausted) and nothing else would ever poll it. Verified/failed
@@ -511,9 +511,27 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		//     stays reported verified indefinitely. A definitive provider
 		//     `failed` commits (with axes) and fires; a provider mid-recheck
 		//     `pending` is NOT committed (no flap on a transient re-check).
+		//   - `failed` drift the other direction: a domain that failed (e.g.
+		//     the customer broke DNS) and was then repaired (DNS fixed) must
+		//     not stay `failed` forever just because nothing but a customer
+		//     POST /verify would otherwise re-check it. A provider `verified`
+		//     answer commits and fires; a provider `pending` answer (SES
+		//     mid-recheck) is deliberately NOT committed here — that would be
+		//     the failed→pending flap the `verified` bullet above already
+		//     avoids in the other direction, so `failed` stays fail-closed
+		//     until the provider is definitive. Bare status flip is safe: this
+		//     branch only runs inside `if !force`, and `force` is derived from
+		//     `applied_incarnation IS DISTINCT FROM incarnation` — so reaching
+		//     here already proves `applied_incarnation == incarnation`, i.e.
+		//     SES still holds THIS registration's selector/key. No re-Put of
+		//     the DKIM key is needed (a stale incarnation takes the forced
+		//     full-convergence path instead), which also means no
+		//     verified→pending flap risk from re-provisioning.
 		//
-		// An absent/foreign answer in either state falls through to full
-		// convergence; `failed` steady state costs no provider call.
+		// An absent/foreign answer in any state falls through to full
+		// convergence; `failed` steady state (provider still failed, or still
+		// pending) costs a provider call under inspectTerminal (the reaper)
+		// but no DB write.
 		//
 		// CAUTION: "inspect"/"READ-ONLY" above describes the DB record only,
 		// not the provider. providerStatus() above calls provider.Status,
@@ -537,7 +555,8 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 			case serr != nil:
 				return serr
 			case state.Status == StatusPending && (res.Status == StatusVerified || res.Status == StatusFailed),
-				state.Status == StatusVerified && res.Status == StatusFailed:
+				state.Status == StatusVerified && res.Status == StatusFailed,
+				state.Status == StatusFailed && res.Status == StatusVerified:
 				if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, res.Status, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						return nil
