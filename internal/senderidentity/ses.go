@@ -7,12 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
-	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	sestypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
@@ -49,19 +50,22 @@ type SESProvider struct {
 	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
 	deleteConfirmDelay func(attempt int) time.Duration
 
-	// accountID resolution feeds the identity ARN adoption's TagResource call
-	// needs (arn:aws:ses:<region>:<accountID>:identity/<domain>) —
-	// GetEmailIdentity/ListEmailIdentities never return one. It is LAZY and
-	// NON-FATAL: only adoption ever needs it, so a failure here must never
-	// take down every other Provider capability (or the whole server —
-	// cmd/e2a/main.go log.Fatalf's on NewSESProviderFromConfig's returned
-	// error). resolveAccountID is nil when the caller already supplied the ID
-	// directly (NewSESProvider); accountIDOnce then short-circuits to it
-	// without ever touching STS. See accountIDForAdoption.
-	accountIDOnce    sync.Once
-	accountID        string
-	accountIDErr     error
-	resolveAccountID func(ctx context.Context) (string, error)
+	// accountID/partition resolution feeds the identity ARN adoption's
+	// TagResource call needs (arn:<partition>:ses:<region>:<accountID>:
+	// identity/<domain>) — GetEmailIdentity/ListEmailIdentities never return
+	// one. It is LAZY and NON-FATAL: only adoption ever needs it, so a
+	// failure here must never take down every other Provider capability (or
+	// the whole server — cmd/e2a/main.go log.Fatalf's on
+	// NewSESProviderFromConfig's returned error). resolveIdentity is nil when
+	// the caller already supplied the account ID directly (NewSESProvider);
+	// accountIDOnce then short-circuits to it (and the "aws" commercial
+	// partition default, since there is no STS ARN to derive it from on that
+	// path) without ever touching STS. See identityForAdoption.
+	accountIDOnce   sync.Once
+	accountID       string
+	partition       string
+	accountIDErr    error
+	resolveIdentity func(ctx context.Context) (accountID, partition string, err error)
 }
 
 const (
@@ -73,22 +77,26 @@ const (
 // NewSESProvider wraps a pre-built SES API (or stub) with an ALREADY-KNOWN
 // AWS account id. region feeds the MAIL FROM MX record target; accountID
 // feeds the identity ARN adoption's TagResource call needs. No STS call is
-// ever made on this path.
+// ever made on this path, so there is no ARN to derive a partition from —
+// the ARN is built against the "aws" commercial partition. Every current
+// production caller (NewSESProviderFromConfig, via main.go) resolves the
+// partition from STS instead; this constructor exists for tests and any
+// future caller that already knows its account id out-of-band.
 func NewSESProvider(api sesAPI, region, accountID string) *SESProvider {
-	return &SESProvider{api: api, region: region, accountID: accountID}
+	return &SESProvider{api: api, region: region, accountID: accountID, partition: "aws"}
 }
 
 // NewSESProviderFromConfig builds a provider from ambient AWS config
 // (env/instance role) for the given region. Unlike the account id, loading
 // the ambient config itself is local (env/file reads, no network round-trip)
 // and stays synchronous here — a genuinely broken/missing AWS config is a
-// legitimate reason to fail startup. The AWS account id adoption's
-// TagResource call needs is resolved LAZILY on first adoption attempt (see
-// accountIDForAdoption) rather than here: STS GetCallerIdentity is a network
-// call, and resolving it eagerly at construction — as this used to do — let
-// a transient STS blip, an egress allowlist covering only SES, an SCP deny,
-// or an IMDS hiccup fail server startup entirely (main.go wraps provider
-// construction in log.Fatalf) for a value only adoption needs.
+// legitimate reason to fail startup. The AWS account id AND partition
+// adoption's TagResource call needs are resolved LAZILY on first adoption
+// attempt (see identityForAdoption) rather than here: STS GetCallerIdentity
+// is a network call, and resolving it eagerly at construction — as this used
+// to do — let a transient STS blip, an egress allowlist covering only SES,
+// an SCP deny, or an IMDS hiccup fail server startup entirely (main.go wraps
+// provider construction in log.Fatalf) for a value only adoption needs.
 func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
@@ -98,49 +106,74 @@ func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider,
 	return &SESProvider{
 		api:    sesv2.NewFromConfig(cfg),
 		region: region,
-		resolveAccountID: func(ctx context.Context) (string, error) {
+		resolveIdentity: func(ctx context.Context) (string, string, error) {
 			out, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 			if err != nil {
-				return "", fmt.Errorf("resolve aws account id: %w", err)
+				return "", "", fmt.Errorf("resolve aws account id: %w", err)
 			}
-			return accountIDFromCallerIdentity(out)
+			return identityFromCallerIdentity(out)
 		},
 	}, nil
 }
 
-// accountIDFromCallerIdentity extracts the account id, treating a nil
-// Account as an error rather than silently yielding an empty account id
-// segment in the identity ARN (arn:aws:ses:<region>::identity/<domain> —
-// missing the account id component entirely, which TagResource would then
-// reject or, worse, resolve unpredictably). Split out from
+// identityFromCallerIdentity extracts the account id and ARN partition,
+// treating a nil Account as an error rather than silently yielding an empty
+// account id segment in the identity ARN
+// (arn:<partition>:ses:<region>::identity/<domain> — missing the account id
+// component entirely, which TagResource would then reject or, worse,
+// resolve unpredictably). The
+// partition comes from STS's own Arn field (arn:<partition>:sts::...): AWS
+// commercial is "aws", GovCloud is "aws-us-gov", China is "aws-cn" —
+// hardcoding "aws" would build an invalid ARN and fail every TagResource
+// call in the other two partitions. A nil or unparseable Arn degrades to the
+// "aws" default rather than failing account id resolution entirely, since
+// GetCallerIdentity's Account field (not Arn) is the one AWS guarantees; Arn
+// is documented but not contractually required to be present. Split out from
 // NewSESProviderFromConfig so it's unit-testable without a real STS call.
-func accountIDFromCallerIdentity(out *sts.GetCallerIdentityOutput) (string, error) {
+func identityFromCallerIdentity(out *sts.GetCallerIdentityOutput) (accountID, partition string, err error) {
 	if out == nil || out.Account == nil {
-		return "", errors.New("sts GetCallerIdentity returned no account id")
+		return "", "", errors.New("sts GetCallerIdentity returned no account id")
 	}
-	return *out.Account, nil
+	partition = "aws"
+	if out.Arn != nil {
+		if p, ok := arnPartition(*out.Arn); ok {
+			partition = p
+		}
+	}
+	return *out.Account, partition, nil
 }
 
-// accountIDForAdoption resolves (at most once) the AWS account id adoption's
-// TagResource ARN needs. Nothing else Provision/Status/Deprovision does
-// requires it — only adoption calls TagResource — so a resolution failure
-// must never be fatal: it degrades adoptIdentity to a wrapped
-// ErrIdentityNotOwned ("cannot adopt"), exactly the pre-adoption-PR behavior,
-// while every other capability keeps working. sync.Once means a persistent
-// STS outage is logged and cached rather than retried on every adoption
-// attempt (which could be hourly-reaper-frequent across many domains); a
-// process restart (routine on every deploy) is what re-attempts it.
-func (p *SESProvider) accountIDForAdoption(ctx context.Context) (string, error) {
-	if p.resolveAccountID == nil {
-		return p.accountID, nil // supplied directly at construction (NewSESProvider)
+// arnPartition extracts the partition segment from an ARN
+// ("arn:<partition>:<service>:...", e.g. "aws", "aws-us-gov", "aws-cn").
+func arnPartition(arn string) (string, bool) {
+	parts := strings.SplitN(arn, ":", 3)
+	if len(parts) < 3 || parts[0] != "arn" || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// identityForAdoption resolves (at most once) the AWS account id and ARN
+// partition adoption's TagResource call needs. Nothing else Provision/
+// Status/Deprovision does requires it — only adoption calls TagResource —
+// so a resolution failure must never be fatal: it degrades adoptIdentity to
+// a wrapped ErrIdentityNotOwned ("cannot adopt"), exactly the
+// pre-adoption-PR behavior, while every other capability keeps working.
+// sync.Once means a persistent STS outage is logged and cached rather than
+// retried on every adoption attempt (which could be hourly-reaper-frequent
+// across many domains); a process restart (routine on every deploy) is what
+// re-attempts it.
+func (p *SESProvider) identityForAdoption(ctx context.Context) (accountID, partition string, err error) {
+	if p.resolveIdentity == nil {
+		return p.accountID, p.partition, nil // supplied directly at construction (NewSESProvider)
 	}
 	p.accountIDOnce.Do(func() {
-		p.accountID, p.accountIDErr = p.resolveAccountID(ctx)
+		p.accountID, p.partition, p.accountIDErr = p.resolveIdentity(ctx)
 		if p.accountIDErr != nil {
 			log.Printf("[senderidentity] cannot resolve AWS account id for adoption (STS GetCallerIdentity failed): %v — adoption will report identities as not-owned until the next restart", p.accountIDErr)
 		}
 	})
-	return p.accountID, p.accountIDErr
+	return p.accountID, p.partition, p.accountIDErr
 }
 
 func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
@@ -149,15 +182,15 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 		// A malformed key is not retryable — fail closed with a reason.
 		return Result{Status: StatusFailed, Error: "dkim private key not usable for BYODKIM: " + err.Error()}, nil
 	}
-	dkimAttributes := &ststypes.DkimSigningAttributes{
+	dkimAttributes := &sestypes.DkimSigningAttributes{
 		DomainSigningSelector:         &dkimSelector,
 		DomainSigningPrivateKey:       &privB64,
-		DomainSigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+		DomainSigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 	}
 	_, err = p.api.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{
 		EmailIdentity:         &domain,
 		DkimSigningAttributes: dkimAttributes,
-		Tags: []ststypes.Tag{{
+		Tags: []sestypes.Tag{{
 			Key:   awsString(managedIdentityTagKey),
 			Value: awsString(managedIdentityTagValue),
 		}},
@@ -167,7 +200,7 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 		// Update BYODKIM explicitly before touching MAIL FROM: Create's input is
 		// ignored on this path, and keeping the old selector/key would make a
 		// re-registered domain fail verification forever.
-		var already *ststypes.AlreadyExistsException
+		var already *sestypes.AlreadyExistsException
 		if !errors.As(err, &already) {
 			return Result{}, err // transient/permission — retry
 		}
@@ -186,13 +219,13 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 		// Put's nested shape deliberately omits DomainSigningAttributesOrigin.
 		// SES rejects every nested Origin value for this operation; EXTERNAL
 		// belongs only on the top-level SigningAttributesOrigin field.
-		putAttributes := &ststypes.DkimSigningAttributes{
+		putAttributes := &sestypes.DkimSigningAttributes{
 			DomainSigningSelector:   &dkimSelector,
 			DomainSigningPrivateKey: &privB64,
 		}
 		if _, err := p.api.PutEmailIdentityDkimSigningAttributes(ctx, &sesv2.PutEmailIdentityDkimSigningAttributesInput{
 			EmailIdentity:           &domain,
-			SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 			SigningAttributes:       putAttributes,
 		}); err != nil {
 			return Result{}, err // transient/permission — retry
@@ -207,7 +240,7 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 	if _, err := p.api.PutEmailIdentityMailFromAttributes(ctx, &sesv2.PutEmailIdentityMailFromAttributesInput{
 		EmailIdentity:       &domain,
 		MailFromDomain:      &mfDomain,
-		BehaviorOnMxFailure: ststypes.BehaviorOnMxFailureUseDefaultValue,
+		BehaviorOnMxFailure: sestypes.BehaviorOnMxFailureUseDefaultValue,
 	}); err != nil {
 		return Result{}, err // transient/permission — retry
 	}
@@ -230,7 +263,7 @@ func mailFromRecords(domain, region string) []DNSRecord {
 func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
-		var notFound *ststypes.NotFoundException
+		var notFound *sestypes.NotFoundException
 		if errors.As(err, &notFound) {
 			return Result{}, ErrIdentityNotFound
 		}
@@ -262,7 +295,7 @@ func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector strin
 func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
-		var notFound *ststypes.NotFoundException
+		var notFound *sestypes.NotFoundException
 		if errors.As(err, &notFound) {
 			return nil
 		}
@@ -273,7 +306,7 @@ func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 	}
 	_, err = p.api.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
-		var notFound *ststypes.NotFoundException
+		var notFound *sestypes.NotFoundException
 		if errors.As(err, &notFound) {
 			return nil // already gone — idempotent success
 		}
@@ -286,7 +319,7 @@ func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 	for attempt := 0; attempt < deleteConfirmAttempts; attempt++ {
 		_, err = p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 		if err != nil {
-			var notFound *ststypes.NotFoundException
+			var notFound *sestypes.NotFoundException
 			if errors.As(err, &notFound) {
 				return nil
 			}
@@ -435,13 +468,13 @@ func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string
 	if out.ConfigurationSetName != nil || len(out.Policies) > 0 {
 		return false
 	}
-	if out.DkimAttributes.SigningAttributesOrigin != ststypes.DkimSigningAttributesOriginExternal {
+	if out.DkimAttributes.SigningAttributesOrigin != sestypes.DkimSigningAttributesOriginExternal {
 		return false
 	}
 	// SES has cryptographically matched the key material IT holds against the
 	// DNS TXT at <selector>._domainkey.<domain> — see the doc comment above
 	// for why this is required strictly, with no PENDING fallback.
-	if out.DkimAttributes.Status != ststypes.DkimStatusSuccess {
+	if out.DkimAttributes.Status != sestypes.DkimStatusSuccess {
 		return false
 	}
 	for _, token := range out.DkimAttributes.Tokens {
@@ -455,18 +488,19 @@ func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string
 // adoptIdentity applies the ownership tag to an identity canAdoptIdentity has
 // already cleared. TagResource needs the identity's full ARN — neither
 // GetEmailIdentity nor ListEmailIdentities returns one — so it's built from
-// the region and the account ID resolved lazily (see accountIDForAdoption).
-// An unresolvable account id degrades to ErrIdentityNotOwned rather than
-// building a malformed/empty-account ARN or blocking indefinitely.
+// the region and the account ID/partition resolved lazily (see
+// identityForAdoption). An unresolvable account id degrades to
+// ErrIdentityNotOwned rather than building a malformed/empty-account ARN or
+// blocking indefinitely.
 func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
-	accountID, err := p.accountIDForAdoption(ctx)
+	accountID, partition, err := p.identityForAdoption(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: aws account id unavailable: %v", ErrIdentityNotOwned, err)
 	}
-	arn := identityARN(p.region, accountID, domain)
+	arn := identityARN(partition, p.region, accountID, domain)
 	_, err = p.api.TagResource(ctx, &sesv2.TagResourceInput{
 		ResourceArn: &arn,
-		Tags: []ststypes.Tag{{
+		Tags: []sestypes.Tag{{
 			Key:   awsString(managedIdentityTagKey),
 			Value: awsString(managedIdentityTagValue),
 		}},
@@ -494,7 +528,7 @@ func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
 //     unmodeled by the SES v2 SDK's generated exception types (AWS returns
 //     IAM-level denials generically, not as a service-specific shape), so it
 //     is matched by smithy's APIError.ErrorCode() rather than errors.As on a
-//     concrete *ststypes type.
+//     concrete *sestypes type.
 //   - BadRequestException: a malformed/invalid ARN — will never succeed
 //     without a code change.
 //   - NotFoundException: the identity (or its ARN) doesn't resolve — will
@@ -509,8 +543,8 @@ func classifyAdoptionError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var badRequest *ststypes.BadRequestException
-	var notFound *ststypes.NotFoundException
+	var badRequest *sestypes.BadRequestException
+	var notFound *sestypes.NotFoundException
 	if errors.As(err, &badRequest) || errors.As(err, &notFound) {
 		// Double %w: ErrIdentityNotOwned drives caller control flow
 		// (errors.Is), while the original error stays reachable for logs/
@@ -526,9 +560,13 @@ func classifyAdoptionError(err error) error {
 }
 
 // identityARN builds the SES v2 email-identity ARN for domain:
-// arn:aws:ses:<region>:<account-id>:identity/<domain>.
-func identityARN(region, accountID, domain string) string {
-	return fmt.Sprintf("arn:aws:ses:%s:%s:identity/%s", region, accountID, domain)
+// arn:<partition>:ses:<region>:<account-id>:identity/<domain>. partition is
+// derived from STS's own ARN (see identityFromCallerIdentity) rather than
+// hardcoded "aws": GovCloud (aws-us-gov) and China (aws-cn) use a different
+// partition, and a hardcoded "aws" there builds an ARN TagResource rejects
+// as invalid, permanently failing adoption in those partitions.
+func identityARN(partition, region, accountID, domain string) string {
+	return fmt.Sprintf("arn:%s:ses:%s:%s:identity/%s", partition, region, accountID, domain)
 }
 
 func awsString(value string) *string { return &value }
@@ -567,7 +605,7 @@ func (p *SESProvider) ListPage(ctx context.Context, nextToken string, limit int)
 	}
 	out := make([]string, 0, len(resp.EmailIdentities))
 	for _, id := range resp.EmailIdentities {
-		if id.IdentityType == ststypes.IdentityTypeDomain && id.IdentityName != nil {
+		if id.IdentityType == sestypes.IdentityTypeDomain && id.IdentityName != nil {
 			out = append(out, *id.IdentityName)
 		}
 	}
@@ -584,18 +622,18 @@ func (p *SESProvider) ListPage(ctx context.Context, nextToken string, limit int)
 // (design Q2), so reaching `verified` means there is genuinely no "via e2a". A
 // hard failure on either DKIM or MAIL FROM is terminal; anything else is pending.
 func mapSESStatus(out *sesv2.GetEmailIdentityOutput) Status {
-	dkim := ststypes.DkimStatusNotStarted
+	dkim := sestypes.DkimStatusNotStarted
 	if out.DkimAttributes != nil {
 		dkim = out.DkimAttributes.Status
 	}
-	mf := ststypes.MailFromDomainStatusPending
+	mf := sestypes.MailFromDomainStatusPending
 	if out.MailFromAttributes != nil {
 		mf = out.MailFromAttributes.MailFromDomainStatus
 	}
-	if dkim == ststypes.DkimStatusFailed || mf == ststypes.MailFromDomainStatusFailed {
+	if dkim == sestypes.DkimStatusFailed || mf == sestypes.MailFromDomainStatusFailed {
 		return StatusFailed
 	}
-	if dkim == ststypes.DkimStatusSuccess && out.VerifiedForSendingStatus && mf == ststypes.MailFromDomainStatusSuccess {
+	if dkim == sestypes.DkimStatusSuccess && out.VerifiedForSendingStatus && mf == sestypes.MailFromDomainStatusSuccess {
 		return StatusVerified
 	}
 	return StatusPending
@@ -611,11 +649,11 @@ func mapSESStatus(out *sesv2.GetEmailIdentityOutput) Status {
 // NOT fold in VerifiedForSendingStatus — that gate belongs to the rollup, not to
 // the DKIM record's own state.
 func sesAxisStatuses(out *sesv2.GetEmailIdentityOutput) (dkim Status, mailFrom Status) {
-	dkimRaw := ststypes.DkimStatusNotStarted
+	dkimRaw := sestypes.DkimStatusNotStarted
 	if out.DkimAttributes != nil {
 		dkimRaw = out.DkimAttributes.Status
 	}
-	mfRaw := ststypes.MailFromDomainStatusPending
+	mfRaw := sestypes.MailFromDomainStatusPending
 	if out.MailFromAttributes != nil {
 		mfRaw = out.MailFromAttributes.MailFromDomainStatus
 	}
@@ -623,11 +661,11 @@ func sesAxisStatuses(out *sesv2.GetEmailIdentityOutput) (dkim Status, mailFrom S
 }
 
 // mapSESDkimStatus folds a single SES DKIM axis state onto our Status.
-func mapSESDkimStatus(s ststypes.DkimStatus) Status {
+func mapSESDkimStatus(s sestypes.DkimStatus) Status {
 	switch s {
-	case ststypes.DkimStatusSuccess:
+	case sestypes.DkimStatusSuccess:
 		return StatusVerified
-	case ststypes.DkimStatusFailed:
+	case sestypes.DkimStatusFailed:
 		return StatusFailed
 	default: // PENDING / NOT_STARTED / TEMPORARY_FAILURE
 		return StatusPending
@@ -636,11 +674,11 @@ func mapSESDkimStatus(s ststypes.DkimStatus) Status {
 
 // mapSESMailFromStatus folds a single SES custom-MAIL-FROM axis state onto our
 // Status.
-func mapSESMailFromStatus(s ststypes.MailFromDomainStatus) Status {
+func mapSESMailFromStatus(s sestypes.MailFromDomainStatus) Status {
 	switch s {
-	case ststypes.MailFromDomainStatusSuccess:
+	case sestypes.MailFromDomainStatusSuccess:
 		return StatusVerified
-	case ststypes.MailFromDomainStatusFailed:
+	case sestypes.MailFromDomainStatusFailed:
 		return StatusFailed
 	default: // PENDING / TEMPORARY_FAILURE
 		return StatusPending

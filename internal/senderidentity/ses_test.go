@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
-	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	sestypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 )
@@ -26,8 +26,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "all three (sending + dkim + mailfrom) success → verified",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 			},
 			want: StatusVerified,
 		},
@@ -35,8 +35,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "dkim success + verified for sending but mailfrom pending → pending (all-or-nothing)",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusPending},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusPending},
 			},
 			want: StatusPending,
 		},
@@ -44,8 +44,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "dkim+mailfrom success but not verified for sending → pending",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: false,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 			},
 			want: StatusPending,
 		},
@@ -53,8 +53,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "mailfrom failed → failed (even with dkim ok)",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusFailed},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusFailed},
 			},
 			want: StatusFailed,
 		},
@@ -62,8 +62,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "dkim temporary_failure → pending (transient, not stranded as failed)",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusTemporaryFailure},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusTemporaryFailure},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 			},
 			want: StatusPending,
 		},
@@ -71,8 +71,8 @@ func TestMapSESStatus(t *testing.T) {
 			name: "mailfrom temporary_failure → pending (transient, not stranded)",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusTemporaryFailure},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusTemporaryFailure},
 			},
 			want: StatusPending,
 		},
@@ -80,14 +80,14 @@ func TestMapSESStatus(t *testing.T) {
 			name: "dkim failed → failed",
 			out: &sesv2.GetEmailIdentityOutput{
 				VerifiedForSendingStatus: true,
-				DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusFailed},
+				DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusFailed},
 			},
 			want: StatusFailed,
 		},
 		{
 			name: "dkim pending → pending",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{Status: ststypes.DkimStatusPending},
+				DkimAttributes: &sestypes.DkimAttributes{Status: sestypes.DkimStatusPending},
 			},
 			want: StatusPending,
 		},
@@ -119,8 +119,8 @@ func TestSESAxisStatuses(t *testing.T) {
 		{
 			name: "both success",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes:     &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+				DkimAttributes:     &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes: &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 			},
 			wantDkim: StatusVerified, wantMailFrom: StatusVerified,
 		},
@@ -129,24 +129,24 @@ func TestSESAxisStatuses(t *testing.T) {
 			// MAIL FROM is broken. The axes must disagree.
 			name: "dkim success + mailfrom failed (mixed)",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes:     &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-				MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusFailed},
+				DkimAttributes:     &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+				MailFromAttributes: &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusFailed},
 			},
 			wantDkim: StatusVerified, wantMailFrom: StatusFailed,
 		},
 		{
 			name: "dkim failed + mailfrom success (reverse mixed)",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes:     &ststypes.DkimAttributes{Status: ststypes.DkimStatusFailed},
-				MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+				DkimAttributes:     &sestypes.DkimAttributes{Status: sestypes.DkimStatusFailed},
+				MailFromAttributes: &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 			},
 			wantDkim: StatusFailed, wantMailFrom: StatusVerified,
 		},
 		{
 			name: "transient axes -> pending, not failed",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes:     &ststypes.DkimAttributes{Status: ststypes.DkimStatusTemporaryFailure},
-				MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusTemporaryFailure},
+				DkimAttributes:     &sestypes.DkimAttributes{Status: sestypes.DkimStatusTemporaryFailure},
+				MailFromAttributes: &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusTemporaryFailure},
 			},
 			wantDkim: StatusPending, wantMailFrom: StatusPending,
 		},
@@ -173,8 +173,8 @@ func TestSESAxisStatuses(t *testing.T) {
 func TestSESProvider_StatusReportsAxes(t *testing.T) {
 	stub := &stubSESAPI{getOut: &sesv2.GetEmailIdentityOutput{
 		VerifiedForSendingStatus: true,
-		DkimAttributes:           &ststypes.DkimAttributes{Status: ststypes.DkimStatusSuccess},
-		MailFromAttributes:       &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusFailed},
+		DkimAttributes:           &sestypes.DkimAttributes{Status: sestypes.DkimStatusSuccess},
+		MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusFailed},
 	}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 	res, err := p.Status(context.Background(), "acme.com", "", false)
@@ -227,24 +227,55 @@ func TestPKCS8Base64(t *testing.T) {
 // construction; it is not a real account.
 const testAccountID = "123456789012"
 
-// TestAccountIDFromCallerIdentity pins finding 4's "empty account is an
+// TestIdentityFromCallerIdentity pins finding 4's "empty account is an
 // error" fix: a nil Account must never silently produce an account-id-less
-// identity ARN (arn:aws:ses:<region>::identity/<domain>).
-func TestAccountIDFromCallerIdentity(t *testing.T) {
+// identity ARN (arn:<partition>:ses:<region>::identity/<domain>). It also
+// pins the partition derivation added on top: STS's own Arn field is what
+// tells adoption whether to build a commercial, GovCloud, or China ARN —
+// hardcoding "aws" would build an ARN TagResource rejects as invalid outside
+// the commercial partition.
+func TestIdentityFromCallerIdentity(t *testing.T) {
 	t.Run("nil output", func(t *testing.T) {
-		if _, err := accountIDFromCallerIdentity(nil); err == nil {
+		if _, _, err := identityFromCallerIdentity(nil); err == nil {
 			t.Fatal("want an error for a nil GetCallerIdentityOutput")
 		}
 	})
 	t.Run("nil Account", func(t *testing.T) {
-		if _, err := accountIDFromCallerIdentity(&sts.GetCallerIdentityOutput{}); err == nil {
+		if _, _, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{}); err == nil {
 			t.Fatal("want an error for a nil Account, not a silently empty account id")
 		}
 	})
-	t.Run("populated Account round-trips", func(t *testing.T) {
-		got, err := accountIDFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID)})
-		if err != nil || got != testAccountID {
-			t.Fatalf("got (%q, %v), want (%q, nil)", got, err, testAccountID)
+	t.Run("no Arn defaults to the aws commercial partition", func(t *testing.T) {
+		gotAccount, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID)})
+		if err != nil || gotAccount != testAccountID || gotPartition != "aws" {
+			t.Fatalf("got (%q, %q, %v), want (%q, %q, nil)", gotAccount, gotPartition, err, testAccountID, "aws")
+		}
+	})
+	t.Run("commercial Arn round-trips the aws partition", func(t *testing.T) {
+		arn := "arn:aws:sts::" + testAccountID + ":assumed-role/e2a-prod/i-0123"
+		gotAccount, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID), Arn: awsString(arn)})
+		if err != nil || gotAccount != testAccountID || gotPartition != "aws" {
+			t.Fatalf("got (%q, %q, %v), want (%q, %q, nil)", gotAccount, gotPartition, err, testAccountID, "aws")
+		}
+	})
+	t.Run("GovCloud Arn derives the aws-us-gov partition", func(t *testing.T) {
+		arn := "arn:aws-us-gov:sts::" + testAccountID + ":assumed-role/e2a-prod/i-0123"
+		_, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID), Arn: awsString(arn)})
+		if err != nil || gotPartition != "aws-us-gov" {
+			t.Fatalf("got (%q, %v), want (%q, nil)", gotPartition, err, "aws-us-gov")
+		}
+	})
+	t.Run("China Arn derives the aws-cn partition", func(t *testing.T) {
+		arn := "arn:aws-cn:sts::" + testAccountID + ":assumed-role/e2a-prod/i-0123"
+		_, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID), Arn: awsString(arn)})
+		if err != nil || gotPartition != "aws-cn" {
+			t.Fatalf("got (%q, %v), want (%q, nil)", gotPartition, err, "aws-cn")
+		}
+	})
+	t.Run("unparseable Arn degrades to the aws default rather than failing", func(t *testing.T) {
+		gotAccount, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID), Arn: awsString("not-an-arn")})
+		if err != nil || gotAccount != testAccountID || gotPartition != "aws" {
+			t.Fatalf("got (%q, %q, %v), want (%q, %q, nil)", gotAccount, gotPartition, err, testAccountID, "aws")
 		}
 	})
 }
@@ -261,22 +292,22 @@ func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 	boom := errors.New("sts: GetCallerIdentity blip")
 	var resolveCalls int
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
 	p := &SESProvider{
 		api:    stub,
 		region: "us-east-1",
-		resolveAccountID: func(context.Context) (string, error) {
+		resolveIdentity: func(context.Context) (string, string, error) {
 			resolveCalls++
-			return "", boom
+			return "", "", boom
 		},
 	}
 
@@ -295,18 +326,20 @@ func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 		t.Fatalf("second Provision error = %v, want ErrIdentityNotOwned again", err)
 	}
 	if resolveCalls != 1 {
-		t.Fatalf("resolveAccountID called %d times, want exactly 1 (sync.Once)", resolveCalls)
+		t.Fatalf("resolveIdentity called %d times, want exactly 1 (sync.Once)", resolveCalls)
 	}
 }
 
 // TestSESProvider_NewSESProviderNeverResolvesAccountID proves the explicit-
-// accountID constructor path never touches resolveAccountID at all — it is
-// simply unset, so accountIDForAdoption returns the supplied id immediately.
+// accountID constructor path never touches resolveIdentity at all — it is
+// simply unset, so identityForAdoption returns the supplied id and the
+// default "aws" partition immediately (there is no STS ARN to derive it
+// from on this path — see NewSESProvider's doc comment).
 func TestSESProvider_NewSESProviderNeverResolvesAccountID(t *testing.T) {
 	p := NewSESProvider(&stubSESAPI{}, "us-east-1", testAccountID)
-	got, err := p.accountIDForAdoption(context.Background())
-	if err != nil || got != testAccountID {
-		t.Fatalf("accountIDForAdoption = (%q, %v), want (%q, nil)", got, err, testAccountID)
+	gotAccount, gotPartition, err := p.identityForAdoption(context.Background())
+	if err != nil || gotAccount != testAccountID || gotPartition != "aws" {
+		t.Fatalf("identityForAdoption = (%q, %q, %v), want (%q, %q, nil)", gotAccount, gotPartition, err, testAccountID, "aws")
 	}
 }
 
@@ -374,7 +407,7 @@ func (s *stubSESAPI) GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIde
 		}
 	}
 	if s.deleted {
-		return nil, &ststypes.NotFoundException{}
+		return nil, &sestypes.NotFoundException{}
 	}
 	if s.getErr != nil {
 		return nil, s.getErr
@@ -385,8 +418,8 @@ func (s *stubSESAPI) GetEmailIdentity(ctx context.Context, in *sesv2.GetEmailIde
 	}
 	copyOut := *out
 	if !s.unmanaged {
-		copyOut.Tags = append([]ststypes.Tag(nil), out.Tags...)
-		copyOut.Tags = append(copyOut.Tags, ststypes.Tag{Key: awsString(managedIdentityTagKey), Value: awsString(managedIdentityTagValue)})
+		copyOut.Tags = append([]sestypes.Tag(nil), out.Tags...)
+		copyOut.Tags = append(copyOut.Tags, sestypes.Tag{Key: awsString(managedIdentityTagKey), Value: awsString(managedIdentityTagValue)})
 	}
 	return &copyOut, nil
 }
@@ -429,9 +462,9 @@ func (s *stubSESAPI) TagResource(ctx context.Context, in *sesv2.TagResourceInput
 
 func TestSESProvider_ListPageIsProviderBounded(t *testing.T) {
 	stub := &stubSESAPI{listOut: &sesv2.ListEmailIdentitiesOutput{
-		EmailIdentities: []ststypes.IdentityInfo{
-			{IdentityType: ststypes.IdentityTypeDomain, IdentityName: awsString("managed.example.test")},
-			{IdentityType: ststypes.IdentityTypeEmailAddress, IdentityName: awsString("ignored@example.test")},
+		EmailIdentities: []sestypes.IdentityInfo{
+			{IdentityType: sestypes.IdentityTypeDomain, IdentityName: awsString("managed.example.test")},
+			{IdentityType: sestypes.IdentityTypeEmailAddress, IdentityName: awsString("ignored@example.test")},
 		},
 		NextToken: awsString("next-page-token"),
 	}}
@@ -472,7 +505,7 @@ func TestSESProvider_ProvisionConfiguresMailFrom(t *testing.T) {
 		*stub.mailFromInput.MailFromDomain != "bounce.acme.com" {
 		t.Fatalf("want MAIL FROM bounce.acme.com, got %+v", stub.mailFromInput)
 	}
-	if stub.mailFromInput.BehaviorOnMxFailure != ststypes.BehaviorOnMxFailureUseDefaultValue {
+	if stub.mailFromInput.BehaviorOnMxFailure != sestypes.BehaviorOnMxFailureUseDefaultValue {
 		t.Errorf("want USE_DEFAULT_VALUE behavior, got %v", stub.mailFromInput.BehaviorOnMxFailure)
 	}
 	// Returned the MX + SPF records (region-targeted) for the customer to publish.
@@ -501,7 +534,7 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	// CreateEmailIdentity returns AlreadyExists (idempotent re-provision); MAIL
 	// FROM must still be (re)configured.
-	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}}
+	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 	res, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1)
 	if err != nil {
@@ -510,7 +543,7 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	if res.Status != StatusPending || stub.mailFromInput == nil || stub.dkimInput == nil {
 		t.Fatalf("AlreadyExists must replace BYODKIM and set MAIL FROM; status=%q dkim=%+v mailFrom=%+v", res.Status, stub.dkimInput, stub.mailFromInput)
 	}
-	if stub.dkimInput.SigningAttributesOrigin != ststypes.DkimSigningAttributesOriginExternal ||
+	if stub.dkimInput.SigningAttributesOrigin != sestypes.DkimSigningAttributesOriginExternal ||
 		stub.dkimInput.SigningAttributes == nil ||
 		stub.dkimInput.SigningAttributes.DomainSigningSelector == nil ||
 		*stub.dkimInput.SigningAttributes.DomainSigningSelector != "sel" {
@@ -548,10 +581,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "external origin + dkim success + key material + matching selector token → adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -561,10 +594,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "external origin + mismatched selector → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"someone-elses-selector"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -574,10 +607,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "aws-managed (easy DKIM) origin, even with a coincidentally matching token → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginAwsSes,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -587,10 +620,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "external origin but no expected selector on file → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "",
@@ -604,10 +637,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 			// Everything else here matches; only haveKeyMaterial is false.
 			name: "external origin + dkim success + matching selector but NO key material on file → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -621,10 +654,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 			// constant). Strict SUCCESS is required, no PENDING fallback.
 			name: "external origin + matching selector but DKIM still pending → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusPending,
+					Status:                  sestypes.DkimStatusPending,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -634,10 +667,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "external origin + matching selector but DKIM failed → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusFailed,
+					Status:                  sestypes.DkimStatusFailed,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -647,9 +680,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 		{
 			name: "external origin with no tokens at all → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
-					Status:                  ststypes.DkimStatusSuccess,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -678,10 +711,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 			name: "configuration set present, otherwise fully matching → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
 				ConfigurationSetName: awsString("someone-elses-config-set"),
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -695,10 +728,10 @@ func TestCanAdoptIdentity(t *testing.T) {
 			name: "identity policy present, otherwise fully matching → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
 				Policies: map[string]string{"cross-account": `{"Effect":"Allow"}`},
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
-					Status:                  ststypes.DkimStatusSuccess,
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 			expectedSelector: "e2a202607",
@@ -725,12 +758,12 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 
 	t.Run("configuration set", func(t *testing.T) {
 		stub := &stubSESAPI{
-			createErr: &ststypes.AlreadyExistsException{},
+			createErr: &sestypes.AlreadyExistsException{},
 			unmanaged: true,
 			getOut: &sesv2.GetEmailIdentityOutput{
 				ConfigurationSetName: awsString("someone-elses-config-set"),
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
 				},
 			},
@@ -749,12 +782,12 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 
 	t.Run("identity policy", func(t *testing.T) {
 		stub := &stubSESAPI{
-			createErr: &ststypes.AlreadyExistsException{},
+			createErr: &sestypes.AlreadyExistsException{},
 			unmanaged: true,
 			getOut: &sesv2.GetEmailIdentityOutput{
 				Policies: map[string]string{"cross-account": `{"Effect":"Allow"}`},
-				DkimAttributes: &ststypes.DkimAttributes{
-					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				DkimAttributes: &sestypes.DkimAttributes{
+					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
 				},
 			},
@@ -779,13 +812,13 @@ func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -817,6 +850,47 @@ func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
 	}
 }
 
+// TestSESProvider_AdoptIdentityUsesResolvedPartitionInARN proves the
+// partition STS resolution feeds all the way into the TagResource ARN,
+// end-to-end through adoptIdentity/identityARN — not just the pure
+// identityFromCallerIdentity parsing covered by TestIdentityFromCallerIdentity.
+// A provider running in GovCloud whose identityARN stayed hardcoded to "aws"
+// would build an ARN TagResource rejects as invalid, permanently failing
+// adoption in that partition.
+func TestSESProvider_AdoptIdentityUsesResolvedPartitionInARN(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	stub := &stubSESAPI{
+		createErr: &sestypes.AlreadyExistsException{},
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  sestypes.DkimStatusSuccess,
+			},
+		},
+	}
+	p := &SESProvider{
+		api:    stub,
+		region: "us-gov-west-1",
+		resolveIdentity: func(context.Context) (string, string, error) {
+			return testAccountID, "aws-us-gov", nil
+		},
+	}
+
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); err != nil {
+		t.Fatalf("Provision error = %v, want adoption to succeed", err)
+	}
+	if len(stub.tagInputs) != 1 {
+		t.Fatalf("want exactly one TagResource call, got %d: %+v", len(stub.tagInputs), stub.tagInputs)
+	}
+	wantARN := "arn:aws-us-gov:ses:us-gov-west-1:" + testAccountID + ":identity/legacy.example"
+	if got := stub.tagInputs[0].ResourceArn; got == nil || *got != wantARN {
+		t.Fatalf("TagResource ARN = %v, want %q", got, wantARN)
+	}
+}
+
 // TestSESProvider_ProvisionRefusesMismatchedSelector covers adoption case 2,
 // the security-critical negative: an untagged BYODKIM identity whose
 // installed selector does NOT match e2a's stored selector must be refused
@@ -826,13 +900,13 @@ func TestSESProvider_ProvisionRefusesMismatchedSelector(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"someone-elses-selector"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -858,13 +932,13 @@ func TestSESProvider_ProvisionRefusesAWSManagedDkimOrigin(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginAwsSes,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginAwsSes,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -886,7 +960,7 @@ func TestSESProvider_ProvisionAlreadyTaggedDoesNotRetag(t *testing.T) {
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	// unmanaged defaults to false: stubSESAPI.GetEmailIdentity auto-appends the
 	// ownership tag, modeling an already-adopted/always-owned identity.
-	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}}
+	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
 	if _, err := p.Provision(context.Background(), "already-owned.example", "e2a202607", pkcs1); err != nil {
@@ -908,14 +982,14 @@ func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	boom := errors.New("tag-resource throttled")
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		tagErr:    boom,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -952,13 +1026,13 @@ func TestClassifyAdoptionError(t *testing.T) {
 		}
 	})
 	t.Run("BadRequestException becomes ErrIdentityNotOwned", func(t *testing.T) {
-		got := classifyAdoptionError(&ststypes.BadRequestException{Message: awsString("invalid ARN")})
+		got := classifyAdoptionError(&sestypes.BadRequestException{Message: awsString("invalid ARN")})
 		if !errors.Is(got, ErrIdentityNotOwned) {
 			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
 		}
 	})
 	t.Run("NotFoundException becomes ErrIdentityNotOwned", func(t *testing.T) {
-		got := classifyAdoptionError(&ststypes.NotFoundException{})
+		got := classifyAdoptionError(&sestypes.NotFoundException{})
 		if !errors.Is(got, ErrIdentityNotOwned) {
 			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
 		}
@@ -987,14 +1061,14 @@ func TestSESProvider_ProvisionAdoptionAccessDeniedRefusesNotRetries(t *testing.T
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	stub := &stubSESAPI{
-		createErr: &ststypes.AlreadyExistsException{},
+		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
 		tagErr:    &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: ses:TagResource"},
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -1017,12 +1091,12 @@ func TestSESProvider_StatusAdoptsProvablyOwnIdentity(t *testing.T) {
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
 			VerifiedForSendingStatus: true,
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
-			MailFromAttributes: &ststypes.MailFromAttributes{MailFromDomainStatus: ststypes.MailFromDomainStatusSuccess},
+			MailFromAttributes: &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusSuccess},
 		},
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
@@ -1045,8 +1119,8 @@ func TestSESProvider_StatusRefusesMismatchedSelector(t *testing.T) {
 	stub := &stubSESAPI{
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"someone-elses-selector"},
 			},
 		},
@@ -1074,10 +1148,10 @@ func TestSESProvider_StatusRefusesAdoptionWithoutKeyMaterial(t *testing.T) {
 	stub := &stubSESAPI{
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusSuccess,
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
@@ -1099,10 +1173,10 @@ func TestSESProvider_StatusRefusesAdoptionWhileDkimPending(t *testing.T) {
 	stub := &stubSESAPI{
 		unmanaged: true,
 		getOut: &sesv2.GetEmailIdentityOutput{
-			DkimAttributes: &ststypes.DkimAttributes{
-				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"e2a202607"},
-				Status:                  ststypes.DkimStatusPending,
+				Status:                  sestypes.DkimStatusPending,
 			},
 		},
 	}
@@ -1119,7 +1193,7 @@ func TestSESProvider_StatusRefusesAdoptionWhileDkimPending(t *testing.T) {
 func TestSESProvider_RefusesUnmanagedExistingIdentity(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
-	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}, unmanaged: true}
+	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}, unmanaged: true}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
 	if _, err := p.Provision(context.Background(), "shared.example", "sel", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
@@ -1149,7 +1223,7 @@ func TestSESProvider_ProvisionPropagatesReplacementDkimError(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	boom := errors.New("dkim update denied")
-	stub := &stubSESAPI{createErr: &ststypes.AlreadyExistsException{}, putDkimErr: boom}
+	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}, putDkimErr: boom}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
 	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1); !errors.Is(err, boom) {
@@ -1180,7 +1254,7 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 
 func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status maps NotFoundException to ErrIdentityNotFound", func(t *testing.T) {
-		p := NewSESProvider(&stubSESAPI{getErr: &ststypes.NotFoundException{}}, "us-east-1", testAccountID)
+		p := NewSESProvider(&stubSESAPI{getErr: &sestypes.NotFoundException{}}, "us-east-1", testAccountID)
 		_, err := p.Status(context.Background(), "example.com", "", false)
 		if !errors.Is(err, ErrIdentityNotFound) {
 			t.Fatalf("expected ErrIdentityNotFound, got %v", err)
@@ -1188,7 +1262,7 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 	})
 
 	t.Run("Deprovision treats NotFoundException as success", func(t *testing.T) {
-		p := NewSESProvider(&stubSESAPI{delErr: &ststypes.NotFoundException{}}, "us-east-1", testAccountID)
+		p := NewSESProvider(&stubSESAPI{delErr: &sestypes.NotFoundException{}}, "us-east-1", testAccountID)
 		if err := p.Deprovision(context.Background(), "example.com"); err != nil {
 			t.Fatalf("expected nil for missing identity, got %v", err)
 		}
