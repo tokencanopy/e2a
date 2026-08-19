@@ -1246,4 +1246,56 @@ describe("E2AClient", () => {
   it("listen() requires an email", () => {
     expect(() => client.listen("")).toThrow(/email is required/);
   });
+
+  // ── dot-segment path-parameter guard (e2a#792) ───────────────────
+  // ".." collapses the built URL onto the preceding segment, retargeting each
+  // of these DELETEs at the agent or the account instead of the sub-resource.
+
+  describe("dot-segment path guard", () => {
+    it("rejects agents.deleteSuppression(email, '..') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.agents.deleteSuppression("sender@example.com", ".."),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects contacts.deleteOutreach(email, '.') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.contacts.deleteOutreach("sender@example.com", "."),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects messages.delete(email, '..') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.messages.delete("sender@example.com", ".."),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects account.suppressions.delete('..') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(client.account.suppressions.delete("..")).rejects.toMatchObject({
+        code: "unsafe_path_segment",
+      });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects account.apiKeys.delete('..') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(client.account.apiKeys.delete("..")).rejects.toMatchObject({
+        code: "unsafe_path_segment",
+      });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("still allows an ordinary address through", async () => {
+      globalThis.fetch = mockFetch(200, { deleted: true, address: "recipient@example.net" });
+      const res = await client.agents.deleteSuppression("sender@example.com", "recipient@example.net");
+      expect(res.deleted).toBe(true);
+    });
+  });
 });

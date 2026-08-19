@@ -210,6 +210,20 @@ def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
         ) from e
 
 
+def _assert_not_dot_segment(value: str, param: str) -> str:
+    # A value of exactly "." or ".." collapses the built URL onto the
+    # PRECEDING path segment (urllib.parse.quote leaves "." unescaped),
+    # retargeting a DELETE at a bigger resource. Reject before the wire.
+    if value in (".", ".."):
+        raise E2AValidationError(
+            code="unsafe_path_segment",
+            message=f'{param} must not be "." or ".."; it would collapse the request path onto a different, larger resource',
+            status=0,
+            retryable=False,
+        )
+    return value
+
+
 class _TypedApiClient(ApiClient):
     """Map malformed successful responses before the retry boundary sees them."""
 
@@ -469,6 +483,7 @@ class AgentsResource:
         self, email: str, address: str
     ) -> DeleteSuppressionResult:
         """Beta: remove only this exact agent-recipient block."""
+        address = _assert_not_dot_segment(address, "address")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_agent_suppression(
                 email, address, confirm="DELETE", _headers=h
@@ -606,6 +621,7 @@ class MessagesResource:
         it on the review queue first. Returns the deletion receipt
         ({deleted, id}).
         """
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_message(
                 # `permanent or None` omits the param entirely on the soft path,
@@ -975,6 +991,7 @@ class ContactsResource:
     async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
         """Un-enrol a contact from an agent's outreach. The contact itself
         survives, and suppressions are untouched — this is not consent."""
+        address = _assert_not_dot_segment(address, "address")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)
         )
@@ -1277,6 +1294,7 @@ class SuppressionsResource:
 
     async def delete(self, email: str) -> DeleteSuppressionResult:
         # Returns the deletion object ({deleted, address}).
+        email = _assert_not_dot_segment(email, "address")
         return await self._c._write_idempotent(lambda h: self._api.delete_suppression(email, confirm="DELETE", _headers=h))
 
 
@@ -1306,6 +1324,7 @@ class APIKeysResource:
 
     async def delete(self, key_id: str) -> DeleteApiKeyResult:
         # Returns the deletion object ({deleted, id}).
+        key_id = _assert_not_dot_segment(key_id, "id")
         return await self._c._write_idempotent(lambda h: self._api.delete_api_key(key_id, confirm="DELETE", _headers=h))
 
 

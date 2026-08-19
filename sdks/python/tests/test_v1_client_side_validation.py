@@ -70,3 +70,63 @@ def test_sync_out_of_range_limit_raises_e2a_validation_error(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             c.messages.list("bot@test.dev", limit=99999).page()
     _assert_typed(ei.value)
+
+
+# ── dot-segment path-parameter guard (e2a#792): httpx collapses a literal
+# ".." segment the same way a browser does, retargeting the DELETE upward.
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value", [".", ".."])
+async def test_delete_agent_suppression_rejects_dot_segment(httpx_mock, value):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.agents.delete_suppression("bot@test.dev", value)
+    assert ei.value.code == "unsafe_path_segment"
+    assert ei.value.status == 0
+
+
+@pytest.mark.anyio
+async def test_delete_engagement_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.contacts.delete_outreach("bot@test.dev", "..")
+    assert ei.value.code == "unsafe_path_segment"
+
+
+@pytest.mark.anyio
+async def test_delete_message_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.messages.delete("bot@test.dev", "..")
+    assert ei.value.code == "unsafe_path_segment"
+
+
+@pytest.mark.anyio
+async def test_account_delete_suppression_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.account.suppressions.delete("..")
+    assert ei.value.code == "unsafe_path_segment"
+
+
+@pytest.mark.anyio
+async def test_account_delete_api_key_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.account.api_keys.delete("..")
+    assert ei.value.code == "unsafe_path_segment"
+
+
+def test_sync_delete_agent_suppression_rejects_dot_segment(httpx_mock):
+    with E2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            c.agents.delete_suppression("bot@test.dev", "..")
+    assert ei.value.code == "unsafe_path_segment"
+
+
+def test_delete_agent_suppression_allows_an_ordinary_address(httpx_mock):
+    httpx_mock.add_response(json={"deleted": True, "address": "recipient@example.net"})
+    with E2AClient(api_key="e2a_test", base_url=BASE) as c:
+        result = c.agents.delete_suppression("bot@test.dev", "recipient@example.net")
+    assert result.deleted is True

@@ -197,6 +197,21 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+// A path-parameter value of exactly "." or ".." collapses the built URL onto
+// the PRECEDING segment (encodeURIComponent leaves "." unescaped), retargeting
+// a DELETE at a bigger resource. Rejected here, before it reaches the wire.
+function assertNotDotSegment(value: string, param: string): string {
+  if (value === "." || value === "..") {
+    throw new E2AError({
+      code: "unsafe_path_segment",
+      message: `${param} must not be "." or ".."; it would collapse the request path onto a different, larger resource`,
+      status: 0,
+      retryable: false,
+    });
+  }
+  return value;
+}
+
 export class E2AClient {
   readonly agents: AgentsResource;
   readonly messages: MessagesResource;
@@ -349,7 +364,7 @@ class AgentsResource {
   }
   /** Beta: remove only this exact agent-recipient block. */
   deleteSuppression(email: string, address: string): Promise<DeleteSuppressionResult> {
-    return call(() => this.api.deleteAgentSuppression(email, address, "DELETE"));
+    return call(() => this.api.deleteAgentSuppression(email, assertNotDotSegment(address, "address"), "DELETE"));
   }
 }
 
@@ -448,7 +463,7 @@ class MessagesResource {
    * on the review queue first. Returns the deletion receipt ({deleted:true, id}).
    */
   delete(email: string, id: string, opts: { permanent?: boolean } = {}): Promise<DeleteMessageResult> {
-    return call(() => this.api.deleteMessage(email, id, opts.permanent, "DELETE"));
+    return call(() => this.api.deleteMessage(email, assertNotDotSegment(id, "id"), opts.permanent, "DELETE"));
   }
   /**
    * Restore a soft-deleted message. A scheduled message restored before
@@ -709,7 +724,7 @@ class ContactsResource {
   /** Un-enrol a contact from an agent's outreach. The contact itself survives,
    *  and suppressions are untouched — this is not consent. */
   deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
-    return call(() => this.api.deleteEngagement(email, address, "DELETE"));
+    return call(() => this.api.deleteEngagement(email, assertNotDotSegment(address, "address"), "DELETE"));
   }
 }
 
@@ -868,7 +883,7 @@ class SuppressionsResource {
     // The typed .delete() call is itself the confirmation; the SDK supplies the
     // ?confirm=DELETE guard the raw API requires so callers aren't burdened.
     // Returns the deletion object ({deleted:true, address}).
-    return call(() => this.api.deleteSuppression(email, "DELETE"));
+    return call(() => this.api.deleteSuppression(assertNotDotSegment(email, "address"), "DELETE"));
   }
 }
 
@@ -891,7 +906,7 @@ class APIKeysResource {
     // The typed .delete() call is itself the confirmation; the SDK supplies the
     // ?confirm=DELETE guard the raw API requires so callers aren't burdened.
     // Returns the deletion object ({deleted:true, id}).
-    return call(() => this.api.deleteApiKey(id, "DELETE"));
+    return call(() => this.api.deleteApiKey(assertNotDotSegment(id, "id"), "DELETE"));
   }
 }
 
