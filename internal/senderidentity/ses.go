@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -44,8 +46,21 @@ type sesAPI interface {
 type SESProvider struct {
 	api                sesAPI
 	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
-	accountID          string // for the identity ARN TagResource needs (arn:aws:ses:<region>:<accountID>:identity/<domain>)
 	deleteConfirmDelay func(attempt int) time.Duration
+
+	// accountID resolution feeds the identity ARN adoption's TagResource call
+	// needs (arn:aws:ses:<region>:<accountID>:identity/<domain>) —
+	// GetEmailIdentity/ListEmailIdentities never return one. It is LAZY and
+	// NON-FATAL: only adoption ever needs it, so a failure here must never
+	// take down every other Provider capability (or the whole server —
+	// cmd/e2a/main.go log.Fatalf's on NewSESProviderFromConfig's returned
+	// error). resolveAccountID is nil when the caller already supplied the ID
+	// directly (NewSESProvider); accountIDOnce then short-circuits to it
+	// without ever touching STS. See accountIDForAdoption.
+	accountIDOnce    sync.Once
+	accountID        string
+	accountIDErr     error
+	resolveAccountID func(ctx context.Context) (string, error)
 }
 
 const (
@@ -54,34 +69,77 @@ const (
 	deleteConfirmAttempts   = 6
 )
 
-// NewSESProvider wraps a pre-built SES API (or stub). region feeds the MAIL
-// FROM MX record target; accountID feeds the identity ARN adoption's
-// TagResource call needs (GetEmailIdentity/ListEmailIdentities never return
-// one).
+// NewSESProvider wraps a pre-built SES API (or stub) with an ALREADY-KNOWN
+// AWS account id. region feeds the MAIL FROM MX record target; accountID
+// feeds the identity ARN adoption's TagResource call needs. No STS call is
+// ever made on this path.
 func NewSESProvider(api sesAPI, region, accountID string) *SESProvider {
 	return &SESProvider{api: api, region: region, accountID: accountID}
 }
 
 // NewSESProviderFromConfig builds a provider from ambient AWS config
-// (env/instance role) for the given region. It resolves the caller's AWS
-// account ID via STS once at startup (GetCallerIdentity requires no IAM
-// grant of its own) because adoption's TagResource call needs a fully
-// qualified identity ARN and neither GetEmailIdentity nor ListEmailIdentities
-// returns one.
+// (env/instance role) for the given region. Unlike the account id, loading
+// the ambient config itself is local (env/file reads, no network round-trip)
+// and stays synchronous here — a genuinely broken/missing AWS config is a
+// legitimate reason to fail startup. The AWS account id adoption's
+// TagResource call needs is resolved LAZILY on first adoption attempt (see
+// accountIDForAdoption) rather than here: STS GetCallerIdentity is a network
+// call, and resolving it eagerly at construction — as this used to do — let
+// a transient STS blip, an egress allowlist covering only SES, an SCP deny,
+// or an IMDS hiccup fail server startup entirely (main.go wraps provider
+// construction in log.Fatalf) for a value only adoption needs.
 func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	callerIdentity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if err != nil {
-		return nil, fmt.Errorf("resolve aws account id: %w", err)
+	stsClient := sts.NewFromConfig(cfg)
+	return &SESProvider{
+		api:    sesv2.NewFromConfig(cfg),
+		region: region,
+		resolveAccountID: func(ctx context.Context) (string, error) {
+			out, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+			if err != nil {
+				return "", fmt.Errorf("resolve aws account id: %w", err)
+			}
+			return accountIDFromCallerIdentity(out)
+		},
+	}, nil
+}
+
+// accountIDFromCallerIdentity extracts the account id, treating a nil
+// Account as an error rather than silently yielding an empty account id
+// segment in the identity ARN (arn:aws:ses:<region>::identity/<domain> —
+// missing the account id component entirely, which TagResource would then
+// reject or, worse, resolve unpredictably). Split out from
+// NewSESProviderFromConfig so it's unit-testable without a real STS call.
+func accountIDFromCallerIdentity(out *sts.GetCallerIdentityOutput) (string, error) {
+	if out == nil || out.Account == nil {
+		return "", errors.New("sts GetCallerIdentity returned no account id")
 	}
-	var accountID string
-	if callerIdentity.Account != nil {
-		accountID = *callerIdentity.Account
+	return *out.Account, nil
+}
+
+// accountIDForAdoption resolves (at most once) the AWS account id adoption's
+// TagResource ARN needs. Nothing else Provision/Status/Deprovision does
+// requires it — only adoption calls TagResource — so a resolution failure
+// must never be fatal: it degrades adoptIdentity to a wrapped
+// ErrIdentityNotOwned ("cannot adopt"), exactly the pre-adoption-PR behavior,
+// while every other capability keeps working. sync.Once means a persistent
+// STS outage is logged and cached rather than retried on every adoption
+// attempt (which could be hourly-reaper-frequent across many domains); a
+// process restart (routine on every deploy) is what re-attempts it.
+func (p *SESProvider) accountIDForAdoption(ctx context.Context) (string, error) {
+	if p.resolveAccountID == nil {
+		return p.accountID, nil // supplied directly at construction (NewSESProvider)
 	}
-	return &SESProvider{api: sesv2.NewFromConfig(cfg), region: region, accountID: accountID}, nil
+	p.accountIDOnce.Do(func() {
+		p.accountID, p.accountIDErr = p.resolveAccountID(ctx)
+		if p.accountIDErr != nil {
+			log.Printf("[senderidentity] cannot resolve AWS account id for adoption (STS GetCallerIdentity failed): %v — adoption will report identities as not-owned until the next restart", p.accountIDErr)
+		}
+	})
+	return p.accountID, p.accountIDErr
 }
 
 func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
@@ -396,23 +454,33 @@ func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string
 // adoptIdentity applies the ownership tag to an identity canAdoptIdentity has
 // already cleared. TagResource needs the identity's full ARN — neither
 // GetEmailIdentity nor ListEmailIdentities returns one — so it's built from
-// the region and the account ID resolved once at construction time.
+// the region and the account ID resolved lazily (see accountIDForAdoption).
+// An unresolvable account id degrades to ErrIdentityNotOwned rather than
+// building a malformed/empty-account ARN or blocking indefinitely.
 func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
-	arn := p.identityARN(domain)
-	_, err := p.api.TagResource(ctx, &sesv2.TagResourceInput{
+	accountID, err := p.accountIDForAdoption(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: aws account id unavailable: %v", ErrIdentityNotOwned, err)
+	}
+	arn := identityARN(p.region, accountID, domain)
+	_, err = p.api.TagResource(ctx, &sesv2.TagResourceInput{
 		ResourceArn: &arn,
 		Tags: []ststypes.Tag{{
 			Key:   awsString(managedIdentityTagKey),
 			Value: awsString(managedIdentityTagValue),
 		}},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	log.Printf("[senderidentity] adopted pre-existing identity for domain %s (tagged %s=%s)", domain, managedIdentityTagKey, managedIdentityTagValue)
+	return nil
 }
 
 // identityARN builds the SES v2 email-identity ARN for domain:
 // arn:aws:ses:<region>:<account-id>:identity/<domain>.
-func (p *SESProvider) identityARN(domain string) string {
-	return fmt.Sprintf("arn:aws:ses:%s:%s:identity/%s", p.region, p.accountID, domain)
+func identityARN(region, accountID, domain string) string {
+	return fmt.Sprintf("arn:aws:ses:%s:%s:identity/%s", region, accountID, domain)
 }
 
 func awsString(value string) *string { return &value }

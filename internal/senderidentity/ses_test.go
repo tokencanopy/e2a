@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 func TestMapSESStatus(t *testing.T) {
@@ -224,6 +225,89 @@ func TestPKCS8Base64(t *testing.T) {
 // testAccountID is a synthetic AWS account id used only to exercise ARN
 // construction; it is not a real account.
 const testAccountID = "123456789012"
+
+// TestAccountIDFromCallerIdentity pins finding 4's "empty account is an
+// error" fix: a nil Account must never silently produce an account-id-less
+// identity ARN (arn:aws:ses:<region>::identity/<domain>).
+func TestAccountIDFromCallerIdentity(t *testing.T) {
+	t.Run("nil output", func(t *testing.T) {
+		if _, err := accountIDFromCallerIdentity(nil); err == nil {
+			t.Fatal("want an error for a nil GetCallerIdentityOutput")
+		}
+	})
+	t.Run("nil Account", func(t *testing.T) {
+		if _, err := accountIDFromCallerIdentity(&sts.GetCallerIdentityOutput{}); err == nil {
+			t.Fatal("want an error for a nil Account, not a silently empty account id")
+		}
+	})
+	t.Run("populated Account round-trips", func(t *testing.T) {
+		got, err := accountIDFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID)})
+		if err != nil || got != testAccountID {
+			t.Fatalf("got (%q, %v), want (%q, nil)", got, err, testAccountID)
+		}
+	})
+}
+
+// TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable pins finding 4's
+// lazy+non-fatal fix directly: a provider whose account id resolution fails
+// (simulating an STS blip) must degrade adoption to ErrIdentityNotOwned
+// rather than propagate the raw error or build a malformed ARN — and must
+// not re-invoke the resolver on every call (sync.Once — a persistent outage
+// doesn't hammer STS on every adoption attempt).
+func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	boom := errors.New("sts: GetCallerIdentity blip")
+	var resolveCalls int
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
+			},
+		},
+	}
+	p := &SESProvider{
+		api:    stub,
+		region: "us-east-1",
+		resolveAccountID: func(context.Context) (string, error) {
+			resolveCalls++
+			return "", boom
+		},
+	}
+
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Provision error = %v, want degraded ErrIdentityNotOwned when the account id is unavailable", err)
+	}
+	if len(stub.tagInputs) != 0 {
+		t.Fatalf("must not attempt TagResource without a resolvable account id: %+v", stub.tagInputs)
+	}
+	if stub.dkimInput != nil || stub.mailFromInput != nil {
+		t.Fatalf("must not proceed to mutate before adoption is confirmed: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+
+	// A second adoption attempt must not re-invoke the resolver.
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("second Provision error = %v, want ErrIdentityNotOwned again", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveAccountID called %d times, want exactly 1 (sync.Once)", resolveCalls)
+	}
+}
+
+// TestSESProvider_NewSESProviderNeverResolvesAccountID proves the explicit-
+// accountID constructor path never touches resolveAccountID at all — it is
+// simply unset, so accountIDForAdoption returns the supplied id immediately.
+func TestSESProvider_NewSESProviderNeverResolvesAccountID(t *testing.T) {
+	p := NewSESProvider(&stubSESAPI{}, "us-east-1", testAccountID)
+	got, err := p.accountIDForAdoption(context.Background())
+	if err != nil || got != testAccountID {
+		t.Fatalf("accountIDForAdoption = (%q, %v), want (%q, nil)", got, err, testAccountID)
+	}
+}
 
 // stubSESAPI implements sesAPI; only the methods under test return real
 // behavior, the rest panic if unexpectedly called.
