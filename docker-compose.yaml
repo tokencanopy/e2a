@@ -108,8 +108,16 @@ services:
 
   web:
     build:
-      context: web
-      dockerfile: Dockerfile
+      # Repo root: web/Dockerfile needs the sibling @e2a/ui workspace
+      # (file:../design-system) and the canonical docs it mirrors into
+      # web/public — both live outside web/. web/Dockerfile.dockerignore
+      # trims the resulting context back down (BuildKit prefers
+      # <dockerfile>.dockerignore over the repo-root one when the
+      # Dockerfile path is non-default). Mirrors
+      # .github/workflows/build-image.yml, which builds this same image
+      # the same way. See web/Dockerfile's header comment.
+      context: .
+      dockerfile: web/Dockerfile
       # Mirror the e2a service's E2A_SHARED_DOMAIN below so the
       # /get-started onboarding flow shows `your-slug@agents.localhost`
       # in the same context as the running backend. Next.js inlines
