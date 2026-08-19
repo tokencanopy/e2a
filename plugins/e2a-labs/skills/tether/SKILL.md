@@ -269,7 +269,7 @@ lands.
 |---|---|---|
 | `E2A_TETHER_POLL_INTERVAL` | `20` (s) | fallback poll cadence when the WS wait is unavailable |
 | `E2A_TETHER_ASK_TIMEOUT` | `1800` (s) | how long `ask` blocks for an answer before giving up |
-| `E2A_URL` | `https://e2a.dev` | e2a deployment root (set for self-host) |
+| `E2A_URL` | none — resolved from `e2a login`'s stored `~/.e2a/config.json`, else whatever the `e2a` CLI itself defaults to | e2a deployment root (set explicitly for self-host if `e2a login` hasn't already stored the right one) |
 | `E2A_CLI` | (auto) | override the e2a CLI invocation (e.g. `node /repo/cli/dist/bin/e2a.js`) |
 
 The only thing that costs a turn per tick is a `/loop` **heartbeat** (tier 2
