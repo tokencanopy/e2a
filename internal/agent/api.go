@@ -1035,6 +1035,16 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 			// the Get-started flow can show the DKIM row populated.
 			dkimState = "found"
 		}
+		// Loud on purpose, every time: this short-circuit skips real DNS
+		// lookups and reports every domain as verified (TXT/MX/SPF "found")
+		// with no ownership proof at all. It exists so local dev works
+		// without publishing DNS — see the doc comment above — but a
+		// deployment that's in this mode by accident (e.g. env: production
+		// never set — see E2A_ENV in internal/config/config.go) would
+		// silently present DNS verification as a security control while
+		// providing none, and on a multi-user self-host it doubles as a
+		// domain-ownership bypass. Never let this fire silently.
+		log.Printf("WARNING: dev-mode DNS short-circuit: domain=%q verified without any DNS lookup (TXT/MX/SPF reported \"found\" unconditionally); set env: production (or E2A_ENV=production) for real verification", domain)
 		return dnsRecordCheck{
 			TXTFound: true,
 			MX:       "found",

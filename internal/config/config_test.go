@@ -138,6 +138,56 @@ signing:
 	}
 }
 
+func TestLoadConfigEnvVarOverridesYAMLEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+env: "development"
+`), 0644)
+
+	t.Setenv("E2A_ENV", "production")
+	// Satisfy the production HMAC guards so this test isolates the Env
+	// override itself, not Validate()'s other production-only checks.
+	t.Setenv("E2A_HMAC_SECRET", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Env != "production" {
+		t.Errorf("Env = %q, want production (E2A_ENV should override config.yaml's env: development)", cfg.Env)
+	}
+	if !cfg.IsProduction() {
+		t.Error("IsProduction() = false, want true after E2A_ENV=production override")
+	}
+}
+
+func TestLoadRejectsInvalidEnvValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		yaml   string
+		envVar string
+	}{
+		{name: "invalid value in YAML", yaml: "env: \"staging\"\n"},
+		{name: "invalid value via E2A_ENV", yaml: "env: \"development\"\n", envVar: "staging"},
+		{name: "typo via E2A_ENV must not silently mean non-production", yaml: "env: \"production\"\n", envVar: "produciton"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.yaml")
+			os.WriteFile(cfgPath, []byte(tc.yaml), 0644)
+			if tc.envVar != "" {
+				t.Setenv("E2A_ENV", tc.envVar)
+			}
+
+			_, err := Load(cfgPath)
+			if err == nil {
+				t.Fatal("Load should reject an env value that is neither \"development\" nor \"production\"")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidSenderIdentityLegacyCompatEnv(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

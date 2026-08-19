@@ -453,6 +453,22 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// E2A_ENV overrides `env:` in config.yaml. Every other config knob
+	// already has an env-var override; env: previously had none — the only
+	// way to flip it was editing YAML, but the published Docker image bakes
+	// config.example.yaml (env: "development") to a fixed path, so every
+	// documented deployment ran in development mode permanently regardless
+	// of how the operator configured the container. That matters because
+	// IsProduction() (below) gates both the production HMAC-secret/length
+	// guards in Validate() and the dev-mode DNS-verification short-circuit
+	// in internal/agent/api.go's checkDomainRecords.
+	if v := os.Getenv("E2A_ENV"); v != "" {
+		cfg.Env = v
+	}
+	if cfg.Env != "development" && cfg.Env != "production" {
+		return nil, fmt.Errorf("config: env (or E2A_ENV) must be %q or %q, got %q", "development", "production", cfg.Env)
+	}
+
 	// Env overrides — secrets only (never duplicated in yaml)
 	if v := os.Getenv("E2A_DATABASE_URL"); v != "" {
 		cfg.Database.URL = v

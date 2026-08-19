@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"log"
 	"sort"
 	"strings"
 	"testing"
@@ -86,5 +88,40 @@ func TestDNSProbeVocabularyPinned(t *testing.T) {
 		if persistedOnlyVocab[v] {
 			t.Errorf("probe emitted persisted-vocabulary value %q — the live-probe axis must never speak persisted-state words (verified/pending/failed)", v)
 		}
+	}
+}
+
+// TestCheckDomainRecordsDevShortCircuitLogsWarning pins that the dev-mode
+// short-circuit (production=false) never fires silently: it skips every real
+// DNS lookup and reports a domain fully verified with no ownership proof at
+// all, which is fine for local dev but would be a silent security-check
+// stub — and a domain-ownership bypass on a multi-user deployment — if a
+// deployment ended up in this mode unintentionally (e.g. env: production
+// never actually set; see TestLoadConfigEnvVarOverridesYAMLEnv in
+// internal/config). The production path must stay quiet on this front (it
+// has nothing to warn about — it did real lookups).
+func TestCheckDomainRecordsDevShortCircuitLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	checkDomainRecords("dev-shortcut.example.test", "mx.e2a.test", "tok", "", "", false /* production */)
+
+	got := buf.String()
+	if !strings.Contains(got, "WARNING") || !strings.Contains(got, "dev-shortcut.example.test") {
+		t.Errorf("dev-mode short-circuit should log a loud, domain-identifying warning every time it fires; got: %q", got)
+	}
+
+	buf.Reset()
+	invalid := strings.Repeat("x", 64) + ".invalid" // rejected client-side, no real DNS traffic
+	checkDomainRecords(invalid, "mx.e2a.test", "tok", "", "", true /* production */)
+	if buf.Len() != 0 {
+		t.Errorf("production path should never log the dev-shortcut warning; got: %q", buf.String())
 	}
 }
