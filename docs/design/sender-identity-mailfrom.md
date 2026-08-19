@@ -268,22 +268,18 @@ it refuses ownership on a live domain, and a plain log line on every
 successful adoption, so this is now operator-observable rather than a silent
 unbounded hourly retry.
 
-**Steps 4, 6, and 7 are NOT simply "unaffected."** An earlier draft of this
-amendment claimed the IAM hardening in step 4 is independent of adoption
-because it is a provider-side condition "that a client-side ownership check
-cannot close" — that framing is now only half true. The `aws:ResourceTag`
-condition still closes the check-then-mutate RACE (adoption's own tag check
-and its `TagResource` call are not atomic with respect to a concurrent
-out-of-band change). But adoption itself is a client that WRITES the tag —
-the very thing step 4's IAM condition exists to gate — so the two are no
-longer independent controls in the way the original doc implied: a bug in
-`canAdoptIdentity` is no longer caught by IAM the way a bug in some
-hypothetical OTHER client-side tagger would be, because IAM's job here is to
-stop *untrusted* principals from tagging, not to second-guess e2a's own
-adoption logic. Step 4's IAM policy remains necessary (it is still the only
-thing stopping a compromised or misconfigured OTHER principal from tagging
-or mutating), just not sufficient on its own to catch an adoption-logic bug
-the way the original phrasing suggested. Steps 6 and 7 (the blue/green
+**Steps 4, 6, and 7 are NOT simply "unaffected."** Step 4's IAM hardening
+remains necessary, but it is not fully independent of adoption. The
+`aws:ResourceTag` condition closes the check-then-mutate RACE (adoption's
+own tag check and its `TagResource` call are not atomic with respect to a
+concurrent out-of-band change). But adoption itself is a client that WRITES
+the tag — the very thing step 4's IAM condition exists to gate — so a bug in
+`canAdoptIdentity` is not caught by IAM the way a bug in some hypothetical
+OTHER client-side tagger would be: IAM's job here is to stop *untrusted*
+principals from tagging, not to second-guess e2a's own adoption logic. Step
+4's IAM policy is still the only thing stopping a compromised or
+misconfigured OTHER principal from tagging or mutating, just not sufficient
+on its own to catch an adoption-logic bug. Steps 6 and 7 (the blue/green
 rollout choreography) are genuinely unaffected — adoption runs entirely
 inside `Provision`/`Status`, which the rollout sequencing already treats as
 opaque provider calls.
@@ -313,6 +309,16 @@ The ownership tag is a deliberate migration gate. Do not bulk-adopt everything
 returned by `ListEmailIdentities`: an AWS account/region may contain identities
 owned by another application.
 
+Steps 1–3 describe the original manual, one-time tagging pass and are no
+longer required for any identity `canAdoptIdentity` can adopt automatically
+(see the amendment above) — `SESProvider` tags those inline, per domain, the
+first time `Provision`/`Status` runs against them, with no export/review
+step needed. Run 1–3 only if you want to pre-emptively tag a specific
+identity you know is e2a's own before the strict IAM policy in step 4 goes
+live (e.g. one that won't satisfy `canAdoptIdentity`'s strict criteria, such
+as a stale selector), or to positively confirm which SES-only identities
+belong to a different application before locking anything down.
+
 1. Before deploying this release, export the customer-owned domains for which
    the existing e2a database records sender-identity work (`sending_status !=
    'none'`). Separately inventory SES identities in the configured region.
@@ -331,10 +337,16 @@ owned by another application.
    tagged `CreateEmailIdentity` calls, in addition to the Create/Get/List/Put/
    Delete actions above. Apply request-tag conditions to create/tag and the
    resource-tag condition to both Put operations and delete.
-5. Re-run both inventories and apply the strict tag-conditioned IAM policy.
-   An untagged legacy e2a identity fails
-   closed with `identity not owned`; audit and tag it explicitly rather than
-   weakening the ownership check.
+5. Re-run both inventories and apply the strict tag-conditioned IAM policy. By
+   this point most e2a-managed identities that satisfy `canAdoptIdentity`'s
+   criteria will already be tagged automatically (see the amendment above),
+   independently of whether you ran steps 1–3. An identity still untagged
+   here either genuinely belongs to another application (correctly fails
+   closed with `identity not owned`) or simply has not yet had a
+   `Provision`/`Status` poll run against it — the ALERT log line on refusal
+   (`internal/senderidentity/worker.go`) distinguishes WHY, and the reaper
+   keeps retrying hourly. Investigate via that log before assuming a domain
+   needs a manual tag.
 6. Freeze domain verification, domain deletion, and account deletion, then
    deploy with `sender_identity.legacy_job_compat: true`. After cutover, wait
    for the previous slot to stop and for the post-drain convergence window;
@@ -378,7 +390,14 @@ owned by another application.
   largest post-upgrade sweep could turn into exactly this PR's own failure
   mode); a successful resolution is cached permanently; resolution runs on
   `context.WithoutCancel(ctx)` with its own explicit timeout so it is never
-  itself at the mercy of the caller's deadline. Non-production guard:
+  itself at the mercy of the caller's deadline. ARN partition: `arnPartition`
+  extracts the partition segment from STS's own `Arn` field (`aws`,
+  `aws-us-gov`, `aws-cn`), degrading to the `aws` default on a nil or
+  unparseable ARN; the adopted-identity ARN built for `TagResource` uses
+  whichever partition was resolved, not a hardcoded one
+  (`TestIdentityFromCallerIdentity`,
+  `TestSESProvider_AdoptIdentityUsesResolvedPartitionInARN`). Non-production
+  guard:
   `SESProvider.refuseAdoption` (set from `NewSESProviderFromConfig`'s
   `production` parameter) refuses adoption of an identity that would
   otherwise satisfy every `canAdoptIdentity` criterion — see the caveat
@@ -419,5 +438,5 @@ owned by another application.
   itself. That would be strictly stronger evidence (no dependency on SES's
   own verification having run correctly) but means plumbing DNS resolution
   into the provider layer, which currently has none — deliberately out of
-  scope for the BATCH A fix. Revisit only if `DkimAttributes.Status` alone
+  scope for the adoption work above. Revisit only if `DkimAttributes.Status` alone
   proves insufficient in practice.

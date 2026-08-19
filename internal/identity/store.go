@@ -1392,16 +1392,29 @@ func (s *Store) ClearSendingIdentityProviderPending(ctx context.Context, domain,
 }
 
 // ForgetSendingIdentityManaged removes the ledger row for domain UNLESS
-// domain still exists in domains with a live owner (a non-NULL user_id). Only
-// the ErrIdentityNotOwned handlers in internal/senderidentity/worker.go call
-// this (an ownership failure, not a confirmed provider deletion — that path
-// is FinalizeSendingIdentityTombstone instead); forgetting the ledger row for
-// a domain that is still live and owned would permanently strand it, because
-// nothing else ever revisits a domain absent from this ledger. The guard is
-// expressed as part of the DELETE's WHERE clause rather than a
+// domain still exists in domains with a live owner (a non-NULL user_id).
+//
+// As of #908, this method has ZERO callers: both ErrIdentityNotOwned
+// handlers in internal/senderidentity/worker.go that used to call it after
+// an ownership failure were changed to call nothing instead, not to call
+// something else here. It is kept rather than deleted: doing so would also
+// require rewriting the rationale comments in those two handlers (which cite
+// this method's guard by name while explaining why they must never call it)
+// and the poisoned-fake regression tests in
+// internal/senderidentity/worker_test.go that exist specifically to catch a
+// reintroduced call — a larger, riskier change than this method's own
+// dead-code status justifies in a hygiene pass. If a future change ever adds
+// a call to this method again, it must NOT be from an ownership-failure
+// branch: an ownership failure is never evidence of teardown, and forgetting
+// the ledger row for a domain that is still live and owned would permanently
+// strand it, because nothing else ever revisits a domain absent from this
+// ledger. FinalizeSendingIdentityTombstone is the method for confirmed-
+// teardown ledger cleanup.
+//
+// The guard is expressed as part of the DELETE's WHERE clause rather than a
 // check-then-act at the call site: WithSendingIdentityMutationLock (held by
-// both callers) and the domain-delete transaction's advisory locks use
-// different lock names and do not exclude each other, so a separate
+// both former callers) and the domain-delete transaction's advisory locks
+// use different lock names and do not exclude each other, so a separate
 // existence check beforehand could race a concurrent domain delete. A
 // genuinely deleted (or ownerless system) domain still has its row removed
 // here exactly as before; a DB failure leaves the ledger row for a later
