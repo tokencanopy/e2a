@@ -1421,13 +1421,14 @@ func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string)
 // FinalizeSendingIdentityTombstone removes the ledger row only when BOTH:
 // its last mutation (updated_at — bumped by provision marks, the migration
 // trigger, and TouchSendingIdentityTombstoneTx on delete) is older than
-// olderThan, AND domain no longer exists in domains with a live owner (the
-// same NOT EXISTS guard ForgetSendingIdentityManaged uses). The age gate
+// olderThan, AND domain no longer exists in domains as a LIVE, OWNED,
+// VERIFIED row (the same live-owner guard ForgetSendingIdentityManaged uses,
+// now also requiring d.verified — see batch C finding 8 below). The age gate
 // alone stops an audit or sweep running inside a LATER mutation's drain
 // window from finalizing that mutation's tombstone. The live-owner guard is
-// what makes "never forget a live owned domain's row" a genuine STORE
-// invariant rather than something only ForgetSendingIdentityManaged upholds:
-// this method's own callers include the no-key branch of
+// what makes "never forget a live owned VERIFIED domain's row" a genuine
+// STORE invariant rather than something only ForgetSendingIdentityManaged
+// upholds: this method's own callers include the no-key branch of
 // syncProviderIdentityWithInspection, which can run against a domain that is
 // verified, live, and owned but has NULL dkim_selector/dkim_private_key
 // (e.g. a stuck migration) — without this guard that call strands the ledger
@@ -1439,13 +1440,30 @@ func (s *Store) ForgetSendingIdentityManaged(ctx context.Context, domain string)
 // tightening, not a behavior change for genuine teardown. A row that fails
 // either gate survives as a no-op; a later audit or the hourly reaper
 // finalizes it once both hold.
+//
+// The AND d.verified clause (added in batch C finding 8) is deliberate, not
+// a widening of the guard's original NOT EXISTS(user_id IS NOT NULL): the
+// teardown branch in syncProviderIdentityWithInspection fires whenever
+// LoadSendingIdentityState reports pgx.ErrNoRows OR (err == nil &&
+// !state.Verified) — the second case is a LIVE, OWNED row that is simply not
+// (yet) DNS-verified, e.g. a delete immediately followed by a re-register of
+// the same domain, landing a fresh unverified row before the post-drain
+// audit runs. Guarding on user_id alone made Finalize a permanent no-op for
+// that row: NOT EXISTS saw the live owned row and always blocked, so the old
+// incarnation's ledger tombstone survived forever and the reaper re-swept it
+// hourly. Requiring d.verified too means that legitimate re-register case
+// (owned but unverified) no longer blocks Finalize, while both protected
+// populations stay protected: the incident population this ledger exists
+// for (verified/live/owned) still satisfies user_id IS NOT NULL AND
+// verified, and so does the no-key branch's domain (verified, live, owned,
+// merely missing key material).
 func (s *Store) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
 	_, err := s.senderIdentityExecutor(ctx).Exec(ctx,
 		`DELETE FROM sender_identity_managed_domains m
 		  WHERE m.domain = $1
 		    AND m.updated_at <= now() - ($2 * interval '1 second')
 		    AND NOT EXISTS (
-		      SELECT 1 FROM domains d WHERE d.domain = m.domain AND d.user_id IS NOT NULL
+		      SELECT 1 FROM domains d WHERE d.domain = m.domain AND d.user_id IS NOT NULL AND d.verified
 		    )`,
 		normalizeDomain(domain), olderThan.Seconds(),
 	)
