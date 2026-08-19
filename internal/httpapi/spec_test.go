@@ -25,7 +25,13 @@ const specGoldenPath = "../../api/openapi.yaml"
 // handlers, so the file codegen consumes can never lag the server. Regenerate
 // with `make spec` after any handler/annotation change.
 func TestSpecGoldenNoDrift(t *testing.T) {
-	yaml, err := New(Deps{}).OpenAPIYAML()
+	// APIURL is set here — not hardcoded in httpapi.go — to represent the
+	// canonical hosted product's own `servers` entry (api-v1-redesign §1)
+	// in the checked-in reference document. A real deployment (hosted or
+	// self-hosted) supplies its OWN config.HTTP.APIURL at runtime; this
+	// golden file is just this repo's documentation snapshot for the
+	// upstream product, not a value every deployment inherits.
+	yaml, err := New(Deps{APIURL: "https://api.e2a.dev"}).OpenAPIYAML()
 	if err != nil {
 		t.Fatalf("render spec: %v", err)
 	}
@@ -43,6 +49,30 @@ func TestSpecGoldenNoDrift(t *testing.T) {
 	if !bytes.Equal(bytes.TrimRight(want, "\n"), bytes.TrimRight(yaml, "\n")) {
 		t.Errorf("committed %s is stale vs the live handlers — run `make spec` to regenerate", specGoldenPath)
 	}
+}
+
+// TestSpecServersReflectsDeployment is the regression test for the OpenAPI
+// `servers` block: every deployment — hosted AND self-hosted — serves this
+// document at /v1/openapi and /v1/docs, so it must never advertise a
+// hardcoded operator host regardless of Deps.APIURL. A self-hoster's own
+// docs page rendering "api.e2a.dev" as the sole server would fire the
+// reader's bearer at the operator's API via the try-it button.
+func TestSpecServersReflectsDeployment(t *testing.T) {
+	t.Run("advertises this deployment's own configured API host", func(t *testing.T) {
+		oapi := New(Deps{APIURL: "https://api.selfhost.example.test"}).API.OpenAPI()
+		if len(oapi.Servers) != 1 || oapi.Servers[0].URL != "https://api.selfhost.example.test" {
+			t.Fatalf("servers = %+v, want exactly [https://api.selfhost.example.test]", oapi.Servers)
+		}
+	})
+
+	t.Run("advertises no server — never a guessed operator host — when APIURL is unset", func(t *testing.T) {
+		oapi := New(Deps{}).API.OpenAPI()
+		for _, s := range oapi.Servers {
+			if strings.Contains(s.URL, "api.e2a.dev") {
+				t.Fatalf("servers = %+v: must never default to the operator's api.e2a.dev when APIURL is unset", oapi.Servers)
+			}
+		}
+	})
 }
 
 // TestSpecGeneratedFromHandlers is the spec↔server check (api-v1-redesign §6):

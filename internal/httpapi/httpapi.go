@@ -446,6 +446,13 @@ type Deps struct {
 	// Deployment info surfaced by GET /v1/info.
 	SharedDomain string
 	PublicURL    string
+	// APIURL is this deployment's externally visible API host (config
+	// http.api_url, which already defaults to http.public_url and is already
+	// the OAuth issuer). Used as the sole entry in the OpenAPI document's
+	// `servers` block — see the comment in New() for why every deployment
+	// (hosted or self-hosted) must advertise ITS OWN host here, never a
+	// hardcoded literal.
+	APIURL string
 
 	// WSHandle serves the WebSocket upgrade for an agent address (the real-
 	// time inbound transport). Injected so httpapi need not depend on the ws
@@ -543,13 +550,25 @@ func New(deps Deps) *Server {
 		"beta, or enumerated as experimental, is stable.\n\n" +
 		"Removing or changing stable surface only happens on a new major version path (/v2); deprecations " +
 		"are announced ahead of time via `deprecated: true` in this document and keep working within v1."
-	// Canonical production host (api-v1-redesign §1: "Canonical base URL
-	// https://api.e2a.dev/v1"). Operations already carry the /v1 prefix, so the
-	// server URL stops at the host — otherwise clients would double it. Without a
-	// servers block, generated SDKs default to http://localhost (a
-	// Bearer-over-cleartext footgun).
-	config.Servers = []*huma.Server{
-		{URL: "https://api.e2a.dev", Description: "Production"},
+	// This document is served by EVERY deployment at /v1/openapi and /v1/docs
+	// — hosted and self-hosted alike — so the `servers` entry must name THIS
+	// deployment's own API host, never a literal. A self-hoster's docs page
+	// would otherwise render the operator as the sole server, and the
+	// try-it button would fire the reader's bearer at api.e2a.dev instead of
+	// the self-hosted deployment. deps.APIURL is config http.api_url, which
+	// already defaults to http.public_url and is already the OAuth issuer —
+	// api-v1-redesign §1's "Canonical base URL https://api.e2a.dev/v1" is
+	// simply what THAT config resolves to on the operator's own deployment.
+	// Operations already carry the /v1 prefix, so the server URL stops at
+	// the host — otherwise clients would double it. When APIURL is unset (a
+	// self-host that configured neither http.api_url nor http.public_url) we
+	// leave Servers nil rather than guess a host: Huma then falls back to
+	// its own http://localhost default, which is at worst unhelpful, never
+	// wrong about who is being talked to.
+	if deps.APIURL != "" {
+		config.Servers = []*huma.Server{
+			{URL: deps.APIURL, Description: "Production"},
+		}
 	}
 	// One auth scheme across the surface: a Bearer credential that is
 	// either an API key or an OAuth 2.1 access token (api-v1-redesign §5).
