@@ -50,6 +50,11 @@ jobs:
           node-version: "22"
       - run: scripts/check-repository-text-integrity.sh
       - run: node --test scripts/sync-agent-docs.test.mjs
+      # Backstop against accidental credential publication. GitHub push
+      # protection cannot catch e2a's own key format, and .gitignore does not
+      # stop a force-add — see the script header for the 2026-08-08 incident
+      # this exists to keep from recurring.
+      - run: scripts/check-no-committed-credentials.sh
 
   harness-tests:
     name: Test harnesses (e2e-prod unit, sdk-monitor)
