@@ -480,10 +480,10 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 			}
 			return observedResult, observedErr
 		}
-		// The periodic sweep never MUTATES a healthy applied identity (that
-		// would flap a verified sender back to pending), but it does inspect
-		// the two states that can silently rot behind an applied, present
-		// identity, both READ-ONLY:
+		// The periodic sweep never MUTATES the DB record for a healthy applied
+		// identity through this inspect block (that would flap a verified
+		// sender back to pending), but it does inspect the two DB states that
+		// can silently rot behind an applied, present identity:
 		//
 		//   - stuck `pending`: the reconcile budget is gone (enqueue failed or
 		//     exhausted) and nothing else would ever poll it. Verified/failed
@@ -498,6 +498,17 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		//
 		// An absent/foreign answer in either state falls through to full
 		// convergence; `failed` steady state costs no provider call.
+		//
+		// CAUTION: "inspect"/"READ-ONLY" above describes the DB record only,
+		// not the provider. providerStatus() above calls provider.Status,
+		// which is NOT a pure read on the SES side: when the identity is
+		// untagged but provably e2a's own (canAdoptIdentity — see ses.go),
+		// Status self-heals the ownership tag with a TagResource call before
+		// returning Verified/Pending/Failed. So a "healthy" applied identity
+		// that merely lost its tag out-of-band can still take a provider-side
+		// write during this block's poll, even though the DB stays untouched
+		// and no event fires. Do not extend this comment's "never mutates" to
+		// mean "never talks to SES with a write."
 		force := forceProvision
 		if !force {
 			if !inspectTerminal && state.Status != StatusPending && state.Status != StatusVerified {
