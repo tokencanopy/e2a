@@ -420,7 +420,7 @@ domain, and cached key scope are managed by login or environment variables.
 | `E2A_API_KEY` | — | API key. Skips `e2a login` — useful in CI and scripts |
 | `E2A_URL` | `https://e2a.dev` | The e2a deployment root. Set for self-host |
 | `E2A_AGENT_EMAIL` | — | Default sending/listening inbox (what `--agent` overrides) |
-| `E2A_SHARED_DOMAIN` | auto-discovered | Force the shared domain instead of discovering it via `GET /v1/info` |
+| `E2A_SHARED_DOMAIN` | auto-discovered | Force the shared domain instead of discovering it via `GET /v1/info`. No baked-in default — bare-name commands (`agents create <name>`, `keys create --agent <name>`) discover it live from `/v1/info` when unset (cheap, unauthenticated) rather than assuming the hosted product's `agents.e2a.dev`; if a self-hosted deployment genuinely has none configured, those commands fail with a clear message instead of guessing |
 
 **Precedence:** command-line flags beat environment variables, which beat
 `~/.e2a/config.json`, which beats the defaults above.

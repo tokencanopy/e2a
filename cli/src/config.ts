@@ -11,8 +11,13 @@ export interface Config {
    * Shared mail domain the deployment uses for slug-based agent addresses
    * (e.g. "agents.example.com"), auto-discovered from `GET /v1/info` on
    * `e2a login` and cached here. Self-hosters override it with
-   * E2A_SHARED_DOMAIN. Defaults to the hosted product's shared domain so the
-   * public deployment works zero-config.
+   * E2A_SHARED_DOMAIN. Empty ("") when unknown — deliberately NOT defaulted
+   * to the hosted product's "agents.e2a.dev": a caller authenticating by env
+   * only (E2A_API_KEY + E2A_URL, never `e2a login` — CI, containers, the
+   * tether harness) would otherwise silently expand bare inbox names onto
+   * the operator's domain instead of a self-hosted one. Use
+   * {@link resolveSharedDomain} to get a value, which discovers it live
+   * from `/v1/info` when this is empty.
    */
   shared_domain: string;
   /**
@@ -34,7 +39,9 @@ export function loadConfig(): Config {
     api_key: "",
     api_url: DEFAULT_URL,
     agent_email: "",
-    shared_domain: DEFAULT_SHARED_DOMAIN,
+    // No default: see the field doc on Config.shared_domain. Resolved live
+    // via resolveSharedDomain() where it's actually needed.
+    shared_domain: "",
   };
 
   // Read from file
@@ -174,4 +181,64 @@ export function requireApiKey(config: Config): string {
     process.exit(EXIT.AUTH);
   }
   return config.api_key;
+}
+
+/**
+ * Resolves the deployment's shared mail domain for bare-name → full-address
+ * expansion (`e2a agents create mybot` → `mybot@<shared_domain>`).
+ *
+ * config.shared_domain is populated by `e2a login`'s discovery request or
+ * E2A_SHARED_DOMAIN, but a caller authenticating purely by env
+ * (E2A_API_KEY + E2A_URL: CI, containers, the tether harness) never runs
+ * `e2a login`, so it's often still empty at the point of use. `GET
+ * /v1/info` is unauthenticated and reachable on every deployment
+ * (hosted or self-hosted) at that same point, so we discover it live
+ * instead of guessing the hosted product's "agents.e2a.dev" — a
+ * self-hosted deployment's real shared domain is almost certainly
+ * something else, and guessing wrong would silently create/reference an
+ * address on the wrong domain.
+ *
+ * Returns "" — never a guess — when nothing resolves a value, so callers
+ * can fail closed with a clear message instead of expanding onto the
+ * wrong domain.
+ */
+export async function resolveSharedDomain(config: Config): Promise<string> {
+  if (config.shared_domain) return config.shared_domain;
+  try {
+    const resp = await fetch(`${config.api_url.replace(/\/+$/, "")}/v1/info`);
+    if (resp.ok) {
+      const info = (await resp.json()) as { shared_domain?: string };
+      if (info.shared_domain) return info.shared_domain;
+    }
+    // Non-ok response: server up but /v1/info unavailable (older
+    // deployment) or genuinely has no shared domain configured. Either
+    // way, fall through to "" rather than guessing.
+  } catch {
+    // Unreachable deployment: the caller's next real API call (agents
+    // create / keys create) will surface this same failure with a clearer,
+    // non-discovery-specific error. No need to duplicate it here.
+  }
+  return "";
+}
+
+/**
+ * Expands a bare inbox slug (no "@") to a full address on the deployment's
+ * shared domain, discovering that domain via {@link resolveSharedDomain}
+ * when it isn't already known. A full address (contains "@") passes
+ * through unchanged with no network call.
+ *
+ * Exits USAGE (2) — the same fail-closed shape as {@link requireApiKey} —
+ * when the name is bare and no shared domain can be found, rather than
+ * silently building an address on the operator's domain.
+ */
+export async function expandBareAddress(nameOrEmail: string, config: Config): Promise<string> {
+  if (nameOrEmail.includes("@")) return nameOrEmail;
+  const domain = await resolveSharedDomain(config);
+  if (!domain) {
+    process.stderr.write(
+      `e2a: "${nameOrEmail}" has no @ and this deployment has no shared domain — pass a full address (name@yourdomain.com).\n`,
+    );
+    process.exit(EXIT.USAGE);
+  }
+  return `${nameOrEmail}@${domain}`;
 }
