@@ -375,9 +375,9 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 		}
 	})
 	// Fire before the error check: a terminal status may have committed even
-	// when a later store call in the same locked section failed (e.g. the
-	// ledger Forget after a not-owned failure). The retry short-circuits on
-	// status != pending, so this attempt is the event's only chance.
+	// when a later step in the same locked section fails. The retry
+	// short-circuits on status != pending, so this attempt is the event's
+	// only chance.
 	if out.changed {
 		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 	}
@@ -653,8 +653,9 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}
-			// out before Forget: the failed status is committed, so the event
-			// must fire even when the ledger cleanup errors and the job retries.
+			// out before FinalizeSendingIdentityTombstone: the failed status is
+			// committed, so the event must fire even when the ledger cleanup
+			// errors and the job retries.
 			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			if finalizeDeletion {
 				if err := store.FinalizeSendingIdentityTombstone(lockedCtx, domain, postDrainConvergenceDelay); err != nil {
@@ -696,9 +697,9 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, res.Status, res.DkimStatus, res.MailFromStatus, res.Error, res.DNSRecords); err != nil {
 			return err
 		}
-		// out before the ledger calls below, same rule as the two branches
-		// above: the status is committed, so a terminal transition must fire
-		// even when Forget/MarkApplied errors and the job retries.
+		// out before the ledger calls below: the status is committed, so a
+		// terminal transition must fire even when FinalizeSendingIdentityTombstone
+		// or MarkSendingIdentityApplied errors and the job retries.
 		out = syncOutcome{changed: true, statusChanged: res.Status != state.Status, incarnation: state.Incarnation, owner: state.Owner, status: res.Status, errMsg: res.Error}
 		if res.Status == StatusFailed {
 			if finalizeDeletion {
@@ -712,11 +713,12 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		return nil
 	})
 	// Fire terminal TRANSITIONS before the error check: the status write is
-	// already committed, and after a later store error (e.g. the ledger
-	// Forget) the retry's rewrite is same→same and will not fire — this
-	// attempt is the event's only chance. Gating on statusChanged (not
-	// changed) is what keeps that retry, and every forced hourly re-sweep of
-	// a stuck domain, from duplicating the webhook.
+	// already committed, and after a later store error (e.g. from
+	// FinalizeSendingIdentityTombstone or MarkSendingIdentityApplied) the
+	// retry's rewrite is same→same and will not fire — this attempt is the
+	// event's only chance. Gating on statusChanged (not changed) is what
+	// keeps that retry, and every forced hourly re-sweep of a stuck domain,
+	// from duplicating the webhook.
 	if out.statusChanged && (out.status == StatusVerified || out.status == StatusFailed) {
 		fireOwner(ctx, fire, domain, out.owner, out.status, out.errMsg)
 	}
