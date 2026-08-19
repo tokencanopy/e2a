@@ -276,12 +276,12 @@ func TestReconcileWorker_Work(t *testing.T) {
 
 // TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial pins
 // FakeProvider.Status actually recording its arguments (it used to discard
-// expectedSelector/haveKeyMaterial and record only the domain, so a call
-// site that regressed to passing "", a stale selector, or the wrong boolean
+// the AdoptionEvidence and record only the domain, so a call site that
+// regressed to passing a zero value, a stale selector, or the wrong boolean
 // would still pass every worker test — the compiler cannot catch a
 // wrong-but-same-typed argument). This exercises the real call site,
-// reconcileProviderIdentity's provider.Status(ctx, domain, state.Selector,
-// len(state.PrivateKey) > 0) in worker.go, and asserts it passes the store's
+// reconcileProviderIdentity's provider.Status(ctx, domain,
+// adoptionEvidence(state)) in worker.go, and asserts it passes the store's
 // actual selector and an accurate key-material signal — the exact inputs
 // canAdoptIdentity depends on in the real SES provider (see ses.go).
 func TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial(t *testing.T) {
