@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -281,17 +282,28 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 		}
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required", domain, reason)
 			changed, err := setFailedStatus(ctx, store, domain, state, reason)
 			if err != nil {
 				return err
 			}
 			if changed {
-				// out is set BEFORE the ledger Forget: the failed status is already
-				// committed, and the retry after a Forget error short-circuits on
-				// status != pending — firing must not depend on Forget succeeding.
 				out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			}
-			return store.ForgetSendingIdentityManaged(ctx, domain)
+			// Do NOT forget the managed-identity ledger row here: an ownership
+			// failure is never evidence of teardown, and the row is the only
+			// durable handle back to a domain that is still live. Forget's own
+			// NOT EXISTS guard evaluates against the CALLING transaction's
+			// snapshot — if a concurrent domain-delete commits first, the guard
+			// still passes and this would delete the tombstone, orphaning the SES
+			// identity forever (the guard is defense-in-depth in the SQL, not a
+			// substitute for never calling Forget from a non-teardown branch).
+			// FinalizeSendingIdentityTombstone (drain-window guarded, called only
+			// from the genuine-teardown branch of syncProviderIdentityWithInspection)
+			// is the sole deletion path; the reaper keeps retrying this domain
+			// hourly until an operator resolves the ownership problem (or the
+			// self-healing adoption path resolves it automatically).
+			return nil
 		}
 		if err != nil {
 			// Transient SES/network error. Retry — UNLESS this was the last
@@ -601,12 +613,15 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		res, err := provider.Provision(lockedCtx, domain, state.Selector, state.PrivateKey)
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required", domain, reason)
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}
-			// out before Forget — see the no-key branch above.
 			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
-			return store.ForgetSendingIdentityManaged(lockedCtx, domain)
+			// Do NOT forget the ledger row — see the identical comment in
+			// reconcileProviderIdentity's ErrIdentityNotOwned branch above.
+			// FinalizeSendingIdentityTombstone stays the sole deletion path.
+			return nil
 		}
 		if err != nil {
 			return err

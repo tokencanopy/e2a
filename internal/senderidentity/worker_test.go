@@ -1172,94 +1172,31 @@ func TestPostDrainAuditWorker_FiresStatusEvents(t *testing.T) {
 	}
 }
 
-// TestReconcileWorker_NotOwnedForgetFailureStillFires pins the review fix for
-// the lost-event window: the failed status is committed, then the ledger
-// Forget hits a transient DB error. The job retries (error propagates), but
-// the retry short-circuits on status != pending — so the event MUST fire on
-// this attempt or it is lost for good.
-func TestReconcileWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
-	const domain = "forget-blip.example"
-	store := newFakeStore()
-	store.setStatus(domain, StatusPending)
-	store.setOwner(domain, "u3")
-	store.forgetErr = errors.New("db blip")
-	prov := NewFakeProvider()
-	prov.SetStatusErr(domain, ErrIdentityNotOwned)
-	firer := &recordingFirer{}
-	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
-
-	err := w.Work(context.Background(), reconcileJob(domain, 1, 12))
-	if err == nil {
-		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
-	}
-	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
-		t.Fatalf("status = %q, want failed committed before the Forget error", got)
-	}
-	ev, ok := firer.last()
-	if !ok || ev.Status != StatusFailed {
-		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
-	}
-}
-
-// TestSyncWorker_NotOwnedForgetFailureStillFires: same window in the sync
-// (provision) path — status commit succeeded, ledger Forget failed. The
-// adversarial review then proved the naive fix fires once per River attempt
-// (the sync path re-executes the same terminal transition on retry, unlike
-// reconcile's status!=pending guard), so this also pins exactly-one event
-// across the retries: the first attempt's write CHANGES the status and fires;
-// the retry's failed→failed rewrite must not.
-func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
-	const domain = "sync-forget-blip.example"
-	store := newFakeStore()
-	store.setStatus(domain, StatusVerified)
-	store.setOwner(domain, "u4")
-	store.setProvisionInputs("sel", []byte("der"), true)
-	store.forgetErr = errors.New("db blip")
-	prov := NewFakeProvider()
-	prov.SetProvisionErr(ErrIdentityNotOwned)
-	firer := &recordingFirer{}
-	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
-
-	err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}})
-	if err == nil {
-		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
-	}
-	ev, ok := firer.last()
-	if !ok || ev.Status != StatusFailed {
-		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
-	}
-	// River retries (Forget still failing): the rewrite is failed→failed — no
-	// duplicate webhook.
-	for attempt := 2; attempt <= 4; attempt++ {
-		if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err == nil {
-			t.Fatalf("attempt %d: Forget still failing must still propagate", attempt)
-		}
-	}
-	if firer.count() != 1 {
-		t.Fatalf("fired %d events over 4 attempts, want exactly 1 (no duplicate per retry)", firer.count())
-	}
-}
-
-// TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain pins the
-// ledger-retention fix (case 5): an ownership failure on a domain that is
-// still live and owned must retain the sender-identity ledger row, not
-// delete it. Before the fix, ForgetSendingIdentityManaged unconditionally
-// deleted the row here, so the domain was never revisited by the periodic
-// reaper — permanently stranded `failed` even after an operator fixed the
-// ownership problem out-of-band (e.g. by tagging the identity manually).
+// TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain pins finding 6: an
+// ownership failure must never call ForgetSendingIdentityManaged at all — an
+// ownership failure is never evidence of teardown, and the ledger row is the
+// only durable handle back to a domain that is still live.
+// ForgetSendingIdentityManaged's own NOT EXISTS guard is defense-in-depth in
+// the SQL, not a substitute for this: it evaluates against the calling
+// transaction's own snapshot, so a concurrent domain-delete that commits
+// first can still make the guard pass and delete the tombstone, orphaning
+// the SES identity forever. store.forgetErr is deliberately poisoned: Work
+// succeeding proves Forget is never even invoked on this path (a
+// reintroduced call would surface the poisoned error).
 func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	const domain = "not-owned-live.example"
 	store := newFakeStore()
 	store.setStatus(domain, StatusPending)
 	store.setOwner(domain, "u-live")
 	store.managed[domain] = domain + "-incarnation"
+	store.forgetErr = errors.New("Forget must never be called from an ownership failure")
 	prov := NewFakeProvider()
 	prov.SetStatusErr(domain, ErrIdentityNotOwned)
 	firer := &recordingFirer{}
 	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
 
 	if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
-		t.Fatalf("Work: %v", err)
+		t.Fatalf("Work: %v (Forget must never be called on this path)", err)
 	}
 	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
 		t.Fatalf("status = %q, want failed", got)
@@ -1277,6 +1214,7 @@ func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 	store.setStatus(domain, StatusNone)
 	store.setOwner(domain, "u-live2")
 	store.setProvisionInputs("sel", []byte("der"), true)
+	store.forgetErr = errors.New("Forget must never be called from an ownership failure")
 	prov := NewFakeProvider()
 	prov.SetProvisionErr(ErrIdentityNotOwned)
 	firer := &recordingFirer{}
