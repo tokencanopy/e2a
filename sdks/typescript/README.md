@@ -392,7 +392,11 @@ stop. Reconnects with exponential backoff (1s → 30s, configurable via
 agent**: if a newer connection for the same agent takes over, the stream
 stops with `E2AConnectionReplacedError` (WS close code `4000 "replaced"`)
 instead of reconnecting — reconnecting would steal the socket back and loop.
-The lower-level `WSListener` is also exported for advanced use.
+The lower-level `WSListener` is also exported for advanced use — its
+`baseUrl` resolves the same way as `E2AClient`'s (`opts.baseUrl` →
+`E2A_API_URL` → the deprecated `E2A_BASE_URL` → `https://api.e2a.dev`), so
+constructing it directly with `E2A_API_URL` exported still points it at a
+self-hosted deployment.
 
 ## Trash and restore
 

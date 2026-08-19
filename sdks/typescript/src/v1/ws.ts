@@ -8,6 +8,7 @@ import {
   E2ANotFoundError,
 } from "./errors.js";
 import type { WebhookEvent } from "./webhook-signature.js";
+import { resolveBaseUrl, DEFAULT_BASE_URL } from "./env.js";
 
 // Map a fatal (non-retryable) WebSocket handshake rejection status to a typed
 // error — mirrors the Python SDK's _fatal_error_for_status (F6). A 4xx means the
@@ -105,7 +106,9 @@ export interface WSListenerOptions {
   apiKey: string;
   /** Agent email to listen for. */
   agentEmail: string;
-  /** Base URL (http/https). Defaults to "https://api.e2a.dev". */
+  /** Base URL (http/https). Falls back to `E2A_API_URL`, then the deprecated
+   *  `E2A_BASE_URL` — the same resolution {@link E2AClient} uses. Default
+   *  `https://api.e2a.dev`; override for self-host. */
   baseUrl?: string;
   /**
    * Auto-reconnect on disconnect. Defaults to true.
@@ -161,7 +164,7 @@ export class WSListener extends EventEmitter<WSListenerEvents> {
 
   constructor(private readonly opts: WSListenerOptions) {
     super();
-    const base = (opts.baseUrl ?? "https://api.e2a.dev").replace(/\/+$/, "");
+    const base = (opts.baseUrl ?? resolveBaseUrl() ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     const wsBase = base.replace(/^http/, "ws");
     this.url = `${wsBase}/v1/agents/${encodeURIComponent(opts.agentEmail)}/ws`;
     this.shouldReconnect = opts.reconnect ?? true;
