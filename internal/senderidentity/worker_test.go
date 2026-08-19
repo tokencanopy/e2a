@@ -1175,6 +1175,110 @@ func TestReapWorker_Work(t *testing.T) {
 			t.Fatalf("healthy identity was mutated: provision=%v deprovision=%v", prov.ProvisionCalls, prov.DeprovisionCalls)
 		}
 	})
+
+	t.Run("failed domain the provider now reports verified recovers", func(t *testing.T) {
+		// The missing transition this test locks in: a domain that failed
+		// (e.g. the customer broke DNS) and was later repaired (DNS fixed)
+		// must not stay `failed` forever just because nothing but a customer
+		// POST /verify would otherwise re-check it. applied == incarnation
+		// here, so the sweep takes the read-only inspect path rather than
+		// forcing full reprovisioning.
+		store := newFakeStore()
+		store.setStatus("recovered.example", StatusFailed)
+		store.setOwner("recovered.example", "u11")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["recovered.example"] = "recovered.example-incarnation"
+		store.applied["recovered.example"] = "recovered.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("recovered.example")
+		prov.SetStatus("recovered.example", Result{Status: StatusVerified})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "recovered.example"); got != StatusVerified {
+			t.Fatalf("status = %q, want verified once the provider recovers", got)
+		}
+		if len(prov.ProvisionCalls) != 0 {
+			t.Fatalf("recovery must be read-only, got provisions %v", prov.ProvisionCalls)
+		}
+		if firer.count() != 1 {
+			t.Fatalf("fired %d events, want exactly 1", firer.count())
+		}
+		if ev, ok := firer.last(); !ok || ev.Status != StatusVerified || ev.UserID != "u11" {
+			t.Fatalf("fired %+v ok=%v, want sending_verified for u11", ev, ok)
+		}
+	})
+
+	t.Run("failed domain mid-recheck at the provider is not flapped to pending", func(t *testing.T) {
+		// The provider reporting pending for a failed domain means SES is
+		// mid-recheck, not yet definitive. Flipping to pending here (or
+		// anything but leaving it failed) would churn on every sweep until
+		// SES resolves one way or the other.
+		store := newFakeStore()
+		store.setStatus("rechecking-failed.example", StatusFailed)
+		store.setOwner("rechecking-failed.example", "u12")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["rechecking-failed.example"] = "rechecking-failed.example-incarnation"
+		store.applied["rechecking-failed.example"] = "rechecking-failed.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("rechecking-failed.example")
+		prov.SetStatus("rechecking-failed.example", Result{Status: StatusPending})
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "rechecking-failed.example"); got != StatusFailed {
+			t.Fatalf("status = %q, want failed preserved through a provider mid-recheck", got)
+		}
+		if len(store.SetStatusCalls) != 0 || len(prov.ProvisionCalls) != 0 {
+			t.Fatalf("provider-pending recheck must not mutate: writes=%d provisions=%v", len(store.SetStatusCalls), prov.ProvisionCalls)
+		}
+		if firer.count() != 0 {
+			t.Fatalf("no event expected for failed->pending, got %d", firer.count())
+		}
+	})
+
+	t.Run("failed domain refused adoption stays failed and alerts, not silently recovered", func(t *testing.T) {
+		// Ownership-refused domains short-circuit at the
+		// ErrIdentityNotFound/ErrIdentityNotOwned case (force = true) and
+		// never reach the new failed->verified case above; they must keep
+		// requiring manual review rather than being silently marked
+		// recovered.
+		store := newFakeStore()
+		store.setStatus("ownership-refused.example", StatusFailed)
+		store.setOwner("ownership-refused.example", "u13")
+		store.setProvisionInputs("sel", []byte("der"), true)
+		store.managed["ownership-refused.example"] = "ownership-refused.example-incarnation"
+		store.applied["ownership-refused.example"] = "ownership-refused.example-incarnation"
+		prov := NewFakeProvider()
+		prov.SeedIdentity("ownership-refused.example")
+		prov.SetStatusErr("ownership-refused.example", ErrIdentityNotOwned)
+		prov.SetProvisionErr(ErrIdentityNotOwned)
+		var buf bytes.Buffer
+		prevOut := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(prevOut)
+		firer := &recordingFirer{}
+		w := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+
+		if err := w.Work(context.Background(), reapJob()); err != nil {
+			t.Fatalf("Work: %v", err)
+		}
+		if got, _ := store.GetSendingStatus(context.Background(), "ownership-refused.example"); got != StatusFailed {
+			t.Fatalf("status = %q, want failed maintained pending manual review", got)
+		}
+		if !strings.Contains(buf.String(), "ALERT") || !strings.Contains(buf.String(), "manual review required") {
+			t.Fatalf("expected an ownership-refusal ALERT, got %q", buf.String())
+		}
+		if firer.count() != 0 {
+			t.Fatalf("an already-failed domain refused adoption must not fire a new event, got %d", firer.count())
+		}
+	})
 }
 
 // TestReapWorker_FiresStatusEvents pins the review fix: reaper-driven
