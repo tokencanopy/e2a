@@ -44,13 +44,13 @@ type FakeProvider struct {
 }
 
 // StatusCall records one Status invocation's full argument set. Provider.Status
-// carries two caller-supplied judgement inputs beyond the domain —
-// expectedSelector and haveKeyMaterial — that drive canAdoptIdentity's
-// decision in the real SES provider. Recording only the domain (as this fake
-// used to) would let a call site regress to passing "", a stale selector, or
-// the wrong boolean while every worker test still passed, since the compiler
-// cannot catch a wrong-but-same-typed argument. Tests that care about
-// adoption wiring must assert on Selector/HaveKey, not just call counts.
+// carries a caller-supplied AdoptionEvidence beyond the domain — Selector and
+// HasPrivateKey — that drives canAdoptIdentity's decision in the real SES
+// provider. Recording only the domain (as this fake used to) would let a
+// call site regress to passing "", a stale selector, or the wrong boolean
+// while every worker test still passed, since the compiler cannot catch a
+// wrong-but-same-typed argument. Tests that care about adoption wiring must
+// assert on Selector/HaveKey, not just call counts.
 type StatusCall struct {
 	Domain   string
 	Selector string
@@ -144,10 +144,10 @@ func (f *FakeProvider) Provision(ctx context.Context, domain, dkimSelector strin
 	return Result{Status: StatusPending, DNSRecords: mailFromRecords(domain, "us-east-1")}, nil
 }
 
-func (f *FakeProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
+func (f *FakeProvider) Status(ctx context.Context, domain string, evidence AdoptionEvidence) (Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.StatusCalls = append(f.StatusCalls, StatusCall{Domain: domain, Selector: expectedSelector, HaveKey: haveKeyMaterial})
+	f.StatusCalls = append(f.StatusCalls, StatusCall{Domain: domain, Selector: evidence.Selector, HaveKey: evidence.HasPrivateKey})
 	if f.notFoundOnStatus[domain] {
 		return Result{}, ErrIdentityNotFound
 	}

@@ -36,7 +36,7 @@ type blockingStatusProvider struct {
 	provisionOnce    sync.Once
 }
 
-func (p *blockingStatusProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
+func (p *blockingStatusProvider) Status(ctx context.Context, domain string, evidence AdoptionEvidence) (Result, error) {
 	p.statusOnce.Do(func() { close(p.statusStarted) })
 	select {
 	case <-p.statusRelease:
@@ -1751,6 +1751,49 @@ func TestSyncWorker_AlreadyVerifiedNoOp(t *testing.T) {
 	}
 	if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: "sel", HaveKey: true}); got != want {
 		t.Fatalf("Status call = %+v, want %+v", got, want)
+	}
+}
+
+// TestSyncWorker_AlreadyVerifiedNoOpCarriesRealKeyMaterialSignal pins batch C
+// finding 4: TestSyncWorker_AlreadyVerifiedNoOp above only ever exercises
+// HaveKey=true at the syncProviderIdentityWithInspection providerStatus
+// call site (worker.go's healthy-recheck gate). Mutation-testing confirmed
+// that hardcoding `true` at that specific call site (instead of passing
+// len(state.PrivateKey) > 0) leaves the ENTIRE test suite green — the
+// reconcile path's sibling call site IS covered on both arms
+// (TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial), but this
+// one wasn't. That matters because LoadSendingIdentityState reports
+// PrivateKey == nil for a verified domain whose dkim_private_key is NULL,
+// and this inspect block runs BEFORE the no-key branch below it — so a wrong
+// hardcoded `true` here is exactly the "tag an identity e2a cannot sign for,
+// then let Deprovision delete it" path canAdoptIdentity's doc warns about.
+// This test seeds no key material (mirroring
+// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial's "no key
+// material" subtest) and asserts HaveKey: false reaches the provider.
+func TestSyncWorker_AlreadyVerifiedNoOpCarriesRealKeyMaterialSignal(t *testing.T) {
+	const domain = "healthy-recheck-no-key.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u1")
+	// Selector on file but NO private key — e.g. a stuck migration or mid
+	// domain-reclaim (see canAdoptIdentity's doc in ses.go).
+	store.setProvisionInputs("sel", nil, true)
+	store.managed[domain] = domain + "-incarnation"
+	store.applied[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(prov.StatusCalls) != 1 {
+		t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+	}
+	if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: "sel", HaveKey: false}); got != want {
+		t.Fatalf("Status call = %+v, want %+v — no private key on file must never report HaveKey=true, even on the healthy-recheck call site", got, want)
 	}
 }
 

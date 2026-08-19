@@ -114,6 +114,16 @@ type SendingIdentityState struct {
 	LedgerUpdatedAt time.Time
 }
 
+// adoptionEvidence builds the AdoptionEvidence Provider.Status needs from a
+// loaded SendingIdentityState — the single helper both provider.Status call
+// sites use (reconcileProviderIdentity and syncProviderIdentityWithInspection's
+// providerStatus closure), so the joint Selector/HasPrivateKey signal is
+// derived in exactly one place instead of two independent call sites that
+// could each get it wrong differently (batch C finding 5).
+func adoptionEvidence(state SendingIdentityState) AdoptionEvidence {
+	return AdoptionEvidence{Selector: state.Selector, HasPrivateKey: len(state.PrivateKey) > 0}
+}
+
 // EventFirer publishes a domain.sending_verified / domain.sending_failed
 // event. Injected as a closure so this package doesn't depend on webhookpub.
 // userID is the domain owner; a nil firer (tests) is a no-op.
@@ -272,7 +282,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			return nil // already resolved (forced re-check, dup job, etc.)
 		}
 
-		res, err := provider.Status(ctx, domain, state.Selector, len(state.PrivateKey) > 0)
+		res, err := provider.Status(ctx, domain, adoptionEvidence(state))
 		if errors.Is(err, ErrIdentityNotFound) {
 			// The old blue/green slot may have deleted the replacement after v2
 			// installed it. Repair desired state immediately instead of turning a
@@ -282,7 +292,13 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 		}
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
-			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required", domain, reason)
+			// %v of err (not just the constant reason) surfaces WHICH criterion
+			// canAdoptIdentity refused on — a missing ses:TagResource grant, a
+			// wrong-partition ARN, DKIM still PENDING, a selector mismatch, or a
+			// genuinely foreign identity previously all logged identically here
+			// (finding 2). The customer-visible sending_error stays the constant
+			// `reason` below — this detail is for operator diagnosis only.
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required (%v)", domain, reason, err)
 			changed, err := setFailedStatus(ctx, store, domain, state, reason)
 			if err != nil {
 				return err
@@ -475,7 +491,7 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 				// Status would tag an identity e2a cannot sign for — and the
 				// no-key branch below would then find it tagged and let
 				// Deprovision actually delete it.
-				observedResult, observedErr = provider.Status(lockedCtx, domain, state.Selector, len(state.PrivateKey) > 0)
+				observedResult, observedErr = provider.Status(lockedCtx, domain, adoptionEvidence(state))
 				observed = true
 			}
 			return observedResult, observedErr
@@ -602,6 +618,16 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		}
 		if state.Selector == "" || len(state.PrivateKey) == 0 {
 			const reason = "no DKIM key material for domain; re-register the domain"
+			// This population is otherwise invisible (finding 11): a live,
+			// owned, verified domain missing DKIM key material re-runs this
+			// exact branch every hourly sweep forever — 2 provider calls plus a
+			// same→same status write each time — with no operator-facing signal
+			// at all (the domain.sending_* webhook only fires on the FIRST
+			// transition into `failed`; every later sweep is same-status and
+			// silent). Log every run, matching the two ErrIdentityNotOwned ALERT
+			// lines' convention, and say plainly that this recurs hourly so an
+			// operator does not mistake steady-state noise for a fresh incident.
+			log.Printf("[senderidentity:worker] ALERT %s: %s — re-checked hourly by the reaper, not a new incident each time; re-register the domain to clear it", domain, reason)
 			if err := provider.Deprovision(lockedCtx, domain); err != nil && !errors.Is(err, ErrIdentityNotOwned) {
 				return err
 			}
@@ -624,7 +650,11 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		res, err := provider.Provision(lockedCtx, domain, state.Selector, state.PrivateKey)
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
-			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required", domain, reason)
+			// See the identical comment in reconcileProviderIdentity's
+			// ErrIdentityNotOwned branch: %v of err surfaces the specific
+			// refusal reason canAdoptIdentity/classifyAdoptionError attached
+			// (finding 2), not just this constant summary.
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required (%v)", domain, reason, err)
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}

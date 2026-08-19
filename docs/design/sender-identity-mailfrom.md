@@ -192,10 +192,17 @@ summary, keep them in sync):
 - the identity is configured with BYODKIM
   (`DkimAttributes.SigningAttributesOrigin == EXTERNAL`) — only e2a's own
   `Provision` supplies signing key material.
-- `DkimAttributes.Status == SUCCESS` — SES has cryptographically matched the
-  key material it holds against the domain's DNS TXT record, which is
-  strictly stronger evidence than the selector token match below (that token
-  is a publicly-derivable OSS constant with zero entropy on its own).
+- `DkimAttributes.Status == SUCCESS` — SES has cryptographically matched
+  whatever key material IT HOLDS against the domain's DNS TXT record. That is
+  materially stronger than the selector token match below (that token is a
+  publicly-derivable OSS constant with zero entropy on its own) but it is NOT
+  proof the matched key is *e2a's* key: a hypothetical foreign BYODKIM
+  identity in a shared AWS account can equally reach provider-side SUCCESS
+  for its own, different key. SUCCESS rules out an identity that was never
+  verified at all; it is SUCCESS combined with the exact-selector match below
+  — scoped to one domain e2a's own DNS probe has already confirmed the
+  caller controls (the reachability bound, next) — that does the actual
+  ownership work.
 - the installed selector matches EXACTLY the selector e2a has on file for
   that domain.
 
@@ -219,6 +226,26 @@ record pointing at the e2a relay (`internal/httpapi/domains.go`'s
 domain they don't control by registering it and waiting; a matching selector
 token is necessary for adoption but this verification gate is what makes it
 sufficient to trust at all.
+
+**Caveat: this bound holds only under `env: production`.** The DNS probe
+above is `internal/agent/api.go`'s `checkDomainRecords`, which
+unconditionally short-circuits to `TXTFound: true, MX: "found"` for EVERY
+domain whenever `!production` — a deliberate dev/test convenience so local
+flows work without real DNS. In that mode any customer-typed domain reaches
+`domains.verified = true` instantly, with no ownership proof at all, so a
+non-production deployment that nonetheless configures
+`sender_identity.ses_region` against real AWS (a misconfigured `env`, or a
+self-hoster testing against live SES) has no DNS gate on which domains
+adoption is even attempted for. `SESProvider.refuseAdoption` — set from
+`NewSESProviderFromConfig`'s `production` parameter (`cfg.IsProduction()` in
+`main.go`) — closes this gap at the `Provision`/`Status` call sites
+themselves: when `!production`, adoption of any untagged identity is refused
+outright regardless of what `canAdoptIdentity` would otherwise conclude, so
+a misconfigured non-production deployment can at most report
+`ErrIdentityNotOwned` (exactly as it would for a genuinely foreign identity)
+rather than silently take one over. Fresh `CreateEmailIdentity` calls are
+unaffected — a brand-new identity is always tagged as e2a's own on creation,
+so there is nothing to "adopt" there.
 
 The ledger-deletion bug above is fixed separately, and more thoroughly than
 the original narrow fix: `ForgetSendingIdentityManaged`
@@ -330,16 +357,46 @@ owned by another application.
   `Policies` present still returns `ErrIdentityNotOwned` with no tag applied;
   an already-tagged identity is not retagged; a transient `TagResource` error
   propagates for retry instead of a false `ErrIdentityNotOwned`; a permanent
-  one (access denied, malformed ARN, not found) is classified as
-  `ErrIdentityNotOwned` instead of retrying forever. Account-id resolution:
-  `accountIDFromCallerIdentity` rejects a nil `Account`; a provider whose
-  resolver fails degrades adoption to `ErrIdentityNotOwned` without
-  re-invoking the resolver on a later attempt (`sync.Once`). Ledger
-  retention: an ownership failure on a still-live, still-owned domain never
-  even calls `ForgetSendingIdentityManaged`; `FinalizeSendingIdentityTombstone`
-  (the sole deletion path) carries the same live-owner guard and retains the
-  row for a still-live domain hit via the no-key branch, while a genuinely
+  one (access denied, malformed ARN) is classified as `ErrIdentityNotOwned`
+  instead of retrying forever, while a `NotFoundException` (the identity
+  vanished between the GET and the tag call) is classified as
+  `ErrIdentityNotFound` instead — callers already treat that as
+  repair/converge, not a foreign-identity refusal. `canAdoptIdentity` returns
+  a refusal reason alongside the bool (not just true/false), and both
+  `Provision`/`Status` wrap it into the returned `ErrIdentityNotOwned` so the
+  worker's ALERT logs can distinguish WHY adoption was refused instead of
+  every refusal reading identically. The two caller-supplied judgement inputs
+  (selector, key-material-present) are bundled into one `AdoptionEvidence`
+  value built by a single helper (`adoptionEvidence` in worker.go) shared by
+  both `provider.Status` call sites, rather than two independent booleans a
+  call site could pass inconsistently. Account-id resolution:
+  `identityFromCallerIdentity` rejects a nil OR empty-string `Account`; a
+  provider whose resolver fails degrades adoption to `ErrIdentityNotOwned`
+  and CACHES ONLY THE FAILURE, for `accountIDRetryCooldown` (not forever —
+  the previous `sync.Once` cached a persistent failure permanently, which a
+  River job's default 1-minute `JobTimeout` landing mid-STS-call on the
+  largest post-upgrade sweep could turn into exactly this PR's own failure
+  mode); a successful resolution is cached permanently; resolution runs on
+  `context.WithoutCancel(ctx)` with its own explicit timeout so it is never
+  itself at the mercy of the caller's deadline. Non-production guard:
+  `SESProvider.refuseAdoption` (set from `NewSESProviderFromConfig`'s
+  `production` parameter) refuses adoption of an identity that would
+  otherwise satisfy every `canAdoptIdentity` criterion — see the caveat
+  above. Ledger retention: an ownership failure on a still-live, still-owned
+  domain never even calls `ForgetSendingIdentityManaged`;
+  `FinalizeSendingIdentityTombstone` (the sole deletion path) carries the
+  same live-owner guard, TIGHTENED to also require `domains.verified` (not
+  just a live owner) so a delete-then-immediate-re-register race can still
+  finalize the old incarnation's tombstone; it retains the row for a
+  still-live VERIFIED domain hit via the no-key branch, while a genuinely
   deleted domain's row is still removed once the drain window elapses.
+- Migration: `105_sender_identity_managed_domains_repair_stranded.sql`
+  re-runs migration 101's backfill, scoped to domains left stranded by the
+  pre-adoption v1.7.8 regression (live, owned, `sending_status='failed'`, no
+  ledger row) — `ON CONFLICT (domain) DO NOTHING` leaves an already-ledgered
+  domain (the common case) untouched, and `applied_incarnation` is
+  deliberately `NULL` so the repaired row actually reconverges instead of
+  reading as already-applied.
 - Local-service e2e (real binary + Mailpit): seeded a `sending_status=verified`
   domain and a `none` domain; over real SMTP confirmed verified → `From:
   bot@acme.e2etest` (no "via") + `Return-Path: bounces@bounce.acme.e2etest`;

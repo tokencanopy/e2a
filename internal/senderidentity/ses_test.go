@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,7 +178,7 @@ func TestSESProvider_StatusReportsAxes(t *testing.T) {
 		MailFromAttributes:       &sestypes.MailFromAttributes{MailFromDomainStatus: sestypes.MailFromDomainStatusFailed},
 	}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
-	res, err := p.Status(context.Background(), "acme.com", "", false)
+	res, err := p.Status(context.Background(), "acme.com", AdoptionEvidence{Selector: "", HasPrivateKey: false})
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -290,17 +291,17 @@ func TestIdentityFromCallerIdentity(t *testing.T) {
 	})
 }
 
-// TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable pins finding 4's
+// TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable pins the
 // lazy+non-fatal fix directly: a provider whose account id resolution fails
 // (simulating an STS blip) must degrade adoption to ErrIdentityNotOwned
-// rather than propagate the raw error or build a malformed ARN — and must
-// not re-invoke the resolver on every call (sync.Once — a persistent outage
-// doesn't hammer STS on every adoption attempt).
+// rather than propagate the raw error or build a malformed ARN. See
+// TestSESProvider_AccountIDResolutionCachesOnlySuccess for the caching
+// contract itself (batch C finding 1) — this test stays focused on the
+// Provision-level degradation.
 func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
 	boom := errors.New("sts: GetCallerIdentity blip")
-	var resolveCalls int
 	stub := &stubSESAPI{
 		createErr: &sestypes.AlreadyExistsException{},
 		unmanaged: true,
@@ -316,7 +317,6 @@ func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 		api:    stub,
 		region: "us-east-1",
 		resolveIdentity: func(context.Context) (string, string, error) {
-			resolveCalls++
 			return "", "", boom
 		},
 	}
@@ -330,13 +330,113 @@ func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 	if stub.dkimInput != nil || stub.mailFromInput != nil {
 		t.Fatalf("must not proceed to mutate before adoption is confirmed: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
 	}
+}
 
-	// A second adoption attempt must not re-invoke the resolver.
-	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
-		t.Fatalf("second Provision error = %v, want ErrIdentityNotOwned again", err)
+// TestSESProvider_AccountIDResolutionCachesOnlySuccess pins batch C finding
+// 1: identityForAdoption used to be a sync.Once, which caches the FIRST
+// result forever — success OR failure. A cached failure is a correctness
+// bug, not just a missed optimization: the cached ctx belonged to the FIRST
+// caller (a River job), internal/jobs/jobs.go sets no JobTimeout so River's
+// 1-minute default applies, and reapManagedIdentityPage's up-to-25-domain
+// pages with several SES round trips each can land the deadline mid-STS-call
+// on exactly the sweep where the untagged population is largest. A
+// permanently cached DeadlineExceeded would then degrade EVERY later
+// adoption attempt for the rest of the process's life — recoverable only by
+// a restart. Fixed contract: only a SUCCESSFUL resolution is cached
+// permanently; a failure is cached for accountIDRetryCooldown only, then the
+// next caller retries — self-healing within a single sweep instead of
+// requiring a restart.
+func TestSESProvider_AccountIDResolutionCachesOnlySuccess(t *testing.T) {
+	boom := errors.New("sts: GetCallerIdentity blip")
+	var resolveCalls int
+	fail := true
+	p := &SESProvider{
+		region: "us-east-1",
+		resolveIdentity: func(context.Context) (string, string, error) {
+			resolveCalls++
+			if fail {
+				return "", "", boom
+			}
+			return testAccountID, "aws", nil
+		},
+	}
+
+	// First call: resolver fails and the failure is cached.
+	if _, _, err := p.identityForAdoption(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("identityForAdoption error = %v, want boom", err)
 	}
 	if resolveCalls != 1 {
-		t.Fatalf("resolveIdentity called %d times, want exactly 1 (sync.Once)", resolveCalls)
+		t.Fatalf("resolveCalls = %d, want 1", resolveCalls)
+	}
+
+	// A second call WITHIN the cooldown must not re-invoke the resolver — a
+	// single reaper page of ~25 candidates must not fire 25 near-simultaneous
+	// STS calls at a genuinely down service.
+	if _, _, err := p.identityForAdoption(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("identityForAdoption (within cooldown) error = %v, want the cached boom", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls after a call within the cooldown = %d, want still 1 (cached failure, not re-invoked)", resolveCalls)
+	}
+
+	// Simulate the cooldown elapsing (real wall-clock, not a synthetic clock
+	// injection — backdate the recorded failure time directly; this test is
+	// in-package so the unexported field is reachable) and STS recovering.
+	p.accountIDFailedAt = time.Now().Add(-accountIDRetryCooldown - time.Second)
+	fail = false
+
+	accountID, partition, err := p.identityForAdoption(context.Background())
+	if err != nil {
+		t.Fatalf("identityForAdoption after the cooldown elapsed = %v, want the resolver retried and to succeed", err)
+	}
+	if accountID != testAccountID || partition != "aws" {
+		t.Fatalf("identityForAdoption = (%q, %q), want (%q, %q)", accountID, partition, testAccountID, "aws")
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("resolveCalls after the cooldown elapsed = %d, want 2 (retried once)", resolveCalls)
+	}
+
+	// A SUCCESSFUL resolution is cached PERMANENTLY: even though the resolver
+	// would now fail again, a later call must not re-invoke it.
+	fail = true
+	accountID, partition, err = p.identityForAdoption(context.Background())
+	if err != nil {
+		t.Fatalf("identityForAdoption after a cached success = %v, want nil (success is cached forever)", err)
+	}
+	if accountID != testAccountID || partition != "aws" {
+		t.Fatalf("identityForAdoption after a cached success = (%q, %q), want (%q, %q)", accountID, partition, testAccountID, "aws")
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("resolveCalls after a cached success = %d, want still 2 (never re-invoked once cached)", resolveCalls)
+	}
+}
+
+// TestSESProvider_AccountIDResolutionDetachesFromCallerContext pins the
+// context.WithoutCancel half of batch C finding 1: identityForAdoption must
+// not simply forward the caller's ctx to resolveIdentity, or a River job's
+// context — already near its 1-minute default deadline, or fully cancelled
+// once the job that first triggered resolution has finished — would fail
+// STS resolution for a reason that has nothing to do with STS itself, and
+// (pre-fix) cache that failure forever.
+func TestSESProvider_AccountIDResolutionDetachesFromCallerContext(t *testing.T) {
+	p := &SESProvider{
+		region: "us-east-1",
+		resolveIdentity: func(ctx context.Context) (string, string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", "", err
+			}
+			return testAccountID, "aws", nil
+		},
+	}
+	callerCtx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled — simulates an expired/finished caller context
+
+	accountID, partition, err := p.identityForAdoption(callerCtx)
+	if err != nil {
+		t.Fatalf("identityForAdoption with an already-cancelled caller ctx = %v, want nil (resolution must run on a context detached from the caller's)", err)
+	}
+	if accountID != testAccountID || partition != "aws" {
+		t.Fatalf("identityForAdoption = (%q, %q), want (%q, %q)", accountID, partition, testAccountID, "aws")
 	}
 }
 
@@ -582,11 +682,16 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 // cannot actually sign for.
 func TestCanAdoptIdentity(t *testing.T) {
 	tests := []struct {
-		name             string
-		out              *sesv2.GetEmailIdentityOutput
-		expectedSelector string
-		haveKeyMaterial  bool
-		want             bool
+		name     string
+		out      *sesv2.GetEmailIdentityOutput
+		evidence AdoptionEvidence
+		want     bool
+		// wantReasonSubstr, when non-empty, asserts the refusal reason
+		// canAdoptIdentity returns identifies THIS specific criterion (batch
+		// C finding 2) rather than every refusal reading identically —
+		// mutation-testing bait: hardcoding one generic reason string would
+		// leave every case below green except this substring check.
+		wantReasonSubstr string
 	}{
 		{
 			name: "external origin + dkim success + key material + matching selector token → adoptable",
@@ -597,9 +702,8 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
-			want:             true,
+			evidence: AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
+			want:     true,
 		},
 		{
 			name: "external origin + mismatched selector → not adoptable",
@@ -610,9 +714,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "does not match",
 		},
 		{
 			name: "aws-managed (easy DKIM) origin, even with a coincidentally matching token → not adoptable",
@@ -623,9 +727,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "not BYODKIM",
 		},
 		{
 			name: "external origin but no expected selector on file → not adoptable",
@@ -636,15 +740,16 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "no DKIM selector",
 		},
 		{
-			// The core fix for finding 2: a stored selector alone is NOT proof
-			// e2a has key material — LoadSendingIdentityState can return a
-			// non-empty selector with a nil private key (e.g. mid domain-reclaim).
-			// Everything else here matches; only haveKeyMaterial is false.
+			// The core fix for finding 2 of the original adoption PR: a stored
+			// selector alone is NOT proof e2a has key material —
+			// LoadSendingIdentityState can return a non-empty selector with a
+			// nil private key (e.g. mid domain-reclaim). Everything else here
+			// matches; only HasPrivateKey is false.
 			name: "external origin + dkim success + matching selector but NO key material on file → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
 				DkimAttributes: &sestypes.DkimAttributes{
@@ -653,15 +758,16 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  false,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: false},
 			want:             false,
+			wantReasonSubstr: "no DKIM private key",
 		},
 		{
-			// The core fix for finding 3: DKIM PENDING means SES has not yet
-			// matched the key it holds against DNS — a weaker signal than the
-			// selector-token match alone (which is a publicly-derivable OSS
-			// constant). Strict SUCCESS is required, no PENDING fallback.
+			// The core fix for finding 3 of the original adoption PR: DKIM
+			// PENDING means SES has not yet matched the key it holds against
+			// DNS — a weaker signal than the selector-token match alone (which
+			// is a publicly-derivable OSS constant). Strict SUCCESS is
+			// required, no PENDING fallback.
 			name: "external origin + matching selector but DKIM still pending → not adoptable",
 			out: &sesv2.GetEmailIdentityOutput{
 				DkimAttributes: &sestypes.DkimAttributes{
@@ -670,9 +776,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusPending,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "not SUCCESS",
 		},
 		{
 			name: "external origin + matching selector but DKIM failed → not adoptable",
@@ -683,9 +789,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusFailed,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "not SUCCESS",
 		},
 		{
 			name: "external origin with no tokens at all → not adoptable",
@@ -695,23 +801,23 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "does not match",
 		},
 		{
 			name:             "nil DkimAttributes → not adoptable",
 			out:              &sesv2.GetEmailIdentityOutput{},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "no DKIM attributes",
 		},
 		{
 			name:             "nil output → not adoptable",
 			out:              nil,
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "no provider identity",
 		},
 		{
 			// Security-critical: a configuration set redirects delivery/bounce/
@@ -727,9 +833,9 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "foreign configuration",
 		},
 		{
 			// Security-critical: an identity policy can grant another AWS
@@ -744,15 +850,22 @@ func TestCanAdoptIdentity(t *testing.T) {
 					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
-			expectedSelector: "e2a202607",
-			haveKeyMaterial:  true,
+			evidence:         AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true},
 			want:             false,
+			wantReasonSubstr: "foreign configuration",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := canAdoptIdentity(tt.out, tt.expectedSelector, tt.haveKeyMaterial); got != tt.want {
-				t.Fatalf("canAdoptIdentity = %v, want %v", got, tt.want)
+			got, reason := canAdoptIdentity(tt.out, tt.evidence)
+			if got != tt.want {
+				t.Fatalf("canAdoptIdentity = (%v, %q), want ok=%v", got, reason, tt.want)
+			}
+			if tt.want && reason != "" {
+				t.Fatalf("canAdoptIdentity returned a reason %q alongside ok=true, want empty", reason)
+			}
+			if tt.wantReasonSubstr != "" && !strings.Contains(reason, tt.wantReasonSubstr) {
+				t.Fatalf("canAdoptIdentity reason = %q, want a substring %q", reason, tt.wantReasonSubstr)
 			}
 		})
 	}
@@ -858,6 +971,64 @@ func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
 	if stub.dkimInput == nil || stub.mailFromInput == nil {
 		t.Fatalf("adopted identity was not provisioned normally: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
 	}
+}
+
+// TestSESProvider_RefuseAdoptionOutsideProduction pins batch C finding 10:
+// canAdoptIdentity's "reachability bound" doc explains that adoption is only
+// ever attempted for a domain e2a's own DNS probe already confirmed the
+// caller controls — but that probe is unconditionally short-circuited to
+// "found" for every domain when !production (internal/agent/api.go's
+// checkDomainRecords). refuseAdoption is how Provision/Status close that gap
+// for a non-production deployment that nonetheless configures
+// sender_identity against real AWS: it must refuse adoption of an identity
+// that would OTHERWISE satisfy every canAdoptIdentity criterion (this test
+// reuses the exact fixture from
+// TestSESProvider_ProvisionAdoptsProvablyOwnIdentity /
+// TestSESProvider_StatusAdoptsProvablyOwnIdentity, which prove the identical
+// setup succeeds when refuseAdoption is false).
+func TestSESProvider_RefuseAdoptionOutsideProduction(t *testing.T) {
+	adoptable := func() *sesv2.GetEmailIdentityOutput {
+		return &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &sestypes.DkimAttributes{
+				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  sestypes.DkimStatusSuccess,
+			},
+		}
+	}
+
+	t.Run("Provision", func(t *testing.T) {
+		key, _ := rsa.GenerateKey(rand.Reader, 2048)
+		pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+		stub := &stubSESAPI{
+			createErr: &sestypes.AlreadyExistsException{},
+			unmanaged: true,
+			getOut:    adoptable(),
+		}
+		p := &SESProvider{api: stub, region: "us-east-1", refuseAdoption: true}
+
+		if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned when refuseAdoption is set", err)
+		}
+		if len(stub.tagInputs) != 0 {
+			t.Fatalf("must not tag an identity while adoption is refused outside production: %+v", stub.tagInputs)
+		}
+		if stub.dkimInput != nil || stub.mailFromInput != nil {
+			t.Fatalf("must not proceed to mutate before adoption is confirmed: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+		}
+	})
+
+	t.Run("Status", func(t *testing.T) {
+		stub := &stubSESAPI{unmanaged: true, getOut: adoptable()}
+		p := &SESProvider{api: stub, region: "us-east-1", refuseAdoption: true}
+
+		if _, err := p.Status(context.Background(), "legacy.example", AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true}); !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("Status error = %v, want ErrIdentityNotOwned when refuseAdoption is set", err)
+		}
+		if len(stub.tagInputs) != 0 {
+			t.Fatalf("must not tag an identity while adoption is refused outside production: %+v", stub.tagInputs)
+		}
+	})
 }
 
 // TestSESProvider_AdoptIdentityUsesResolvedPartitionInARN proves the
@@ -1122,7 +1293,7 @@ func TestSESProvider_StatusAdoptsProvablyOwnIdentity(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	res, err := p.Status(context.Background(), "legacy.example", "e2a202607", true)
+	res, err := p.Status(context.Background(), "legacy.example", AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true})
 	if err != nil {
 		t.Fatalf("Status error = %v, want adoption to succeed", err)
 	}
@@ -1148,7 +1319,7 @@ func TestSESProvider_StatusRefusesMismatchedSelector(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Status(context.Background(), "shared.example", "e2a202607", true); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Status(context.Background(), "shared.example", AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Status error = %v, want ErrIdentityNotOwned", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1178,7 +1349,7 @@ func TestSESProvider_StatusRefusesAdoptionWithoutKeyMaterial(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Status(context.Background(), "no-key.example", "e2a202607", false); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Status(context.Background(), "no-key.example", AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: false}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Status error = %v, want ErrIdentityNotOwned when e2a has no key material on file", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1203,7 +1374,7 @@ func TestSESProvider_StatusRefusesAdoptionWhileDkimPending(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Status(context.Background(), "still-pending.example", "e2a202607", true); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Status(context.Background(), "still-pending.example", AdoptionEvidence{Selector: "e2a202607", HasPrivateKey: true}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Status error = %v, want ErrIdentityNotOwned while DKIM is still pending", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1259,7 +1430,7 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 	// Status re-emits the MAIL FROM records so the verify/failed transition
 	// preserves them (records aren't wiped when a domain goes verified).
 	p := NewSESProvider(&stubSESAPI{}, "eu-west-1", testAccountID)
-	res, err := p.Status(context.Background(), "acme.com", "", false)
+	res, err := p.Status(context.Background(), "acme.com", AdoptionEvidence{Selector: "", HasPrivateKey: false})
 	if err != nil {
 		t.Fatalf("Status error: %v", err)
 	}
@@ -1276,7 +1447,7 @@ func TestSESProvider_StatusReturnsMailFromRecords(t *testing.T) {
 func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status maps NotFoundException to ErrIdentityNotFound", func(t *testing.T) {
 		p := NewSESProvider(&stubSESAPI{getErr: &sestypes.NotFoundException{}}, "us-east-1", testAccountID)
-		_, err := p.Status(context.Background(), "example.com", "", false)
+		_, err := p.Status(context.Background(), "example.com", AdoptionEvidence{Selector: "", HasPrivateKey: false})
 		if !errors.Is(err, ErrIdentityNotFound) {
 			t.Fatalf("expected ErrIdentityNotFound, got %v", err)
 		}
@@ -1292,7 +1463,7 @@ func TestSESProvider_NotFoundMapping(t *testing.T) {
 	t.Run("Status propagates other errors", func(t *testing.T) {
 		boom := errors.New("throttled")
 		p := NewSESProvider(&stubSESAPI{getErr: boom}, "us-east-1", testAccountID)
-		if _, err := p.Status(context.Background(), "example.com", "", false); !errors.Is(err, boom) {
+		if _, err := p.Status(context.Background(), "example.com", AdoptionEvidence{Selector: "", HasPrivateKey: false}); !errors.Is(err, boom) {
 			t.Fatalf("expected boom to propagate, got %v", err)
 		}
 	})

@@ -50,6 +50,17 @@ type SESProvider struct {
 	region             string // for the custom MAIL FROM MX target (feedback-smtp.<region>.amazonses.com)
 	deleteConfirmDelay func(attempt int) time.Duration
 
+	// refuseAdoption, when true, makes Provision/Status refuse to adopt ANY
+	// untagged identity regardless of what canAdoptIdentity would otherwise
+	// conclude (see the doc on canAdoptIdentity's "Reachability bound" —
+	// batch C finding 10). It does NOT affect fresh CreateEmailIdentity
+	// calls: a brand-new identity is always tagged as e2a's own on creation,
+	// so there is nothing to "adopt" there. Zero value (false) preserves
+	// every existing caller's behavior, including every direct-struct-literal
+	// SESProvider in this package's tests — production-only enforcement is
+	// opt-IN via NewSESProviderFromConfig's production parameter, not opt-out.
+	refuseAdoption bool
+
 	// accountID/partition resolution feeds the identity ARN adoption's
 	// TagResource call needs (arn:<partition>:ses:<region>:<accountID>:
 	// identity/<domain>) — GetEmailIdentity/ListEmailIdentities never return
@@ -58,20 +69,43 @@ type SESProvider struct {
 	// the whole server — cmd/e2a/main.go log.Fatalf's on
 	// NewSESProviderFromConfig's returned error). resolveIdentity is nil when
 	// the caller already supplied the account ID directly (NewSESProvider);
-	// accountIDOnce then short-circuits to it (and the "aws" commercial
+	// identityForAdoption then short-circuits to it (and the "aws" commercial
 	// partition default, since there is no STS ARN to derive it from on that
 	// path) without ever touching STS. See identityForAdoption.
-	accountIDOnce   sync.Once
-	accountID       string
-	partition       string
-	accountIDErr    error
-	resolveIdentity func(ctx context.Context) (accountID, partition string, err error)
+	//
+	// accountIDMu guards the rest of this block AND bounds one resolution
+	// attempt to accountIDResolveTimeout, so a wedged STS call cannot hold
+	// the lock (and therefore every concurrent adoption attempt) forever.
+	// ONLY a successful resolution is cached (accountIDResolved=true,
+	// permanent for the process); a failure is cached for
+	// accountIDRetryCooldown only, then retried by the next caller — see
+	// identityForAdoption's doc for why a permanently-cached failure is
+	// unacceptable here.
+	accountIDMu       sync.Mutex
+	accountID         string
+	partition         string
+	accountIDResolved bool
+	accountIDErr      error
+	accountIDFailedAt time.Time
+	resolveIdentity   func(ctx context.Context) (accountID, partition string, err error)
 }
 
 const (
 	managedIdentityTagKey   = "e2a-managed"
 	managedIdentityTagValue = "sender-identity-v1"
 	deleteConfirmAttempts   = 6
+
+	// accountIDResolveTimeout bounds a single STS GetCallerIdentity attempt,
+	// deliberately independent of the caller's own context deadline (see
+	// identityForAdoption). Generous for a single AWS API round trip, tight
+	// enough that a wedged call cannot hold accountIDMu for long.
+	accountIDResolveTimeout = 10 * time.Second
+	// accountIDRetryCooldown bounds how long a failed resolution is cached
+	// before the next caller retries STS. Long enough that a page of ~25
+	// reaper candidates hitting a real STS outage doesn't hammer it with 25
+	// near-simultaneous calls; short enough that a transient blip self-heals
+	// within the SAME hourly sweep instead of requiring a process restart.
+	accountIDRetryCooldown = 30 * time.Second
 )
 
 // NewSESProvider wraps a pre-built SES API (or stub) with an ALREADY-KNOWN
@@ -97,15 +131,29 @@ func NewSESProvider(api sesAPI, region, accountID string) *SESProvider {
 // to do — let a transient STS blip, an egress allowlist covering only SES,
 // an SCP deny, or an IMDS hiccup fail server startup entirely (main.go wraps
 // provider construction in log.Fatalf) for a value only adoption needs.
-func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider, error) {
+//
+// production gates adoption itself (batch C finding 10), independent of the
+// account-id/STS plumbing above: canAdoptIdentity's "reachability bound" —
+// that adoption is only ever attempted for a domain e2a's own DNS probe
+// already confirmed the caller controls — holds only when domain
+// verification actually enforces that probe, which
+// internal/agent/api.go's checkDomainRecords short-circuits to
+// unconditionally-"found" whenever !production. Passing production=false
+// (i.e. cfg.Env != "production") makes Provision/Status refuse to adopt any
+// untagged identity outright, regardless of what canAdoptIdentity would
+// otherwise conclude, closing that gap for any non-production deployment
+// that nonetheless configures sender_identity.ses_region against real AWS
+// (e.g. a misconfigured `env`, or a self-hoster testing against live SES).
+func NewSESProviderFromConfig(ctx context.Context, region string, production bool) (*SESProvider, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 	stsClient := sts.NewFromConfig(cfg)
 	return &SESProvider{
-		api:    sesv2.NewFromConfig(cfg),
-		region: region,
+		api:            sesv2.NewFromConfig(cfg),
+		region:         region,
+		refuseAdoption: !production,
 		resolveIdentity: func(ctx context.Context) (string, string, error) {
 			out, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 			if err != nil {
@@ -156,27 +204,64 @@ func arnPartition(arn string) (string, bool) {
 	return parts[1], true
 }
 
-// identityForAdoption resolves (at most once) the AWS account id and ARN
-// partition adoption's TagResource call needs. Nothing else Provision/
-// Status/Deprovision does requires it — only adoption calls TagResource —
-// so a resolution failure must never be fatal: it degrades adoptIdentity to
-// a wrapped ErrIdentityNotOwned ("cannot adopt"), exactly the
-// pre-adoption-PR behavior, while every other capability keeps working.
-// sync.Once means a persistent STS outage is logged and cached rather than
-// retried on every adoption attempt (which could be hourly-reaper-frequent
-// across many domains); a process restart (routine on every deploy) is what
-// re-attempts it.
+// identityForAdoption resolves the AWS account id and ARN partition
+// adoption's TagResource call needs. Nothing else Provision/Status/
+// Deprovision does requires it — only adoption calls TagResource — so a
+// resolution failure must never be fatal: it degrades adoptIdentity to a
+// wrapped ErrIdentityNotOwned ("cannot adopt"), exactly the pre-adoption-PR
+// behavior, while every other capability keeps working.
+//
+// CACHES ONLY SUCCESS, permanently, for the process — a failure is cached
+// for accountIDRetryCooldown only (batch C finding 1). This used to be a
+// sync.Once, which caches the FIRST result forever, success or failure. That
+// is a correctness bug, not just a missed optimization: the cached ctx
+// belongs to the FIRST caller — a River job — and internal/jobs/jobs.go sets
+// no JobTimeout, so River's 1-minute default applies. reapManagedIdentityPage
+// processes up to 25 domains per job with several SES round trips each, so
+// on the very first post-upgrade sweep — exactly when the untagged
+// population is largest — the job deadline can land mid-STS-call. A
+// sync.Once would then cache context.DeadlineExceeded FOREVER: every LATER
+// adoption attempt (any domain, any job, for the rest of the process's
+// life) would return a wrapped ErrIdentityNotOwned, every owned-but-untagged
+// domain would flip to `failed`, and a domain.sending_failed webhook would
+// fire to each affected customer — recoverable only by a process restart.
+// That is the exact failure shape this whole PR exists to fix, just moved
+// one layer down. Fixed two ways together:
+//
+//   - resolveIdentity now runs on context.WithoutCancel(ctx) with its own
+//     explicit accountIDResolveTimeout, detached from whatever deadline the
+//     FIRST caller's ctx happened to carry.
+//   - the cache is a mutex, not sync.Once: only a SUCCESSFUL resolution is
+//     permanent; a failure is remembered for accountIDRetryCooldown and then
+//     retried by the next caller. Adoption is already rate-limited to
+//     roughly hourly per domain by the reaper, so retrying on the next
+//     attempt is not hammering STS — the cooldown exists only to keep a
+//     single sweep's ~25-domain page from firing 25 near-simultaneous calls
+//     at a genuinely down STS, not to suppress legitimate retry.
 func (p *SESProvider) identityForAdoption(ctx context.Context) (accountID, partition string, err error) {
 	if p.resolveIdentity == nil {
 		return p.accountID, p.partition, nil // supplied directly at construction (NewSESProvider)
 	}
-	p.accountIDOnce.Do(func() {
-		p.accountID, p.partition, p.accountIDErr = p.resolveIdentity(ctx)
-		if p.accountIDErr != nil {
-			log.Printf("[senderidentity] cannot resolve AWS account id for adoption (STS GetCallerIdentity failed): %v — adoption will report identities as not-owned until the next restart", p.accountIDErr)
-		}
-	})
-	return p.accountID, p.partition, p.accountIDErr
+	p.accountIDMu.Lock()
+	defer p.accountIDMu.Unlock()
+	if p.accountIDResolved {
+		return p.accountID, p.partition, nil
+	}
+	if !p.accountIDFailedAt.IsZero() && time.Since(p.accountIDFailedAt) < accountIDRetryCooldown {
+		return "", "", p.accountIDErr
+	}
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), accountIDResolveTimeout)
+	defer cancel()
+	accountID, partition, err = p.resolveIdentity(resolveCtx)
+	if err != nil {
+		p.accountIDErr = err
+		p.accountIDFailedAt = time.Now()
+		log.Printf("[senderidentity] cannot resolve AWS account id for adoption (STS GetCallerIdentity failed): %v — will retry after %s; adoption reports identities as not-owned until then", err, accountIDRetryCooldown)
+		return "", "", err
+	}
+	p.accountID, p.partition = accountID, partition
+	p.accountIDResolved = true
+	return accountID, partition, nil
 }
 
 func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
@@ -212,8 +297,15 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 			return Result{}, getErr
 		}
 		if !isManagedIdentity(existing) {
-			if !canAdoptIdentity(existing, dkimSelector, len(dkimPrivateKeyDER) > 0) {
-				return Result{}, ErrIdentityNotOwned
+			evidence := AdoptionEvidence{Selector: dkimSelector, HasPrivateKey: len(dkimPrivateKeyDER) > 0}
+			if ok, reason := p.adoptionDecision(existing, evidence); !ok {
+				// Wrap the refusal reason (batch C finding 2): canAdoptIdentity
+				// now reports WHICH criterion failed, so the operator-facing ALERT
+				// log at both worker.go call sites (which logs %v of this error)
+				// can distinguish a missing IAM grant from a mismatched selector
+				// from a genuinely foreign identity, instead of all three
+				// reporting the identical bare ErrIdentityNotOwned.
+				return Result{}, fmt.Errorf("%w: %s", ErrIdentityNotOwned, reason)
 			}
 			if err := p.adoptIdentity(ctx, domain); err != nil {
 				return Result{}, err // transient/permission on the tag call — retry
@@ -263,7 +355,7 @@ func mailFromRecords(domain, region string) []DNSRecord {
 	}
 }
 
-func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector string, haveKeyMaterial bool) (Result, error) {
+func (p *SESProvider) Status(ctx context.Context, domain string, evidence AdoptionEvidence) (Result, error) {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {
 		var notFound *sestypes.NotFoundException
@@ -276,8 +368,10 @@ func (p *SESProvider) Status(ctx context.Context, domain, expectedSelector strin
 		// Self-heals an ownership tag removed out-of-band on an identity e2a
 		// otherwise still provably owns (matching BYODKIM selector), not just
 		// the initial adoption of a pre-tag-release identity.
-		if !canAdoptIdentity(out, expectedSelector, haveKeyMaterial) {
-			return Result{}, ErrIdentityNotOwned
+		if ok, reason := p.adoptionDecision(out, evidence); !ok {
+			// See the identical comment in Provision: the reason string lets
+			// the caller's ALERT log distinguish WHY adoption was refused.
+			return Result{}, fmt.Errorf("%w: %s", ErrIdentityNotOwned, reason)
 		}
 		if err := p.adoptIdentity(ctx, domain); err != nil {
 			return Result{}, err // transient/permission on the tag call — retry
@@ -380,38 +474,46 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 //     recipient addresses; a policy can grant another AWS account send
 //     permissions on it. This is checked first and independent of the
 //     BYODKIM/selector reasoning below.
-//   - haveKeyMaterial is true: e2a actually has DKIM private key material on
-//     file for this domain — NOT merely a stored selector. expectedSelector
-//     non-empty is a DIFFERENT fact than key material being present:
-//     LoadSendingIdentityState can return a non-empty selector with a
-//     nil/empty private key (e.g. mid domain-reclaim — see
+//   - evidence.HasPrivateKey is true: e2a actually has DKIM private key
+//     material on file for this domain — NOT merely a stored selector.
+//     evidence.Selector non-empty is a DIFFERENT fact than key material being
+//     present: LoadSendingIdentityState can return a non-empty selector with
+//     a nil/empty private key (e.g. mid domain-reclaim — see
 //     internal/identity's key lifecycle), and adopting on the selector alone
 //     would tag an identity e2a cannot actually sign for. That is not inert:
 //     the caller's own no-key branch (worker.go) then finds the identity
 //     tagged and calls Deprovision, which now SUCCEEDS and DELETES it —
-//     pre-adoption behavior refused that delete outright. Provision passes
-//     len(dkimPrivateKeyDER)>0 directly, since it already receives the raw
-//     key bytes. Status's own interface carries no key bytes, so ITS caller
-//     (worker.go, at both provider.Status call sites) is responsible for
-//     passing accurate signal — see Provider.Status's doc.
-//   - expectedSelector is non-empty: e2a has a stored DKIM selector on file
+//     pre-adoption behavior refused that delete outright. Provision builds
+//     its AdoptionEvidence with HasPrivateKey: len(dkimPrivateKeyDER)>0
+//     directly, since it already receives the raw key bytes. Status's own
+//     interface carries no key bytes, so ITS caller (worker.go, at both
+//     provider.Status call sites) is responsible for passing accurate
+//     evidence — see Provider.Status's doc.
+//   - evidence.Selector is non-empty: e2a has a stored DKIM selector on file
 //     for this domain.
 //   - the identity's DKIM was configured via BYODKIM (SigningAttributesOrigin
 //     == EXTERNAL). Only e2a's own Provision supplies signing key material;
 //     AWS_SES (Easy DKIM, SES-generated keys) can never be e2a's doing.
-//   - DkimAttributes.Status == SUCCESS: SES has independently matched the
-//     private key material IT holds against the DNS TXT published at
-//     <selector>._domainkey.<domain> — that is what DKIM verification means
-//     for a BYODKIM identity, and it costs no extra provider call (Get
+//   - DkimAttributes.Status == SUCCESS: SES has independently matched
+//     whatever private key material IT HOLDS against the DNS TXT published
+//     at <selector>._domainkey.<domain> — that is what DKIM verification
+//     means for a BYODKIM identity, and it costs no extra provider call (Get
 //     already returns it). This is materially stronger than the token match
 //     below: dkim.SelectorForNow's monthly convention is a publicly-derivable
 //     OSS constant with zero entropy of its own, so the token match alone
 //     proves only that SOME identity was configured with e2a's naming
-//     scheme — not that SES has cryptographically confirmed e2a's key
-//     against that domain's DNS. Requiring SUCCESS closes that gap without
-//     e2a resolving DNS itself (deliberately out of scope for the provider
-//     layer — a DNS-comparing follow-up is a possible future hardening, not
-//     required here).
+//     scheme — not that the key SES holds for it matches that domain's DNS
+//     at all. Requiring SUCCESS closes THAT gap without e2a resolving DNS
+//     itself (deliberately out of scope for the provider layer — a
+//     DNS-comparing follow-up is a possible future hardening, not required
+//     here). CAUTION — SUCCESS is not proof the key is e2a's OWN key: for a
+//     hypothetical foreign BYODKIM identity (some other application's, in a
+//     shared AWS account) that already reached provider-side SUCCESS, this
+//     bit is equally SUCCESS — it is that OTHER app's key SES matched, not
+//     e2a's. SUCCESS rules out an identity that was never verified at all;
+//     it is the exact-selector match below, combined with the reachability
+//     bound (this domain is independently DNS-verified as caller-controlled
+//     — see below), that does the actual ownership work.
 //     Design choice, made explicit because it trades off against a real
 //     population: SUCCESS is required STRICTLY, with no fallback for
 //     PENDING. A legacy BYODKIM identity that is still provider-side PENDING
@@ -429,7 +531,7 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 //     a real non-SUCCESS legacy population left behind by this rule.
 //   - the selector SES reports installed (DkimAttributes.Tokens — for an
 //     EXTERNAL-origin identity this holds the BYODKIM selector, not a set of
-//     Easy-DKIM CNAME tokens) matches expectedSelector EXACTLY.
+//     Easy-DKIM CNAME tokens) matches evidence.Selector EXACTLY.
 //
 // The selector match is scoped to one domain by construction: both sides come
 // from a single domain's GetEmailIdentity call and a single domain's stored
@@ -452,9 +554,37 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 // handleVerifyDomain/VerifyDomain). No customer can aim adoption at a domain
 // they don't control; a matching selector token is necessary but this
 // verification gate is what makes it sufficient to trust at all.
-func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string, haveKeyMaterial bool) bool {
-	if out == nil || out.DkimAttributes == nil || expectedSelector == "" || !haveKeyMaterial {
-		return false
+//
+// CAVEAT (batch C finding 10): that bound holds only when the DNS probe
+// above actually runs. internal/agent/api.go's checkDomainRecords
+// short-circuits to TXTFound=true/MX="found" for EVERY domain whenever
+// !production (config env != "production") — a deliberate dev/test
+// convenience so local flows work without real DNS. In that mode ANY
+// customer-typed domain reaches domains.verified=true instantly, with no
+// ownership proof at all, and this function has no way to tell. This
+// function itself does not gate on production — that would need threading
+// deployment-environment awareness through a pure per-identity decision
+// function used from a security-critical, exhaustively-table-tested code
+// path. Instead SESProvider.refuseAdoption (set from
+// NewSESProviderFromConfig's production parameter, itself
+// cfg.IsProduction()) refuses adoption at the Provision/Status call sites
+// BEFORE this function ever runs — see adoptionDecision. A misconfigured
+// non-production deployment that nonetheless points sender_identity at real
+// AWS therefore still cannot silently take over a pre-existing SES identity
+// via adoption; it can only fall back to ErrIdentityNotOwned exactly like a
+// genuinely foreign one.
+func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, evidence AdoptionEvidence) (ok bool, reason string) {
+	if out == nil {
+		return false, "no provider identity to evaluate"
+	}
+	if out.DkimAttributes == nil {
+		return false, "provider identity has no DKIM attributes"
+	}
+	if evidence.Selector == "" {
+		return false, "no DKIM selector on file for this domain"
+	}
+	if !evidence.HasPrivateKey {
+		return false, "no DKIM private key material on file for this domain"
 	}
 	// A configuration set or an identity policy is FOREIGN configuration e2a
 	// never writes (Provision never sets either). Adopting an identity that
@@ -469,23 +599,35 @@ func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string
 	// this identity is not purely e2a's — refuse it exactly like a foreign
 	// identity, before any of the BYODKIM/selector checks below.
 	if out.ConfigurationSetName != nil || len(out.Policies) > 0 {
-		return false
+		return false, "identity carries foreign configuration (a configuration set or an identity policy e2a never writes)"
 	}
 	if out.DkimAttributes.SigningAttributesOrigin != sestypes.DkimSigningAttributesOriginExternal {
-		return false
+		return false, "DKIM signing origin is not BYODKIM (AWS_SES/Easy DKIM can never be e2a's own doing)"
 	}
 	// SES has cryptographically matched the key material IT holds against the
 	// DNS TXT at <selector>._domainkey.<domain> — see the doc comment above
 	// for why this is required strictly, with no PENDING fallback.
 	if out.DkimAttributes.Status != sestypes.DkimStatusSuccess {
-		return false
+		return false, fmt.Sprintf("DKIM verification status is %q, not SUCCESS", out.DkimAttributes.Status)
 	}
 	for _, token := range out.DkimAttributes.Tokens {
-		if token == expectedSelector {
-			return true
+		if token == evidence.Selector {
+			return true, ""
 		}
 	}
-	return false
+	return false, "installed DKIM selector does not match the selector e2a has on file for this domain"
+}
+
+// adoptionDecision applies the non-production adoption guard (refuseAdoption
+// — batch C finding 10) on top of canAdoptIdentity's pure per-identity
+// criteria, and always returns a non-empty reason on refusal so both
+// Provision and Status can build a diagnosable, wrapped ErrIdentityNotOwned
+// regardless of which check refused (finding 2).
+func (p *SESProvider) adoptionDecision(out *sesv2.GetEmailIdentityOutput, evidence AdoptionEvidence) (ok bool, reason string) {
+	if p.refuseAdoption {
+		return false, "adoption is refused outside production: domain verification's DNS gate (which adoption's reachability bound depends on) is not enforced when env != \"production\" — see canAdoptIdentity's doc"
+	}
+	return canAdoptIdentity(out, evidence)
 }
 
 // adoptIdentity applies the ownership tag to an identity canAdoptIdentity has
