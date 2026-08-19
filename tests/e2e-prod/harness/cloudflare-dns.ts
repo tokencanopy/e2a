@@ -94,6 +94,34 @@ export class CloudflareDnsClient {
     for (const id of ids) await this.deleteId(id);
   }
 
+  /**
+   * Verification-only counterpart to delete(): true iff at least one record
+   * still matches this ref's type+name (and comment/content, same precedence
+   * as findIds()). Callers that already trust a 2xx delete response should
+   * NOT need this — it exists for callers that must not trust it, e.g. a
+   * teardown step that asserts DNS is actually gone rather than assuming a
+   * prior delete() call worked. Never throws DnsDeleteError on zero matches
+   * (that is the expected, successful outcome here, not a transient miss).
+   */
+  async exists(ref: CloudflareDnsRecordRef): Promise<boolean> {
+    const query = new URLSearchParams({ type: ref.type, name: ref.name, per_page: "100" });
+    const res = await this.fetchImpl(`${this.api}/zones/${this.zone}/dns_records?${query}`, {
+      headers: this.headers(false),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const envelope = await this.readEnvelope<Array<{ id: string; content?: string; comment?: string }>>(
+      res,
+      `${ref.type} ${ref.name} exists-check`,
+    );
+    if (!res.ok || !envelope.success || !Array.isArray(envelope.result)) {
+      throw this.httpError(`${ref.type} ${ref.name} exists-check`, res.status, envelope.errors);
+    }
+    return envelope.result.some((record) => {
+      if (ref.comment !== undefined) return record.comment === ref.comment;
+      return ref.content === undefined || record.content === ref.content;
+    });
+  }
+
   private async findIds(ref: CloudflareDnsRecordRef): Promise<string[]> {
     const query = new URLSearchParams({ type: ref.type, name: ref.name, per_page: "100" });
     const res = await this.fetchImpl(`${this.api}/zones/${this.zone}/dns_records?${query}`, {
