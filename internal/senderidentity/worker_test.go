@@ -1457,16 +1457,19 @@ func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
 // TestReapWorker_GenuineDeleteStillFinalizesTombstone pins case 6: a
 // genuinely deleted domain's teardown/tombstone path is unaffected by the
 // ledger-retention fix above. It goes through FinalizeSendingIdentityTombstone
-// (age-gated on the ledger row's last mutation), never through
-// ForgetSendingIdentityManaged — the two are called from disjoint branches of
-// syncProviderIdentityWithInspection (deletion vs. ownership-failure).
+// (age-gated on the ledger row's last mutation). ForgetSendingIdentityManaged
+// has no production callers at all (see its doc comment in
+// internal/identity/store.go), so the ForgetCalls assertion below is a
+// belt-and-suspenders check, not evidence of disambiguating two live call
+// sites — this test does not, and cannot, prove anything about a branch that
+// is not reached.
 //
-// The `len(store.managed)` check alone can't tell WHICH of the two deletion
-// methods emptied the ledger map — both simply delete the same entry in the
-// fake. What actually pins "never through ForgetSendingIdentityManaged" is
-// the explicit ForgetCalls/FinalizeTombstoneCalls assertion below; the
-// prov.List() check is independent, real evidence that Deprovision itself
-// genuinely ran (not implied by the ledger going empty).
+// The `len(store.managed)` check alone can't tell WHICH deletion method
+// emptied the ledger map — both would delete the same entry in the fake if
+// either were called. The FinalizeTombstoneCalls assertion below is what
+// actually pins "through FinalizeSendingIdentityTombstone"; the prov.List()
+// check is independent, real evidence that Deprovision itself genuinely ran
+// (not implied by the ledger going empty).
 func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
 	const domain = "genuinely-deleted.example"
 	store := newFakeStore()
