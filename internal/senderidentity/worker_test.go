@@ -36,7 +36,7 @@ type blockingStatusProvider struct {
 	provisionOnce    sync.Once
 }
 
-func (p *blockingStatusProvider) Status(ctx context.Context, domain string) (Result, error) {
+func (p *blockingStatusProvider) Status(ctx context.Context, domain string, evidence AdoptionEvidence) (Result, error) {
 	p.statusOnce.Do(func() { close(p.statusStarted) })
 	select {
 	case <-p.statusRelease:
@@ -270,6 +270,65 @@ func TestReconcileWorker_Work(t *testing.T) {
 		}
 		if firer.count() != 0 {
 			t.Fatalf("firer should not fire, got %d", firer.count())
+		}
+	})
+}
+
+// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial pins
+// FakeProvider.Status actually recording its arguments (it used to discard
+// the AdoptionEvidence and record only the domain, so a call site that
+// regressed to passing a zero value, a stale selector, or the wrong boolean
+// would still pass every worker test — the compiler cannot catch a
+// wrong-but-same-typed argument). This exercises the real call site,
+// reconcileProviderIdentity's provider.Status(ctx, domain,
+// adoptionEvidence(state)) in worker.go, and asserts it passes the store's
+// actual selector and an accurate key-material signal — the exact inputs
+// canAdoptIdentity depends on in the real SES provider (see ses.go).
+func TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial(t *testing.T) {
+	const domain = "adopt-signal.example.com"
+	const owner = "user_1"
+	const selector = "e2a202608"
+
+	t.Run("known key material passes the real selector and true", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusPending)
+		store.setOwner(domain, owner)
+		store.setProvisionInputs(selector, []byte("real-der-key-material"), true)
+		prov := NewFakeProvider()
+		prov.SetStatus(domain, Result{Status: StatusVerified})
+		w := &ReconcileWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.StatusCalls) != 1 {
+			t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+		}
+		if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: selector, HaveKey: true}); got != want {
+			t.Fatalf("Status call = %+v, want %+v — the reconcile path must pass the real stored selector and haveKeyMaterial=true when key material is on file", got, want)
+		}
+	})
+
+	t.Run("no key material passes false", func(t *testing.T) {
+		store := newFakeStore()
+		store.setStatus(domain, StatusPending)
+		store.setOwner(domain, owner)
+		// Selector on file but no private key — e.g. mid domain-reclaim (see
+		// canAdoptIdentity's doc comment in ses.go for why this distinction
+		// matters: a non-empty selector alone must never read as adoptable).
+		store.setProvisionInputs(selector, nil, true)
+		prov := NewFakeProvider()
+		prov.SetStatus(domain, Result{Status: StatusVerified})
+		w := &ReconcileWorker{store: store, provider: prov}
+
+		if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+			t.Fatalf("Work returned error: %v", err)
+		}
+		if len(prov.StatusCalls) != 1 {
+			t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+		}
+		if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: selector, HaveKey: false}); got != want {
+			t.Fatalf("Status call = %+v, want %+v — no private key on file must never report haveKeyMaterial=true", got, want)
 		}
 	})
 }
@@ -1172,71 +1231,201 @@ func TestPostDrainAuditWorker_FiresStatusEvents(t *testing.T) {
 	}
 }
 
-// TestReconcileWorker_NotOwnedForgetFailureStillFires pins the review fix for
-// the lost-event window: the failed status is committed, then the ledger
-// Forget hits a transient DB error. The job retries (error propagates), but
-// the retry short-circuits on status != pending — so the event MUST fire on
-// this attempt or it is lost for good.
-func TestReconcileWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
-	const domain = "forget-blip.example"
+// TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain pins finding 6: an
+// ownership failure must never call ForgetSendingIdentityManaged at all — an
+// ownership failure is never evidence of teardown, and the ledger row is the
+// only durable handle back to a domain that is still live.
+// ForgetSendingIdentityManaged's own NOT EXISTS guard is defense-in-depth in
+// the SQL, not a substitute for this: it evaluates against the calling
+// transaction's own snapshot, so a concurrent domain-delete that commits
+// first can still make the guard pass and delete the tombstone, orphaning
+// the SES identity forever. store.forgetErr is deliberately poisoned: Work
+// succeeding proves Forget is never even invoked on this path (a
+// reintroduced call would surface the poisoned error).
+//
+// A retained row that never buys anything is worthless — checking
+// store.managed[domain] alone (as this test used to) only proves the fake's
+// own bookkeeping still has an entry; reverting the store.go NOT EXISTS
+// guard entirely would leave this test passing exactly the same, since it
+// never touches real SQL and the ledger row is never actually forgotten on
+// this code path either way. Phase 2 proves the CONSEQUENCE the incident
+// cared about: once the ownership problem resolves, the retained row lets
+// the reaper's hourly sweep actually re-provision and converge the domain to
+// verified — not merely that a map entry survived.
+func TestReconcileWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
+	const domain = "not-owned-live.example"
 	store := newFakeStore()
 	store.setStatus(domain, StatusPending)
-	store.setOwner(domain, "u3")
-	store.forgetErr = errors.New("db blip")
+	store.setOwner(domain, "u-live")
+	store.setProvisionInputs("sel", []byte("der"), true)
+	store.managed[domain] = domain + "-incarnation"
+	store.forgetErr = errors.New("Forget must never be called from an ownership failure")
 	prov := NewFakeProvider()
 	prov.SetStatusErr(domain, ErrIdentityNotOwned)
 	firer := &recordingFirer{}
 	w := &ReconcileWorker{store: store, provider: prov, fire: firer.fire()}
 
-	err := w.Work(context.Background(), reconcileJob(domain, 1, 12))
-	if err == nil {
-		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
+	// Phase 1: the first poll discovers an untagged (foreign-looking)
+	// identity. Fails closed; the ledger row must survive.
+	if err := w.Work(context.Background(), reconcileJob(domain, 1, 12)); err != nil {
+		t.Fatalf("Work: %v (Forget must never be called on this path)", err)
 	}
 	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
-		t.Fatalf("status = %q, want failed committed before the Forget error", got)
+		t.Fatalf("status = %q, want failed", got)
 	}
-	ev, ok := firer.last()
-	if !ok || ev.Status != StatusFailed {
-		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
+	if store.managed[domain] == "" {
+		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
+	}
+
+	// Phase 2: the problem resolves (e.g. the ownership tag reappears, or an
+	// operator fixes IAM). Nothing about a domain sitting `failed` due to an
+	// ownership issue is ever revisited by another reconcile poll (the
+	// reconcile path only acts while status==pending) — it's the hourly
+	// reaper, driven off the ledger's applied-vs-incarnation mismatch, that
+	// keeps retrying. A forced re-provision always reports pending first
+	// (matching real SES semantics), so convergence takes two sweeps: the
+	// first re-installs and the second confirms verified.
+	prov.SetStatusErr(domain, nil)
+	reap := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 1: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status after recovery sweep 1 = %q, want pending (re-provisioned)", got)
+	}
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 2: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status after recovery sweep 2 = %q, want verified — the retained ledger row must buy a retry that actually converges", got)
 	}
 }
 
-// TestSyncWorker_NotOwnedForgetFailureStillFires: same window in the sync
-// (provision) path — status commit succeeded, ledger Forget failed. The
-// adversarial review then proved the naive fix fires once per River attempt
-// (the sync path re-executes the same terminal transition on retry, unlike
-// reconcile's status!=pending guard), so this also pins exactly-one event
-// across the retries: the first attempt's write CHANGES the status and fires;
-// the retry's failed→failed rewrite must not.
-func TestSyncWorker_NotOwnedForgetFailureStillFires(t *testing.T) {
-	const domain = "sync-forget-blip.example"
+// TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain is the sync (provision)
+// path's counterpart to the reconcile test above — see its doc comment for
+// why phase 2 (convergence via the reaper) is what makes this test earn its
+// place rather than only checking the fake's own bookkeeping.
+func TestSyncWorker_NotOwnedRetainsLedgerForLiveDomain(t *testing.T) {
+	const domain = "sync-not-owned-live.example"
 	store := newFakeStore()
-	store.setStatus(domain, StatusVerified)
-	store.setOwner(domain, "u4")
+	store.setStatus(domain, StatusNone)
+	store.setOwner(domain, "u-live2")
 	store.setProvisionInputs("sel", []byte("der"), true)
-	store.forgetErr = errors.New("db blip")
+	store.forgetErr = errors.New("Forget must never be called from an ownership failure")
 	prov := NewFakeProvider()
 	prov.SetProvisionErr(ErrIdentityNotOwned)
 	firer := &recordingFirer{}
 	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
 
-	err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}})
-	if err == nil {
-		t.Fatal("Forget failure must propagate so River retries the ledger cleanup")
+	// Phase 1: the initial provision attempt hits a foreign-looking identity.
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
 	}
-	ev, ok := firer.last()
-	if !ok || ev.Status != StatusFailed {
-		t.Fatalf("fired %+v ok=%v, want domain.sending_failed despite the Forget error", ev, ok)
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed", got)
 	}
-	// River retries (Forget still failing): the rewrite is failed→failed — no
-	// duplicate webhook.
-	for attempt := 2; attempt <= 4; attempt++ {
-		if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err == nil {
-			t.Fatalf("attempt %d: Forget still failing must still propagate", attempt)
-		}
+	if store.managed[domain] == "" {
+		t.Fatal("ownership failure on a live domain must retain the ledger row so the reconciler can retry")
 	}
-	if firer.count() != 1 {
-		t.Fatalf("fired %d events over 4 attempts, want exactly 1 (no duplicate per retry)", firer.count())
+
+	// Phase 2: the problem resolves; the reaper's forced re-provision (driven
+	// by the ledger's applied-vs-incarnation mismatch, independent of
+	// sending_status) picks the retained row back up and converges it — same
+	// two-sweep shape as the reconcile-path test above.
+	prov.SetProvisionErr(nil)
+	reap := &ReapWorker{store: store, provider: prov, fire: firer.fire()}
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 1: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusPending {
+		t.Fatalf("status after recovery sweep 1 = %q, want pending (re-provisioned)", got)
+	}
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	if err := runReapWorkerChain(context.Background(), reap, ReapV2Args{}); err != nil {
+		t.Fatalf("recovery reap sweep 2: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusVerified {
+		t.Fatalf("status after recovery sweep 2 = %q, want verified — the retained ledger row must buy a retry that actually converges", got)
+	}
+}
+
+// TestReapWorker_GenuineDeleteStillFinalizesTombstone pins case 6: a
+// genuinely deleted domain's teardown/tombstone path is unaffected by the
+// ledger-retention fix above. It goes through FinalizeSendingIdentityTombstone
+// (age-gated on the ledger row's last mutation), never through
+// ForgetSendingIdentityManaged — the two are called from disjoint branches of
+// syncProviderIdentityWithInspection (deletion vs. ownership-failure).
+//
+// The `len(store.managed)` check alone can't tell WHICH of the two deletion
+// methods emptied the ledger map — both simply delete the same entry in the
+// fake. What actually pins "never through ForgetSendingIdentityManaged" is
+// the explicit ForgetCalls/FinalizeTombstoneCalls assertion below; the
+// prov.List() check is independent, real evidence that Deprovision itself
+// genuinely ran (not implied by the ledger going empty).
+func TestReapWorker_GenuineDeleteStillFinalizesTombstone(t *testing.T) {
+	const domain = "genuinely-deleted.example"
+	store := newFakeStore()
+	// No setStatus/setOwner: the domain row is gone, mirroring a real delete
+	// (LoadSendingIdentityState reads pgx.ErrNoRows).
+	store.managed[domain] = domain + "-incarnation"
+	store.ageTombstone(domain) // past the post-drain convergence delay
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	w := &ReapWorker{store: store, provider: prov}
+
+	if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
+		t.Fatalf("Work returned error: %v", err)
+	}
+	identities, err := prov.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(identities) != 0 {
+		t.Fatalf("provider identity survived deprovision: %v", identities)
+	}
+	if len(store.managed) != 0 {
+		t.Fatalf("genuinely deleted domain's tombstone must still finalize, ledger = %v", store.managed)
+	}
+	if len(store.ForgetCalls) != 0 {
+		t.Fatalf("genuine teardown must never call ForgetSendingIdentityManaged, got %v", store.ForgetCalls)
+	}
+	if len(store.FinalizeTombstoneCalls) != 1 {
+		t.Fatalf("expected exactly one FinalizeSendingIdentityTombstone call, got %v", store.FinalizeTombstoneCalls)
+	}
+}
+
+// TestReapWorker_NoKeyMaterialLiveDomainRetainsLedger pins finding 7's
+// concrete gap: a verified, live, owned domain with NO DKIM key material on
+// file (selector/key never set — e.g. a stuck migration) hits the no-key
+// branch of syncProviderIdentityWithInspection, which calls
+// FinalizeSendingIdentityTombstone under the reaper's finalizeDeletion=true.
+// The tombstone is backdated well past the drain window so only the
+// live-owner guard (not the age gate) is under test — before that guard
+// existed on this method, the domain would be stranded exactly like the
+// original ForgetSendingIdentityManaged incident, just reached via a
+// different trigger (missing key material instead of a missing ownership
+// tag).
+func TestReapWorker_NoKeyMaterialLiveDomainRetainsLedger(t *testing.T) {
+	const domain = "no-key-live.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u-live3")
+	// setProvisionInputs deliberately left uncalled: selector/privKey stay ""/nil,
+	// mirroring a live domain with NULL dkim_selector/dkim_private_key.
+	store.managed[domain] = domain + "-incarnation" // unapplied ⇒ forced (reaches the no-key branch directly)
+	store.ageTombstone(domain)                      // past the post-drain convergence delay
+	prov := NewFakeProvider()
+	w := &ReapWorker{store: store, provider: prov}
+
+	if err := runReapWorkerChain(context.Background(), w, ReapV2Args{}); err != nil {
+		t.Fatalf("Work returned error: %v", err)
+	}
+	if got, _ := store.GetSendingStatus(context.Background(), domain); got != StatusFailed {
+		t.Fatalf("status = %q, want failed (no key material)", got)
+	}
+	if store.managed[domain] == "" {
+		t.Fatal("a live owned domain's ledger row must survive FinalizeSendingIdentityTombstone on the no-key branch")
 	}
 }
 
@@ -1552,6 +1741,59 @@ func TestSyncWorker_AlreadyVerifiedNoOp(t *testing.T) {
 	}
 	if firer.count() != 0 {
 		t.Fatalf("healthy re-check fired %d event(s), want none", firer.count())
+	}
+	// The other provider.Status call site (syncProviderIdentityWithInspection's
+	// providerStatus closure) must carry the same real selector/key-material
+	// signal as the reconcile path — see
+	// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial.
+	if len(prov.StatusCalls) != 1 {
+		t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+	}
+	if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: "sel", HaveKey: true}); got != want {
+		t.Fatalf("Status call = %+v, want %+v", got, want)
+	}
+}
+
+// TestSyncWorker_AlreadyVerifiedNoOpCarriesRealKeyMaterialSignal pins batch C
+// finding 4: TestSyncWorker_AlreadyVerifiedNoOp above only ever exercises
+// HaveKey=true at the syncProviderIdentityWithInspection providerStatus
+// call site (worker.go's healthy-recheck gate). Mutation-testing confirmed
+// that hardcoding `true` at that specific call site (instead of passing
+// len(state.PrivateKey) > 0) leaves the ENTIRE test suite green — the
+// reconcile path's sibling call site IS covered on both arms
+// (TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial), but this
+// one wasn't. That matters because LoadSendingIdentityState reports
+// PrivateKey == nil for a verified domain whose dkim_private_key is NULL,
+// and this inspect block runs BEFORE the no-key branch below it — so a wrong
+// hardcoded `true` here is exactly the "tag an identity e2a cannot sign for,
+// then let Deprovision delete it" path canAdoptIdentity's doc warns about.
+// This test seeds no key material (mirroring
+// TestReconcileWorker_StatusCallCarriesRealSelectorAndKeyMaterial's "no key
+// material" subtest) and asserts HaveKey: false reaches the provider.
+func TestSyncWorker_AlreadyVerifiedNoOpCarriesRealKeyMaterialSignal(t *testing.T) {
+	const domain = "healthy-recheck-no-key.example"
+	store := newFakeStore()
+	store.setStatus(domain, StatusVerified)
+	store.setOwner(domain, "u1")
+	// Selector on file but NO private key — e.g. a stuck migration or mid
+	// domain-reclaim (see canAdoptIdentity's doc in ses.go).
+	store.setProvisionInputs("sel", nil, true)
+	store.managed[domain] = domain + "-incarnation"
+	store.applied[domain] = domain + "-incarnation"
+	prov := NewFakeProvider()
+	prov.SeedIdentity(domain)
+	prov.SetStatus(domain, Result{Status: StatusVerified})
+	firer := &recordingFirer{}
+	w := &SyncWorker{store: store, provider: prov, fire: firer.fire()}
+
+	if err := w.Work(context.Background(), &river.Job[SyncArgs]{Args: SyncArgs{Domain: domain}}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if len(prov.StatusCalls) != 1 {
+		t.Fatalf("expected exactly one Status call, got %d: %+v", len(prov.StatusCalls), prov.StatusCalls)
+	}
+	if got, want := prov.StatusCalls[0], (StatusCall{Domain: domain, Selector: "sel", HaveKey: false}); got != want {
+		t.Fatalf("Status call = %+v, want %+v — no private key on file must never report HaveKey=true, even on the healthy-recheck call site", got, want)
 	}
 }
 

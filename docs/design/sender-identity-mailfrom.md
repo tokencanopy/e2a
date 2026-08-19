@@ -63,17 +63,27 @@ for verified domains; (b) needed an aligned Return-Path.
   unrelated identity from the same SES account.
 - Every created SES identity carries `e2a-managed=sender-identity-v1`.
   Existing identities without that exact tag are treated as foreign: e2a will
-  neither update nor delete them. The runtime IAM role should independently
-  require `aws:RequestTag/e2a-managed=sender-identity-v1` for create/tag calls
-  and `aws:ResourceTag/e2a-managed=sender-identity-v1` for DKIM, MAIL FROM, and
+  neither update nor delete them, **unless provably e2a's own** (see
+  `canAdoptIdentity` in `internal/senderidentity/ses.go`, and the amendment
+  below) — an untagged identity that clears that narrow bar is tagged in
+  place and then treated exactly like an always-owned one. The runtime IAM
+  role should independently require
+  `aws:RequestTag/e2a-managed=sender-identity-v1` for create/tag calls and
+  `aws:ResourceTag/e2a-managed=sender-identity-v1` for DKIM, MAIL FROM, and
   delete mutations. This provider-side condition closes the check-then-mutate
-  race that a client-side ownership check cannot close.
+  race that a client-side ownership check cannot close **for a client that
+  never writes the tag itself; adoption writes it, so read the amendment
+  below before treating this IAM condition as independent of e2a's own
+  logic.**
   `ses:TagResource` is also callable directly because AWS does not expose a
   create-only variant of its dependent authorization. e2a itself never makes
-  that standalone call, but the runtime credential must remain trusted: this
-  tag is not a boundary against its deliberate compromise. Do not operate two
-  e2a installations with this shared tag value in the same AWS account and
-  region; use an isolated account/region or separately scoped principal.
+  that standalone call outside adoption (see amendment), but the runtime
+  credential must remain trusted: this tag is not a boundary against its
+  deliberate compromise. Do not operate two e2a installations with this
+  shared tag value in the same AWS account and region; use an isolated
+  account/region or separately scoped principal — **the amendment below
+  explains why adoption makes violating this silent, and worse, than before
+  adoption existed.**
 - Mutation and reconcile job kinds and their River queue are versioned for
   blue/green rollout. The old slot does not listen to the v2 queue and cannot
   claim new work; legacy jobs are drained by compatibility
@@ -158,6 +168,147 @@ for verified domains; (b) needed an aligned Return-Path.
 
 ## Upgrading an existing SES-enabled installation
 
+**Amendment:** steps 1–3 and 5 below described a MANUAL, human-reviewed
+tagging pass that was expected to run once, before the ownership-tag release
+first deployed. In practice every identity created before that release
+reached production untagged, `Provision`/`Status` then hit
+`AlreadyExistsException`/an untagged `GetEmailIdentity` response and returned
+`ErrIdentityNotOwned`, and the `ErrIdentityNotOwned` handler unconditionally
+deleted the domain's row from the durable managed-identity ledger — so the
+domain was marked `sending_status=failed` and never automatically revisited.
+`SESProvider` now performs the equivalent of steps 1–3 automatically and
+per-domain, inline in `Provision`/`Status`, using criteria strictly narrower
+than "no tag" — ALL of the following must hold (`canAdoptIdentity` in
+`internal/senderidentity/ses.go` is the normative definition; this is a
+summary, keep them in sync):
+
+- the identity carries no foreign configuration (`ConfigurationSetName` is
+  nil and `Policies` is empty) — e2a's own `Provision` never sets either, so
+  either one present means the identity is doing something e2a didn't ask
+  for, and adoption would otherwise silently keep it in place.
+- e2a actually has DKIM private key material on file for the domain — not
+  merely a stored selector string (those are different facts; a domain can
+  carry a selector with no key, e.g. mid a reclaim).
+- the identity is configured with BYODKIM
+  (`DkimAttributes.SigningAttributesOrigin == EXTERNAL`) — only e2a's own
+  `Provision` supplies signing key material.
+- `DkimAttributes.Status == SUCCESS` — SES has cryptographically matched
+  whatever key material IT HOLDS against the domain's DNS TXT record. That is
+  materially stronger than the selector token match below (that token is a
+  publicly-derivable OSS constant with zero entropy on its own) but it is NOT
+  proof the matched key is *e2a's* key: a hypothetical foreign BYODKIM
+  identity in a shared AWS account can equally reach provider-side SUCCESS
+  for its own, different key. SUCCESS rules out an identity that was never
+  verified at all; it is SUCCESS combined with the exact-selector match below
+  — scoped to one domain e2a's own DNS probe has already confirmed the
+  caller controls (the reachability bound, next) — that does the actual
+  ownership work.
+- the installed selector matches EXACTLY the selector e2a has on file for
+  that domain.
+
+Anything else — foreign configuration, no key material on file, an
+AWS-managed (Easy DKIM) identity, DKIM not yet `SUCCESS`, or a selector
+mismatch — still returns `ErrIdentityNotOwned` untouched, same as before
+adoption existed; that keeps the "do not bulk-adopt" property below true
+per-identity instead of relying on a one-time human review. A permanent AWS
+error on the `TagResource` call itself (access denied, a malformed ARN, the
+identity not found) is also folded into `ErrIdentityNotOwned` rather than
+retried forever; only throttling/5xx/network errors propagate for retry.
+
+**Reachability bound on attacker-controlled input:** adoption is only ever
+*attempted* for a domain e2a's own database has independently confirmed the
+caller controls. `Provision`/`Status` are invoked from
+`internal/senderidentity/worker.go` only once `LoadSendingIdentityState`
+reports the domain verified (`domains.verified = true`) — which itself
+requires a live DNS probe of BOTH the ownership TXT record AND an apex MX
+record pointing at the e2a relay (`internal/httpapi/domains.go`'s
+`handleVerifyDomain`/`VerifyDomain`). No customer can aim adoption at a
+domain they don't control by registering it and waiting; a matching selector
+token is necessary for adoption but this verification gate is what makes it
+sufficient to trust at all.
+
+**Caveat: this bound holds only under `env: production`.** The DNS probe
+above is `internal/agent/api.go`'s `checkDomainRecords`, which
+unconditionally short-circuits to `TXTFound: true, MX: "found"` for EVERY
+domain whenever `!production` — a deliberate dev/test convenience so local
+flows work without real DNS. In that mode any customer-typed domain reaches
+`domains.verified = true` instantly, with no ownership proof at all, so a
+non-production deployment that nonetheless configures
+`sender_identity.ses_region` against real AWS (a misconfigured `env`, or a
+self-hoster testing against live SES) has no DNS gate on which domains
+adoption is even attempted for. `SESProvider.refuseAdoption` — set from
+`NewSESProviderFromConfig`'s `production` parameter (`cfg.IsProduction()` in
+`main.go`) — closes this gap at the `Provision`/`Status` call sites
+themselves: when `!production`, adoption of any untagged identity is refused
+outright regardless of what `canAdoptIdentity` would otherwise conclude, so
+a misconfigured non-production deployment can at most report
+`ErrIdentityNotOwned` (exactly as it would for a genuinely foreign identity)
+rather than silently take one over. Fresh `CreateEmailIdentity` calls are
+unaffected — a brand-new identity is always tagged as e2a's own on creation,
+so there is nothing to "adopt" there.
+
+The ledger-deletion bug above is fixed separately, and more thoroughly than
+the original narrow fix: `ForgetSendingIdentityManaged`
+(`internal/identity/store.go`) is no longer even CALLED from an ownership
+failure — an ownership failure is never evidence of teardown, and its own
+`NOT EXISTS` guard evaluates against the calling transaction's own snapshot,
+so a concurrent domain-delete that commits first can still make the guard
+pass and delete the ledger row out from under a still-live domain.
+`FinalizeSendingIdentityTombstone` (drain-window guarded, called only from
+the genuine-teardown branch) is the sole deletion path, and it now carries
+the SAME live-owner guard as `ForgetSendingIdentityManaged` — "never forget a
+live owned domain's row" is a store-wide invariant, not one method's
+property. A domain that fails adoption for any reason (foreign
+configuration, it was never BYODKIM, no key material, DKIM not yet
+`SUCCESS`, or the selector was rotated in a way the ledger doesn't reflect)
+stays in the ledger for the reaper to retry hourly after manual review — it
+is no longer stranded. Adoption logs an ALERT-convention line
+(`internal/senderidentity/worker.go`, matching `reaper.go`'s style) whenever
+it refuses ownership on a live domain, and a plain log line on every
+successful adoption, so this is now operator-observable rather than a silent
+unbounded hourly retry.
+
+**Steps 4, 6, and 7 are NOT simply "unaffected."** An earlier draft of this
+amendment claimed the IAM hardening in step 4 is independent of adoption
+because it is a provider-side condition "that a client-side ownership check
+cannot close" — that framing is now only half true. The `aws:ResourceTag`
+condition still closes the check-then-mutate RACE (adoption's own tag check
+and its `TagResource` call are not atomic with respect to a concurrent
+out-of-band change). But adoption itself is a client that WRITES the tag —
+the very thing step 4's IAM condition exists to gate — so the two are no
+longer independent controls in the way the original doc implied: a bug in
+`canAdoptIdentity` is no longer caught by IAM the way a bug in some
+hypothetical OTHER client-side tagger would be, because IAM's job here is to
+stop *untrusted* principals from tagging, not to second-guess e2a's own
+adoption logic. Step 4's IAM policy remains necessary (it is still the only
+thing stopping a compromised or misconfigured OTHER principal from tagging
+or mutating), just not sufficient on its own to catch an adoption-logic bug
+the way the original phrasing suggested. Steps 6 and 7 (the blue/green
+rollout choreography) are genuinely unaffected — adoption runs entirely
+inside `Provision`/`Status`, which the rollout sequencing already treats as
+opaque provider calls.
+
+**The existing "do not run two e2a installations sharing this tag value in
+one AWS account and region" constraint (step 4, above) still applies — and
+adoption makes violating it BOTH silent and worse.** Before adoption
+existed, two installations sharing a tag value could still corrupt each
+other's identities (the design doc already called this out), but the damage
+mode was limited to update/delete racing on an already-tagged identity.
+Adoption adds a new failure mode: if installation A's untagged legacy
+identity happens to satisfy installation B's `canAdoptIdentity` criteria
+(matching selector convention, BYODKIM, DKIM `SUCCESS` — plausible if both
+installs independently used the same monthly selector convention against
+the same domain history), installation B silently tags and takes over an
+identity it does not actually manage, with no error or warning on either
+side — this is exactly the failure mode the ownership tag exists to
+prevent, self-inflicted by having two installs share a tag value at all. An
+adopted identity is also now deletable by `Deprovision` where it was
+previously flatly protected (`ErrIdentityNotOwned`), so a stray adoption
+under this scenario escalates from "silent takeover" to "silent takeover
+that can later be silently deleted." Use an isolated account/region or a
+separately scoped tag value per installation; do not rely on this being
+merely a theoretical concern.
+
 The ownership tag is a deliberate migration gate. Do not bulk-adopt everything
 returned by `ListEmailIdentities`: an AWS account/region may contain identities
 owned by another application.
@@ -198,6 +349,54 @@ owned by another application.
 - Unit: `mapSESStatus` across both axes; `Provision` configures MAIL FROM + emits
   MX/SPF (incl. `AlreadyExists`); `mailfrom` convention; `envelopeSender`
   (verified → aligned, else relay/fail-closed).
+- Unit (adoption amendment): `canAdoptIdentity`'s truth table plus
+  `Provision`/`Status` wiring — matching selector + EXTERNAL origin + DKIM
+  `SUCCESS` + real key material + no foreign configuration adopts and
+  proceeds; a mismatched selector, an AWS-managed origin, DKIM still
+  `PENDING`/`FAILED`, no key material on file, or a `ConfigurationSetName`/
+  `Policies` present still returns `ErrIdentityNotOwned` with no tag applied;
+  an already-tagged identity is not retagged; a transient `TagResource` error
+  propagates for retry instead of a false `ErrIdentityNotOwned`; a permanent
+  one (access denied, malformed ARN) is classified as `ErrIdentityNotOwned`
+  instead of retrying forever, while a `NotFoundException` (the identity
+  vanished between the GET and the tag call) is classified as
+  `ErrIdentityNotFound` instead — callers already treat that as
+  repair/converge, not a foreign-identity refusal. `canAdoptIdentity` returns
+  a refusal reason alongside the bool (not just true/false), and both
+  `Provision`/`Status` wrap it into the returned `ErrIdentityNotOwned` so the
+  worker's ALERT logs can distinguish WHY adoption was refused instead of
+  every refusal reading identically. The two caller-supplied judgement inputs
+  (selector, key-material-present) are bundled into one `AdoptionEvidence`
+  value built by a single helper (`adoptionEvidence` in worker.go) shared by
+  both `provider.Status` call sites, rather than two independent booleans a
+  call site could pass inconsistently. Account-id resolution:
+  `identityFromCallerIdentity` rejects a nil OR empty-string `Account`; a
+  provider whose resolver fails degrades adoption to `ErrIdentityNotOwned`
+  and CACHES ONLY THE FAILURE, for `accountIDRetryCooldown` (not forever —
+  the previous `sync.Once` cached a persistent failure permanently, which a
+  River job's default 1-minute `JobTimeout` landing mid-STS-call on the
+  largest post-upgrade sweep could turn into exactly this PR's own failure
+  mode); a successful resolution is cached permanently; resolution runs on
+  `context.WithoutCancel(ctx)` with its own explicit timeout so it is never
+  itself at the mercy of the caller's deadline. Non-production guard:
+  `SESProvider.refuseAdoption` (set from `NewSESProviderFromConfig`'s
+  `production` parameter) refuses adoption of an identity that would
+  otherwise satisfy every `canAdoptIdentity` criterion — see the caveat
+  above. Ledger retention: an ownership failure on a still-live, still-owned
+  domain never even calls `ForgetSendingIdentityManaged`;
+  `FinalizeSendingIdentityTombstone` (the sole deletion path) carries the
+  same live-owner guard, TIGHTENED to also require `domains.verified` (not
+  just a live owner) so a delete-then-immediate-re-register race can still
+  finalize the old incarnation's tombstone; it retains the row for a
+  still-live VERIFIED domain hit via the no-key branch, while a genuinely
+  deleted domain's row is still removed once the drain window elapses.
+- Migration: `105_sender_identity_managed_domains_repair_stranded.sql`
+  re-runs migration 101's backfill, scoped to domains left stranded by the
+  pre-adoption v1.7.8 regression (live, owned, `sending_status='failed'`, no
+  ledger row) — `ON CONFLICT (domain) DO NOTHING` leaves an already-ledgered
+  domain (the common case) untouched, and `applied_incarnation` is
+  deliberately `NULL` so the repaired row actually reconverges instead of
+  reading as already-applied.
 - Local-service e2e (real binary + Mailpit): seeded a `sending_status=verified`
   domain and a `none` domain; over real SMTP confirmed verified → `From:
   bot@acme.e2etest` (no "via") + `Return-Path: bounces@bounce.acme.e2etest`;
@@ -213,3 +412,12 @@ owned by another application.
 - Per-deployment configurable subdomain label (Q1).
 - **ARC sealing** + `_dmarc` policy fetch (separate inbound-auth deferrals) — out
   of scope.
+- **DNS-comparing adoption hardening** — `canAdoptIdentity` trusts SES's own
+  `DkimAttributes.Status == SUCCESS` as proof the key material SES holds
+  matches the domain's published DNS, rather than e2a independently
+  resolving `<selector>._domainkey.<domain>` and comparing the public key
+  itself. That would be strictly stronger evidence (no dependency on SES's
+  own verification having run correctly) but means plumbing DNS resolution
+  into the provider layer, which currently has none — deliberately out of
+  scope for the BATCH A fix. Revisit only if `DkimAttributes.Status` alone
+  proves insufficient in practice.

@@ -1,0 +1,54 @@
+-- Repairs domains stranded by the pre-adoption v1.7.8 regression: on an
+-- ownership-check failure, the old ErrIdentityNotOwned handler
+-- unconditionally called ForgetSendingIdentityManaged, deleting the
+-- domain's row from sender_identity_managed_domains even though the domain
+-- itself stayed live/owned in `domains` at sending_status='failed'. That left
+-- the domain invisible to BOTH reaper phases going forward:
+--
+--   - reapManagedIdentityPage only iterates ledgered domains (this table) —
+--     a domain with no row here is simply never a candidate.
+--   - reapProviderOrphanPage's orphan audit skips any provider identity whose
+--     domain still has a live `domains` row (DomainExists=true), on the
+--     assumption a live domain is already covered by the ledger phase above
+--     — which is exactly the assumption this incident breaks.
+--
+-- Migration 101's trigger does not self-heal this either: it only
+-- re-inserts a row on INSERT, on a transition FROM sending_status='none', or
+-- on a verification_token change — none of which a domain sitting at
+-- `failed` (its state since the moment it was stranded) ever hits again on
+-- its own. Only a customer-initiated POST /domains/{d}/verify (which forces
+-- a fresh convergence pass through the current, fixed adoption logic)
+-- recovers a stranded domain today; this migration re-runs migration 101's
+-- one-time backfill for the population that regressed after it already ran.
+--
+-- applied_incarnation is deliberately NULL, not verification_token: setting
+-- it to the current token would make needsProvision (ledger's
+-- applied_incarnation IS DISTINCT FROM incarnation) read false, and the
+-- reaper's inspect switch in syncProviderIdentityWithInspection would then
+-- treat a `failed`-status domain with a provider-`verified` identity as
+-- "nothing to do" (its non-forced branch only acts on `pending`/`verified`
+-- ledger status, not `failed`) rather than reconverging it. NULL forces a
+-- real inspection/reconvergence pass on the next sweep, exactly like a fresh
+-- migration-101 backfill row.
+--
+-- Restricted to sending_status='failed': this is the only status a domain
+-- stranded by the v1.7.8 handler can be sitting at (see worker.go's
+-- ErrIdentityNotOwned branches, which write StatusFailed before the old
+-- Forget call). A domain already re-ledgered by 101's trigger (e.g. it later
+-- re-verified, changing verification_token) is unaffected — ON CONFLICT
+-- (domain) DO NOTHING leaves any existing ledger row untouched. A
+-- currently-failed domain that is genuinely, permanently unowned (a real
+-- foreign identity, not a stranding artifact) is also safe to re-ledger: the
+-- reaper will simply keep observing the same ErrIdentityNotOwned refusal and
+-- ALERT-logging it hourly for manual review, exactly as it already does for
+-- every other live ownership-refused domain post-fix — it can no longer
+-- delete the row out from under a live domain.
+--
+-- This mirrors a repair already performed by hand against one production
+-- deployment; this migration makes that repair durable and automatic for
+-- every deployment carrying the same stranded population.
+INSERT INTO sender_identity_managed_domains (domain, incarnation, applied_incarnation)
+SELECT domain, verification_token, NULL
+  FROM domains
+ WHERE user_id IS NOT NULL AND sending_status = 'failed'
+ON CONFLICT (domain) DO NOTHING;

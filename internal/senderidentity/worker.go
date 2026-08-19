@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -111,6 +112,16 @@ type SendingIdentityState struct {
 	// LedgerUpdatedAt remains available for diagnostics and adapters. Timeout
 	// decisions use Store.SendingIdentityLedgerExpired so clocks are not mixed.
 	LedgerUpdatedAt time.Time
+}
+
+// adoptionEvidence builds the AdoptionEvidence Provider.Status needs from a
+// loaded SendingIdentityState — the single helper both provider.Status call
+// sites use (reconcileProviderIdentity and syncProviderIdentityWithInspection's
+// providerStatus closure), so the joint Selector/HasPrivateKey signal is
+// derived in exactly one place instead of two independent call sites that
+// could each get it wrong differently (batch C finding 5).
+func adoptionEvidence(state SendingIdentityState) AdoptionEvidence {
+	return AdoptionEvidence{Selector: state.Selector, HasPrivateKey: len(state.PrivateKey) > 0}
 }
 
 // EventFirer publishes a domain.sending_verified / domain.sending_failed
@@ -271,7 +282,7 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 			return nil // already resolved (forced re-check, dup job, etc.)
 		}
 
-		res, err := provider.Status(ctx, domain)
+		res, err := provider.Status(ctx, domain, adoptionEvidence(state))
 		if errors.Is(err, ErrIdentityNotFound) {
 			// The old blue/green slot may have deleted the replacement after v2
 			// installed it. Repair desired state immediately instead of turning a
@@ -281,17 +292,34 @@ func reconcileProviderIdentity(ctx context.Context, domain, incarnation string, 
 		}
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
+			// %v of err (not just the constant reason) surfaces WHICH criterion
+			// canAdoptIdentity refused on — a missing ses:TagResource grant, a
+			// wrong-partition ARN, DKIM still PENDING, a selector mismatch, or a
+			// genuinely foreign identity previously all logged identically here
+			// (finding 2). The customer-visible sending_error stays the constant
+			// `reason` below — this detail is for operator diagnosis only.
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required (%v)", domain, reason, err)
 			changed, err := setFailedStatus(ctx, store, domain, state, reason)
 			if err != nil {
 				return err
 			}
 			if changed {
-				// out is set BEFORE the ledger Forget: the failed status is already
-				// committed, and the retry after a Forget error short-circuits on
-				// status != pending — firing must not depend on Forget succeeding.
 				out = syncOutcome{changed: true, owner: state.Owner, status: StatusFailed, errMsg: reason}
 			}
-			return store.ForgetSendingIdentityManaged(ctx, domain)
+			// Do NOT forget the managed-identity ledger row here: an ownership
+			// failure is never evidence of teardown, and the row is the only
+			// durable handle back to a domain that is still live. Forget's own
+			// NOT EXISTS guard evaluates against the CALLING transaction's
+			// snapshot — if a concurrent domain-delete commits first, the guard
+			// still passes and this would delete the tombstone, orphaning the SES
+			// identity forever (the guard is defense-in-depth in the SQL, not a
+			// substitute for never calling Forget from a non-teardown branch).
+			// FinalizeSendingIdentityTombstone (drain-window guarded, called only
+			// from the genuine-teardown branch of syncProviderIdentityWithInspection)
+			// is the sole deletion path; the reaper keeps retrying this domain
+			// hourly until an operator resolves the ownership problem (or the
+			// self-healing adoption path resolves it automatically).
+			return nil
 		}
 		if err != nil {
 			// Transient SES/network error. Retry — UNLESS this was the last
@@ -457,15 +485,21 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		observed := false
 		providerStatus := func() (Result, error) {
 			if !observed {
-				observedResult, observedErr = provider.Status(lockedCtx, domain)
+				// state.PrivateKey backs the adoption judgement Status may make
+				// internally (see canAdoptIdentity's doc): a non-empty selector
+				// with no key material must never be treated as adoptable, or
+				// Status would tag an identity e2a cannot sign for — and the
+				// no-key branch below would then find it tagged and let
+				// Deprovision actually delete it.
+				observedResult, observedErr = provider.Status(lockedCtx, domain, adoptionEvidence(state))
 				observed = true
 			}
 			return observedResult, observedErr
 		}
-		// The periodic sweep never MUTATES a healthy applied identity (that
-		// would flap a verified sender back to pending), but it does inspect
-		// the two states that can silently rot behind an applied, present
-		// identity, both READ-ONLY:
+		// The periodic sweep never MUTATES the DB record for a healthy applied
+		// identity through this inspect block (that would flap a verified
+		// sender back to pending), but it does inspect the two DB states that
+		// can silently rot behind an applied, present identity:
 		//
 		//   - stuck `pending`: the reconcile budget is gone (enqueue failed or
 		//     exhausted) and nothing else would ever poll it. Verified/failed
@@ -480,6 +514,17 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		//
 		// An absent/foreign answer in either state falls through to full
 		// convergence; `failed` steady state costs no provider call.
+		//
+		// CAUTION: "inspect"/"READ-ONLY" above describes the DB record only,
+		// not the provider. providerStatus() above calls provider.Status,
+		// which is NOT a pure read on the SES side: when the identity is
+		// untagged but provably e2a's own (canAdoptIdentity — see ses.go),
+		// Status self-heals the ownership tag with a TagResource call before
+		// returning Verified/Pending/Failed. So a "healthy" applied identity
+		// that merely lost its tag out-of-band can still take a provider-side
+		// write during this block's poll, even though the DB stays untouched
+		// and no event fires. Do not extend this comment's "never mutates" to
+		// mean "never talks to SES with a write."
 		force := forceProvision
 		if !force {
 			if !inspectTerminal && state.Status != StatusPending && state.Status != StatusVerified {
@@ -573,6 +618,16 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		}
 		if state.Selector == "" || len(state.PrivateKey) == 0 {
 			const reason = "no DKIM key material for domain; re-register the domain"
+			// This population is otherwise invisible (finding 11): a live,
+			// owned, verified domain missing DKIM key material re-runs this
+			// exact branch every hourly sweep forever — 2 provider calls plus a
+			// same→same status write each time — with no operator-facing signal
+			// at all (the domain.sending_* webhook only fires on the FIRST
+			// transition into `failed`; every later sweep is same-status and
+			// silent). Log every run, matching the two ErrIdentityNotOwned ALERT
+			// lines' convention, and say plainly that this recurs hourly so an
+			// operator does not mistake steady-state noise for a fresh incident.
+			log.Printf("[senderidentity:worker] ALERT %s: %s — re-checked hourly by the reaper, not a new incident each time; re-register the domain to clear it", domain, reason)
 			if err := provider.Deprovision(lockedCtx, domain); err != nil && !errors.Is(err, ErrIdentityNotOwned) {
 				return err
 			}
@@ -595,12 +650,19 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		res, err := provider.Provision(lockedCtx, domain, state.Selector, state.PrivateKey)
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
+			// See the identical comment in reconcileProviderIdentity's
+			// ErrIdentityNotOwned branch: %v of err surfaces the specific
+			// refusal reason canAdoptIdentity/classifyAdoptionError attached
+			// (finding 2), not just this constant summary.
+			log.Printf("[senderidentity:worker] ALERT adoption refused for %s: %s — manual review required (%v)", domain, reason, err)
 			if err := store.SetSendingStatus(lockedCtx, domain, state.Incarnation, StatusFailed, "", "", reason, nil); err != nil {
 				return err
 			}
-			// out before Forget — see the no-key branch above.
 			out = syncOutcome{changed: true, statusChanged: state.Status != StatusFailed, incarnation: state.Incarnation, owner: state.Owner, status: StatusFailed, errMsg: reason}
-			return store.ForgetSendingIdentityManaged(lockedCtx, domain)
+			// Do NOT forget the ledger row — see the identical comment in
+			// reconcileProviderIdentity's ErrIdentityNotOwned branch above.
+			// FinalizeSendingIdentityTombstone stays the sole deletion path.
+			return nil
 		}
 		if err != nil {
 			return err

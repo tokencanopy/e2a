@@ -82,26 +82,60 @@ type Result struct {
 var ErrIdentityNotFound = errors.New("senderidentity: identity not found")
 
 // ErrIdentityNotOwned means an identity exists for the domain but lacks the
-// provider-side ownership marker written by e2a. Callers must never update or
-// delete it: an SES account can be shared with other applications.
+// provider-side ownership marker written by e2a, AND does not qualify for
+// adoption (see Provider.Provision). Callers must never update or delete it:
+// an SES account can be shared with other applications.
 var ErrIdentityNotOwned = errors.New("senderidentity: identity is not managed by e2a")
+
+// AdoptionEvidence is what a caller has on file for a domain, used to judge
+// whether an untagged existing provider identity is provably e2a's own (see
+// the SES implementation's canAdoptIdentity for the precise criteria).
+// Selector and HasPrivateKey must be JOINTLY consistent — a caller's stored
+// state can carry a selector with no private key on file (e.g. mid a domain
+// reclaim), and reporting HasPrivateKey=true in that case would make Status
+// tag an identity e2a cannot actually sign for. Bundling the two into one
+// value (batch C finding 5) replaces what used to be two independent
+// parameters that existed only to feed a single joint decision — a caller
+// could pass them inconsistently (e.g. a non-empty Selector with
+// HasPrivateKey hardcoded true) and nothing but code review would catch it,
+// since both are the same primitive type.
+type AdoptionEvidence struct {
+	Selector      string
+	HasPrivateKey bool
+}
 
 // Provider registers, polls, and removes the upstream (SES) sending
 // identity for a domain. Implementations MUST be idempotent for identities they
 // own: Provision on an already-managed domain refreshes desired state, and
 // Deprovision treats a missing identity as success. An existing identity that
-// lacks the provider ownership marker returns ErrIdentityNotOwned and must not
-// be mutated.
+// lacks the provider ownership marker is ADOPTED (tagged and then treated as
+// owned) when it is provably e2a's own — an untagged identity configured with
+// e2a's own BYODKIM selector for that exact domain (see the SES implementation
+// for the precise criteria) — and otherwise returns ErrIdentityNotOwned and
+// must not be mutated. Adoption exists because every identity created before
+// the ownership tag shipped is untagged, and a naive "no tag means foreign"
+// rule would permanently strand every pre-existing customer domain.
 type Provider interface {
 	// Provision registers a BYODKIM sending identity for domain, supplying
 	// the per-domain DKIM selector + PKCS#1 DER private key that e2a
-	// already generated (so DKIM d= aligns with the From domain). Returns
-	// the initial Result — typically StatusPending — or an error to retry.
+	// already generated (so DKIM d= aligns with the From domain). An
+	// existing untagged identity is adopted in place when it provably
+	// matches this selector (see Provider doc); otherwise returns
+	// ErrIdentityNotOwned. Returns the initial Result — typically
+	// StatusPending — or an error to retry.
 	Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error)
 
 	// Status polls the current verification state from the provider.
-	// Returns ErrIdentityNotFound if no identity exists for domain.
-	Status(ctx context.Context, domain string) (Result, error)
+	// evidence is what e2a has on file for domain (see AdoptionEvidence) —
+	// Status needs it to make the same adoption judgement as Provision
+	// (including self-healing an ownership tag that was removed out-of-band
+	// on an identity e2a otherwise still provably owns). Callers that have no
+	// adoption judgement to make for this poll (no selector, or a selector
+	// without key material) should pass a zero AdoptionEvidence; this never
+	// affects polling an ALREADY-owned identity, whose status reporting
+	// doesn't consult it. Returns ErrIdentityNotFound if no identity exists
+	// for domain.
+	Status(ctx context.Context, domain string, evidence AdoptionEvidence) (Result, error)
 
 	// Deprovision removes the sending identity. A missing identity MUST be
 	// reported as success (idempotent teardown).

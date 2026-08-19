@@ -48,12 +48,20 @@ type fakeStore struct {
 	domainExistsErr error
 
 	// recorded calls
-	SetStatusCalls       []setStatusCall
-	TouchCalls           []string
-	listManagedCalls     int
-	listManagedPageCalls int
-	lookupManagedCalls   int
-	domainExistsCalls    int
+	SetStatusCalls []setStatusCall
+	TouchCalls     []string
+	// ForgetCalls / FinalizeTombstoneCalls record every successful call to
+	// each deletion method separately (they share forgetErr for injected
+	// failures, but distinct call logs let a test prove WHICH of the two
+	// disjoint branches — ownership-failure vs. genuine-teardown — actually
+	// fired, rather than only observing the shared side effect of both
+	// (deleting the same map entry).
+	ForgetCalls            []string
+	FinalizeTombstoneCalls []string
+	listManagedCalls       int
+	listManagedPageCalls   int
+	lookupManagedCalls     int
+	domainExistsCalls      int
 }
 
 type setStatusCall struct {
@@ -110,12 +118,17 @@ func (s *fakeStore) setStatus(domain string, st Status) {
 	s.verified[domain] = true
 }
 
+// deleteDomain models a genuine `domains` row delete: gone from status
+// (LoadSendingIdentityState reads pgx.ErrNoRows, mirroring the real d.domain
+// join) AND ownerless (DomainOwner reads "" for an absent row in production,
+// COALESCE(d.user_id::text, '') — never leave a stale owner behind).
 func (s *fakeStore) deleteDomain(domain string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.status, domain)
 	delete(s.incarnations, domain)
 	delete(s.verified, domain)
+	delete(s.owners, domain)
 }
 
 func (s *fakeStore) setOwner(domain, owner string) {
@@ -303,11 +316,21 @@ func (s *fakeStore) ClearSendingIdentityProviderPending(ctx context.Context, dom
 	return nil
 }
 
+// ForgetSendingIdentityManaged mirrors the production guard: never delete the
+// ledger row for a domain that still has a live owner (owners[domain] != "",
+// matching DomainOwner/COALESCE(d.user_id::text, '') reading non-empty for a
+// live owned row). forgetErr simulates a query-level failure and is checked
+// first, same as the real conditional DELETE still round-tripping to the DB
+// even when its WHERE clause matches nothing.
 func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forgetErr != nil {
 		return s.forgetErr
+	}
+	s.ForgetCalls = append(s.ForgetCalls, domain)
+	if s.owners[domain] != "" {
+		return nil
 	}
 	delete(s.managed, domain)
 	delete(s.applied, domain)
@@ -316,11 +339,21 @@ func (s *fakeStore) ForgetSendingIdentityManaged(ctx context.Context, domain str
 	return nil
 }
 
+// FinalizeSendingIdentityTombstone mirrors the production guard (see
+// internal/identity's store.go): it deletes the ledger row only when BOTH
+// the age gate (updated_at older than olderThan) AND the live-owner guard
+// (owners[domain] == "", matching domains d.user_id IS NOT NULL) allow it —
+// "never forget a live owned domain's row" is a store-wide invariant, not
+// just ForgetSendingIdentityManaged's.
 func (s *fakeStore) FinalizeSendingIdentityTombstone(ctx context.Context, domain string, olderThan time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forgetErr != nil {
 		return s.forgetErr
+	}
+	s.FinalizeTombstoneCalls = append(s.FinalizeTombstoneCalls, domain)
+	if s.owners[domain] != "" {
+		return nil // still live and owned: never finalize
 	}
 	if touched, ok := s.managedTouched[domain]; ok && time.Since(touched) < olderThan {
 		return nil // a mutation inside the drain window: keep the tombstone

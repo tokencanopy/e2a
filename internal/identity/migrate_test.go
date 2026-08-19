@@ -227,6 +227,104 @@ func TestDomainTeardownReceiptMigrationUpgradesAppliedLegacyShape(t *testing.T) 
 	}
 }
 
+// TestSenderIdentityStrandedDomainRepairMigrationBackfillsForgottenLedgerRows
+// pins batch C finding 3: the pre-adoption v1.7.8 regression's
+// ErrIdentityNotOwned handler unconditionally called
+// ForgetSendingIdentityManaged, deleting a domain's ledger row even though
+// the domain itself stayed live/owned in `domains` at sending_status
+// ='failed'. Migration 101's trigger only re-inserts on INSERT, a
+// transition FROM sending_status='none', or a verification_token change —
+// none of which a domain already sitting at `failed` (its state since the
+// moment it was stranded) hits again on its own, so nothing before this
+// migration ever re-populates that row. This test models exactly that
+// history — a live, owned, `failed` domain with NO ledger row, i.e. the
+// pre-101-trigger-repair, post-Forget state — and proves migration 105
+// re-inserts it with applied_incarnation NULL (forcing a real reconvergence
+// pass, not a false "already applied" no-op) and leaves an already-ledgered
+// domain (the non-stranded, common case) untouched.
+func TestSenderIdentityStrandedDomainRepairMigrationBackfillsForgottenLedgerRows(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+
+	user, err := store.CreateOrGetUser(ctx, "stranded-repair@example.com", "Stranded Repair", "stranded-repair-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+
+	// The stranded domain: live, owned, sending_status='failed', but its
+	// ledger row has been deleted — modeling the v1.7.8 Forget call that ran
+	// on an ownership-check failure.
+	stranded, err := store.ClaimOrCreateDomain(ctx, "stranded.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain(stranded): %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE domains SET sending_status = 'failed' WHERE domain = $1`, stranded.Domain); err != nil {
+		t.Fatalf("set stranded domain failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM sender_identity_managed_domains WHERE domain = $1`, stranded.Domain); err != nil {
+		t.Fatalf("delete ledger row (simulate the v1.7.8 Forget call): %v", err)
+	}
+
+	// The control domain: also failed, but its ledger row is intact and
+	// already carries a confirmed applied_incarnation — the common,
+	// non-stranded case. The migration must leave it exactly as-is.
+	healthy, err := store.ClaimOrCreateDomain(ctx, "already-ledgered.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain(healthy): %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE domains SET sending_status = 'failed' WHERE domain = $1`, healthy.Domain); err != nil {
+		t.Fatalf("set control domain failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE sender_identity_managed_domains SET applied_incarnation = incarnation WHERE domain = $1`,
+		healthy.Domain,
+	); err != nil {
+		t.Fatalf("mark control domain's ledger row applied: %v", err)
+	}
+
+	sql, err := migrations.FS.ReadFile("105_sender_identity_managed_domains_repair_stranded.sql")
+	if err != nil {
+		t.Fatalf("read repair migration: %v", err)
+	}
+	// Apply twice: the migration runner only ever applies a given filename
+	// once, but the ON CONFLICT DO NOTHING shape must also be safe to
+	// re-run (e.g. a future manual repair pass) without disturbing state a
+	// first pass already fixed.
+	if _, err := pool.Exec(ctx, string(sql)); err != nil {
+		t.Fatalf("apply repair migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(sql)); err != nil {
+		t.Fatalf("reapply repair migration: %v", err)
+	}
+
+	var incarnation string
+	var appliedIncarnation *string
+	if err := pool.QueryRow(ctx,
+		`SELECT incarnation, applied_incarnation FROM sender_identity_managed_domains WHERE domain = $1`,
+		stranded.Domain,
+	).Scan(&incarnation, &appliedIncarnation); err != nil {
+		t.Fatalf("read repaired ledger row: %v", err)
+	}
+	if incarnation != stranded.VerificationToken {
+		t.Fatalf("repaired incarnation = %q, want the domain's verification_token %q", incarnation, stranded.VerificationToken)
+	}
+	if appliedIncarnation != nil {
+		t.Fatalf("repaired applied_incarnation = %v, want NULL so the reaper actually reconverges the domain instead of treating it as already applied", *appliedIncarnation)
+	}
+
+	var healthyApplied *string
+	if err := pool.QueryRow(ctx,
+		`SELECT applied_incarnation FROM sender_identity_managed_domains WHERE domain = $1`,
+		healthy.Domain,
+	).Scan(&healthyApplied); err != nil {
+		t.Fatalf("read control ledger row: %v", err)
+	}
+	if healthyApplied == nil || *healthyApplied != healthy.VerificationToken {
+		t.Fatalf("control domain's already-applied ledger row was disturbed: applied_incarnation = %v, want unchanged %q", healthyApplied, healthy.VerificationToken)
+	}
+}
+
 // stubFS builds an fs.FS with the given filename → SQL body mapping.
 // Order isn't preserved by MapFS but RunMigrations sorts by filename.
 func stubFS(files map[string]string) fstest.MapFS {

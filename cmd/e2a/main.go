@@ -347,7 +347,7 @@ func main() {
 
 	var senderMgr *senderidentity.Manager
 	if region := cfg.SenderIdentity.SESRegion; region != "" {
-		provider, perr := senderidentity.NewSESProviderFromConfig(ctx, region)
+		provider, perr := senderidentity.NewSESProviderFromConfig(ctx, region, cfg.IsProduction())
 		if perr != nil {
 			log.Fatalf("sender identity: build SES provider: %v", perr)
 		}
