@@ -640,7 +640,7 @@ func (p *SESProvider) adoptionDecision(out *sesv2.GetEmailIdentityOutput, eviden
 func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
 	accountID, partition, err := p.identityForAdoption(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: aws account id unavailable: %v", ErrIdentityNotOwned, err)
+		return fmt.Errorf("%w: aws account id unavailable: %w", ErrIdentityNotOwned, err)
 	}
 	arn := identityARN(partition, p.region, accountID, domain)
 	_, err = p.api.TagResource(ctx, &sesv2.TagResourceInput{
