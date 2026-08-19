@@ -47,13 +47,17 @@ COVERAGE_GATE_ALWAYS_ALLOWLIST = {"deleteAccount"}
 COVERAGE_GATE_STAGING_ONLY_ALLOWLIST = {"deleteSuppression"}
 
 EVENT_GATE_ALWAYS_ALLOWLIST = {"domain.sending_failed"}
+# domain.sending_verified is NOT here (removed once suites/35-domain-
+# sending-identity.test.ts moved out of suites/prod/ and started verifying
+# it for real on staging too — see event_coverage_gate.py's module doc,
+# STAGING_ONLY_ALLOWLIST section, HISTORY). self.required below must
+# include it so this test still pins the real gate's current tiers.
 EVENT_GATE_STAGING_ONLY_ALLOWLIST = {
     "email.delivered",
     "email.bounced",
     "email.complained",
     "domain.suppression_added",
     "agent.suppression_added",
-    "domain.sending_verified",
 }
 
 # mcp_coverage_gate.py refuses to run when its allowlist names a tool the
@@ -158,6 +162,13 @@ class EventCoverageGateTest(unittest.TestCase):
         allowlisted = EVENT_GATE_ALWAYS_ALLOWLIST | EVENT_GATE_STAGING_ONLY_ALLOWLIST
         self.required = load_event_types() - allowlisted
         self.assertIn("contact.due", self.required, "contact.due must be a REQUIRED type on a staging target")
+        self.assertIn(
+            "domain.sending_verified",
+            self.required,
+            "domain.sending_verified must be REQUIRED on staging too, now that "
+            "suites/35-domain-sending-identity.test.ts runs there — regression "
+            "guard for the allowlist-graduation this test mirrors.",
+        )
         self.args = (
             "--openapi", str(OPENAPI),
             "--reports", str(self.reports),
