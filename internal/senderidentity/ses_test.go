@@ -245,6 +245,16 @@ func TestIdentityFromCallerIdentity(t *testing.T) {
 			t.Fatal("want an error for a nil Account, not a silently empty account id")
 		}
 	})
+	t.Run("empty-string Account", func(t *testing.T) {
+		// Finding 7: out.Account == nil is not the only malformed-ARN shape —
+		// a present but EMPTY Account must be rejected the same way, or it
+		// yields arn:aws:ses:<region>::identity/<domain> (missing the account
+		// id segment entirely), exactly the ARN the nil-Account guard exists
+		// to prevent.
+		if _, _, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString("")}); err == nil {
+			t.Fatal("want an error for an empty-string Account, not a silently malformed ARN")
+		}
+	})
 	t.Run("no Arn defaults to the aws commercial partition", func(t *testing.T) {
 		gotAccount, gotPartition, err := identityFromCallerIdentity(&sts.GetCallerIdentityOutput{Account: awsString(testAccountID)})
 		if err != nil || gotAccount != testAccountID || gotPartition != "aws" {
@@ -1005,10 +1015,14 @@ func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
 
 // TestClassifyAdoptionError pins finding 5's permanent/transient split:
 // AccessDeniedException (unmodeled by the SES v2 SDK — IAM denials arrive
-// generically, matched here via smithy's APIError.ErrorCode()),
-// BadRequestException, and NotFoundException never succeed on retry and must
-// be wrapped as ErrIdentityNotOwned; everything else (throttling, network,
-// arbitrary errors) must propagate untouched for the caller to retry.
+// generically, matched here via smithy's APIError.ErrorCode()) and
+// BadRequestException never succeed on retry and must be wrapped as
+// ErrIdentityNotOwned; everything else (throttling, network, arbitrary
+// errors) must propagate untouched for the caller to retry. NotFoundException
+// is classified separately (batch C finding 6): it means the identity
+// vanished between the GET that fed canAdoptIdentity and this TagResource
+// call, not that it is foreign, so it maps to ErrIdentityNotFound, which
+// callers already treat as "repair/converge".
 func TestClassifyAdoptionError(t *testing.T) {
 	t.Run("nil is nil", func(t *testing.T) {
 		if err := classifyAdoptionError(nil); err != nil {
@@ -1031,10 +1045,17 @@ func TestClassifyAdoptionError(t *testing.T) {
 			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
 		}
 	})
-	t.Run("NotFoundException becomes ErrIdentityNotOwned", func(t *testing.T) {
-		got := classifyAdoptionError(&sestypes.NotFoundException{})
-		if !errors.Is(got, ErrIdentityNotOwned) {
-			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
+	t.Run("NotFoundException becomes ErrIdentityNotFound, not ErrIdentityNotOwned", func(t *testing.T) {
+		notFound := &sestypes.NotFoundException{}
+		got := classifyAdoptionError(notFound)
+		if !errors.Is(got, ErrIdentityNotFound) {
+			t.Fatalf("got %v, want a wrapped ErrIdentityNotFound", got)
+		}
+		if errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, must NOT also be ErrIdentityNotOwned — a vanished identity is not evidence of a foreign one", got)
+		}
+		if !errors.Is(got, notFound) {
+			t.Fatalf("got %v, want the original error still reachable via errors.Is for diagnostics", got)
 		}
 	})
 	t.Run("throttling (a different error code) propagates untouched", func(t *testing.T) {

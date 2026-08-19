@@ -117,11 +117,14 @@ func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider,
 }
 
 // identityFromCallerIdentity extracts the account id and ARN partition,
-// treating a nil Account as an error rather than silently yielding an empty
-// account id segment in the identity ARN
+// treating a nil OR EMPTY Account as an error rather than silently yielding
+// an empty account id segment in the identity ARN
 // (arn:<partition>:ses:<region>::identity/<domain> — missing the account id
 // component entirely, which TagResource would then reject or, worse,
-// resolve unpredictably). The
+// resolve unpredictably). An empty string is exactly the malformed-ARN shape
+// this guard exists to prevent, so it is rejected the same way a nil pointer
+// is — a defensive check, since AWS is not documented to ever return "" for
+// a present Account field. The
 // partition comes from STS's own Arn field (arn:<partition>:sts::...): AWS
 // commercial is "aws", GovCloud is "aws-us-gov", China is "aws-cn" —
 // hardcoding "aws" would build an invalid ARN and fail every TagResource
@@ -131,7 +134,7 @@ func NewSESProviderFromConfig(ctx context.Context, region string) (*SESProvider,
 // is documented but not contractually required to be present. Split out from
 // NewSESProviderFromConfig so it's unit-testable without a real STS call.
 func identityFromCallerIdentity(out *sts.GetCallerIdentityOutput) (accountID, partition string, err error) {
-	if out == nil || out.Account == nil {
+	if out == nil || out.Account == nil || *out.Account == "" {
 		return "", "", errors.New("sts GetCallerIdentity returned no account id")
 	}
 	partition = "aws"
@@ -531,8 +534,11 @@ func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
 //     concrete *sestypes type.
 //   - BadRequestException: a malformed/invalid ARN — will never succeed
 //     without a code change.
-//   - NotFoundException: the identity (or its ARN) doesn't resolve — will
-//     never succeed against the same ARN.
+//
+// A TagResource NotFoundException is handled SEPARATELY below, not folded in
+// here: it means the identity vanished between the GetEmailIdentity that fed
+// canAdoptIdentity and this TagResource call (a delete raced adoption), not
+// that the ARN was wrong or foreign — see below.
 //
 // Verified against the live prod IAM policy (2026-08): ses:TagResource IS
 // allowed for e2a.dev's own runtime principal, so the catastrophic
@@ -543,9 +549,21 @@ func classifyAdoptionError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var badRequest *sestypes.BadRequestException
+	// NotFoundException on TagResource means the identity resolved fine
+	// moments ago (canAdoptIdentity ran against a fresh GetEmailIdentity) but
+	// is gone NOW — a delete raced adoption, not evidence of a foreign
+	// identity. Misclassifying this as ErrIdentityNotOwned produced a wrong
+	// customer-visible sending_error ("not managed by e2a" for an identity
+	// that simply disappeared) and a spurious domain.sending_failed webhook.
+	// ErrIdentityNotFound is what callers already treat as "repair/converge"
+	// (reconcileProviderIdentity's repairMissingIdentity branch re-enters
+	// convergeWorkerIdentity, which re-creates a fresh, e2a-tagged identity).
 	var notFound *sestypes.NotFoundException
-	if errors.As(err, &badRequest) || errors.As(err, &notFound) {
+	if errors.As(err, &notFound) {
+		return fmt.Errorf("%w: %w", ErrIdentityNotFound, err)
+	}
+	var badRequest *sestypes.BadRequestException
+	if errors.As(err, &badRequest) {
 		// Double %w: ErrIdentityNotOwned drives caller control flow
 		// (errors.Is), while the original error stays reachable for logs/
 		// diagnostics (also via errors.Is, and through %v in any wrapping
