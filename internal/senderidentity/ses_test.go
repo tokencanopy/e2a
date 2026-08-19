@@ -888,6 +888,7 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 				DkimAttributes: &sestypes.DkimAttributes{
 					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 		}
@@ -912,6 +913,7 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 				DkimAttributes: &sestypes.DkimAttributes{
 					SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 					Tokens:                  []string{"e2a202607"},
+					Status:                  sestypes.DkimStatusSuccess,
 				},
 			},
 		}
@@ -1314,6 +1316,7 @@ func TestSESProvider_StatusRefusesMismatchedSelector(t *testing.T) {
 			DkimAttributes: &sestypes.DkimAttributes{
 				SigningAttributesOrigin: sestypes.DkimSigningAttributesOriginExternal,
 				Tokens:                  []string{"someone-elses-selector"},
+				Status:                  sestypes.DkimStatusSuccess,
 			},
 		},
 	}
