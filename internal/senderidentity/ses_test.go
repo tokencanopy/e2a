@@ -523,6 +523,37 @@ func TestCanAdoptIdentity(t *testing.T) {
 			expectedSelector: "e2a202607",
 			want:             false,
 		},
+		{
+			// Security-critical: a configuration set redirects delivery/bounce/
+			// complaint feedback (including recipient addresses) to whoever owns
+			// it. Adoption must never inherit that even when the BYODKIM/selector
+			// checks would otherwise pass.
+			name: "configuration set present, otherwise fully matching → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				ConfigurationSetName: awsString("someone-elses-config-set"),
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
+		{
+			// Security-critical: an identity policy can grant another AWS
+			// account send permissions on this identity. Adoption must never
+			// leave that in place either.
+			name: "identity policy present, otherwise fully matching → not adoptable",
+			out: &sesv2.GetEmailIdentityOutput{
+				Policies: map[string]string{"cross-account": `{"Effect":"Allow"}`},
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+			expectedSelector: "e2a202607",
+			want:             false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -531,6 +562,60 @@ func TestCanAdoptIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSESProvider_ProvisionRefusesForeignConfiguration covers the
+// Provision-level negative for a configuration set / identity policy: even
+// with a matching BYODKIM selector, either one refuses adoption exactly like
+// an unowned identity — no tag, no mutation.
+func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+
+	t.Run("configuration set", func(t *testing.T) {
+		stub := &stubSESAPI{
+			createErr: &ststypes.AlreadyExistsException{},
+			unmanaged: true,
+			getOut: &sesv2.GetEmailIdentityOutput{
+				ConfigurationSetName: awsString("someone-elses-config-set"),
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+		}
+		p := NewSESProvider(stub, "us-east-1", testAccountID)
+		if _, err := p.Provision(context.Background(), "shared-config.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
+		}
+		if len(stub.tagInputs) != 0 {
+			t.Fatalf("identity with a foreign configuration set must never be tagged, got %+v", stub.tagInputs)
+		}
+		if stub.dkimInput != nil || stub.mailFromInput != nil {
+			t.Fatalf("unowned identity was mutated: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+		}
+	})
+
+	t.Run("identity policy", func(t *testing.T) {
+		stub := &stubSESAPI{
+			createErr: &ststypes.AlreadyExistsException{},
+			unmanaged: true,
+			getOut: &sesv2.GetEmailIdentityOutput{
+				Policies: map[string]string{"cross-account": `{"Effect":"Allow"}`},
+				DkimAttributes: &ststypes.DkimAttributes{
+					SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+					Tokens:                  []string{"e2a202607"},
+				},
+			},
+		}
+		p := NewSESProvider(stub, "us-east-1", testAccountID)
+		if _, err := p.Provision(context.Background(), "shared-policy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
+		}
+		if len(stub.tagInputs) != 0 {
+			t.Fatalf("identity with a foreign policy must never be tagged, got %+v", stub.tagInputs)
+		}
+	})
 }
 
 // TestSESProvider_ProvisionAdoptsProvablyOwnIdentity covers adoption case 1:

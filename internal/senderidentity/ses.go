@@ -273,8 +273,18 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 // canAdoptIdentity reports whether an UNTAGGED existing identity is provably
 // e2a's own, making the missing ownership tag a migration artifact (created
 // before release v1.7.8 introduced it, or removed out-of-band) rather than
-// evidence of a foreign identity. All three must hold:
+// evidence of a foreign identity. All of the following must hold:
 //
+//   - the identity carries no foreign configuration: ConfigurationSetName is
+//     nil AND Policies is empty. e2a's own Provision never sets either, so
+//     either one present is affirmative evidence this identity is doing
+//     something e2a didn't ask for — and adoption would silently KEEP it
+//     (Provision/Status never touch these fields, so nothing would ever
+//     clear them). A configuration set controls where SES routes delivery/
+//     bounce/complaint feedback for this identity's sends, including
+//     recipient addresses; a policy can grant another AWS account send
+//     permissions on it. This is checked first and independent of the
+//     BYODKIM/selector reasoning below.
 //   - expectedSelector is non-empty: e2a has DKIM key material on file for
 //     this domain (the caller already required this to reach Provision/Status
 //     at all — SendingProvisionInputs/LoadSendingIdentityState gate on it —
@@ -297,6 +307,21 @@ func isManagedIdentity(out *sesv2.GetEmailIdentityOutput) bool {
 // mismatched or absent selector) must keep returning ErrIdentityNotOwned.
 func canAdoptIdentity(out *sesv2.GetEmailIdentityOutput, expectedSelector string) bool {
 	if out == nil || out.DkimAttributes == nil || expectedSelector == "" {
+		return false
+	}
+	// A configuration set or an identity policy is FOREIGN configuration e2a
+	// never writes (Provision never sets either). Adopting an identity that
+	// carries one would keep it: (a) ConfigurationSetName controls where SES
+	// routes delivery/bounce/complaint feedback — including recipient
+	// addresses — for every send through this identity; when
+	// delivery_feedback.ses_configuration_set is unset (self-hosts, e2a's own
+	// staging) SES falls back to the IDENTITY's default config set, so
+	// adopting silently hands that traffic's feedback to whoever owns the
+	// set. (b) An identity policy (e.g. granting ses:SendRawEmail to another
+	// AWS account) would survive adoption and keep applying. Either one means
+	// this identity is not purely e2a's — refuse it exactly like a foreign
+	// identity, before any of the BYODKIM/selector checks below.
+	if out.ConfigurationSetName != nil || len(out.Policies) > 0 {
 		return false
 	}
 	if out.DkimAttributes.SigningAttributesOrigin != ststypes.DkimSigningAttributesOriginExternal {
