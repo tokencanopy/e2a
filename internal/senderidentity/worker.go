@@ -78,6 +78,9 @@ type Store interface {
 	// once the provider agrees or a terminal transition is committed.
 	ObserveSendingIdentityProviderPending(ctx context.Context, domain, incarnation string, olderThan time.Duration) (bool, error)
 	ClearSendingIdentityProviderPending(ctx context.Context, domain, incarnation string) error
+	// ForgetSendingIdentityManaged currently has no callers in this package —
+	// see the doc comment on *identity.Store's implementation for why it is
+	// kept anyway, and why an ownership failure must never call it.
 	ForgetSendingIdentityManaged(ctx context.Context, domain string) error
 	// FinalizeSendingIdentityTombstone removes the ledger row ONLY when its
 	// last mutation (updated_at) is older than olderThan. An audit or sweep
