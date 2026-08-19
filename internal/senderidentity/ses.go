@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 
 	"github.com/tokencanopy/e2a/internal/mailfrom"
 )
@@ -471,10 +472,57 @@ func (p *SESProvider) adoptIdentity(ctx context.Context, domain string) error {
 		}},
 	})
 	if err != nil {
-		return err
+		return classifyAdoptionError(err)
 	}
 	log.Printf("[senderidentity] adopted pre-existing identity for domain %s (tagged %s=%s)", domain, managedIdentityTagKey, managedIdentityTagValue)
 	return nil
+}
+
+// classifyAdoptionError maps a TagResource error that can never succeed on
+// retry into a wrapped ErrIdentityNotOwned, and leaves everything else
+// (throttling, 5xx, network) untouched for the caller to retry. Both
+// Provision and Status call adoptIdentity and, pre-fix, returned its raw
+// error with a "transient/permission — retry" comment; for a permanent error
+// that meant the reaper returned an error on EVERY hourly sweep forever
+// (never resolving, never flagged prominently), and the reconcile path burned
+// its whole attempt budget before mislabeling the domain "verification timed
+// out" — sending operators chasing DNS instead of the real IAM problem.
+//
+//   - AccessDeniedException: the runtime IAM principal lacks ses:TagResource
+//     (or a resource-tag/request-tag condition denies it) for this specific
+//     identity ARN — will never succeed without an IAM change. This is
+//     unmodeled by the SES v2 SDK's generated exception types (AWS returns
+//     IAM-level denials generically, not as a service-specific shape), so it
+//     is matched by smithy's APIError.ErrorCode() rather than errors.As on a
+//     concrete *ststypes type.
+//   - BadRequestException: a malformed/invalid ARN — will never succeed
+//     without a code change.
+//   - NotFoundException: the identity (or its ARN) doesn't resolve — will
+//     never succeed against the same ARN.
+//
+// Verified against the live prod IAM policy (2026-08): ses:TagResource IS
+// allowed for e2a.dev's own runtime principal, so the catastrophic
+// every-sweep-red variant isn't active in production today — but a
+// self-hoster following the design doc's narrower, CONDITIONED grant would
+// hit exactly this.
+func classifyAdoptionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var badRequest *ststypes.BadRequestException
+	var notFound *ststypes.NotFoundException
+	if errors.As(err, &badRequest) || errors.As(err, &notFound) {
+		// Double %w: ErrIdentityNotOwned drives caller control flow
+		// (errors.Is), while the original error stays reachable for logs/
+		// diagnostics (also via errors.Is, and through %v in any wrapping
+		// fmt.Errorf upstream).
+		return fmt.Errorf("%w: %w", ErrIdentityNotOwned, err)
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException" {
+		return fmt.Errorf("%w: %w", ErrIdentityNotOwned, err)
+	}
+	return err
 }
 
 // identityARN builds the SES v2 email-identity ARN for domain:

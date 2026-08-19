@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 )
 
 func TestMapSESStatus(t *testing.T) {
@@ -925,6 +926,85 @@ func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
 	}
 	if stub.dkimInput != nil || stub.mailFromInput != nil {
 		t.Fatalf("must not proceed to mutate before adoption is confirmed: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
+	}
+}
+
+// TestClassifyAdoptionError pins finding 5's permanent/transient split:
+// AccessDeniedException (unmodeled by the SES v2 SDK — IAM denials arrive
+// generically, matched here via smithy's APIError.ErrorCode()),
+// BadRequestException, and NotFoundException never succeed on retry and must
+// be wrapped as ErrIdentityNotOwned; everything else (throttling, network,
+// arbitrary errors) must propagate untouched for the caller to retry.
+func TestClassifyAdoptionError(t *testing.T) {
+	t.Run("nil is nil", func(t *testing.T) {
+		if err := classifyAdoptionError(nil); err != nil {
+			t.Fatalf("got %v, want nil", err)
+		}
+	})
+	t.Run("AccessDeniedException (unmodeled, matched by error code) becomes ErrIdentityNotOwned", func(t *testing.T) {
+		denied := &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: ses:TagResource"}
+		got := classifyAdoptionError(denied)
+		if !errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
+		}
+		if !errors.Is(got, denied) {
+			t.Fatalf("got %v, want the original error still reachable via errors.Is for diagnostics", got)
+		}
+	})
+	t.Run("BadRequestException becomes ErrIdentityNotOwned", func(t *testing.T) {
+		got := classifyAdoptionError(&ststypes.BadRequestException{Message: awsString("invalid ARN")})
+		if !errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
+		}
+	})
+	t.Run("NotFoundException becomes ErrIdentityNotOwned", func(t *testing.T) {
+		got := classifyAdoptionError(&ststypes.NotFoundException{})
+		if !errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, want a wrapped ErrIdentityNotOwned", got)
+		}
+	})
+	t.Run("throttling (a different error code) propagates untouched", func(t *testing.T) {
+		throttled := &smithy.GenericAPIError{Code: "TooManyRequestsException", Message: "rate exceeded"}
+		if got := classifyAdoptionError(throttled); !errors.Is(got, throttled) || errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, want the throttling error to propagate untouched for retry", got)
+		}
+	})
+	t.Run("plain network/arbitrary error propagates untouched", func(t *testing.T) {
+		boom := errors.New("connection reset")
+		if got := classifyAdoptionError(boom); !errors.Is(got, boom) || errors.Is(got, ErrIdentityNotOwned) {
+			t.Fatalf("got %v, want boom to propagate untouched for retry", got)
+		}
+	})
+}
+
+// TestSESProvider_ProvisionAdoptionAccessDeniedRefusesNotRetries proves the
+// end-to-end wiring: an AccessDeniedException from the TagResource call
+// itself (the real IAM-denial shape, unmodeled by the SDK) makes Provision
+// return ErrIdentityNotOwned — the caller's normal "fail closed, mark
+// failed, do not burn the retry budget" path — instead of a bare error that
+// would retry forever against the same permanently-denied call.
+func TestSESProvider_ProvisionAdoptionAccessDeniedRefusesNotRetries(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	stub := &stubSESAPI{
+		createErr: &ststypes.AlreadyExistsException{},
+		unmanaged: true,
+		tagErr:    &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: ses:TagResource"},
+		getOut: &sesv2.GetEmailIdentityOutput{
+			DkimAttributes: &ststypes.DkimAttributes{
+				SigningAttributesOrigin: ststypes.DkimSigningAttributesOriginExternal,
+				Tokens:                  []string{"e2a202607"},
+				Status:                  ststypes.DkimStatusSuccess,
+			},
+		},
+	}
+	p := NewSESProvider(stub, "us-east-1", testAccountID)
+
+	if _, err := p.Provision(context.Background(), "denied.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned for a permanently denied TagResource call", err)
+	}
+	if stub.dkimInput != nil || stub.mailFromInput != nil {
+		t.Fatalf("must not proceed to mutate: dkim=%+v mailFrom=%+v", stub.dkimInput, stub.mailFromInput)
 	}
 }
 
