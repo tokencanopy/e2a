@@ -461,6 +461,51 @@ func TestForgetSendingIdentityManagedRetainsLedgerForLiveOwnedDomain(t *testing.
 	}
 }
 
+// TestForgetSendingIdentityManagedRemovesLedgerForGenuinelyDeletedDomain is
+// the DELETE-arm companion to
+// TestForgetSendingIdentityManagedRetainsLedgerForLiveOwnedDomain, pinning
+// the NOT EXISTS guard from the other direction: once a domain is genuinely
+// gone from `domains`, ForgetSendingIdentityManaged must still remove its
+// ledger row. An inverted (or otherwise broken) predicate that always
+// retained would silently leave every torn-down domain's tombstone in place
+// forever, with nothing else ever revisiting it.
+// (TestManagedSendingIdentityLedgerSurvivesDomainDelete already exercises
+// this as a side effect of a broader mark→apply→forget flow; this test
+// isolates the guard itself, the same way the retain-arm test isolates its
+// case, so a future refactor of that broader test cannot silently drop
+// DELETE-arm coverage.)
+func TestForgetSendingIdentityManagedRemovesLedgerForGenuinelyDeletedDomain(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "gone-ledger@example.com", "Gone Ledger", "gone-ledger-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	domain, err := store.ClaimOrCreateDomain(ctx, "gone-ledger.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+	if err := store.DeleteDomain(ctx, domain.Domain, user.ID); err != nil {
+		t.Fatalf("DeleteDomain: %v", err)
+	}
+
+	if err := store.ForgetSendingIdentityManaged(ctx, domain.Domain); err != nil {
+		t.Fatalf("ForgetSendingIdentityManaged: %v", err)
+	}
+
+	managed, _, err := store.ListManagedSendingIdentityDomains(ctx)
+	if err != nil {
+		t.Fatalf("ListManagedSendingIdentityDomains: %v", err)
+	}
+	if len(managed) != 0 {
+		t.Fatalf("ledger after forgetting a genuinely deleted domain = %v, want empty", managed)
+	}
+}
+
 // TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain pins
 // the same ledger-retention invariant for FinalizeSendingIdentityTombstone
 // (finding 7): "never forget a live owned domain's row" was previously only
@@ -504,6 +549,55 @@ func TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain(t *test
 	}
 	if len(managed) != 1 || managed[0] != domain.Domain {
 		t.Fatalf("ledger after finalize on a live-owned domain = %v, want [%s] retained", managed, domain.Domain)
+	}
+}
+
+// TestFinalizeSendingIdentityTombstoneRemovesLedgerForGenuinelyDeletedDomain
+// is the DELETE-arm companion to
+// TestFinalizeSendingIdentityTombstoneRetainsLedgerForLiveOwnedDomain: once a
+// domain is genuinely gone AND its ledger row has aged past the drain
+// window, Finalize must remove it. An inverted (or otherwise broken) NOT
+// EXISTS predicate would leave the tombstone in place forever — this method
+// is the only place a torn-down domain's ledger row is ever actually
+// reclaimed.
+// (TestSendingIdentityTombstoneFinalizeRespectsAge's final "aged row"
+// assertion already exercises this as a side effect of deleting the domain
+// up front to isolate the age gate; this test isolates the NOT EXISTS guard
+// itself, the same way the retain-arm test isolates its case, so a future
+// refactor of that age-focused test cannot silently drop DELETE-arm
+// coverage.)
+func TestFinalizeSendingIdentityTombstoneRemovesLedgerForGenuinelyDeletedDomain(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "finalize-gone@example.com", "Finalize Gone", "finalize-gone-sub")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	domain, err := store.ClaimOrCreateDomain(ctx, "finalize-gone.example.com", user.ID)
+	if err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if err := store.MarkSendingIdentityManaged(ctx, domain.Domain, domain.VerificationToken); err != nil {
+		t.Fatalf("MarkSendingIdentityManaged: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sender_identity_managed_domains SET updated_at = now() - interval '1 hour' WHERE domain=$1`, domain.Domain); err != nil {
+		t.Fatalf("backdate past the drain window: %v", err)
+	}
+	if err := store.DeleteDomain(ctx, domain.Domain, user.ID); err != nil {
+		t.Fatalf("DeleteDomain: %v", err)
+	}
+
+	if err := store.FinalizeSendingIdentityTombstone(ctx, domain.Domain, 15*time.Minute); err != nil {
+		t.Fatalf("FinalizeSendingIdentityTombstone: %v", err)
+	}
+
+	managed, _, err := store.ListManagedSendingIdentityDomains(ctx)
+	if err != nil {
+		t.Fatalf("ListManagedSendingIdentityDomains: %v", err)
+	}
+	if len(managed) != 0 {
+		t.Fatalf("ledger after finalizing a genuinely deleted, aged domain = %v, want empty", managed)
 	}
 }
 
