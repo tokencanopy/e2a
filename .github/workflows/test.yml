@@ -139,7 +139,9 @@ jobs:
   go-e2e:
     name: Go e2e tests
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Must stay above the 11m per-package timeout in `make test-e2e` so a wedged
+    # package fails with Go's stack dump rather than a runner kill.
+    timeout-minutes: 14
     services:
       postgres:
         image: postgres:16-alpine
