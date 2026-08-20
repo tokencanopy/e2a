@@ -199,7 +199,7 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
 
 // A path-parameter value of exactly ".." collapses the built URL onto the
 // PRECEDING segment, and exactly "." collapses onto the segment's own parent
-// collection (i.e. it drops itself, not the segment before it) — neither is
+// collection (i.e. it drops itself, not the segment before it); neither is
 // escaped by encodeURIComponent(), so both reach the URL parser literally.
 // Either way the request retargets a bigger resource than the caller named.
 // Rejected here, before it reaches the wire.

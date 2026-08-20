@@ -213,7 +213,7 @@ def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
 def _assert_not_dot_segment(value: str, param: str) -> str:
     # A value of exactly ".." collapses the built URL onto the PRECEDING path
     # segment, and exactly "." collapses onto the segment's own parent
-    # collection (it drops itself, not the segment before it) — neither is
+    # collection (it drops itself, not the segment before it); neither is
     # escaped by urllib.parse.quote(), so both reach httpx's URL builder
     # literally. On Python this is not merely latent: httpx drops the
     # collapsed trailing slash (unlike the TS client's URL builder, which

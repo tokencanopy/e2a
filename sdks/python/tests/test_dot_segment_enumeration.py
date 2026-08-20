@@ -1,32 +1,32 @@
 """Denominator test for the dot-segment path-collapse guard (e2a#792).
 
 The other tests in ``test_v1_client_side_validation.py`` pin the guard at
-specific call sites, found by hand (first the issue's own DELETE-route sweep,
-then two misses a maintainer review caught on 2026-08-19, then one more found
-by re-running the same sweep against every HTTP method). Hand-found call
-sites are exactly the failure mode rule 4 warns about: a list assembled by
-reading code is bounded by what the reader thought to look at.
+specific call sites, found by hand: first the issue's own DELETE-route
+sweep, then two misses a maintainer review caught on 2026-08-19, then one
+more found by re-running the same sweep against every HTTP method. A
+hand-found list like that is bounded by what the reader thought to check,
+so a fourth miss is exactly as plausible as the third one was.
 
-This test instead derives the COMPLETE denominator mechanically, straight
+This test instead derives the complete denominator mechanically, straight
 from ``api/openapi.yaml``, every run:
 
   For every path parameter on every operation, compute what path the URL
   collapses to when that parameter is set to ".." (the value itself and its
-  immediately preceding literal/param segment are removed — the same rule
-  ``new URL()`` / ``httpx.URL`` apply). If the collapsed path is a *different*
-  existing route that also defines a handler for the *same* HTTP method, a
-  client sending that value sends a real, structurally valid request to the
-  wrong resource under the wrong intent — that is the shape of the bug the
-  issue and both blockers describe.
+  immediately preceding literal/param segment are removed, the same rule
+  ``new URL()`` / ``httpx.URL`` apply). If the collapsed path is a
+  *different* existing route that also defines a handler for the *same*
+  HTTP method, a client sending that value sends a real, structurally valid
+  request to the wrong resource under the wrong intent: that is the shape
+  of the bug the issue and both review blockers describe.
 
 Every (route, method, param) the sweep finds must appear in exactly one of
 GUARDED (an ergonomic call that reproduces the bug pre-guard, expected to
 raise ``unsafe_path_segment`` with no request sent) or ALLOWLIST (a reason
 the collapse cannot be reached, or need not be guarded, at the ergonomic
-layer today). ``test_sweep_fully_classified`` fails closed the moment
-``api/openapi.yaml`` adds a route this file has not yet triaged — that is
-the point: it is a gate against the NEXT one of these, not a record of the
-ones already found.
+layer today). ``test_sweep_fully_classified`` fails the moment
+``api/openapi.yaml`` adds a route this file has not yet triaged, so it is a
+gate against the next one of these, not just a record of the ones already
+found.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _segments(path: str) -> list[str]:
 
 def _collapse_segments(segments: list[str], idx: int) -> list[str]:
     # A ".." value at position idx removes itself and the segment directly
-    # before it (or just itself, at position 0 — there is nothing before it).
+    # before it (or just itself, at position 0, where there is nothing before it).
     return segments[: idx - 1] + segments[idx + 1 :] if idx > 0 else segments[idx + 1 :]
 
 
@@ -138,7 +138,7 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
         "GET only (listEngagements -> listContacts); no state change to guard against",
     ("/v1/agents/{email}/contacts/{address}", "get", "{email}"):
         "GET only (getEngagement -> getContact); info-disclosure risk, not a destructive-action "
-        "blocker -- out of scope for this priority-1 pass, same as the WS builders",
+        "blocker, out of scope for this priority-1 pass, same as the WS builders",
     ("/v1/agents/{email}/contacts/{address}", "get", "{address}"):
         "GET only (getEngagement -> getAgent); same as above",
     ("/v1/agents/{email}/conversations/{id}", "get", "{id}"):
@@ -157,7 +157,7 @@ def test_sweep_fully_classified(collapse: Collapse):
     key = (collapse.origin_path, collapse.method, collapse.param)
     assert key in GUARDED or key in ALLOWLIST, (
         f"{key} collapses onto {collapse.target_path} (same method, real route) and is "
-        "classified in neither GUARDED nor ALLOWLIST -- api/openapi.yaml grew a new "
+        "classified in neither GUARDED nor ALLOWLIST: api/openapi.yaml grew a new "
         "dot-segment collapse onto a same-method route; triage it (guard the ergonomic "
         "call site, or allowlist it with a reason) before this can pass"
     )
@@ -176,7 +176,7 @@ async def test_guarded_collapse_rejected_before_any_request(httpx_mock, key):
 
 def test_allowlist_entries_are_still_in_the_denominator():
     # An allowlist reason for a collapse the spec no longer produces (route
-    # renamed/removed) is a stale entry hiding a shrunk sweep -- catch it
+    # renamed/removed) is a stale entry hiding a shrunk sweep; catch it
     # explicitly rather than letting it silently stop mattering.
     live = {(c.origin_path, c.method, c.param) for c in DENOMINATOR}
     stale = set(ALLOWLIST) - live
@@ -185,6 +185,6 @@ def test_allowlist_entries_are_still_in_the_denominator():
 
 def test_denominator_is_nonempty():
     # A parse failure or an empty openapi.yaml would make every test above
-    # vacuously pass -- assert the sweep actually found the routes we know
+    # vacuously pass; assert the sweep actually found the routes we know
     # are there.
     assert len(DENOMINATOR) >= len(GUARDED)

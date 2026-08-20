@@ -234,7 +234,7 @@ def _build_ws_url(base_url: str, agent_email: str) -> str:
     # is no "/v1/ws"), so a collapsed value fails closed with a 404/connection
     # error instead of retargeting a live resource. Flagged in review
     # (e2a#792 PR #909) and left as a one-line comment, not a fix, for that
-    # reason -- noted out of scope here rather than left unexplained.
+    # reason: noted out of scope here rather than left unexplained.
     parsed = urlparse(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     path = f"/v1/agents/{quote(agent_email, safe='')}/ws"

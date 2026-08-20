@@ -134,7 +134,7 @@ def test_sync_delete_agent_suppression_rejects_dot_segment(httpx_mock):
 
 
 # review follow-up (2026-08-19): delete_outreach's `address` param was guarded
-# from the start, but `email` was not -- collapsing it retargets
+# from the start, but `email` was not: collapsing it retargets
 # DELETE /v1/agents/{email}/contacts/{address} onto
 # DELETE /v1/contacts/{address} (deleteContact), which the same
 # ?confirm=DELETE already satisfies and which permanently deletes the contact
@@ -148,7 +148,7 @@ async def test_delete_engagement_rejects_dot_segment_email(httpx_mock):
     assert httpx_mock.get_requests() == []
 
 
-# review follow-up (2026-08-19): messages.restore() had no guard at all --
+# review follow-up (2026-08-19): messages.restore() had no guard at all:
 # collapsing `message_id` retargets
 # POST /v1/agents/{email}/messages/{id}/restore onto
 # POST /v1/agents/{email}/restore (restoreAgent), undoing a deliberate agent

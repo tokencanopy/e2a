@@ -12,7 +12,7 @@
   Python, not merely latent: ``httpx`` drops the collapsed path's trailing
   slash (unlike the TS client, which keeps it unless the input string itself
   ends in ``/``), so several of these values reached a real, matching route
-  rather than 404ing — e.g. ``account.suppressions.delete("..")`` reached
+  rather than 404ing, e.g. ``account.suppressions.delete("..")`` reached
   ``DELETE /v1/account`` directly. This is a behavior change for any caller
   that was, deliberately or not, passing one of these values: it now raises
   instead of sending the (misdirected) request. Available on both

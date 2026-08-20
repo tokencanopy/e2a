@@ -1254,7 +1254,7 @@ describe("E2AClient", () => {
   // The full openapi.yaml-driven enumeration (every path param whose ".."
   // collapse lands on a DIFFERENT route sharing the same HTTP method, plus an
   // explicit allowlist for the read-only ones) lives once, in
-  // sdks/python/tests/test_dot_segment_enumeration.py — both SDKs share the
+  // sdks/python/tests/test_dot_segment_enumeration.py: both SDKs share the
   // one spec and the one set of ergonomic call sites (same shape guarded at
   // the same five-plus-three routes), so a second full parser here would
   // duplicate that denominator computation rather than add coverage; this
@@ -1316,7 +1316,7 @@ describe("E2AClient", () => {
     });
 
     // review follow-up (2026-08-19): deleteOutreach's `address` param was
-    // guarded from the start, but `email` was not — collapsing it retargets
+    // guarded from the start, but `email` was not: collapsing it retargets
     // DELETE /v1/agents/{email}/contacts/{address} onto
     // DELETE /v1/contacts/{address} (deleteContact), which the same
     // ?confirm=DELETE already satisfies and which permanently deletes the
@@ -1329,7 +1329,7 @@ describe("E2AClient", () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
-    // review follow-up (2026-08-19): messages.restore() had no guard at all —
+    // review follow-up (2026-08-19): messages.restore() had no guard at all:
     // collapsing `id` retargets POST /v1/agents/{email}/messages/{id}/restore
     // onto POST /v1/agents/{email}/restore (restoreAgent), undoing a
     // deliberate agent deletion instead of restoring a message. The response
