@@ -70,6 +70,15 @@ const rateErrorSnoozeInterval = time.Minute
 // the window-boundary race — cannot hot-loop the queue.
 const rateMinSnooze = 250 * time.Millisecond
 
+// rateMaxSnooze caps a rate deferral's elapsed-time backoff (#771). The
+// exponential doubling already turns the quadratic drain cost into a logarithmic
+// one; the cap only bounds the deep tail (messages that keep losing the slot
+// race for minutes). 3m — 3× the 1m production window — keeps essentially all of
+// the doubling's wake-up savings while bounding worst-case re-check latency and
+// the fairness skew below. Tunable: raise it to trade lower wake-up volume for
+// higher tail latency. Well under sendRetryHorizon either way.
+const rateMaxSnooze = 3 * time.Minute
+
 // sendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
 // outage-snoozing job stops deferring and is declared terminally failed. 72h matches
 // the industry MTA retry horizon (and the webhook deliverer's envelope) — long enough
@@ -126,17 +135,25 @@ type SendJob struct {
 	ProviderMessageID string
 }
 
+// fireTime is when the message became eligible to submit: max(accept, scheduled).
+// A scheduled send's clocks (retry horizon, deferral backoff) start when it
+// fires, not when it was accepted. Zero when both timestamps are unknown.
+func (j *SendJob) fireTime() time.Time {
+	t := j.AcceptedAt
+	if j.ScheduledAt.After(t) {
+		t = j.ScheduledAt
+	}
+	return t
+}
+
 // pastRetryHorizon reports whether the accept is older than the outage-tolerant
 // retry horizon. Zero AcceptedAt (unknown) is treated as not-past so an outage keeps
 // deferring rather than being falsely terminated on a missing timestamp.
 func (j *SendJob) pastRetryHorizon() bool {
-	// Measure from max(accept, scheduled): a scheduled send's outage tail starts
-	// when it fires, not when it was accepted, so a >72h-out schedule isn't
-	// terminally failed on its very first attempt.
-	start := j.AcceptedAt
-	if j.ScheduledAt.After(start) {
-		start = j.ScheduledAt
-	}
+	// Measure from the fire time (max of accept, scheduled): a scheduled send's
+	// outage tail starts when it fires, not when it was accepted, so a >72h-out
+	// schedule isn't terminally failed on its very first attempt.
+	start := j.fireTime()
 	return !start.IsZero() && time.Since(start) > sendRetryHorizon
 }
 
@@ -472,7 +489,11 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
 			}
-			delay := clampRateSnooze(time.Until(decision.RetryAt), w.rate.Window()) + rateJitter(j.MessageID, w.rate.Window())
+			delay := rateSnooze(j.fireTime(), time.Until(decision.RetryAt), w.rate.Window())
+			// Jitter scales with the snooze it decorates (not the fixed window) so
+			// a capped, minutes-long backlog still fans out proportionally instead
+			// of re-herding in a 15s band. Adds up to a quarter on top of delay.
+			delay += rateJitter(j.MessageID, delay)
 			w.metrics.OutboundRateDeferred()
 			// IDs only — never recipient data.
 			log.Printf("[outbound-send] rate_limited agent=%s msg=%s retry_in=%s", j.AgentID, j.MessageID, delay)
@@ -624,21 +645,60 @@ func clampRateSnooze(d, window time.Duration) time.Duration {
 	return d
 }
 
-// rateJitter spreads a deferred backlog's re-fire across a quarter-window.
-// Every job deferred by the same burst gets a near-identical RetryAt (their
-// blocking events were stamped ~simultaneously); without jitter the whole
-// backlog re-wakes in lockstep every window and serializes on the agent's one
-// hot rate row — a self-inflicted thundering herd of claim/reserve/release
-// txs, log lines, and metric increments. Deterministic per message (FNV over
-// the message id) so there is no RNG state and a given message's spread is
-// stable across workers and replicas.
-func rateJitter(messageID string, window time.Duration) time.Duration {
-	maxJitter := window / 4
+// rateSnooze picks how long a rate-deferred job sleeps before re-driving.
+//
+// The base wait is the time until the agent's window frees a slot
+// (clampRateSnooze: floored off the boundary race, capped at one window). On top
+// of that, the deferral backs off by how long the message has ALREADY been
+// waiting to fire: sleeping at least "as long as we've already waited" (elapsed
+// since fireTime) doubles the total wait on each pass, so a deep backlog
+// re-drives a logarithmic number of times instead of re-waking every window —
+// the quadratic drain cost in #771 (each re-drive is 3 txs / 2 messages
+// UPDATEs and occupies a send worker, adding latency to other tenants' sends).
+// Bounded by rateMaxSnooze so the job still drains well under the 72h retry
+// horizon.
+//
+// Trade-off: because a longer-waiting message sleeps longer, a draining backlog
+// skews toward newer-first (LIFO-ish) — an old message can cede a freed slot to
+// a fresher one. This is inherent to any elapsed/attempt-scaled backoff and is
+// bounded: the rateMaxSnooze cap keeps an old message re-driving on a fixed
+// cadence (hundreds of retries before the 72h horizon), and pastRetryHorizon —
+// which runs BEFORE this in the deferral branch — still terminates a genuinely
+// stuck job rather than letting it churn forever.
+//
+// A zero fireTime (unknown timestamps) disables the backoff and falls back to
+// the base wait, mirroring pastRetryHorizon's zero-handling.
+func rateSnooze(fireTime time.Time, retryDelay, window time.Duration) time.Duration {
+	delay := clampRateSnooze(retryDelay, window)
+	if !fireTime.IsZero() {
+		if elapsed := time.Since(fireTime); elapsed > delay {
+			delay = elapsed
+		}
+	}
+	if delay > rateMaxSnooze {
+		delay = rateMaxSnooze
+	}
+	return delay
+}
+
+// rateJitter spreads a deferred backlog's re-fire across a quarter of the
+// snooze it decorates. Every job deferred by the same burst gets a
+// near-identical snooze (their blocking events were stamped ~simultaneously);
+// without jitter the whole backlog re-wakes in lockstep and serializes on the
+// agent's one hot rate row — a self-inflicted thundering herd of
+// claim/reserve/release txs, log lines, and metric increments. Scaling the
+// spread to the actual snooze (not the fixed window) keeps the fan-out
+// proportional even when rateSnooze's elapsed backoff has grown the snooze to
+// minutes — otherwise a capped backlog re-herds in a window-sized band.
+// Deterministic per message (FNV over the message id) so there is no RNG state
+// and a given message's spread is stable across workers and replicas.
+func rateJitter(messageID string, spread time.Duration) time.Duration {
+	maxJitter := spread / 4
 	if maxJitter <= 0 {
 		return 0
 	}
-	// Sub-millisecond-precision windows (tests) truncate to 0ms — guard the
-	// modulo against the divide-by-zero, not just the non-positive window.
+	// Sub-millisecond spreads (tiny test windows) truncate to 0ms — guard the
+	// modulo against the divide-by-zero, not just the non-positive spread.
 	ms := maxJitter.Milliseconds()
 	if ms <= 0 {
 		return 0

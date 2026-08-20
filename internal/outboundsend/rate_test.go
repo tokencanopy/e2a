@@ -112,6 +112,30 @@ func TestSendWorker_RateLimitedSnoozeClamped(t *testing.T) {
 	}
 }
 
+// TestSendWorker_RateLimitedBacksOffByElapsedWait proves the #771 backoff is
+// wired through the deferral path: a message that has already been waiting to
+// fire for minutes snoozes well beyond the one-window clamp (older = longer),
+// instead of re-waking every window. Contrast RateLimitedSnoozeClamped, whose
+// jobs carry no fire time and so stay on the base wait.
+func TestSendWorker_RateLimitedBacksOffByElapsedWait(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-90 * time.Second) // fired ~90s ago, still deferring
+	st := &fakeStore{job: j}
+	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(time.Second)}}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+
+	d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
+	// Old fixed behavior capped at the window (1m); the elapsed backoff pushes
+	// the base to ~90s — above the window, below the 3m cap — plus proportional
+	// jitter (<= base/4).
+	if d <= time.Minute {
+		t.Errorf("snooze = %s, want > window=1m (elapsed backoff not applied)", d)
+	}
+	if d > 90*time.Second+90*time.Second/4+time.Second {
+		t.Errorf("snooze = %s, want ~90s backoff + proportional jitter (below the 3m cap)", d)
+	}
+}
+
 // TestSendWorker_RateLimitedJitterDeterministicPerMessage: the anti-herd
 // jitter must be stable for a given message (no RNG state drifting across
 // workers) but DIFFERENT across messages (a burst must fan out, not
