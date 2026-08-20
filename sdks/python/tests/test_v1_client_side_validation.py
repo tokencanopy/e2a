@@ -84,6 +84,9 @@ async def test_delete_agent_suppression_rejects_dot_segment(httpx_mock, value):
             await c.agents.delete_suppression("bot@test.dev", value)
     assert ei.value.code == "unsafe_path_segment"
     assert ei.value.status == 0
+    # Pre-flight means literally that: no request was ever built, not just
+    # that pytest-httpx happened not to see one registered.
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.anyio
@@ -92,6 +95,7 @@ async def test_delete_engagement_rejects_dot_segment(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             await c.contacts.delete_outreach("bot@test.dev", "..")
     assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.anyio
@@ -100,6 +104,7 @@ async def test_delete_message_rejects_dot_segment(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             await c.messages.delete("bot@test.dev", "..")
     assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.anyio
@@ -108,6 +113,7 @@ async def test_account_delete_suppression_rejects_dot_segment(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             await c.account.suppressions.delete("..")
     assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
 
 
 @pytest.mark.anyio
@@ -116,6 +122,7 @@ async def test_account_delete_api_key_rejects_dot_segment(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             await c.account.api_keys.delete("..")
     assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
 
 
 def test_sync_delete_agent_suppression_rejects_dot_segment(httpx_mock):
@@ -123,6 +130,53 @@ def test_sync_delete_agent_suppression_rejects_dot_segment(httpx_mock):
         with pytest.raises(E2AValidationError) as ei:
             c.agents.delete_suppression("bot@test.dev", "..")
     assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
+
+
+# review follow-up (2026-08-19): delete_outreach's `address` param was guarded
+# from the start, but `email` was not -- collapsing it retargets
+# DELETE /v1/agents/{email}/contacts/{address} onto
+# DELETE /v1/contacts/{address} (deleteContact), which the same
+# ?confirm=DELETE already satisfies and which permanently deletes the contact
+# record the docstring says survives this call.
+@pytest.mark.anyio
+async def test_delete_engagement_rejects_dot_segment_email(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.contacts.delete_outreach("..", "recipient@example.net")
+    assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
+
+
+# review follow-up (2026-08-19): messages.restore() had no guard at all --
+# collapsing `message_id` retargets
+# POST /v1/agents/{email}/messages/{id}/restore onto
+# POST /v1/agents/{email}/restore (restoreAgent), undoing a deliberate agent
+# deletion instead of restoring a message. The return type is annotated
+# MessageView but the server actually returns an AgentView on this path.
+@pytest.mark.anyio
+async def test_restore_message_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.messages.restore("bot@test.dev", "..")
+    assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
+
+
+# Found by re-running the issue's own enumeration methodology against every
+# HTTP method, not just DELETE: update_labels is a PATCH, and collapsing
+# `message_id` retargets PATCH /v1/agents/{email}/messages/{id} onto
+# PATCH /v1/agents/{email} (updateAgent). Not independently confirmed live
+# against a real server (updateAgent's body schema rejects the labels fields
+# via additionalProperties: false), but the client should never send a PATCH
+# at the wrong resource regardless of what the server does with it.
+@pytest.mark.anyio
+async def test_update_message_labels_rejects_dot_segment(httpx_mock):
+    async with AsyncE2AClient(api_key="e2a_test", base_url=BASE) as c:
+        with pytest.raises(E2AValidationError) as ei:
+            await c.messages.update_labels("bot@test.dev", "..", {"add_labels": ["x"]})
+    assert ei.value.code == "unsafe_path_segment"
+    assert httpx_mock.get_requests() == []
 
 
 def test_delete_agent_suppression_allows_an_ordinary_address(httpx_mock):

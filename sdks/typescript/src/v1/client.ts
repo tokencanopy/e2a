@@ -98,7 +98,7 @@ import type {
   CreateAgentSuppressionRequest,
 } from "./generated/index.js";
 import { RetryHttpLibrary, type RetryOptions } from "./retry.js";
-import { E2AError, fromApiException, connectionError } from "./errors.js";
+import { E2AError, E2AValidationError, fromApiException, connectionError } from "./errors.js";
 import { AutoPager } from "./pagination.js";
 import { WSStream } from "./ws.js";
 import type { WebhookEvent, EmailReceivedData } from "./webhook-signature.js";
@@ -197,12 +197,15 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// A path-parameter value of exactly "." or ".." collapses the built URL onto
-// the PRECEDING segment (encodeURIComponent leaves "." unescaped), retargeting
-// a DELETE at a bigger resource. Rejected here, before it reaches the wire.
+// A path-parameter value of exactly ".." collapses the built URL onto the
+// PRECEDING segment, and exactly "." collapses onto the segment's own parent
+// collection (i.e. it drops itself, not the segment before it) — neither is
+// escaped by encodeURIComponent(), so both reach the URL parser literally.
+// Either way the request retargets a bigger resource than the caller named.
+// Rejected here, before it reaches the wire.
 function assertNotDotSegment(value: string, param: string): string {
   if (value === "." || value === "..") {
-    throw new E2AError({
+    throw new E2AValidationError({
       code: "unsafe_path_segment",
       message: `${param} must not be "." or ".."; it would collapse the request path onto a different, larger resource`,
       status: 0,
@@ -471,7 +474,7 @@ class MessagesResource {
    * submission canceled.
    */
   restore(email: string, id: string): Promise<MessageView> {
-    return call(() => this.api.restoreMessage(email, id));
+    return call(() => this.api.restoreMessage(email, assertNotDotSegment(id, "id")));
   }
   // getAttachment returns one attachment's metadata + a short-lived download_url
   // (+ expires_at). Pass { inline: true } to also receive base64 `data` for small
@@ -494,7 +497,7 @@ class MessagesResource {
   // deprecated per-inbox messages.approve/reject was removed in the pre-GA
   // vocabulary freeze (a review is addressed by message id alone).
   updateLabels(email: string, id: string, body: UpdateMessageRequest): Promise<UpdateMessageResultView> {
-    return call(() => this.api.updateMessage(email, id, body));
+    return call(() => this.api.updateMessage(email, assertNotDotSegment(id, "id"), body));
   }
 }
 
@@ -724,7 +727,13 @@ class ContactsResource {
   /** Un-enrol a contact from an agent's outreach. The contact itself survives,
    *  and suppressions are untouched — this is not consent. */
   deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
-    return call(() => this.api.deleteEngagement(email, assertNotDotSegment(address, "address"), "DELETE"));
+    return call(() =>
+      this.api.deleteEngagement(
+        assertNotDotSegment(email, "email"),
+        assertNotDotSegment(address, "address"),
+        "DELETE",
+      ),
+    );
   }
 }
 

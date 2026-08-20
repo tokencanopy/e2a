@@ -211,9 +211,15 @@ def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
 
 
 def _assert_not_dot_segment(value: str, param: str) -> str:
-    # A value of exactly "." or ".." collapses the built URL onto the
-    # PRECEDING path segment (urllib.parse.quote leaves "." unescaped),
-    # retargeting a DELETE at a bigger resource. Reject before the wire.
+    # A value of exactly ".." collapses the built URL onto the PRECEDING path
+    # segment, and exactly "." collapses onto the segment's own parent
+    # collection (it drops itself, not the segment before it) — neither is
+    # escaped by urllib.parse.quote(), so both reach httpx's URL builder
+    # literally. On Python this is not merely latent: httpx drops the
+    # collapsed trailing slash (unlike the TS client's URL builder, which
+    # only strips a trailing slash when the input string itself ends in
+    # "/"), so several of these collapses land on a real, live route rather
+    # than 404ing. Reject before the wire either way.
     if value in (".", ".."):
         raise E2AValidationError(
             code="unsafe_path_segment",
@@ -635,6 +641,7 @@ class MessagesResource:
         """Restore a soft-deleted message. A scheduled message restored before
         scheduled_at re-arms; at/after scheduled_at it returns live as failed
         with submission canceled."""
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         return await self._c._write_unsafe(
             lambda h: self._api.restore_message(email, message_id, _headers=h)
         )
@@ -766,6 +773,7 @@ class MessagesResource:
     async def update_labels(
         self, email: str, message_id: str, body: Body
     ) -> UpdateMessageResultView:
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         req = _coerce(UpdateMessageRequest, body)
         return await self._c._write_idempotent(
             lambda h: self._api.update_message(email, message_id, req, _headers=h)
@@ -991,6 +999,7 @@ class ContactsResource:
     async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
         """Un-enrol a contact from an agent's outreach. The contact itself
         survives, and suppressions are untouched — this is not consent."""
+        email = _assert_not_dot_segment(email, "email")
         address = _assert_not_dot_segment(address, "address")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)

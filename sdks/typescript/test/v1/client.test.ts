@@ -1250,6 +1250,16 @@ describe("E2AClient", () => {
   // ── dot-segment path-parameter guard (e2a#792) ───────────────────
   // ".." collapses the built URL onto the preceding segment, retargeting each
   // of these DELETEs at the agent or the account instead of the sub-resource.
+  //
+  // The full openapi.yaml-driven enumeration (every path param whose ".."
+  // collapse lands on a DIFFERENT route sharing the same HTTP method, plus an
+  // explicit allowlist for the read-only ones) lives once, in
+  // sdks/python/tests/test_dot_segment_enumeration.py — both SDKs share the
+  // one spec and the one set of ergonomic call sites (same shape guarded at
+  // the same five-plus-three routes), so a second full parser here would
+  // duplicate that denominator computation rather than add coverage; this
+  // file pins the same eight guarded call sites directly against the TS
+  // client instead.
 
   describe("dot-segment path guard", () => {
     it("rejects agents.deleteSuppression(email, '..') before any request is sent", async () => {
@@ -1296,6 +1306,57 @@ describe("E2AClient", () => {
       globalThis.fetch = mockFetch(200, { deleted: true, address: "recipient@example.net" });
       const res = await client.agents.deleteSuppression("sender@example.com", "recipient@example.net");
       expect(res.deleted).toBe(true);
+    });
+
+    it("throws E2AValidationError, not the bare base class", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.agents.deleteSuppression("sender@example.com", ".."),
+      ).rejects.toBeInstanceOf(E2AValidationError);
+    });
+
+    // review follow-up (2026-08-19): deleteOutreach's `address` param was
+    // guarded from the start, but `email` was not — collapsing it retargets
+    // DELETE /v1/agents/{email}/contacts/{address} onto
+    // DELETE /v1/contacts/{address} (deleteContact), which the same
+    // ?confirm=DELETE already satisfies and which permanently deletes the
+    // contact record the docstring says survives this call.
+    it("rejects contacts.deleteOutreach('..', address) before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.contacts.deleteOutreach("..", "recipient@example.net"),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    // review follow-up (2026-08-19): messages.restore() had no guard at all —
+    // collapsing `id` retargets POST /v1/agents/{email}/messages/{id}/restore
+    // onto POST /v1/agents/{email}/restore (restoreAgent), undoing a
+    // deliberate agent deletion instead of restoring a message. The response
+    // is typed MessageView but the server actually returns an AgentView.
+    it("rejects messages.restore(email, '..') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.messages.restore("sender@example.com", ".."),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    // Found by re-running the issue's own enumeration methodology (every
+    // route whose param collapse lands on ANOTHER route sharing the same
+    // HTTP method, not just DELETE): messages.updateLabels is a PATCH, and
+    // collapsing `id` retargets PATCH /v1/agents/{email}/messages/{id} onto
+    // PATCH /v1/agents/{email} (updateAgent). Not independently confirmed
+    // live against a real server (updateAgent's body schema rejects the
+    // labels fields via additionalProperties: false), but the client should
+    // never send a PATCH at the wrong resource regardless of what the server
+    // does with it.
+    it("rejects messages.updateLabels(email, '..', body) before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.messages.updateLabels("sender@example.com", "..", { addLabels: ["x"] }),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
     });
   });
 });
