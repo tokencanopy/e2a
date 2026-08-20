@@ -1768,22 +1768,30 @@ func (a *API) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		attempted++
 		ghRepo := os.Getenv("GITHUB_FEEDBACK_REPO")
 		if ghRepo == "" {
-			ghRepo = "tokencanopy/e2a"
-		}
-		parts := strings.SplitN(ghRepo, "/", 2)
-		if len(parts) != 2 {
-			log.Printf("feedback: invalid GITHUB_FEEDBACK_REPO: %s", ghRepo)
+			// A GitHub credential (App or PAT) is configured but no target repo
+			// is — refuse to file rather than defaulting to the operator's
+			// public tracker. /api/feedback is unauthenticated and
+			// IP-rate-limited only, so silently falling back here would let
+			// anyone who can reach this deployment file arbitrary-text issues
+			// on tokencanopy/e2a using THIS deployment's own GitHub
+			// credential, with the submitter's email in the issue body.
+			log.Printf("feedback: GITHUB_FEEDBACK_REPO is not set — refusing to file a GitHub issue (a self-hosted deployment's GitHub credential must never target the operator's repo by default)")
 		} else {
-			issue, _, err := ghClient.Issues.Create(ghCtx, parts[0], parts[1], &github.IssueRequest{
-				Title:  github.Ptr(title),
-				Body:   github.Ptr(body),
-				Labels: &[]string{label},
-			})
-			if err != nil {
-				log.Printf("feedback: GitHub API error: %v", err)
+			parts := strings.SplitN(ghRepo, "/", 2)
+			if len(parts) != 2 {
+				log.Printf("feedback: invalid GITHUB_FEEDBACK_REPO: %s", ghRepo)
 			} else {
-				delivered++
-				issueURL = issue.GetHTMLURL()
+				issue, _, err := ghClient.Issues.Create(ghCtx, parts[0], parts[1], &github.IssueRequest{
+					Title:  github.Ptr(title),
+					Body:   github.Ptr(body),
+					Labels: &[]string{label},
+				})
+				if err != nil {
+					log.Printf("feedback: GitHub API error: %v", err)
+				} else {
+					delivered++
+					issueURL = issue.GetHTMLURL()
+				}
 			}
 		}
 	}

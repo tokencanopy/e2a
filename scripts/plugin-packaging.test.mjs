@@ -64,7 +64,7 @@ test("marketplaces expose the supported plugin set and release versions", async 
   }
   for (const client of [".claude-plugin", ".codex-plugin"]) {
     const labs = JSON.parse(await readFile(`plugins/e2a-labs/${client}/plugin.json`, "utf8"));
-    assert.equal(labs.version, "0.2.1");
+    assert.equal(labs.version, "0.3.0");
   }
 });
 

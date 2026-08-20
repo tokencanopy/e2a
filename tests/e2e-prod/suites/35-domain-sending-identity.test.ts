@@ -230,13 +230,40 @@ async function waitForPublicDns(domain: string, txtValue: string, mxHost: string
 //      DeleteEmailIdentity is allowed only in-namespace, so staging's own
 //      server credentials cannot delete an SES identity outside
 //      identity/*.staging.trymnexa.com no matter what this sweeper asks for.
-const STAGING_FIXTURE_DOMAIN = /^[a-z][a-z0-9]*-[0-9a-f]{6}-[0-9a-f]{6}\.staging\.trymnexa\.com$/;
+// DERIVED from fixtureDomainSuffix(), never written as a literal. The generator
+// above already builds the suffix from CLOUDFLARE_ZONE_NAME; hardcoding the zone
+// here made matcher and generator disagree on their source of truth, so pointing
+// this suite at a different zone would keep naming fixtures correctly while this
+// quietly matched nothing. A silent no-op is the worst failure mode for a
+// cleanup routine: it is indistinguishable from "there was nothing to clean".
+//
+// The anchoring also does real work. The slug alternation is dot-free, so a
+// pattern built for one environment cannot match another environment's
+// subdomain — `^<slug>\.trymnexa\.com$` cannot match `x.staging.trymnexa.com`,
+// because the slug would have to contain a dot. The two namespaces stay
+// disjoint by construction rather than by a special case, which is what makes
+// running this against either target safe.
+function fixtureDomainPattern(suffix: string): RegExp {
+  const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^[a-z][a-z0-9]*-[0-9a-f]{6}-[0-9a-f]{6}\\.${escaped}$`);
+}
 const SWEEP_MIN_AGE_MS = 3 * 60 * 60 * 1000; // 3h; this suite's own worst case is well under 15min end to end.
 const SWEEP_MAX_PAGES = 50; // bound the /v1/domains walk on a very large account rather than hang.
 
 async function sweepStaleStagingFixtures(): Promise<void> {
+  // The prod gate stays. Removing it is defensible on the safety analysis
+  // (credential scoping means each conformance key only sees its own account's
+  // domains; DNS refs are reconstructed per-domain from the API rather than
+  // pattern-scanned from the shared Cloudflare zone; and the anchored dot-free
+  // slug cannot cross a subdomain boundary) — but "defensible" is not the bar
+  // for a routine that DELETES domains against production on a nightly cron.
+  // Production's own stale fixtures are being reaped deliberately, once, by an
+  // operator; that does not require arming an automatic sweeper there.
   if (isProductionTarget(client.env.apiUrl)) return; // see SAFETY #2 above.
 
+  const fixturePattern = fixtureDomainPattern(
+    fixtureDomainSuffix(client.env.apiUrl, CF_ZONE_NAME ?? ""),
+  );
   const cutoff = Date.now() - SWEEP_MIN_AGE_MS;
   const stale: DomainView[] = [];
   let cursor: string | undefined;
@@ -251,7 +278,7 @@ async function sweepStaleStagingFixtures(): Promise<void> {
         return;
       }
       for (const d of res.body.items) {
-        if (STAGING_FIXTURE_DOMAIN.test(d.domain) && new Date(d.created_at).getTime() < cutoff) {
+        if (fixturePattern.test(d.domain) && new Date(d.created_at).getTime() < cutoff) {
           stale.push(d);
         }
       }
@@ -319,7 +346,8 @@ before(async () => {
 });
 
 test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL FROM) -> verify -> sending_status hard gate -> [best-effort, also-failing] sending_status verified -> custom-domain agent -> teardown (verified)", { skip }, async () => {
-  const domain = `${uniqueSlug("dsi")}.${fixtureDomainSuffix(client.env.apiUrl, CF_ZONE_NAME!)}`;
+  const fixtureSuffix = fixtureDomainSuffix(client.env.apiUrl, CF_ZONE_NAME!);
+  const domain = `${uniqueSlug("dsi")}.${fixtureSuffix}`;
   const dnsRecords: CloudflareDnsRecordRef[] = [];
   let agentEmail: string | undefined;
   track("domain", domain);
@@ -392,7 +420,7 @@ test("domain lifecycle + SES sending identity: register -> DNS (incl. DKIM/MAIL 
         status,
         "none",
         `sending_status stayed "none" for ${SENDING_LEAVES_NONE_BUDGET_MS / 1000}s after verify — the SES sending-identity provisioning call never ran. ` +
-          `An AccessDenied, a missing IAM action, or a fixture domain outside the staging IAM fence's identity/*.staging.trymnexa.com scope all present ` +
+          `An AccessDenied, a missing IAM action, or a fixture domain outside the IAM fence's identity/*.${fixtureSuffix} scope all present ` +
           `exactly this way (internal/senderidentity/worker.go's syncProviderIdentityWithInspection returns the raw provider error without ever calling ` +
           `store.SetSendingStatus). This is the assertion that would have caught the 2026-08-16 production incident.`,
       );

@@ -69,13 +69,40 @@ function parseTrustProxy(raw: string): boolean | number | string {
   return raw;
 }
 
-function parseHostList(raw: string, def: string): string[] {
-  const source = raw === "" ? def : raw;
-  const list = source.split(",").map((s) => s.trim()).filter(Boolean);
-  if (list.length === 0) {
-    throw new ConfigError(`MCP_ALLOWED_HOSTS resolved to an empty list (raw=${JSON.stringify(raw)})`);
+// hostFromUrl extracts the bare hostname (no port) from a URL string, used to
+// derive the MCP_ALLOWED_HOSTS default from MCP_PUBLIC_URL. Throws
+// ConfigError on an unparseable URL so a typo'd MCP_PUBLIC_URL fails loudly
+// instead of silently producing a useless allowlist.
+function hostFromUrl(name: string, raw: string): string {
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    throw new ConfigError(`${name} is not a valid URL; got ${JSON.stringify(raw)}`);
   }
-  return list;
+}
+
+// parseHostList has NO literal-host fallback: defaulting to the operator's
+// api.e2a.dev would silently 421 every request to a self-hosted deployment
+// with a different host, with no body and no log line. When
+// MCP_ALLOWED_HOSTS is unset, derive the allowlist from MCP_PUBLIC_URL's
+// host if that's set (it already names this deployment's externally
+// reachable host); otherwise there is no safe default and we fail closed.
+function parseHostList(raw: string, publicUrl: string | undefined): string[] {
+  if (raw !== "") {
+    const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (list.length === 0) {
+      throw new ConfigError(`MCP_ALLOWED_HOSTS resolved to an empty list (raw=${JSON.stringify(raw)})`);
+    }
+    return list;
+  }
+  if (publicUrl) {
+    return [hostFromUrl("MCP_PUBLIC_URL", publicUrl)];
+  }
+  throw new ConfigError(
+    "MCP_ALLOWED_HOSTS is required (or set MCP_PUBLIC_URL, whose host becomes the default allowlist) — " +
+      "this server has no default Host allowlist, since defaulting to the operator's api.e2a.dev would 421 " +
+      "every request to a self-hosted deployment with no body and no log line.",
+  );
 }
 
 // resolveBaseUrl picks the API host this server talks to. Canonical is
@@ -88,6 +115,15 @@ function parseHostList(raw: string, def: string): string[] {
 // still accepted so existing deployment manifests keep working, with a stderr
 // deprecation note. main() calls loadConfig exactly once, so the note is emitted
 // once per process without needing a module-level guard to dedupe it.
+//
+// There is deliberately NO terminal fallback to "https://api.e2a.dev". This
+// server forwards the caller's bearer token to `baseUrl` verbatim
+// (`new E2AClient({ apiKey: bearer, baseUrl })` in http-server.ts) and also
+// uses it for /readyz and RFC 9728 discovery. A self-hoster who forgets this
+// var would otherwise have their users' credentials silently sent to the
+// operator's production API instead of their own deployment — a loud
+// failure here costs five minutes, a silent fallback costs a leaked
+// credential.
 function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
   const canonical = env.E2A_API_URL;
   if (canonical) return canonical;
@@ -101,18 +137,22 @@ function resolveBaseUrl(env: NodeJS.ProcessEnv): string {
     );
     return v;
   }
-  return "https://api.e2a.dev";
+  throw new ConfigError(
+    "E2A_API_URL is required (or the legacy E2A_URL / E2A_BASE_URL) — this server has no default backend API. " +
+      "Falling back to the operator's api.e2a.dev would forward your users' bearer tokens to someone else's deployment.",
+  );
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BinConfig {
+  const publicUrl = env.MCP_PUBLIC_URL || undefined;
   return {
     port: parsePort("PORT", env.PORT ?? "", 3000),
     baseUrl: resolveBaseUrl(env),
-    allowedHosts: parseHostList(env.MCP_ALLOWED_HOSTS ?? "", "api.e2a.dev"),
+    allowedHosts: parseHostList(env.MCP_ALLOWED_HOSTS ?? "", publicUrl),
     sessionIdleMs: parsePositiveInt("MCP_SESSION_IDLE_MS", env.MCP_SESSION_IDLE_MS ?? "", 5 * 60_000),
     maxSessions: parsePositiveInt("MCP_MAX_SESSIONS", env.MCP_MAX_SESSIONS ?? "", 500),
     resolveTimeoutMs: parsePositiveInt("MCP_RESOLVE_TIMEOUT_MS", env.MCP_RESOLVE_TIMEOUT_MS ?? "", 5000),
-    publicUrl: env.MCP_PUBLIC_URL || undefined,
+    publicUrl,
     authorizationServerUrl: env.MCP_AUTHORIZATION_SERVER_URL || undefined,
     trustProxy: parseTrustProxy(env.E2A_TRUST_PROXY ?? ""),
   };

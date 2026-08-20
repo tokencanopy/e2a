@@ -207,6 +207,67 @@ func TestFeedbackEmailTimeoutReturnsAfterGitHubDelivery(t *testing.T) {
 	}
 }
 
+// A GitHub credential configured with no GITHUB_FEEDBACK_REPO must refuse to
+// file — never default to the operator's tokencanopy/e2a. /api/feedback is
+// unauthenticated, so a silent default there would let anyone who can reach
+// this deployment file arbitrary-text issues on the operator's public
+// tracker using this deployment's own GitHub credential, with the
+// submitter's email in the body.
+func TestFeedbackNoRepoConfigured_RefusesToFileRatherThanDefaultingToOperatorRepo(t *testing.T) {
+	issueRequested := false
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issueRequested = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"html_url":"https://github.example/tokencanopy/e2a/issues/1"}`))
+	}))
+	defer githubServer.Close()
+
+	oldBaseURL := githubAPIBaseURL
+	githubAPIBaseURL = githubServer.URL
+	defer func() { githubAPIBaseURL = oldBaseURL }()
+
+	t.Setenv("GITHUB_FEEDBACK_APP_ID", "")
+	t.Setenv("GITHUB_FEEDBACK_APP_INSTALLATION_ID", "")
+	t.Setenv("GITHUB_FEEDBACK_APP_PRIVATE_KEY", "")
+	t.Setenv("GITHUB_FEEDBACK_TOKEN", "pat")
+	t.Setenv("GITHUB_FEEDBACK_REPO", "") // deliberately unset — the bug under test
+	t.Setenv("FEEDBACK_NOTIFY_TO", "feedback@example.com")
+	t.Setenv("FEEDBACK_NOTIFY_CC", "")
+
+	smtpHost, smtpPort, smtpMessages := startFeedbackSMTPServer(t)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: smtpHost, Port: smtpPort})
+	sender := outbound.NewSender(relay, "test.e2a.dev")
+	api := NewAPI(nil, sender, relay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	router := mux.NewRouter()
+	api.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/api/feedback", "application/json", bytes.NewBufferString(`{"category":"bug","message":"no repo configured"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (email channel still delivers)", resp.StatusCode)
+	}
+
+	if issueRequested {
+		t.Fatal("a GitHub issue-create request was sent even though GITHUB_FEEDBACK_REPO was unset — must never default to the operator's repo")
+	}
+
+	var message string
+	select {
+	case message = <-smtpMessages:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for feedback email")
+	}
+	if !strings.Contains(message, "GitHub issue: creation FAILED") {
+		t.Fatalf("email did not report the missing-repo failure:\n%s", message)
+	}
+}
+
 // testAppKey generates a throwaway RSA key and returns it plus its
 // base64-encoded PKCS#1 PEM (the canonical GITHUB_FEEDBACK_APP_PRIVATE_KEY
 // env form).

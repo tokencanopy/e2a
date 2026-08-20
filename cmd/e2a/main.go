@@ -812,6 +812,7 @@ func main() {
 		SESRegion:                 cfg.SenderIdentity.SESRegion,
 		SharedDomain:              cfg.SharedDomain,
 		PublicURL:                 cfg.HTTP.PublicURL,
+		APIURL:                    cfg.HTTP.APIURL,
 		SigningSecret:             cfg.Signing.HMACSecret,
 		EventsEnabled:             webhookOutbox.Enabled(),
 		Production:                cfg.IsProduction(),

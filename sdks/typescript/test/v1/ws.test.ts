@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { WSEvent } from "../../src/v1/ws.js";
@@ -104,6 +104,86 @@ describe("WSListener exponential backoff", () => {
     // construction).
     expect(l).toBeDefined();
     l.close();
+  });
+});
+
+describe("WSListener base URL resolution", () => {
+  // Same contract as E2AClient (client.test.ts's "base URL resolution"
+  // suite): opts.baseUrl > E2A_API_URL > E2A_BASE_URL (deprecated) > the
+  // api.e2a.dev default. WSListener used to bypass this entirely with its
+  // own hardcoded "https://api.e2a.dev" fallback, so a self-hoster who
+  // exported E2A_API_URL and constructed WSListener directly (rather than
+  // going through E2AClient.listen) would have their API key sent to the
+  // operator's host in the WS handshake Authorization header regardless.
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = {
+      E2A_API_URL: process.env.E2A_API_URL,
+      E2A_BASE_URL: process.env.E2A_BASE_URL,
+    };
+    delete process.env.E2A_API_URL;
+    delete process.env.E2A_BASE_URL;
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  async function dialedHost(opts: { baseUrl?: string } = {}): Promise<string> {
+    const calls: Array<{ url: string }> = [];
+    vi.resetModules();
+    vi.doMock("ws", () => {
+      class FakeWS {
+        constructor(url: string) {
+          calls.push({ url });
+        }
+        on() {
+          return this;
+        }
+        close() {}
+      }
+      return { default: FakeWS };
+    });
+    const { WSListener } = await import("../../src/v1/ws.js");
+    const l = new WSListener({ apiKey: "k", agentEmail: "bot@x.dev", reconnect: false, ...opts });
+    l.connect();
+    l.close();
+    vi.doUnmock("ws");
+    vi.resetModules();
+    expect(calls).toHaveLength(1);
+    return new URL(calls[0].url.replace(/^ws/, "http")).origin;
+  }
+
+  it("defaults to the API host, same as E2AClient", async () => {
+    expect(await dialedHost()).toBe("https://api.e2a.dev");
+  });
+
+  it("reads E2A_API_URL", async () => {
+    process.env.E2A_API_URL = "https://api.self-host.example";
+    expect(await dialedHost()).toBe("https://api.self-host.example");
+  });
+
+  it("still honours the deprecated E2A_BASE_URL, with a warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.E2A_BASE_URL = "https://legacy.example";
+    expect(await dialedHost()).toBe("https://legacy.example");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("E2A_BASE_URL is deprecated"));
+    warn.mockRestore();
+  });
+
+  it("prefers E2A_API_URL over the deprecated name", async () => {
+    process.env.E2A_API_URL = "https://canonical.example";
+    process.env.E2A_BASE_URL = "https://legacy.example";
+    expect(await dialedHost()).toBe("https://canonical.example");
+  });
+
+  it("lets an explicit baseUrl beat the environment", async () => {
+    process.env.E2A_API_URL = "https://api.self-host.example";
+    expect(await dialedHost({ baseUrl: "https://explicit.example" })).toBe("https://explicit.example");
   });
 });
 

@@ -1,7 +1,7 @@
 import type { CreateAPIKeyRequest } from "@e2a/sdk/v1";
 import { hostname } from "node:os";
 import { createClient } from "../sdk.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, expandBareAddress } from "../config.js";
 import { EXIT, fail } from "../exit.js";
 import { sanitizeTsvField } from "./messages.js";
 
@@ -22,14 +22,12 @@ const DELETE_USAGE = "usage: e2a keys delete <key-id>";
 // least-privilege agent key — what a harness bootstrap (tether setup) runs
 // when the account credential already exists and no browser is available.
 export async function keysCreate(opts: KeysCreateOptions): Promise<void> {
-  const client = createClient();
+  const config = loadConfig();
+  const client = createClient({}, config);
   // Bare agent names expand on the shared domain: `--agent myname` means
-  // myname@<shared_domain>, matching the expansion in agents.ts.
-  const agentEmail = opts.agent
-    ? opts.agent.includes("@")
-      ? opts.agent
-      : `${opts.agent}@${loadConfig().shared_domain}`
-    : undefined;
+  // myname@<shared_domain>, discovered live via GET /v1/info when not
+  // already known — matching the expansion in agents.ts (expandBareAddress).
+  const agentEmail = opts.agent ? await expandBareAddress(opts.agent, config) : undefined;
   const created = await client.account.apiKeys.create({
     name: opts.name || (opts.agent ? `agent key @${hostname()}` : `account key @${hostname()}`),
     ...(agentEmail ? { scope: "agent" as CreateAPIKeyRequest["scope"], agentEmail } : {}),

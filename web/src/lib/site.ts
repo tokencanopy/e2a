@@ -33,12 +33,22 @@ export const FEEDBACK_EMAIL = process.env.NEXT_PUBLIC_FEEDBACK_EMAIL || "";
 export const GOOGLE_SITE_VERIFICATION =
   process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
 
-// Umami web analytics (self-hosted at umami.tokencanopy.com). The e2a.dev
-// website record id, created in the Umami dashboard. Empty in the OSS
-// build and for self-hosters (no tracking); the hosted deployment bakes in
-// NEXT_PUBLIC_UMAMI_WEBSITE_ID at image build time. The tracker is gated to
-// public marketing routes only — the authenticated dashboard is not tracked.
+// Umami web analytics. The e2a.dev website record id, created in the Umami
+// dashboard. Empty in the OSS build and for self-hosters (no tracking); the
+// hosted deployment bakes in NEXT_PUBLIC_UMAMI_WEBSITE_ID at image build
+// time. The tracker is gated to public marketing routes only — the
+// authenticated dashboard is not tracked.
 export const UMAMI_WEBSITE_ID = process.env.NEXT_PUBLIC_UMAMI_WEBSITE_ID || "";
+
+// Umami collector origin (e.g. "https://umami.tokencanopy.com") — where
+// beacons actually get POSTed. Paired with UMAMI_WEBSITE_ID and deliberately
+// given NO default: a self-hoster running their own Umami instance who sets
+// only NEXT_PUBLIC_UMAMI_WEBSITE_ID (the variable .env.example presents as
+// "the" way to enable analytics) must not have their pageviews silently
+// beaconed to the upstream operator's collector. UmamiTracker requires BOTH
+// vars before it loads at all. The hosted deployment bakes this in at image
+// build time alongside the website id.
+export const UMAMI_COLLECTOR_ORIGIN = process.env.NEXT_PUBLIC_UMAMI_COLLECTOR_ORIGIN || "";
 
 // Site-relative path of the pricing page, when the deployment has one.
 //
