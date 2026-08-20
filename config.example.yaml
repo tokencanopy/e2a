@@ -334,3 +334,14 @@ metrics:
 # Kill-switch: set E2A_GEMINI_DETECTOR_ENABLED=false to disable Gemini even when
 # a key is configured (e.g. to isolate whether Gemini or heuristics drove a given
 # block/review outcome, or to roll back without removing the credential).
+#
+# Compliance note: the detector sends the message subject, sender, and up to
+# 4,000 characters of extracted body text to the configured endpoint. The
+# default is the Google AI Studio consumer API, which is NOT covered by a
+# Google Cloud BAA/DPA. Deployments with confidentiality obligations (e.g.
+# HIPAA) must either leave scanning disabled or point the detector at a
+# project-scoped Vertex AI endpoint under their Google Cloud agreement:
+#   GEMINI_BASE_URL=https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google
+#   GEMINI_AUTH=adc   # authenticate with Application Default Credentials
+# In adc mode no GEMINI_API_KEY is used; credentials come from the ADC chain
+# (workload identity, service-account file, or gcloud auth application-default).
