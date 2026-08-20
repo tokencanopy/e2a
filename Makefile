@@ -39,10 +39,15 @@ test-unit:
 test-integration:
 	go test -p 4 ./internal/identity/ ./internal/agent/ ./internal/hitlworker/ ./internal/hitlnotify/ ./internal/limits/ ./internal/relay/ ./internal/sendramp/
 
+# -timeout 11m: internal/identity runs 5-6 minutes on a healthy CI run, so Go's
+# default 10-minute per-package timeout left under a 2x margin and tripped on DB
+# contention (same root cause the cover target documents below). 11m stays under
+# the workflow's 14-minute job cap so a genuine wedge still panics with a usable
+# stack instead of being killed by the runner.
 test-e2e:
 	@packages="$$(find ./cmd ./internal ./tests -name '*_test.go' -exec grep -l '^//go:build integration$$' {} + | xargs -n 1 dirname | sort -u)"; \
 	test -n "$$packages"; \
-	go test -tags integration -p 4 $$packages
+	go test -tags integration -p 4 -timeout 11m $$packages
 
 # cover writes a coverage profile across the internal packages (needs Postgres
 # on :5433, like `make test`; per-package DBs make the -p 4 parallel run safe).
