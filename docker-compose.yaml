@@ -70,46 +70,74 @@ services:
       - "8080:8080"
     # Load secrets and OAuth credentials from .env if present.
     # `.env` is gitignored; see .env.example for the full set of vars.
-    # Anything explicitly set under `environment:` below overrides the
-    # .env value, so the database/HMAC defaults stay deterministic for
-    # the demo even if the user edits .env.
+    #
+    # The `environment:` block below sets defaults for the zero-config demo
+    # via ${VAR:-default} interpolation, NOT hardcoded literals. Compose
+    # interpolates `${VAR:-default}` from the *host/project* environment —
+    # which includes this same root .env file, read separately from (and
+    # earlier than) the `env_file:` injection below — before merging
+    # `environment:` on top of `env_file:`. So a value a user sets in .env
+    # is substituted into the ${...} expression itself and wins; only a var
+    # genuinely absent from .env and the shell falls back to the literal
+    # demo default after the `:-`. Do NOT go back to hardcoding these as
+    # plain literals — `environment:` unconditionally overrides `env_file:`
+    # in compose, so a plain literal here would silently discard whatever a
+    # user put in .env (as it used to: a self-hoster who set real SES
+    # credentials in E2A_OUTBOUND_SMTP_* would see outbound mail keep
+    # landing in the Mailpit catch-all with no error, and a real
+    # E2A_HMAC_SECRET would be silently ignored).
     env_file:
       - path: .env
         required: false
     environment:
-      E2A_DATABASE_URL: "postgres://e2a:e2a@postgres:5432/e2a?sslmode=disable"
-      # Demo-only HMAC secret. ≥32 bytes is required by the OAuth
-      # provider (fosite) for HKDF-derived token signing — shorter
-      # values refuse to wire. Override via .env for any non-demo run.
-      E2A_HMAC_SECRET: "demo-hmac-secret-do-not-use-in-production-32"
+      E2A_DATABASE_URL: "${E2A_DATABASE_URL:-postgres://e2a:e2a@postgres:5432/e2a?sslmode=disable}"
+      # Demo-only HMAC secret, falling back to the same >=32-byte example
+      # placeholder as config.example.yaml (internal/config/config.go's
+      # placeholderHMACSecret) rather than an unrelated demo string. >=32
+      # bytes is required by the OAuth provider (fosite) for HKDF-derived
+      # token signing regardless of env — shorter values refuse to wire.
+      # Reusing the literal placeholder means that if this default is ever
+      # left in place under env: production (or E2A_ENV=production),
+      # Validate() rejects it by name instead of silently accepting an
+      # unrelated committed-in-public string that happens to be long enough
+      # to pass the length check. Override via .env for any non-demo run.
+      E2A_HMAC_SECRET: "${E2A_HMAC_SECRET:-change-me-in-production-this-is-not-a-real-secret}"
       # Demo shared domain so the README's slug-based `agents register`
       # example works without DNS setup. agents.localhost never resolves
       # externally, so no real mail will arrive — fine for an API smoke
       # test. Production deployments override this to a real mail
       # domain (or unset it to disable slug registration entirely).
-      E2A_SHARED_DOMAIN: "agents.localhost"
+      E2A_SHARED_DOMAIN: "${E2A_SHARED_DOMAIN:-agents.localhost}"
       # Point outbound mail at the Mailpit catch-all so HITL approval
       # notifications and test sends land in http://localhost:8025
       # instead of failing with "outbound SMTP relay not configured".
-      # Production overrides every one of these to a real upstream.
-      E2A_OUTBOUND_SMTP_HOST: "mailpit"
-      E2A_OUTBOUND_SMTP_PORT: "1025"
-      E2A_OUTBOUND_SMTP_FROM_DOMAIN: "e2a.localhost"
+      # Set these three in .env to point at a real upstream instead.
+      E2A_OUTBOUND_SMTP_HOST: "${E2A_OUTBOUND_SMTP_HOST:-mailpit}"
+      E2A_OUTBOUND_SMTP_PORT: "${E2A_OUTBOUND_SMTP_PORT:-1025}"
+      E2A_OUTBOUND_SMTP_FROM_DOMAIN: "${E2A_OUTBOUND_SMTP_FROM_DOMAIN:-e2a.localhost}"
       # Enable per-message usage tracking so the dashboard stats strip
       # (GET /api/dashboard/stats) shows real numbers in the dev
       # experience. The default is the NoopUsageTracker,
       # which leaves usage_summaries empty and renders the cards as 0/—.
       # Production sets this on the e2a-ops compose; mirroring it here
       # keeps "first docker compose up" feel parity with prod.
-      E2A_USAGE_TRACKING: "true"
+      E2A_USAGE_TRACKING: "${E2A_USAGE_TRACKING:-true}"
     # Healthcheck is defined in the Dockerfile (HEALTHCHECK instruction)
     # so it travels with the image. Anyone using the image — including
     # this compose file — gets it for free.
 
   web:
     build:
-      context: web
-      dockerfile: Dockerfile
+      # Repo root: web/Dockerfile needs the sibling @e2a/ui workspace
+      # (file:../design-system) and the canonical docs it mirrors into
+      # web/public — both live outside web/. web/Dockerfile.dockerignore
+      # trims the resulting context back down (BuildKit prefers
+      # <dockerfile>.dockerignore over the repo-root one when the
+      # Dockerfile path is non-default). Mirrors
+      # .github/workflows/build-image.yml, which builds this same image
+      # the same way. See web/Dockerfile's header comment.
+      context: .
+      dockerfile: web/Dockerfile
       # Mirror the e2a service's E2A_SHARED_DOMAIN below so the
       # /get-started onboarding flow shows `your-slug@agents.localhost`
       # in the same context as the running backend. Next.js inlines

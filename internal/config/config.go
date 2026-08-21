@@ -26,9 +26,14 @@ func splitAndTrim(s string) []string {
 }
 
 // placeholderHMACSecret is the example value shipped in config.example.yaml.
-// It must be overridden in any production deployment — the server refuses
-// to start with this value when env: production.
-const placeholderHMACSecret = "change-me-in-production"
+// It is deliberately >=32 bytes so the documented `cp config.example.yaml
+// config.yaml && make run` path boots in development without edits — see
+// deriveOAuthSigningKey in internal/oauth/provider.go, which requires
+// >=32 regardless of env. It must still be overridden in any production
+// deployment: the server refuses to start with this exact value when
+// env: production. Keep this in sync with config.example.yaml's
+// signing.hmac_secret.
+const placeholderHMACSecret = "change-me-in-production-this-is-not-a-real-secret"
 
 // minHMACSecretBytes is the minimum HMAC secret length enforced in
 // production. RFC 2104 §3 recommends keys be at least the output length
@@ -446,6 +451,22 @@ func Load(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
+	}
+
+	// E2A_ENV overrides `env:` in config.yaml. Every other config knob
+	// already has an env-var override; env: previously had none — the only
+	// way to flip it was editing YAML, but the published Docker image bakes
+	// config.example.yaml (env: "development") to a fixed path, so every
+	// documented deployment ran in development mode permanently regardless
+	// of how the operator configured the container. That matters because
+	// IsProduction() (below) gates both the production HMAC-secret/length
+	// guards in Validate() and the dev-mode DNS-verification short-circuit
+	// in internal/agent/api.go's checkDomainRecords.
+	if v := os.Getenv("E2A_ENV"); v != "" {
+		cfg.Env = v
+	}
+	if cfg.Env != "development" && cfg.Env != "production" {
+		return nil, fmt.Errorf("config: env (or E2A_ENV) must be %q or %q, got %q", "development", "production", cfg.Env)
 	}
 
 	// Env overrides — secrets only (never duplicated in yaml)

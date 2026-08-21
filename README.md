@@ -259,7 +259,7 @@ A built-in, dependency-free **heuristics** detector flags prompt-injection, jail
 Turn it on with `PUT /v1/agents/{email}/protection` (the same sub-resource as HITL holds), which carries the inbound/outbound × gate/scan posture.
 
 > [!NOTE]
-> Content screening is currently available on **self-hosted** deployments only — it is **not yet enabled on the hosted service** at [e2a.dev](https://e2a.dev). Self-host the image (see [Deployment](#deployment)) to use it today.
+> Content screening is currently available on **self-hosted** deployments only — it is **not yet enabled on the hosted service** at [e2a.dev](https://e2a.dev). Self-host the image (see [Deployment](#deployment)) and set `E2A_CONTENT_SCAN_ENABLED=true` (off by default even self-hosted — see [docs/deployment.md](docs/deployment.md)) to use it today.
 
 ### Human in the loop (HITL)
 
