@@ -119,13 +119,18 @@ Usage:
         --attach <file>            Attach a file (repeatable; max 10 files, 10 MB each, 25 MB total)
         --conversation-id <id>     Application conversation/grouping id (alias: --conversation)
         --reply-to <email>         Reply-To header (where replies go; default: the agent). Repeatable to direct replies to several addresses (max 5)
+        --cc <email>               Cc recipient (repeatable)
+        --bcc <email>              Bcc recipient (repeatable)
         --send-at <rfc3339>        Beta (may change before stable): schedule for a future RFC 3339 time with an explicit UTC offset;
                                    status=scheduled, sent "not before" then. Direct self-send is unsupported;
                                    trash prevents submission; restore before send time re-arms, at/after leaves it canceled
         --idempotency-key <k>      Stable key so a retried invocation can't double-send
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
+                                   --to, --cc, and --bcc combined are capped at 50 recipients
   e2a reply <message-id> [options]  Reply in-thread (same body options as send)
+        --cc <email>               Additional Cc recipient (repeatable)
+        --bcc <email>              Additional Bcc recipient (repeatable)
         --quote-history            Beta (may change before stable): the server appends the
                                    original message beneath the reply body, mail-client style
                                    ("On <date>, <sender> wrote:" + '>'-quoted text / blockquote HTML)
@@ -664,7 +669,7 @@ async function main() {
     case "send":
       checkFlags(args, [
         "--to", "--subject", "--body", "--body-file", "--html-file", "--attach",
-        "--conversation-id", "--conversation", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
+        "--conversation-id", "--conversation", "--reply-to", "--cc", "--bcc", "--send-at", "--agent", "--idempotency-key", "--json",
       ]);
       getPositionals(args, 0, "usage: e2a send [options]");
       await send({
@@ -679,6 +684,8 @@ async function main() {
         // rejection) is shared via getConversationId — see FIX 3.
         conversationId: getConversationId(args),
         replyTo: getFlagsChecked(args, "--reply-to"),
+        cc: getFlagsChecked(args, "--cc"),
+        bcc: getFlagsChecked(args, "--bcc"),
         sendAt: getFlagChecked(args, "--send-at"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
@@ -687,7 +694,7 @@ async function main() {
       break;
     case "reply":
       checkFlags(args, [
-        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--send-at", "--quote-history", "--agent", "--idempotency-key", "--json",
+        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--cc", "--bcc", "--send-at", "--quote-history", "--agent", "--idempotency-key", "--json",
       ]);
       await reply(getPositionals(args, 1, "usage: e2a reply <message-id> [options]")[0], {
         attach: getFlagsChecked(args, "--attach"),
@@ -695,6 +702,8 @@ async function main() {
         bodyFile: getFlagChecked(args, "--body-file"),
         htmlFile: getFlagChecked(args, "--html-file"),
         replyTo: getFlagsChecked(args, "--reply-to"),
+        cc: getFlagsChecked(args, "--cc"),
+        bcc: getFlagsChecked(args, "--bcc"),
         sendAt: getFlagChecked(args, "--send-at"),
         quoteHistory: hasFlag(args, "--quote-history"),
         agent: getFlagChecked(args, "--agent"),
