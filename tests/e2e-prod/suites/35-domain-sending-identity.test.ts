@@ -8,7 +8,7 @@ import { isProductionTarget } from "../harness/env.ts";
 import { cleanupDomainFixture } from "../harness/domain-fixture-cleanup.ts";
 import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "../harness/cloudflare-dns.ts";
 import { track } from "../harness/cleanup.ts";
-import { uniqueSlug } from "../harness/fixtures.ts";
+import { fixtureDomainSuffix, uniqueSlug } from "../harness/fixtures.ts";
 import { writeReport, info, warn, fail } from "../harness/report.ts";
 
 // The full custom-domain lifecycle PLUS the real SES sending identity (DKIM +
@@ -121,25 +121,12 @@ const skip =
 const cfDns = new CloudflareDnsClient(CF_ZONE ?? "", CF_TOKEN ?? "");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Environment-aware fixture-domain suffix — THE central, obvious place this
-// suite decides which Cloudflare zone-subtree a fixture domain lives under.
-// Do NOT let this drift back to a bare `${uniqueSlug(...)}.${CF_ZONE_NAME}`
-// (what this suite used before it ran on staging, and what the sibling
-// suites/22-domain-lifecycle.test.ts — which never provisions a real SES
-// sending identity, so it has nothing for the fence to deny — still uses
-// today). The reason is the staging AWS IAM policy from e2a-ops PR #318,
-// which Deny-fences every mutating SES action (CreateEmailIdentity,
-// PutEmailIdentityDkimSigningAttributes, SetIdentityMailFromDomain,
-// DeleteEmailIdentity, ...) to `identity/*.staging.trymnexa.com`. A fixture
-// domain registered without that exact suffix on a staging run gets
-// AccessDenied the instant SES provisioning runs — which reads exactly like
-// a code bug, not a naming mismatch. Driven by the SAME apiUrl-derived
-// signal (isProductionTarget) that already gates the destructive-prod
-// opt-in and the event-coverage-gate's target detection — not a new,
-// independently-settable flag.
-function fixtureDomainSuffix(apiUrl: string, zoneName: string): string {
-  return isProductionTarget(apiUrl) ? zoneName : `staging.${zoneName}`;
-}
+// fixtureDomainSuffix now lives in harness/fixtures.ts (shared with
+// suites/22-domain-lifecycle.test.ts — with sender_identity enabled on
+// staging, EVERY registered domain touches SES at verify and delete, so
+// every domain suite must mint fixtures inside the staging IAM fence's
+// `identity/*.staging.trymnexa.com` namespace, not just this one). See the
+// harness doc comment for the full derivation rationale.
 
 interface DNSRecordView {
   type: string;
