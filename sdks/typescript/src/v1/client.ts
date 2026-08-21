@@ -655,7 +655,7 @@ class ContactsResource {
   }
   /** Reverse an import, removing untouched contacts and agent enrolments it created. */
   deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
-    return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
+    return call(() => this.api.deleteImportBatch(assertNotDotSegment(batchId, "batchId"), "DELETE"));
   }
 
   // ── Per-agent outreach ────────────────────────────────────────────────────
@@ -721,7 +721,9 @@ class ContactsResource {
     body: UpsertEngagementRequest,
     opts: { ifMatch?: string } = {},
   ): Promise<ContactEngagementView> {
-    return call(() => this.api.upsertEngagement(email, address, body, opts.ifMatch));
+    return call(() =>
+      this.api.upsertEngagement(assertNotDotSegment(email, "email"), address, body, opts.ifMatch),
+    );
   }
 
   /** Un-enrol a contact from an agent's outreach. The contact itself survives,

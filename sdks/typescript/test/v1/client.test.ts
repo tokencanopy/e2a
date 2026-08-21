@@ -1248,17 +1248,17 @@ describe("E2AClient", () => {
   });
 
   // ── dot-segment path-parameter guard (e2a#792) ───────────────────
-  // ".." collapses the built URL onto the preceding segment, retargeting each
-  // of these DELETEs at the agent or the account instead of the sub-resource.
+  // ".." collapses the built URL onto the preceding segment, and "." onto the
+  // segment's own parent collection, retargeting each of these mutations at a
+  // different, larger resource than the caller named.
   //
-  // The full openapi.yaml-driven enumeration (every path param whose ".."
-  // collapse lands on a DIFFERENT route sharing the same HTTP method, plus an
-  // explicit allowlist for the read-only ones) lives once, in
-  // sdks/python/tests/test_dot_segment_enumeration.py: both SDKs share the
-  // one spec and the one set of ergonomic call sites (same shape guarded at
-  // the same five-plus-three routes), so a second full parser here would
+  // The full openapi.yaml-driven enumeration (every path param whose ".." or
+  // "." collapse lands on a DIFFERENT route sharing the same HTTP method)
+  // lives once, in sdks/python/tests/test_dot_segment_enumeration.py: both
+  // SDKs share the one spec and the one set of ergonomic call sites (same
+  // shape guarded at the same routes), so a second full parser here would
   // duplicate that denominator computation rather than add coverage; this
-  // file pins the same eight guarded call sites directly against the TS
+  // file pins the same ten guarded call sites directly against the TS
   // client instead.
 
   describe("dot-segment path guard", () => {
@@ -1355,6 +1355,33 @@ describe("E2AClient", () => {
       globalThis.fetch = mockFetch(200, {});
       await expect(
         client.messages.updateLabels("sender@example.com", "..", { addLabels: ["x"] }),
+      ).rejects.toMatchObject({ code: "unsafe_path_segment" });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    // review follow-up (2026-08-20): the enumeration gate only swept ".."
+    // collapses, so this "." collapse was missed: deleteImport(".") drops to
+    // /v1/contacts/imports, which the router backtracks onto
+    // DELETE /v1/contacts/{address} (deleteContact) with address "imports",
+    // and the confirm=DELETE this method already sends satisfies
+    // deleteContact's own guard.
+    it("rejects contacts.deleteImport('.') before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(client.contacts.deleteImport(".")).rejects.toMatchObject({
+        code: "unsafe_path_segment",
+      });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    // review follow-up (2026-08-20): a surviving path param is caller-
+    // controlled and can equal a route literal, so setOutreach(".",
+    // "protection", body) collapses PUT /v1/agents/{email}/contacts/{address}
+    // onto PUT /v1/agents/{email}/protection (putAgentProtection), a
+    // same-method retarget.
+    it("rejects contacts.setOutreach('.', address, body) before any request is sent", async () => {
+      globalThis.fetch = mockFetch(200, {});
+      await expect(
+        client.contacts.setOutreach(".", "protection", {}),
       ).rejects.toMatchObject({ code: "unsafe_path_segment" });
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });

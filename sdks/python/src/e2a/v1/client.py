@@ -215,11 +215,12 @@ def _assert_not_dot_segment(value: str, param: str) -> str:
     # segment, and exactly "." collapses onto the segment's own parent
     # collection (it drops itself, not the segment before it); neither is
     # escaped by urllib.parse.quote(), so both reach httpx's URL builder
-    # literally. On Python this is not merely latent: httpx drops the
-    # collapsed trailing slash (unlike the TS client's URL builder, which
-    # only strips a trailing slash when the input string itself ends in
-    # "/"), so several of these collapses land on a real, live route rather
-    # than 404ing. Reject before the wire either way.
+    # literally. httpx then normalizes the dot segments away and drops any
+    # collapsed trailing slash, so several of these collapses land on a
+    # real, live route rather than 404ing. (The TS client's URL builder
+    # behaves the same way for every mid-path collapse and for any collapsed
+    # trailing slash not followed by a query string, so this was live on
+    # both SDKs.) Reject before the wire either way.
     if value in (".", ".."):
         raise E2AValidationError(
             code="unsafe_path_segment",
@@ -920,6 +921,7 @@ class ContactsResource:
 
     async def delete_import(self, batch_id: str) -> DeleteImportBatchResult:
         """Reverse an import, removing untouched contacts and agent enrolments it created."""
+        batch_id = _assert_not_dot_segment(batch_id, "batch_id")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
         )
@@ -989,6 +991,7 @@ class ContactsResource:
         """Enrol a contact in an agent's outreach, or update the agent-owned
         fields. Omitted fields are left unchanged, so advancing the stage after a
         send does not disturb the schedule."""
+        email = _assert_not_dot_segment(email, "email")
         req = _coerce(UpsertEngagementRequest, body)
         return await self._c._write_idempotent(
             lambda h: self._api.upsert_engagement(

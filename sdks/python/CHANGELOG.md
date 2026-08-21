@@ -5,18 +5,21 @@
 ### Changed
 - **Dot-segment path parameters (``.`` / ``..``) are now rejected
   client-side** on ``agents.delete_suppression``, ``contacts.delete_outreach``
-  (both ``email`` and ``address``), ``messages.delete``, ``messages.restore``,
-  ``messages.update_labels``, ``account.suppressions.delete``, and
-  ``account.api_keys.delete``, raising ``E2AValidationError`` (code
-  ``unsafe_path_segment``) before any request is built. This was LIVE on
-  Python, not merely latent: ``httpx`` drops the collapsed path's trailing
-  slash (unlike the TS client, which keeps it unless the input string itself
-  ends in ``/``), so several of these values reached a real, matching route
-  rather than 404ing, e.g. ``account.suppressions.delete("..")`` reached
-  ``DELETE /v1/account`` directly. This is a behavior change for any caller
-  that was, deliberately or not, passing one of these values: it now raises
-  instead of sending the (misdirected) request. Available on both
-  ``AsyncE2AClient`` and the synchronous ``E2AClient``.
+  (both ``email`` and ``address``), ``contacts.delete_import``,
+  ``contacts.set_outreach`` (``email``), ``messages.delete``,
+  ``messages.restore``, ``messages.update_labels``,
+  ``account.suppressions.delete``, and ``account.api_keys.delete``, raising
+  ``E2AValidationError`` (code ``unsafe_path_segment``) before any request is
+  built. This was LIVE, not merely latent: ``httpx`` normalizes the dot
+  segments away and drops the collapsed path's trailing slash (the TS
+  client's URL builder does the same for every mid-path collapse, and for a
+  collapsed trailing slash whenever no query string follows), so several of
+  these values reached a real, matching route rather than 404ing, e.g.
+  ``account.suppressions.delete("..")`` reached ``DELETE /v1/account``
+  directly. This is a behavior change for any caller that was, deliberately
+  or not, passing one of these values: it now raises instead of sending the
+  (misdirected) request. Available on both ``AsyncE2AClient`` and the
+  synchronous ``E2AClient``.
 
 ## 5.7.0
 
