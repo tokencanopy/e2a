@@ -166,6 +166,12 @@ export class WSListener extends EventEmitter<WSListenerEvents> {
     super();
     const base = (opts.baseUrl ?? resolveBaseUrl() ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     const wsBase = base.replace(/^http/, "ws");
+    // No dot-segment guard here (unlike client.ts's assertNotDotSegment): this
+    // path has no sibling route for `..` or `.` to collapse onto (there is no
+    // `/v1/ws`), so a collapsed value fails closed with a 404/connection
+    // error instead of retargeting a live resource. Flagged in review
+    // (e2a#792 PR #909) and left as a one-line comment, not a fix, for that
+    // reason: noted out of scope here rather than left unexplained.
     this.url = `${wsBase}/v1/agents/${encodeURIComponent(opts.agentEmail)}/ws`;
     this.shouldReconnect = opts.reconnect ?? true;
     this.initialDelayMs = opts.reconnectDelay ?? 1000;

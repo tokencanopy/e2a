@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Dot-segment path parameters (`.` / `..`) are now rejected client-side**
+  on `agents.deleteSuppression`, `contacts.deleteOutreach` (both `email` and
+  `address`), `contacts.deleteImport`, `contacts.setOutreach` (`email`),
+  `messages.delete`, `messages.restore`, `messages.updateLabels`,
+  `account.suppressions.delete`, and `account.apiKeys.delete`, throwing
+  `E2AValidationError` (code `unsafe_path_segment`) before any request is
+  built. Previously a value of exactly `.` or `..` reached the URL builder
+  unescaped and could retarget the request at a different, larger resource
+  (e.g. `contacts.deleteOutreach("..", address)` could permanently delete the
+  contact record via `deleteContact` instead of un-enrolling one outreach
+  relationship, and `contacts.deleteOutreach(email, "..")` could delete the
+  agent itself via `deleteAgent`; `messages.restore(email, "..")` could undo
+  an agent deletion via `restoreAgent` instead of restoring a message). This
+  is a behavior change for any caller that was, deliberately or not, passing
+  one of these values: it now throws instead of sending the (misdirected)
+  request.
+
 ## 5.7.0
 
 Additive only. Every 5.6.0 call site keeps compiling and behaving identically.
