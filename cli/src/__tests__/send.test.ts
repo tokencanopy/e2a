@@ -81,6 +81,51 @@ describe("send/reply commands", () => {
     expect(mockSend.mock.calls[0][1].replyTo).toBeUndefined();
   });
 
+  it("passes repeated --cc and --bcc through as arrays", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_cc", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    await send({
+      to: ["you@example.com"],
+      subject: "hi",
+      body: "hello",
+      cc: ["cc1@example.com", "cc2@example.com"],
+      bcc: ["audit@example.com"],
+    });
+    const call = mockSend.mock.calls[0][1];
+    expect(call.cc).toEqual(["cc1@example.com", "cc2@example.com"]);
+    expect(call.bcc).toEqual(["audit@example.com"]);
+  });
+
+  it("omits cc and bcc when their lists are empty", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_nocc", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    await send({ to: ["you@example.com"], subject: "hi", body: "hello", cc: [], bcc: [] });
+    const call = mockSend.mock.calls[0][1];
+    expect(call.cc).toBeUndefined();
+    expect(call.bcc).toBeUndefined();
+  });
+
+  it("accepts exactly 50 recipients combined across --to, --cc, and --bcc", async () => {
+    mockSend.mockResolvedValue({ messageId: "msg_50", status: "sent" });
+    const { send } = await import("../commands/send.js");
+    const cc = Array.from({ length: 24 }, (_, i) => `cc${i}@example.com`);
+    const bcc = Array.from({ length: 25 }, (_, i) => `bcc${i}@example.com`);
+    await send({ to: ["you@example.com"], subject: "hi", body: "hello", cc, bcc });
+    expect(mockSend).toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  it("exits USAGE (2) when --to, --cc, and --bcc combined exceed 50 recipients", async () => {
+    const { send } = await import("../commands/send.js");
+    const cc = Array.from({ length: 25 }, (_, i) => `cc${i}@example.com`);
+    const bcc = Array.from({ length: 25 }, (_, i) => `bcc${i}@example.com`);
+    await expect(
+      send({ to: ["you@example.com"], subject: "hi", body: "hello", cc, bcc }),
+    ).rejects.toThrow("process.exit");
+    expect(mockExit).toHaveBeenCalledWith(2);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it("threads --idempotency-key through to the SDK request options", async () => {
     mockSend.mockResolvedValue({ messageId: "msg_i", status: "sent" });
     const { send } = await import("../commands/send.js");
@@ -235,6 +280,21 @@ describe("send/reply commands", () => {
       undefined,
     );
     expect(process.exitCode).toBe(3);
+  });
+
+  it("passes --cc and --bcc through on reply, with no combined-recipient cap", async () => {
+    mockReply.mockResolvedValue({ messageId: "msg_rcc", status: "sent" });
+    const { reply } = await import("../commands/send.js");
+
+    await reply("msg_orig", {
+      body: "answer",
+      cc: ["cc1@example.com"],
+      bcc: Array.from({ length: 60 }, (_, i) => `bcc${i}@example.com`),
+    });
+    const call = mockReply.mock.calls[0][2];
+    expect(call.cc).toEqual(["cc1@example.com"]);
+    expect(call.bcc).toHaveLength(60);
+    expect(mockExit).not.toHaveBeenCalled();
   });
 
   it("exits OK when an async reply is durably accepted", async () => {

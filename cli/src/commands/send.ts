@@ -14,6 +14,8 @@ export interface SendOptions {
   htmlFile?: string;
   conversationId?: string;
   replyTo?: string[];
+  cc?: string[];
+  bcc?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
@@ -26,6 +28,8 @@ export interface ReplyOptions {
   bodyFile?: string;
   htmlFile?: string;
   replyTo?: string[];
+  cc?: string[];
+  bcc?: string[];
   agent?: string;
   json?: boolean;
   idempotencyKey?: string;
@@ -42,6 +46,27 @@ export interface ReplyOptions {
 function replyToArg(replyTo?: string[]): string | string[] | undefined {
   if (!replyTo || replyTo.length === 0) return undefined;
   return replyTo.length === 1 ? replyTo[0] : replyTo;
+}
+
+// --cc/--bcc map straight onto the request's array fields (unlike --reply-to,
+// there is no pre-list scalar wire shape to stay compatible with), so an
+// empty list just needs to become undefined rather than an empty array.
+function recipientListArg(values?: string[]): string[] | undefined {
+  return values && values.length > 0 ? values : undefined;
+}
+
+const MAX_COMBINED_RECIPIENTS = 50;
+
+// Server-enforced too, but `send`'s --to/--cc/--bcc are the whole recipient
+// set, so the CLI can pre-check and fail with USAGE instead of a request
+// error. `reply` has no equivalent: its primary recipients come from the thread.
+function checkRecipientCap(total: number): void {
+  if (total > MAX_COMBINED_RECIPIENTS) {
+    fail(
+      EXIT.USAGE,
+      `--to, --cc, and --bcc combined must not exceed ${MAX_COMBINED_RECIPIENTS} recipients (got ${total})`,
+    );
+  }
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -76,9 +101,9 @@ function readAttachments(paths: string[] | undefined): Attachment[] | undefined 
 }
 
 const SEND_USAGE =
-  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
+  "usage: e2a send --to <email> --subject <s> (--body <text> | --body-file <f> | --html-file <f>) [--conversation-id <id>] [--reply-to <email>] [--cc <email>] [--bcc <email>] [--send-at <rfc3339>] [--agent <inbox>] [--json]";
 const REPLY_USAGE =
-  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--send-at <rfc3339>] [--quote-history] [--agent <inbox>] [--json]";
+  "usage: e2a reply <message-id> (--body <text> | --body-file <f> | --html-file <f>) [--reply-to <email>] [--cc <email>] [--bcc <email>] [--send-at <rfc3339>] [--quote-history] [--agent <inbox>] [--json]";
 
 /**
  * Parse the optional --send-at flag into a Date for scheduled send. Requires an
@@ -175,6 +200,9 @@ function emitSendResult(result: SendResultView, json?: boolean): void {
 
 export async function send(opts: SendOptions): Promise<void> {
   if (opts.to.length === 0 || !opts.subject) fail(EXIT.USAGE, SEND_USAGE);
+  const cc = recipientListArg(opts.cc);
+  const bcc = recipientListArg(opts.bcc);
+  checkRecipientCap(opts.to.length + (cc?.length ?? 0) + (bcc?.length ?? 0));
   const { body, htmlBody } = resolveBodies(opts, SEND_USAGE);
 
   const client = createClient();
@@ -194,6 +222,8 @@ export async function send(opts: SendOptions): Promise<void> {
       html: htmlBody,
       conversationId: opts.conversationId,
       replyTo: replyToArg(opts.replyTo),
+      cc,
+      bcc,
       attachments: readAttachments(opts.attach),
       sendAt,
     },
@@ -216,6 +246,8 @@ export async function reply(messageId: string | undefined, opts: ReplyOptions): 
       text: body,
       html: htmlBody,
       replyTo: replyToArg(opts.replyTo),
+      cc: recipientListArg(opts.cc),
+      bcc: recipientListArg(opts.bcc),
       attachments: readAttachments(opts.attach),
       sendAt,
       // Beta server-side quoted history. Absent-or-false stays off the
