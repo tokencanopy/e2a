@@ -1,7 +1,14 @@
 # Copy to config.yaml and edit for your deployment.
 # Secrets should be set via env vars (E2A_*) — see README "Configuration".
 
-env: "development"  # Set to "production" to enforce TLS, HTTPS webhooks, and HMAC secret strength checks
+# Set to "production" to enforce TLS, HTTPS webhooks, HMAC secret strength
+# checks, and real DNS domain verification (development short-circuits
+# domain verification to "found" with no lookup, logging a WARNING per
+# check). The E2A_ENV environment variable overrides this value — the only
+# way to reach production mode on the published Docker image, which bakes
+# this file to a fixed path. Any value other than "development" or
+# "production" fails startup.
+env: "development"
 
 # Optional. When set, users can register agents by slug (no DNS setup required)
 # and the server provisions <slug>@<shared_domain>. Leave empty on a self-host

@@ -17,6 +17,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in values, or set the envir
 |----------|----------|-------------|
 | `E2A_DATABASE_URL` | yes | Postgres connection string |
 | `E2A_HMAC_SECRET` | yes | Master HMAC secret for approval/magic-link tokens and internal key derivation |
+| `E2A_ENV` | for production | `development` (default) or `production`; overrides `env:` in `config.yaml`, and any other value fails startup. This is the **only** way to reach production mode on the published Docker image, which bakes `config.example.yaml` (`env: "development"`) to a fixed path — pass `-e E2A_ENV=production` (or set it in your compose `environment:`) or the deployment runs in development mode permanently. Development mode short-circuits DNS domain verification (every domain reports verified with no lookup, so it doubles as a domain-ownership bypass on multi-user deployments; a loud `WARNING:` is logged per check) and skips the production config guards below. |
 | `E2A_PUBLIC_URL` | for HITL emails | Externally visible base URL (e.g. `https://e2a.example.com`); required to render absolute magic-link URLs |
 | `E2A_SHARED_DOMAIN` | optional | Mail domain backing slug-based agent registration (e.g. `agents.example.com`). When set, users can register agents with just a slug; when empty, every agent must use a custom domain that the user verifies. The shared domain itself becomes reserved (cannot be claimed as a custom domain). |
 | `E2A_GOOGLE_CLIENT_ID` | for OAuth login | Google OAuth client ID for dashboard sign-in |
@@ -41,7 +42,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in values, or set the envir
 | `GEMINI_EVAL_MODEL` | no (default `gemini-3.1-flash-lite`) | Overrides the Gemini model used by the LLM-as-detector layer. Only takes effect when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is also set. |
 | `E2A_GEMINI_DETECTOR_ENABLED` | no (default `true`) | Set to `false` to disable the Gemini detector even when an API key is configured — an operator kill-switch independent of the credential, useful for isolating whether Gemini or heuristics drove a given block/review outcome, or for rolling back without touching secrets. |
 
-`env: production` in [config.example.yaml](../config.example.yaml) enforces TLS for SMTP and HTTPS for webhook URLs. Leave it as `development` for local work.
+`env: production` in [config.example.yaml](../config.example.yaml) — or the `E2A_ENV=production` override above, which is the only way to set it on the published Docker image — enforces TLS for SMTP, HTTPS for webhook URLs, HMAC-secret strength, and real DNS domain verification. Leave it as `development` for local work.
 
 Non-secret request-rate tuning lives in `config.yaml`. The
 `rate_limits.poll_per_minute` setting controls the per-user budget shared by
