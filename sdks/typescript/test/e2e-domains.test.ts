@@ -65,7 +65,13 @@ describe.skipIf(!env)("ts sdk live e2e: domains", () => {
         const deleted = await client.domains.delete(domain);
         expect(deleted.deleted).toBe(true);
         expect(deleted.domain).toBe(domain);
-        expect(deleted.sendingTeardown).toBe("confirmed");
+        // With a sending-identity provider configured, the receipt starts
+        // "pending" and is only "confirmed" when the in-request best-effort
+        // deprovision proves provider absence. Staging's provider IAM policy
+        // denies identity calls outside its own namespace, so this throwaway
+        // .example.com domain can never reach "confirmed" there — both states
+        // are contract-valid receipts for a domain that never verified.
+        expect(["pending", "confirmed"]).toContain(deleted.sendingTeardown);
         cleaned = true;
         recordCovered("domains.delete");
 
