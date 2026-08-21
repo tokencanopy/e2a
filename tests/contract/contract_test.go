@@ -919,17 +919,55 @@ func extractEmailFromWSPath(path string) string {
 
 // ── Entry point ────────────────────────────────────────────────────
 
+// decodeScenarios parses scenario YAML with strict field checking, so an
+// unknown key (a typo) is a decode error instead of a silently dropped field.
+func decodeScenarios(data []byte) (scenarioFile, error) {
+	var sf scenarioFile
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&sf); err != nil {
+		return scenarioFile{}, err
+	}
+	return sf, nil
+}
+
 func loadScenarios(t *testing.T) []scenario {
 	t.Helper()
 	data, err := os.ReadFile("scenarios.yaml")
 	if err != nil {
 		t.Fatalf("load scenarios.yaml: %v", err)
 	}
-	var sf scenarioFile
-	if err := yaml.Unmarshal(data, &sf); err != nil {
+	sf, err := decodeScenarios(data)
+	if err != nil {
 		t.Fatalf("parse scenarios.yaml: %v", err)
 	}
 	return sf.Scenarios
+}
+
+// TestDecodeScenariosRejectsUnknownFields pins decodeScenarios: a misspelled
+// key must fail the decode instead of silently vanishing.
+func TestDecodeScenariosRejectsUnknownFields(t *testing.T) {
+	const badYAML = `
+scenarios:
+  - name: typo
+    description: a typo'd assertion key must not be silently ignored
+    steps:
+      - id: s1
+        action: request
+        method: GET
+        path: /v1/health
+        expect:
+          status: 200
+          body_matchs:
+            ok: true
+`
+	_, err := decodeScenarios([]byte(badYAML))
+	if err == nil {
+		t.Fatal("decodeScenarios silently accepted an unknown field (body_matchs); want a strict-decode error")
+	}
+	if !strings.Contains(err.Error(), "body_matchs") {
+		t.Fatalf("decode error = %q, want it to name the unknown field", err)
+	}
 }
 
 // requireCappedKey fails a scenario that asks for the capped account when the
