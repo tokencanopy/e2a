@@ -61,7 +61,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^26.2.0",
     "@types/supertest": "^7.2.0",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "supertest": "^7.0.0",
     "typescript": "^7.0",
     "vitest": "^4.1.10"
