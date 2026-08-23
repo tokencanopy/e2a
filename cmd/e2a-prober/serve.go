@@ -57,9 +57,17 @@ func (p *prober) probe() *selftest.Probe {
 }
 
 func (p *prober) runOnce(ctx context.Context) run {
-	results := selftest.Run(ctx, p.probe(), selftest.All, true /* smokeOnly */)
+	probe := p.probe()
+	results := selftest.Run(ctx, probe, selftest.All, true /* smokeOnly */)
 	r := run{At: time.Now(), OK: selftest.Worst(results) == selftest.StatusPass, Results: results}
 	p.recordRun(r)
+	// Hygiene, deliberately AFTER the run is recorded: the battery's verdict is
+	// already fixed, so a cleanup failure cannot colour it. Without this the
+	// probe agent accumulates every message the battery ever created (268k on
+	// staging), until unrelated deletes on that instance start timing out.
+	if sw := probe.SweepMessages(); sw.Trashed > 0 || sw.Purged > 0 {
+		log.Printf("prober: message sweep trashed=%d purged=%d", sw.Trashed, sw.Purged)
+	}
 	return r
 }
 
