@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 5.8.0
 
 ### Changed
 - **Dot-segment path parameters (``.`` / ``..``) are now rejected
