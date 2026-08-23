@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.5.0
+
+Additive only for every input that already succeeded in 2.4.0 — no flag,
+output-field, or exit-code meaning changes to any command that shipped in
+2.4.0.
+
+**Added:** `--cc <email>` and `--bcc <email>` on `e2a send` and `e2a reply`.
+Both are repeatable and map straight onto the request's `cc` / `bcc` array
+fields, so an omitted flag sends no field at all rather than an empty array.
+On `reply` they are *additional* recipients — the primary recipients still
+come from the thread.
+
+**Changed:** `e2a send` now pre-checks the combined `--to` + `--cc` + `--bcc`
+recipient count against the server's 50-recipient cap and fails with the
+`USAGE` exit code instead of issuing a request that the server rejects. This
+only affects invocations that were already failing. `e2a reply` has no
+equivalent pre-check, because its primary recipients come from the thread
+rather than the command line.
+
 ## 2.4.0
 
 Additive only — no flag, output-field, or exit-code meaning changes to any
