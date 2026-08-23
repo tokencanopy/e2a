@@ -11,6 +11,7 @@ import (
 
 	"blitiri.com.ar/go/spf"
 	"github.com/emersion/go-msgauth/dkim"
+	"golang.org/x/net/idna"
 )
 
 var defaultDMARCEvaluator = newDMARCEvaluator(netTXTResolver{resolver: net.DefaultResolver})
@@ -120,8 +121,15 @@ func aggregateLegacyDKIM(results []DKIMResult) CheckResult {
 	return CheckResult{Status: results[0].Status, Detail: results[0].Detail}
 }
 
+// normDomain lowercases and IDNA-normalizes a domain (same pattern as
+// internal/identity.normalizeDomain), so the "_dmarc."+domain DNS queries
+// below use the label the resolver actually serves records under.
 func normDomain(d string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
+	d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
+	if ascii, err := idna.Lookup.ToASCII(d); err == nil {
+		return ascii
+	}
+	return d
 }
 
 type AuthorIdentity struct {
