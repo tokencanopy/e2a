@@ -64,7 +64,7 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"
