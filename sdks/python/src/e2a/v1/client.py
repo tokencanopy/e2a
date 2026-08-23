@@ -29,7 +29,7 @@ from .generated.api.reviews_api import ReviewsApi
 from .generated.api.templates_api import TemplatesApi
 from .generated.api.contacts_api import ContactsApi
 from .generated.api.webhooks_api import WebhooksApi
-from .generated.api_client import ApiClient
+from .generated.api_client import ApiClient, RequestSerialized
 from .generated.configuration import Configuration
 from .generated.models import (
     AgentView,
@@ -233,6 +233,43 @@ def _assert_not_dot_segment(value: str, param: str) -> str:
 
 class _TypedApiClient(ApiClient):
     """Map malformed successful responses before the retry boundary sees them."""
+
+    def param_serialize(
+        self,
+        method: str,
+        resource_path: str,
+        path_params: Optional[Mapping[str, Any]] = None,
+        query_params: Optional[Any] = None,
+        header_params: Optional[Any] = None,
+        body: Optional[Any] = None,
+        post_params: Optional[Any] = None,
+        files: Optional[Any] = None,
+        auth_settings: Optional[Any] = None,
+        collection_formats: Optional[Any] = None,
+        _host: Optional[str] = None,
+        _request_auth: Optional[Any] = None,
+    ) -> RequestSerialized:
+        # Every generated *Api method builds its URL through this one call, so
+        # checking here covers every path parameter of every resource, not just
+        # the 10 sites the ergonomic wrapper classes above happen to name.
+        if path_params:
+            for name, value in path_params.items():
+                if isinstance(value, str):
+                    _assert_not_dot_segment(value, name)
+        return super().param_serialize(
+            method,
+            resource_path,
+            path_params,
+            query_params,
+            header_params,
+            body,
+            post_params,
+            files,
+            auth_settings,
+            collection_formats,
+            _host,
+            _request_auth,
+        )
 
     def response_deserialize(self, response_data: Any, response_types_map: Any = None) -> Any:
         try:
