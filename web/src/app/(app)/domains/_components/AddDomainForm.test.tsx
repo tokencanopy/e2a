@@ -19,9 +19,15 @@ describe("AddDomainForm", () => {
     expect(screen.getByRole("button", { name: "Register domain" })).toBeDisabled();
   });
 
-  it("includes Cloudflare MCP guidance in the field hint", () => {
+  // The Cloudflare-MCP recommendation lives once per page, in the
+  // agent-prompt card above the form. Repeating it in the field hint made
+  // the hint three sentences long for a single-input form.
+  it("keeps the field hint to what the domain itself must be", () => {
     render(<AddDomainForm onRegistered={jest.fn()} />);
-    expect(screen.getByText(/Cloudflare MCP/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Use a subdomain you control/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Cloudflare/)).not.toBeInTheDocument();
   });
 
   it("lowercases the domain as the user types", async () => {

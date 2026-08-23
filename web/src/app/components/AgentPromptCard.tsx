@@ -18,8 +18,7 @@ export const AGENT_PROMPTS = {
     prompt: "Help me set up an e2a inbox using https://api.e2a.dev/mcp",
     notice: {
       label: "Want every outbound email reviewed first?",
-      instruction:
-        "Configure this inbox so every outbound email requires human review.",
+      text: "Ask your agent: “Configure this inbox so every outbound email requires human review.”",
     },
   },
   domains: {
@@ -27,6 +26,18 @@ export const AGENT_PROMPTS = {
       "Domain setup is a one-time task your coding agent can drive end to end — paste this into Claude Code, Cursor, or any agent connected to e2a.",
     prompt:
       "Help me connect a custom domain to e2a using https://api.e2a.dev/mcp",
+    // The agent can create the domain in e2a over MCP, but the DNS records
+    // land at the registrar — out of reach unless the agent also has an MCP
+    // server for the provider. Surfacing that here, next to the prompt,
+    // means the human installs it before the agent stalls halfway through.
+    notice: {
+      label: "Domain managed by Cloudflare?",
+      text: "Add Cloudflare’s MCP server to the same agent and it can create the DNS records for you too.",
+      link: {
+        href: "https://github.com/cloudflare/mcp",
+        text: "https://github.com/cloudflare/mcp",
+      },
+    },
   },
   contacts: {
     blurb:
@@ -46,8 +57,7 @@ export const AGENT_PROMPTS = {
       "Help me set up an e2a webhook using https://api.e2a.dev/mcp — register the subscription, then wire up a handler that verifies the signature with the e2a SDK.",
     notice: {
       label: "Only want events from certain inboxes?",
-      instruction:
-        "Scope this webhook to only the inboxes it should receive — an unscoped subscription gets every inbox on the account.",
+      text: "Ask your agent: “Scope this webhook to only the inboxes it should receive — an unscoped subscription gets every inbox on the account.”",
     },
   },
 } as const;
@@ -57,7 +67,11 @@ export type AgentPromptCardProps = {
   prompt: string;
   notice?: {
     label: string;
-    instruction: string;
+    // Rendered verbatim after the label, so each card phrases its own nudge
+    // (an "Ask your agent: …" instruction, a prerequisite to install, …).
+    text: string;
+    // Optional trailing link for a notice that points somewhere.
+    link?: { href: string; text: string };
   };
 };
 
@@ -134,7 +148,9 @@ export function AgentPromptCard({
       {notice ? (
         <aside
           role="note"
-          aria-label="Optional outbound review setup"
+          // Each card carries a different nudge, so the accessible name comes
+          // from the notice itself rather than a single hardcoded label.
+          aria-label={notice.label}
           className="mt-3 rounded-[var(--r-md)] border px-3.5 py-3 text-[12px] leading-[1.6]"
           style={{
             color: "var(--fg-muted)",
@@ -145,7 +161,21 @@ export function AgentPromptCard({
           <span className="font-semibold" style={{ color: "var(--fg)" }}>
             {notice.label}
           </span>{" "}
-          Ask your agent: “{notice.instruction}”
+          {notice.text}
+          {notice.link ? (
+            <>
+              {" "}
+              <a
+                href={notice.link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+                style={{ color: "var(--fg)" }}
+              >
+                {notice.link.text}
+              </a>
+            </>
+          ) : null}
         </aside>
       ) : null}
     </section>
