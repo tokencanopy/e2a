@@ -42,6 +42,16 @@ function ensureAbsoluteUrl(url: string) {
     return window.location.origin + url;
 }
 
+// Rejects a literal "."/".." path segment before new URL() collapses it (#792, #915).
+function assertNoDotSegmentInPath(url: string): void {
+    const path = url.split(/[?#]/, 1)[0];
+    for (const segment of path.split("/")) {
+        if (segment === "." || segment === "..") {
+            throw new HttpException(`request path contains an unsafe "${segment}" segment`);
+        }
+    }
+}
+
 /**
  * Represents an HTTP request context
  */
@@ -58,6 +68,7 @@ export class RequestContext {
      * @param httpMethod http method
      */
     public constructor(url: string, private httpMethod: HttpMethod) {
+        assertNoDotSegmentInPath(url);
         this.url = new URL(ensureAbsoluteUrl(url));
     }
 
@@ -76,6 +87,7 @@ export class RequestContext {
      *
      */
     public setUrl(url: string) {
+        assertNoDotSegmentInPath(url);
         this.url = new URL(ensureAbsoluteUrl(url));
     }
 
