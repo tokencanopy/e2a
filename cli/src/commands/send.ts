@@ -111,7 +111,8 @@ const REPLY_USAGE =
  * value at or before now sends immediately; a value more than 90 days ahead is
  * rejected server-side. Direct loopback to the sending agent's own address
  * cannot be scheduled and returns 400 invalid_request unless a review hold
- * takes precedence (holds drop send_at). Returns undefined when absent.
+ * takes precedence — a schedule caught by a hold survives it and re-arms on
+ * approval. Returns undefined when absent.
  */
 export function parseSendAt(value: string | undefined, usage: string): Date | undefined {
   if (value === undefined) return undefined;

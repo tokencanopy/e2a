@@ -28,7 +28,7 @@ machine-readable source of truth is **`x-stability-level`** in
 `x-stability-level: beta` may change before it is promoted to stable, and
 **everything not marked beta (or experimental) is GA**, covered by the
 [compatibility rules](#compatibility-rules) below. At the operation level that
-is currently 43 GA operations and 29 beta operations:
+is currently 43 GA operations and 31 beta operations:
 
 | Resource group | Stability | Operations |
 | --- | --- | --- |
