@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 5.8.0
+
+### Added
+- **`E2A_API_URL` is the canonical base-URL environment variable**, matching the
+  name the server uses for its externally visible API base. The previous
+  `E2A_BASE_URL` is still honoured so published integrations keep working, but
+  now emits a one-shot deprecation warning. Resolution order is
+  `opts.baseUrl` -> `E2A_API_URL` -> `E2A_BASE_URL` (deprecated) ->
+  `https://api.e2a.dev`.
+
+### Fixed
+- **`WSListener` now resolves its base URL the same way `E2AClient` does.** It
+  previously honoured only an explicit `opts.baseUrl` and otherwise went
+  straight to `https://api.e2a.dev`, ignoring the environment entirely — so a
+  self-hosted deployment that set the env var still had its WebSocket listener
+  pointed at the hosted service. Exporting `E2A_API_URL` now points both at the
+  same deployment.
 
 ### Changed
 - **Dot-segment path parameters (`.` / `..`) are now rejected client-side**
