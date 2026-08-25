@@ -118,9 +118,11 @@ type SendJob struct {
 	ScheduledAt time.Time
 	// ReviewedAt is messages.reviewed_at — when a HITL hold was resolved into the
 	// send pipeline (human approve or TTL auto-approve), zero for a message that
-	// was never held. Consumed ONLY by submissionAnchor for the latency SLI; the
-	// retry horizon deliberately still measures from AcceptedAt, so the F2
-	// limitation in docs/design/hitl-ttl-async-send.md is unchanged by this field.
+	// was never held. Consumed via submissionAnchor — the latency SLI baseline and
+	// the rate-deferral backoff clock — so a reviewer's dwell time counts as
+	// neither error budget nor "already waiting to send". The retry horizon
+	// deliberately still measures from AcceptedAt, so the F2 limitation in
+	// docs/design/hitl-ttl-async-send.md is unchanged by this field.
 	ReviewedAt time.Time
 	// ProviderAccepted is set when authoritatively correlated provider-accept
 	// evidence (an SNS-verified, header- or provider-id-matched SES
@@ -136,8 +138,10 @@ type SendJob struct {
 }
 
 // fireTime is when the message became eligible to submit: max(accept, scheduled).
-// A scheduled send's clocks (retry horizon, deferral backoff) start when it
-// fires, not when it was accepted. Zero when both timestamps are unknown.
+// The retry horizon starts when a scheduled send fires, not when it was accepted.
+// Zero when both timestamps are unknown. NOTE: the rate-deferral backoff anchors
+// at submissionAnchor (which also folds in ReviewedAt), not here — see the call
+// site in Work.
 func (j *SendJob) fireTime() time.Time {
 	t := j.AcceptedAt
 	if j.ScheduledAt.After(t) {
@@ -489,7 +493,13 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
 			}
-			delay := rateSnooze(j.fireTime(), time.Until(decision.RetryAt), w.rate.Window())
+			// Anchor the backoff at submission eligibility (max of accept,
+			// scheduled, review) — NOT fireTime, which excludes ReviewedAt. A
+			// message held for HITL review only starts "waiting to send" once it
+			// clears review; measuring elapsed from accept would hand it the
+			// rateMaxSnooze cap on its very first deferral, for dwell time it never
+			// spent retrying. The retry horizon above still uses fireTime.
+			delay := rateSnooze(j.submissionAnchor(), time.Until(decision.RetryAt), w.rate.Window())
 			// Jitter scales with the snooze it decorates (not the fixed window) so
 			// a capped, minutes-long backlog still fans out proportionally instead
 			// of re-herding in a 15s band. Adds up to a quarter on top of delay.
@@ -650,9 +660,11 @@ func clampRateSnooze(d, window time.Duration) time.Duration {
 // The base wait is the time until the agent's window frees a slot
 // (clampRateSnooze: floored off the boundary race, capped at one window). On top
 // of that, the deferral backs off by how long the message has ALREADY been
-// waiting to fire: sleeping at least "as long as we've already waited" (elapsed
-// since fireTime) doubles the total wait on each pass, so a deep backlog
-// re-drives a logarithmic number of times instead of re-waking every window —
+// waiting to send: sleeping at least "as long as we've already waited" (elapsed
+// since it became eligible to submit — the caller passes submissionAnchor, so a
+// held message's review dwell does not count) doubles the total wait on each
+// pass, so a deep backlog re-drives a logarithmic number of times instead of
+// re-waking every window —
 // the quadratic drain cost in #771 (each re-drive is 3 txs / 2 messages
 // UPDATEs and occupies a send worker, adding latency to other tenants' sends).
 // Bounded by rateMaxSnooze so the job still drains well under the 72h retry
@@ -666,12 +678,12 @@ func clampRateSnooze(d, window time.Duration) time.Duration {
 // which runs BEFORE this in the deferral branch — still terminates a genuinely
 // stuck job rather than letting it churn forever.
 //
-// A zero fireTime (unknown timestamps) disables the backoff and falls back to
-// the base wait, mirroring pastRetryHorizon's zero-handling.
-func rateSnooze(fireTime time.Time, retryDelay, window time.Duration) time.Duration {
+// A zero waitingSince (unknown timestamps) disables the backoff and falls back
+// to the base wait, mirroring pastRetryHorizon's zero-handling.
+func rateSnooze(waitingSince time.Time, retryDelay, window time.Duration) time.Duration {
 	delay := clampRateSnooze(retryDelay, window)
-	if !fireTime.IsZero() {
-		if elapsed := time.Since(fireTime); elapsed > delay {
+	if !waitingSince.IsZero() {
+		if elapsed := time.Since(waitingSince); elapsed > delay {
 			delay = elapsed
 		}
 	}
