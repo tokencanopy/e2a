@@ -87,8 +87,8 @@ type LimitExceededError struct {
 	// key the error to: "agents" | "domains" | "messages_month" |
 	// "storage_bytes". It matches usage.<resource> and limits.max_<resource>.
 	Resource string
-	Limit    int // the cap that was hit
-	Current  int // the user's current count (counts vary by resource)
+	Limit    int    // the cap that was hit
+	Current  int    // the user's current count (counts vary by resource)
 	Limits   Limits // full resolved limits for upgrade-URL rendering
 }
 

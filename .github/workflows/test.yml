@@ -93,6 +93,7 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+      - run: make fmt-check
       - run: go test ./...
 
   go-coverage:

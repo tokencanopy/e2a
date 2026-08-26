@@ -12,31 +12,31 @@ func TestIsDisallowedWebhookIP(t *testing.T) {
 		ip      string
 		blocked bool
 	}{
-		{"127.0.0.1", true},        // loopback
-		{"::1", true},              // loopback v6
-		{"10.0.0.5", true},         // RFC-1918
-		{"172.16.3.4", true},       // RFC-1918
-		{"192.168.1.1", true},      // RFC-1918
-		{"169.254.169.254", true},  // cloud metadata (link-local)
-		{"100.64.1.2", true},       // CGNAT (RFC 6598)
-		{"100.127.255.255", true},  // CGNAT upper edge
-		{"0.0.0.0", true},          // unspecified
-		{"224.0.0.1", true},        // multicast
-		{"fc00::1", true},          // IPv6 ULA
-		{"fd00:ec2::254", true},    // IPv6 ULA (fd00, IMDSv6-style)
-		{"fe80::1", true},          // IPv6 link-local
-		{"::", true},               // unspecified v6
+		{"127.0.0.1", true},       // loopback
+		{"::1", true},             // loopback v6
+		{"10.0.0.5", true},        // RFC-1918
+		{"172.16.3.4", true},      // RFC-1918
+		{"192.168.1.1", true},     // RFC-1918
+		{"169.254.169.254", true}, // cloud metadata (link-local)
+		{"100.64.1.2", true},      // CGNAT (RFC 6598)
+		{"100.127.255.255", true}, // CGNAT upper edge
+		{"0.0.0.0", true},         // unspecified
+		{"224.0.0.1", true},       // multicast
+		{"fc00::1", true},         // IPv6 ULA
+		{"fd00:ec2::254", true},   // IPv6 ULA (fd00, IMDSv6-style)
+		{"fe80::1", true},         // IPv6 link-local
+		{"::", true},              // unspecified v6
 		// IPv4-mapped IPv6 (::ffff:a.b.c.d) — the classic guard-bypass class:
 		// an internal v4 target smuggled through a v6 literal. Go's IP.To4()
 		// unwraps it so the same private/loopback/link-local checks apply.
 		{"::ffff:127.0.0.1", true},       // v4-mapped loopback
 		{"::ffff:10.0.0.1", true},        // v4-mapped RFC-1918
 		{"::ffff:169.254.169.254", true}, // v4-mapped cloud metadata
-		{"8.8.8.8", false},         // public
-		{"1.1.1.1", false},         // public
-		{"100.63.255.255", false},  // just below CGNAT
-		{"100.128.0.0", false},     // just above CGNAT
-		{"2606:4700:4700::1111", false}, // public v6 (Cloudflare)
+		{"8.8.8.8", false},               // public
+		{"1.1.1.1", false},               // public
+		{"100.63.255.255", false},        // just below CGNAT
+		{"100.128.0.0", false},           // just above CGNAT
+		{"2606:4700:4700::1111", false},  // public v6 (Cloudflare)
 	}
 	for _, c := range cases {
 		ip := net.ParseIP(c.ip)

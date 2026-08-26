@@ -18,9 +18,9 @@ type fakeInboundLookup struct {
 		agentID        string
 		emailMessageID string
 	}
-	wantAgentID        string // when non-empty, t.Errorf if a different agent is queried
-	returnInbound      *identity.Message
-	returnErr          error
+	wantAgentID   string // when non-empty, t.Errorf if a different agent is queried
+	returnInbound *identity.Message
+	returnErr     error
 }
 
 func (f *fakeInboundLookup) GetMessageByEmailMessageID(_ context.Context, agentID, emailMessageID string) (*identity.Message, error) {

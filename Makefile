@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-e2e cover cover-check clean docker-up docker-down migrate spec spec-check openapi-compat-check openapi-compat-test generate generate-check generate-sdk generate-sdk-check generate-sdk-ts generate-sdk-py
+.PHONY: build run test test-unit test-integration test-e2e cover cover-check clean docker-up docker-down migrate spec spec-check openapi-compat-check openapi-compat-test generate generate-check generate-sdk generate-sdk-check generate-sdk-ts generate-sdk-py fmt fmt-check
 
 # OpenAPI Generator for the /v1 SDK base. Pinned to a released tag (never
 # :latest/SNAPSHOT) so output is reproducible for the drift gate. Run via
@@ -21,6 +21,20 @@ export E2A_TEST_DATABASE_URL
 
 build:
 	go build -o bin/e2a ./cmd/e2a
+
+fmt:
+	gofmt -w internal/ cmd/ tests/
+
+# gofmt -l only lists files that would change and always exits 0, so the
+# check has to test its output itself rather than gofmt's exit code.
+fmt-check:
+	@files="$$(gofmt -l internal/ cmd/ tests/)"; \
+	if [ -n "$$files" ]; then \
+		echo "gofmt drift in:"; \
+		echo "$$files"; \
+		echo "run 'make fmt' to fix"; \
+		exit 1; \
+	fi
 
 run: build
 	./bin/e2a -config config.yaml

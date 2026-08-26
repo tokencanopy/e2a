@@ -150,15 +150,15 @@ func (s *Storage) SetClientAssertionJWT(ctx context.Context, jti string, exp tim
 // column. Mirrors fosite.Request minus the session, which we round-trip
 // via the caller-provided pointer in GetXxxSession.
 type persistedRequest struct {
-	ID                string          `json:"id"`
-	RequestedAt       time.Time       `json:"requested_at"`
-	ClientID          string          `json:"client_id"`
-	RequestedScope    []string        `json:"requested_scope"`
-	GrantedScope      []string        `json:"granted_scope"`
+	ID                string              `json:"id"`
+	RequestedAt       time.Time           `json:"requested_at"`
+	ClientID          string              `json:"client_id"`
+	RequestedScope    []string            `json:"requested_scope"`
+	GrantedScope      []string            `json:"granted_scope"`
 	Form              map[string][]string `json:"form"`
-	RequestedAudience []string        `json:"requested_audience"`
-	GrantedAudience   []string        `json:"granted_audience"`
-	Session           json.RawMessage `json:"session"`
+	RequestedAudience []string            `json:"requested_audience"`
+	GrantedAudience   []string            `json:"granted_audience"`
+	Session           json.RawMessage     `json:"session"`
 }
 
 // marshalRequest serializes the fosite.Requester sans-session-instance
