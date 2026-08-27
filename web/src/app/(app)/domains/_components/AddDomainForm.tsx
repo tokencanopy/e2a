@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Field } from "../../../components/Field";
+import { Field } from "@e2a/ui";
 import { isValidDomain } from "../../../components/onboarding/state";
 import { registerDomain } from "../../../components/onboarding/api";
 import { track } from "../../../components/onboarding/analytics";

@@ -9,7 +9,7 @@
 
 import { useMemo, useState } from "react";
 import useSWR from "swr";
-import { CounterpartyAvatar } from "./CounterpartyAvatar";
+import { Avatar } from "@e2a/ui";
 import { MessageStatusChip, isFutureScheduled } from "./MessageStatusChip";
 import { formatScheduledSend } from "../../../lib/scheduledTime";
 import { EmailHtmlBody } from "./EmailHtmlBody";
@@ -179,7 +179,7 @@ export function ThreadBubble({
       {/* Avatar — sender face for inbound, e2a tile for outbound. */}
       <div style={{ flexShrink: 0, paddingTop: 2 }}>
         {isInbound ? (
-          <CounterpartyAvatar email={senderEmail} name={senderName} size={32} />
+          <Avatar email={senderEmail} name={senderName} size={32} />
         ) : (
           <span
             aria-hidden

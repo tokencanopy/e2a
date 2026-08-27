@@ -11,8 +11,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Chip, Dot, Eyebrow } from "@e2a/ui";
-import { CounterpartyAvatar } from "./CounterpartyAvatar";
+import { Avatar, Chip, Dot, Eyebrow } from "@e2a/ui";
 import { sendAgentTestEmail } from "../onboarding/api";
 import type { DashboardAgent } from "../types";
 
@@ -57,7 +56,7 @@ export function AgentHeader({
         <div className="min-w-0 flex-1">
           <Eyebrow>Inbox</Eyebrow>
           <div className="flex items-center gap-3 mt-2 mb-1.5 flex-wrap">
-            <CounterpartyAvatar email={agent.email} name={agent.name} size={28} />
+            <Avatar email={agent.email} name={agent.name} size={28} />
             <h1
               style={{
                 fontFamily: "var(--f-ui)",
