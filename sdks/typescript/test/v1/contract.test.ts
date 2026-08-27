@@ -925,6 +925,8 @@ class Runner {
         );
         continue;
       }
+
+      throw new Error(`unknown setup step: ${JSON.stringify(s)}`);
     }
     return false;
   }

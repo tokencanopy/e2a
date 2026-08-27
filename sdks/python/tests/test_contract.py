@@ -257,14 +257,15 @@ class Runner:
                 resp = self._raw("POST", "/v1/domains", {"domain": domain})
                 if resp.status_code >= 400 and resp.status_code != 409:
                     resp.raise_for_status()
-
-            if "register_agent" in s:
+            elif "register_agent" in s:
                 agent = s["register_agent"]
                 email = self.resolve(agent["email"])
                 resp = self._raw("POST", "/v1/agents", {"email": email})
                 if resp.status_code >= 400 and resp.status_code != 409:
                     resp.raise_for_status()
                 self.vars["agent_email"] = email
+            else:
+                raise ValueError(f"unknown setup step: {s!r}")
 
         return False
 
@@ -625,6 +626,50 @@ def test_domain_crud_is_runnable_without_store_access():
     scenario = _scenario_by_name("domain_crud")
     assert scenario["setup"] == [{"register_domain": "domain-crud.test.dev"}]
     assert not scenario_needs_store(scenario)
+
+
+def test_execute_setup_registers_domain_then_agent(monkeypatch):
+    scenario = {
+        "name": "setup_domain_and_agent",
+        "description": "known setup keys still dispatch",
+        "setup": [
+            {"register_domain": "setup.test.dev"},
+            {"register_agent": {"email": "agent@setup.test.dev"}},
+        ],
+        "steps": [],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    calls: list[tuple[str, str]] = []
+
+    def fake_raw(method: str, path: str, body: Any = None, **kwargs: Any) -> httpx.Response:
+        del body, kwargs
+        calls.append((method, path))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(runner, "_raw", fake_raw)
+    try:
+        skipped = runner.execute_setup()
+    finally:
+        runner.close()
+
+    assert skipped is False
+    assert calls == [("POST", "/v1/domains"), ("POST", "/v1/agents")]
+    assert runner.vars["agent_email"] == "agent@setup.test.dev"
+
+
+def test_execute_setup_rejects_unrecognized_key():
+    scenario = {
+        "name": "setup_typo",
+        "description": "a typo'd setup key must not silently no-op",
+        "setup": [{"regsiter_domain": "typo.test.dev"}],
+        "steps": [],
+    }
+    runner = Runner("https://contract.test", "key", scenario)
+    try:
+        with pytest.raises(ValueError, match="unknown setup step"):
+            runner.execute_setup()
+    finally:
+        runner.close()
 
 
 def test_runner_cleanup_preserves_primary_failure_and_runs_every_request(monkeypatch):
