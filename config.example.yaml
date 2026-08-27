@@ -77,6 +77,45 @@ oidc:
   user_id_claim: ""       # TokenCanopy uses "e2a_user_id". Override: E2A_OIDC_USER_ID_CLAIM
   # Enable with: E2A_OIDC_ENABLED=true
 
+# — Delegated access tokens ——————————————————————————————————————————————————
+# Optional, off by default. Lets an external control plane (any OIDC issuer
+# — the operator's own platform, for example) call the e2a API with
+# short-lived, audience-bound RFC 9068 access tokens (JOSE typ "at+jwt")
+# minted server-side for its signed-in humans. e2a verifies the token
+# against the issuer's published JWKS and maps the verified (issuer,
+# subject) pair to an existing local user via external_principal_mappings
+# — populated by provisioning/attach, never on token presentation. A
+# verified token acts with account scope, exactly like an account API key.
+#
+# Enabled requires every field below; a malformed static configuration
+# refuses to start, and in production the issuer must be https. Issuer
+# NETWORK unavailability is deliberately not startup-fatal: discovery
+# retries in the background and delegated requests fail 503 until it
+# succeeds. Existing credentials (API keys, OAuth, agent JWTs, sessions)
+# are unaffected by any delegated outage. Compact tokens whose protected
+# header says typ "at+jwt" belong to this verifier even while it is
+# disabled — they never fall through to the API-key path.
+delegated:
+  enabled: false          # Override: E2A_DELEGATED_ENABLED
+  issuer_url: ""          # exact issuer/discovery base, byte-compared against `iss`, e.g. "https://auth.platform.example.com/oidc"
+  audience: ""            # exact single-string `aud`, e.g. "https://api.e2a.example.com"
+  authorized_party: ""    # exact `azp` the issuer stamps on console-minted tokens
+  required_scope: ""      # exact singleton scope, e.g. "account" — the whole claim, not a member
+  allowed_algorithms: ["RS256", "ES256"]   # closed allowlist; only these two are supported
+  max_token_lifetime_seconds: 120          # bound on exp - iat
+  clock_skew_seconds: 5                    # tolerated iat-future / exp-past drift
+  # Context claims every token must carry as bounded nonempty strings;
+  # allowed_values (optional) closes a claim to a value set.
+  required_claims:
+    - name: workspace_id
+    - name: membership_id
+    - name: workspace_role
+      allowed_values: [owner, admin, member]
+  # Claims that must be absent entirely (present-as-null still rejects):
+  # the issuer's machine-credential claim names, so a non-human token can
+  # never pass the human-token policy.
+  forbidden_claims: [client_id, credential_id, runtime_id, sponsor_id]
+
 # — Internal user provisioning ———————————————————————————————————————————————
 # Optional, off by default, internal-only (not part of the public /v1 API or
 # the OpenAPI spec). When enabled, an external control plane can create e2a
