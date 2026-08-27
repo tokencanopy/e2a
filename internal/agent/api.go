@@ -218,6 +218,7 @@ type API struct {
 	internalAPISecret     string                // optional; when empty, /api/internal/* endpoints return 503
 	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
+	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
@@ -574,6 +575,14 @@ func (a *API) ConfigureProvisioning(enabled bool, secret string) {
 	a.provisioningSecret = secret
 }
 
+// SetDelegatedIssuer wires the configured delegated issuer URL
+// (config delegated.issuer_url) that the external-principal attach
+// endpoint byte-compares request issuers against. Deliberately separate
+// from the verifier being enabled: mappings can be populated ahead of
+// flipping delegated verification on. Empty (the default) keeps attach
+// returning 503 delegated_verifier_not_configured.
+func (a *API) SetDelegatedIssuer(issuer string) { a.delegatedIssuer = issuer }
+
 // SetBillingHookURL wires in the URL of an external billing service's
 // user-event endpoint. When the user deletes their account, the API
 // HMAC-signs a JSON payload and POSTs it there so the billing service
@@ -684,6 +693,13 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	// deliberately not advertised in OpenAPI. Off by default — 503s
 	// unless provisioning.enabled + the provisioning secret are set.
 	r.HandleFunc("/api/internal/users/provision", a.handleProvisionUser).Methods("POST")
+
+	// Internal machine-to-machine endpoint: attach an external OIDC
+	// (issuer, subject) pair to an EXISTING user for delegated-token
+	// authentication (reconciliation of accounts that predate delegated
+	// provisioning). Same HMAC boundary as provisioning; additionally
+	// 503s until a delegated issuer is configured.
+	r.HandleFunc("/api/internal/users/external-principals/attach", a.handleAttachExternalPrincipal).Methods("POST")
 
 	// HITL magic-link pages (/v1/approve, /v1/reject) are NOT registered on
 	// this mux: the chi root (internal/httpapi) owns every /v1/* path and
