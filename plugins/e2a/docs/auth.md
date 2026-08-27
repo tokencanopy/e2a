@@ -1,6 +1,6 @@
 # auth.md
 
-You are an agent that wants to use e2a — the authenticated email gateway for AI agents. This file describes how to obtain credentials today, how to handle them safely, and where the protocol is going.
+This guide explains how an agent connects to e2a, the open-source email API for AI agents. It covers how to obtain credentials today, handle them safely, and follow the protocol as it evolves.
 
 Two hosts are relevant:
 

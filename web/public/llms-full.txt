@@ -1,9 +1,9 @@
 # e2a — full documentation
 
-> e2a is an authenticated email gateway for AI agents: it gives an agent its
-> own verified email inbox to send, receive, reply, and forward, with SPF/DKIM
-> verification on inbound. Connect over a hosted MCP server (OAuth 2.1, no API
-> key), the REST API, or the TypeScript/Python SDKs.
+> e2a is the open-source email API for AI agents. Send transactional email, give
+> agents real two-way inboxes, and keep people in control. Use e2a as a hosted
+> service or run the Apache-2.0 stack yourself. Connect over a hosted MCP server
+> (OAuth 2.1, no API key), the REST API, or the TypeScript/Python SDKs.
 
 This file inlines the full e2a documentation set so it can be read in one
 fetch. The per-document originals are linked above each section, and the
@@ -201,7 +201,7 @@ The hosted shared-domain path is free to start without a card. See
 
 # auth.md
 
-You are an agent that wants to use e2a — the authenticated email gateway for AI agents. This file describes how to obtain credentials today, how to handle them safely, and where the protocol is going.
+This guide explains how an agent connects to e2a, the open-source email API for AI agents. It covers how to obtain credentials today, handle them safely, and follow the protocol as it evolves.
 
 Two hosts are relevant:
 

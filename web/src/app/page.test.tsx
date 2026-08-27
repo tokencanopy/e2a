@@ -43,14 +43,27 @@ describe("Landing page", () => {
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: /Build the best email agents with e2a/i,
+        name: "The open-source email API for AI agents.",
       }),
     ).toBeInTheDocument();
-    // The hero leads with the product promise and makes the first use cases
-    // explicit rather than asking a visitor to infer what e2a is for.
     expect(
-      screen.getByText(/e2a gives every agent a real, authenticated inbox/i),
+      screen.getByText(
+        /Send transactional email, give agents real two-way inboxes, and keep people in control\./i,
+      ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Use e2a as a hosted service or run the Apache-2\.0 stack yourself\./i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /For developers, agent-native teams, and businesses building email into their products and workflows\./i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /What is an email API for AI agents\?/i }),
+    ).toHaveAttribute("href", "/email-api-for-ai-agents");
   });
 
   it("renders the e2a wordmark", () => {
@@ -219,7 +232,7 @@ describe("Landing page", () => {
     // The hero explainer link the row collided with is still present above.
     expect(
       screen.getByRole("link", {
-        name: /What is email infrastructure for AI agents\?/,
+        name: /What is an email API for AI agents\?/,
       }),
     ).toBeInTheDocument();
   });

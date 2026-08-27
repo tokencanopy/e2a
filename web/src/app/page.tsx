@@ -343,35 +343,42 @@ export default function Home() {
               color: "var(--fg)",
             }}
           >
-            Build the best{" "}
+            The open-source{" "}
             <em
               style={{
                 fontStyle: "italic",
                 color: "var(--accent-strong)",
               }}
             >
-              email agents
+              email API
             </em>
-            {" "}with e2a.
+            {" "}for AI agents.
           </h1>
           <p
-            className="mx-auto mb-9 leading-[1.55]"
+            className="mx-auto mb-3 leading-[1.55]"
             style={{
               fontSize: 17,
               color: "var(--fg-muted)",
-              maxWidth: 540,
+              maxWidth: 660,
             }}
           >
-            e2a gives every agent a real, authenticated inbox — so it can handle
-            support, scheduling, reception, and ecommerce work over email, with
-            human approval when it matters.
+            Send transactional email, give agents real two-way inboxes, and keep
+            people in control. Use e2a as a hosted service or run the Apache-2.0
+            stack yourself.
+          </p>
+          <p
+            className="mx-auto mb-7 text-[13px] leading-[1.55]"
+            style={{ color: "var(--fg-subtle)", maxWidth: 660 }}
+          >
+            For developers, agent-native teams, and businesses building email
+            into their products and workflows.
           </p>
           <Link
             href="/email-api-for-ai-agents"
             className="inline-flex mb-7 text-[13px]"
             style={{ color: "var(--accent-strong)" }}
           >
-            What is email infrastructure for AI agents? <span className="font-mono ml-1">→</span>
+            What is an email API for AI agents? <span className="font-mono ml-1">→</span>
           </Link>
           <div className="flex flex-wrap items-center justify-center gap-2.5">
             <Link
@@ -422,7 +429,7 @@ export default function Home() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"
-                alt="e2a – open-source email API for agents - Give your AI agents a real, authenticated email address. | Product Hunt"
+                alt="e2a, the open-source email API for AI agents | Product Hunt"
                 width={250}
                 height={54}
                 style={{ display: "block" }}

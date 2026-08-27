@@ -5,11 +5,13 @@
   <img src="assets/e2a-wordmark-light.svg" width="320" alt="e2a">
 </picture>
 
-### The first open-source email service built for AI agents.
+### The open-source email API for AI agents.
 
-### Give your AI agents a real, authenticated email address.
+### Send transactional email, give agents real two-way inboxes, and keep people in control.
 
-Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Every sender — human or agent — **identity-verified**.
+Use e2a as a hosted service or run the Apache-2.0 stack yourself. Built for developers, agent-native teams, and businesses adding email to products and workflows.
+
+Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Inbound mail includes structured **SPF · DKIM · DMARC** evidence.
 
 <sub>A [Token Canopy](https://tokencanopy.com) product</sub>
 
@@ -25,7 +27,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 
 [Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Examples](#working-examples) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
-<a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a – open-source email API for agents - Give your AI agents a real, authenticated email address. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
+<a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a, the open-source email API for AI agents | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
 
 </div>
 
@@ -34,7 +36,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 > [!IMPORTANT]
 > **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, delivery metrics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
-e2a is an **authenticated email gateway for AI agents**. It receives inbound mail, evaluates SPF, every DKIM signature, and DMARC, and delivers structured authentication evidence over whichever channel fits your runtime. Outbound goes back out through an HTTP API, with an optional human-in-the-loop approval gate.
+e2a is the **open-source email API for AI agents**. Send transactional email, give agents real two-way inboxes, and keep people in control. Inbound mail arrives with structured SPF, DKIM, and DMARC evidence; outbound mail goes through an HTTP API with an optional human-in-the-loop approval gate. Use the hosted service or run the Apache-2.0 stack yourself.
 
 **Four ways to plug an agent in:**
 
