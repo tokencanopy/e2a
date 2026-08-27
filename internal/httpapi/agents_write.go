@@ -371,22 +371,38 @@ func (s *Server) handleCreateAgent(ctx context.Context, in *createAgentInput) (*
 
 	// Per-user agent cap (after auth + domain checks, so a 402 means
 	// "valid request, out of capacity" — never masks a 400/401).
-	if s.deps.EnforceAgentCreate != nil {
-		if err := s.deps.EnforceAgentCreate(ctx, user.ID); err != nil {
-			if env, ok := limitEnvelope(err); ok {
-				return nil, env
-			}
+	// maxAgents left at its zero value on a GetLimits failure would read as
+	// unlimited to CreateAgentWithLimit, so a lookup error must fail the
+	// request rather than fall through with the cap silently open.
+	maxAgents := 0
+	if s.deps.GetLimits != nil {
+		lim, err := s.deps.GetLimits(ctx, user.ID)
+		if err != nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "limits check failed")
 		}
+		maxAgents = lim.MaxAgents
 	}
 
-	if s.deps.CreateAgent == nil {
+	if s.deps.CreateAgentWithLimit == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "agent create unavailable")
 	}
-	// webhookURL/agentMode params are ignored by the store (migration 029);
-	// pass "" to satisfy the retained signature.
-	ag, err := s.deps.CreateAgent(ctx, email, domain, req.Name, "", "", user.ID)
+	ag, err := s.deps.CreateAgentWithLimit(ctx, email, domain, req.Name, user.ID, maxAgents)
 	if err != nil {
+		var limErr *identity.AgentLimitExceededError
+		if errors.As(err, &limErr) {
+			// CreateAgentWithLimit is the race-proof source of truth for the
+			// cap; ask EnforceAgentCreate only for the plan/upgrade-URL
+			// details a bare AgentLimitExceededError doesn't carry.
+			if s.deps.EnforceAgentCreate != nil {
+				if enfErr := s.deps.EnforceAgentCreate(ctx, user.ID); enfErr != nil {
+					if env, ok := limitEnvelope(enfErr); ok {
+						return nil, env
+					}
+				}
+			}
+			return nil, NewError(http.StatusPaymentRequired, "limit_exceeded", limErr.Error()).
+				WithDetails(LimitExceededDetails{Resource: "agents", Limit: int64(limErr.Limit), Current: int64(limErr.Current)})
+		}
 		if isUniqueViolation(err) {
 			// Soft-delete (migration 063) keeps the trashed row's PK, so the
 			// address stays reserved: a user who trashed an inbox and tries to
