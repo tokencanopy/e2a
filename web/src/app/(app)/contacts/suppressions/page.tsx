@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Button } from "../../../components/loft/Button";
-import { Chip } from "../../../components/loft/Chip";
+import { Button, Chip } from "@e2a/ui";
 import { PageShell } from "../../../components/loft/PageShell";
 import { ViewTabs } from "../_lib/ViewTabs";
 import { appendUniqueByAddress, encodeAddressSegment } from "../_lib/suppressionPath";

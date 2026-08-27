@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button } from "../../../components/loft/Button";
+import { Button } from "@e2a/ui";
 import { readErrorBody, type TemplateView } from "../_lib/types";
 
 // "Use this template" — POST /v1/templates { from_starter } and navigate

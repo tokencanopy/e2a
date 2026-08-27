@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "./loft/Button";
+import { Button } from "@e2a/ui";
 
 // Copy-paste prompts for driving each workspace surface from a coding
 // agent (Claude Code, Cursor, …) instead of the dashboard. Each prompt
