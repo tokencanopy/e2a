@@ -16,9 +16,9 @@ https://github.com/tokencanopy/e2a (Apache-2.0).
 
 # Set up e2a
 
-e2a gives an AI agent its own real email inbox: a verified address it can send
-from, receive to, and use for multi-turn conversations. The inbox belongs to
-the agent—not to a human whose mailbox the agent reads.
+e2a gives an AI agent its own real email inbox: a provisioned address it can
+send from, receive to, and use for multi-turn conversations. The inbox belongs
+to the agent—not to a human whose mailbox the agent reads.
 
 This guide connects e2a, selects or creates an inbox, and verifies that it is
 ready. Most setups use the shared `agents.e2a.dev` domain and require no DNS

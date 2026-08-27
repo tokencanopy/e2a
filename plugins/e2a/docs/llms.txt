@@ -59,9 +59,9 @@ approval before an agent's message leaves.
 ## Use cases
 
 The use-case pages below describe concrete workflows developers can build with
-an agent-owned inbox. e2a provides the email identity, inbound authentication
-evidence, delivery, threading, and outbound controls; the application remains
-the source of truth for business data and policy.
+an agent-owned inbox. e2a provides the provisioned address, structured inbound
+domain evidence, delivery, threading, and outbound controls; the application
+remains the source of truth for business data and policy.
 
 - [What can you build with e2a?](https://e2a.dev/use-cases): The canonical use-case directory.
 - [Support agent](https://e2a.dev/use-cases/support-agent): Triage customer requests, retrieve context, reply in-thread, and hold sensitive replies for approval.
@@ -75,7 +75,7 @@ the source of truth for business data and policy.
 
 ## Pricing
 
-- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, structured inbound domain evidence, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
+- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, structured inbound domain evidence, and real-time WebSocket delivery; paid tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
 
 ## Blog
 

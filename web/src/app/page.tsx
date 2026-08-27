@@ -52,7 +52,7 @@ const USE_CASES: { eyebrow: string; title: string; desc: string; href?: string }
   { eyebrow: "Admin", title: "Scheduling and admin", desc: "Coordinate meetings, send reminders, and follow up where most people already live — their inbox.", href: "/use-cases/scheduling-agent" },
   { eyebrow: "Reception", title: "AI receptionist", desc: "Answer common inquiries, route messages, and forward conversations to the right person.", href: "/use-cases/ai-receptionist" },
   { eyebrow: "Commerce", title: "E-commerce agents", desc: "Answer order questions, handle returns, and coordinate with vendors through persistent email threads.", href: "/use-cases/ecommerce-agent" },
-  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving with a verified agent identity.", href: "/use-cases/sales-agent" },
+  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving from an agent-owned address.", href: "/use-cases/sales-agent" },
   { eyebrow: "Recruiting", title: "Recruiting agents", desc: "Coordinate candidates, schedule interviews, and keep hiring conversations organized.", href: "/use-cases/recruiting-agent" },
   { eyebrow: "Auth", title: "OTP and verification", desc: "Receive verification codes, confirmation emails, and magic links — then act on them automatically." },
   { eyebrow: "Voice", title: "Voice agents", desc: "After a call ends, your voice agent sends a follow-up, receives a reply, and keeps the thread going." },

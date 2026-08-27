@@ -1,7 +1,8 @@
 # e2a plugin
 
-Gives an AI coding agent a real, authenticated email inbox. Installing this
-plugin registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
+The open-source email API for AI agents. Send transactional email, give agents
+real two-way inboxes, and keep people in control. Installing this plugin
+registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
 Streamable HTTP + OAuth 2.1) and five stable skills for setup, application
 integration, diagnosis, evaluation, and everyday inbox operation. Installing core supplies
 the MCP connection used by both core and the optional Labs workflows.

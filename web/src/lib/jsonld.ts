@@ -70,6 +70,7 @@ export function website(): JsonLdNode {
  * instead of one.
  */
 export const SOFTWARE_ID = `${SITE_URL}/#software`;
+export const FREE_OFFER_ID = `${SITE_URL}/#offer-free`;
 
 export function softwareApplication(description: string): JsonLdNode {
   return {
@@ -91,6 +92,7 @@ export function softwareApplication(description: string): JsonLdNode {
     // or not sell at all.
     offers: {
       "@type": "Offer",
+      "@id": FREE_OFFER_ID,
       price: "0",
       priceCurrency: "USD",
     },

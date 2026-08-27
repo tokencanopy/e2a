@@ -1,4 +1,5 @@
 import {
+  FREE_OFFER_ID,
   ORGANIZATION_ID,
   SOFTWARE_ID,
   blogPosting,
@@ -46,9 +47,11 @@ describe("structured data", () => {
     // page so structured data cannot drift away from billing.
     expect(softwareApplication("desc").offers).toEqual({
       "@type": "Offer",
+      "@id": FREE_OFFER_ID,
       price: "0",
       priceCurrency: "USD",
     });
+    expect(FREE_OFFER_ID).toMatch(/#offer-free$/);
   });
 
   it("builds a BlogPosting with absolute URLs and an ISO publish date", () => {

@@ -109,6 +109,7 @@ test("agent answer surfaces describe domain evidence without identity overclaims
   for (const path of [
     "../plugins/e2a/docs/auth.md",
     "../plugins/e2a/docs/llms.txt",
+    "../plugins/e2a/docs/setup.md",
     "../web/public/auth.md",
     "../web/public/llms.txt",
     "../web/public/llms-full.txt",
@@ -116,7 +117,7 @@ test("agent answer surfaces describe domain evidence without identity overclaims
     const body = await readFile(new URL(path, import.meta.url), "utf8");
     assert.doesNotMatch(
       body,
-      /authenticated email address|verified email inbox|sender verification|end-to-end-verified email address|identity claim e2a stands behind/i,
+      /authenticated email address|verified email inbox|sender verification|end-to-end-verified email address|identity claim e2a stands behind|a verified address|provides the email identity|inbound authentication evidence/i,
       `${path} contains an identity overclaim`,
     );
   }
@@ -126,6 +127,7 @@ test("agent answer surfaces describe domain evidence without identity overclaims
   );
   assert.match(llms, /structured inbound domain evidence/i);
   assert.match(llms, /not a person, mailbox, or message content/i);
+  assert.doesNotMatch(llms, /paid Pro and Scale tiers/i);
 });
 
 test("check reports a stale llms-full.txt without rewriting it", async () => {

@@ -198,6 +198,7 @@ describe("Landing page", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Support and intake")).toBeInTheDocument();
     expect(screen.getAllByText("Procurement").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/verified agent identity/i)).not.toBeInTheDocument();
   });
 
   it("shows the human-in-the-loop section", () => {
