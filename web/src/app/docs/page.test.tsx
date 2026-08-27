@@ -35,6 +35,12 @@ describe("Docs page", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: /e2a developer docs/i }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/e2a is the open-source email API for AI agents/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/authenticated email gateway|verified email address/i),
+    ).not.toBeInTheDocument();
   });
 
   it("routes onward to the full API reference", () => {

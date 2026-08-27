@@ -15,10 +15,10 @@ approval before an agent's message leaves.
 
 **What is distinctive about e2a:**
 
-- **Sender verification on every inbound message.** e2a evaluates SPF, every
-  DKIM signature, and DMARC — including alignment — before the agent sees a
-  message, and hands the result over as structured evidence rather than raw
-  headers the agent has to parse and trust.
+- **Structured inbound domain evidence.** e2a evaluates SPF, every DKIM
+  signature, and DMARC, including alignment, before the agent sees a message.
+  It hands the results over as structured data rather than raw headers. The
+  evidence applies to the From domain, not a person, mailbox, or message content.
 - **An approval gate before anything is sent.** Opt-in, per agent: an outbound
   message is accepted but not dispatched (`status: pending_review`) until a
   person approves it from the dashboard, the API, the MCP tools, or a magic
@@ -75,7 +75,7 @@ the source of truth for business data and policy.
 
 ## Pricing
 
-- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, sender verification, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
+- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, structured inbound domain evidence, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
 
 ## Blog
 

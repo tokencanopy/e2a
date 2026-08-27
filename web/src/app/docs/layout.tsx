@@ -7,7 +7,7 @@ const TITLE = "Docs — e2a email API for AI agents";
 // — rather than the whole product. A description that overshoots its page is
 // the one search engines rewrite.
 const DESC =
-  "Developer docs for e2a, the authenticated email API for AI agents: connect over MCP, REST, or the TypeScript and Python SDKs; API keys and OAuth 2.1; webhook vs WebSocket delivery; conversation threading and idempotent sends.";
+  "Developer docs for e2a, the open-source email API for AI agents: transactional sending, two-way inboxes, MCP, REST, TypeScript and Python SDKs, OAuth 2.1, webhooks, WebSockets, threading, and idempotency.";
 
 export const metadata: Metadata = {
   title: { absolute: TITLE },

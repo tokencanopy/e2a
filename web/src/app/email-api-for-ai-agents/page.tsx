@@ -6,7 +6,7 @@ import { JsonLd } from "../components/JsonLd";
 
 const TITLE = "Email API for AI Agents | e2a";
 const DESC =
-  "e2a is open-source email infrastructure for AI agents. Give agents real, authenticated inboxes to send, receive, and reply to email through an API, SDK, webhook, WebSocket, or MCP.";
+  "e2a is the open-source email API for AI agents. Send transactional email, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.";
 
 export const metadata: Metadata = {
   title: { absolute: TITLE },
@@ -39,19 +39,19 @@ const WAYS_ROWS = [
 
 const FAQ: FaqEntry[] = [
   {
-    question: "What are the best ways to give an AI agent its own email address?",
+    question: "What are the main ways to give an AI agent its own email address?",
     answer:
-      "The best way is a dedicated email gateway: the agent gets a real, authenticated inbox it can send from, receive into, and reply in-thread — e2a is one such gateway. The other main options are connecting an existing Gmail or Outlook account, direct IMAP access, and forwarding mail into an AI integration.",
+      "The main options are a dedicated email API, connecting an existing Gmail or Outlook account, direct IMAP access, and forwarding mail into an AI integration. A dedicated email API such as e2a gives the agent its own two-way address rather than access to a person's mailbox.",
   },
   {
     question: "What is an email API for AI agents?",
     answer:
-      "An email API for AI agents gives an agent its own email identity and the programmatic ability to receive, send, and reply to messages. e2a adds authenticated inbound delivery, in-thread replies, multiple integration surfaces, and an optional human approval gate for outbound actions.",
+      "An email API for AI agents lets software send transactional email and gives agents the programmatic ability to receive, send, and reply to messages. e2a adds structured inbound domain evidence, in-thread replies, multiple integration surfaces, and an optional human approval gate for outbound actions.",
   },
   {
     question: "What is the difference between e2a and a transactional email API?",
     answer:
-      "A transactional email API primarily sends application mail. e2a gives an AI agent a two-way inbox of its own: it can receive requests, preserve conversation threads, reply from its identity, and hand sensitive actions to a human for approval.",
+      "e2a includes transactional sending and adds a two-way inbox for each agent. An agent can receive requests, preserve conversation threads, reply from its own address, and hand sensitive actions to a human for approval through the same API.",
   },
   {
     question: "What can I build with an AI agent email API?",
@@ -61,7 +61,7 @@ const FAQ: FaqEntry[] = [
   {
     question: "How does e2a authenticate inbound email?",
     answer:
-      "e2a evaluates SPF, DKIM, and DMARC on inbound messages and delivers the authentication result as structured evidence. Webhook deliveries are signed so the receiving service can verify that the event came from e2a before invoking an agent.",
+      "e2a evaluates SPF, DKIM, and DMARC on inbound messages and delivers the results as structured domain evidence. That evidence applies to the From domain, not a person, mailbox, or message content. Webhook deliveries are signed so the receiving service can verify that the event came from e2a before invoking an agent.",
   },
 ];
 
@@ -101,20 +101,20 @@ export default function EmailApiForAgentsPage() {
             EMAIL INFRASTRUCTURE FOR AI AGENTS
           </p>
           <h1 className="text-[40px] md:text-[60px] font-semibold leading-[1.04] mb-6" style={{ letterSpacing: "-0.045em" }}>
-            Build agents that work over email.
+            The open-source email API for AI agents.
           </h1>
           <p className="text-[18px] md:text-[21px] leading-[1.55]" style={{ color: "var(--fg-muted)" }}>
-            e2a gives every agent a real, authenticated inbox. Receive requests,
-            take action, reply in-thread, and bring in a human when the action
-            matters.
+            Send transactional email, give agents real two-way inboxes, and keep
+            people in control. Use e2a as a hosted service or run the Apache-2.0
+            stack yourself.
           </p>
         </header>
 
         <section className="grid md:grid-cols-3 gap-3" aria-labelledby="primitives-heading">
           <h2 id="primitives-heading" className="sr-only">What e2a provides</h2>
           {[
-            ["01", "An agent identity", "A real address that belongs to the agent, not a human mailbox it happens to read."],
-            ["02", "A two-way channel", "Receive authenticated mail and send replies that stay in the same conversation."],
+            ["01", "An agent-owned address", "A real address that belongs to the agent, not a human mailbox it happens to read."],
+            ["02", "A two-way channel", "Receive mail with domain-authentication evidence and send replies that stay in the same conversation."],
             ["03", "A safer action boundary", "Hold outbound mail for human approval and pass sender evidence into the agent."],
           ].map(([number, title, text]) => (
             <div key={number} className="p-6" style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: "var(--r-lg)" }}>

@@ -21,6 +21,14 @@ describe("structured data", () => {
     });
   });
 
+  it("describes domain evidence without claiming an authenticated mailbox", () => {
+    const description = String(organization().description);
+    expect(description).toMatch(/open-source email API for AI agents/i);
+    expect(description).toMatch(/structured SPF, DKIM, and DMARC evidence/i);
+    expect(description).toMatch(/From domain, not a person, mailbox, or content/i);
+    expect(description).not.toMatch(/authenticated email address|verified inbox/i);
+  });
+
   it("gives the product a stable @id the pricing page can attach Offers to", () => {
     // The pricing page ships from a different repo and hangs its paid-tier
     // Offer nodes off this @id. Drop it and that reference dangles, leaving

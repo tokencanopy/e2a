@@ -212,7 +212,7 @@ Two hosts are relevant:
 
 e2a already implements the OAuth 2.1 surface that MCP clients depend on: RFC 8414 authorization-server metadata at [`/.well-known/oauth-authorization-server`](https://api.e2a.dev/.well-known/oauth-authorization-server), RFC 7591 Dynamic Client Registration at `/oauth2/register` (rate-limited per IP), `authorization_code` + `refresh_token` grants with PKCE S256, RFC 7009 revocation, and RFC 6750 Bearer challenges on 401s. MCP clients can register and onboard without any human-supplied secret — the user only sees a browser consent screen.
 
-e2a also implements the first pieces of the WorkOS [auth.md](https://github.com/workos/auth.md) autonomous-agent flow: a JSON Web Key Set at `/.well-known/jwks.json`, an `agent_auth` block in the AS metadata, and a bootstrap endpoint (`POST /agent/identity`) that exchanges an agent-scoped API key for a long-lived identity assertion, redeemable at `/oauth2/token` via `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` for a short-lived access token. Still missing: an RFC 9728 protected-resource metadata document, ID-JAG assertion intake from third parties, and the email-OTP claim ceremony. See [Agent identity](#agent-identity) for where we're heading — because every e2a agent has an end-to-end-verified email address, e2a is positioned to act as an identity provider in this protocol, and that's the direction we're building.
+e2a also implements the first pieces of the WorkOS [auth.md](https://github.com/workos/auth.md) autonomous-agent flow: a JSON Web Key Set at `/.well-known/jwks.json`, an `agent_auth` block in the AS metadata, and a bootstrap endpoint (`POST /agent/identity`) that exchanges an agent-scoped API key for a long-lived identity assertion, redeemable at `/oauth2/token` via `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` for a short-lived access token. Still missing: an RFC 9728 protected-resource metadata document, ID-JAG assertion intake from third parties, and the email-OTP claim ceremony. See [Agent identity](#agent-identity) for where we're heading. Each e2a agent has a stable, provisioned email address and can obtain an e2a-issued identity assertion; that issuer-backed assertion, rather than arbitrary inbound mail, is the basis for the identity-provider direction.
 
 ## Use the existing tooling first
 
@@ -334,7 +334,7 @@ The `WWW-Authenticate` header on 401 responses tells you whether the failing cre
 
 This section describes e2a's bet on where agent auth is heading. The bootstrap identity endpoint below is shipped (behind an opt-in signing-key config); third-party ID-JAG consumption and the email-loop claim ceremony are still direction, not shipped surface. If you are implementing today, use the credential paths above for anything beyond the identity bootstrap.
 
-Every e2a agent has a stable, verified email address. The owner proved control of the domain (via DNS records and a verification token), and e2a evaluates SPF, DKIM, and DMARC on every inbound message routed to that agent. Equivalently for agents on the shared `agents.e2a.dev` domain, e2a is the authoritative issuer. **The agent's email is not a label — it's an identity claim e2a stands behind.**
+Every e2a agent has a stable, provisioned email address. For a custom domain, the owner proves control through DNS records and a verification token. For the shared `agents.e2a.dev` domain, e2a provisions the address directly. e2a also evaluates SPF, DKIM, and DMARC on inbound messages and returns structured evidence about the From domain. That evidence does not prove a person, mailbox, or message content. When agent-identity signing is enabled, the separate OAuth identity assertion is the claim e2a issues and signs.
 
 We are building two pieces on top of this:
 
@@ -343,12 +343,12 @@ We are building two pieces on top of this:
 e2a already operates as an OAuth issuer at `https://api.e2a.dev` (see AS metadata above), publishes a JSON Web Key Set at `https://api.e2a.dev/.well-known/jwks.json`, and lets an agent bootstrap a long-lived identity assertion from its API key via `POST /agent/identity`, redeemable for a short-lived access token at `/oauth2/token`. The remaining work is issuing audience-bound [ID-JAG](https://datatracker.ietf.org/doc/draft-ietf-oauth-identity-assertion-authz-grant/) assertions (`urn:ietf:params:oauth:token-type:id-jag`) that a *third-party* service can verify, with:
 
 - `iss` = `https://api.e2a.dev`
-- `sub` = the agent's verified email
+- `sub` = the agent's provisioned email
 - `email` / `email_verified: true`
 - `aud` = the third-party service the agent is registering with
 - Short `exp` (≤5 minutes), fresh `jti`
 
-Any auth.md-implementing service that adds e2a to its trust list will be able to onboard an e2a agent without an OTP ceremony — the agent's e2a identity vouches for it. e2a's contribution is an identity rooted in a verifiable email address, stable across agent runtimes.
+Any auth.md-implementing service that adds e2a to its trust list will be able to onboard an e2a agent without an OTP ceremony. The e2a-issued assertion vouches for the agent identity, which is tied to a stable, provisioned email address across agent runtimes.
 
 If you operate an agent service and want to accept e2a-issued assertions, watch for `iss: https://api.e2a.dev` to land in the WorkOS reference trust list, or open an issue at `https://github.com/tokencanopy/e2a/issues` to pre-register.
 

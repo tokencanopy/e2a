@@ -3,7 +3,7 @@ import { SITE_URL } from "../../../lib/site";
 
 const TITLE = "Python SDK docs — send email from your AI agent";
 const DESC =
-  "Python SDK guide for e2a. Install the e2a package, send and receive authenticated email from your AI agent, use WebSocket for real-time delivery, thread conversations across agents and humans.";
+  "Python SDK guide for e2a. Install the e2a package, send transactional email, receive mail with structured domain evidence, use WebSocket delivery, and thread conversations across agents and humans.";
 
 export const metadata: Metadata = {
   title: { absolute: TITLE },

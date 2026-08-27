@@ -146,7 +146,7 @@ const FAQ: FaqEntry[] = [
   {
     question: "Can an AI agent have its own email address?",
     answer:
-      "Yes. e2a gives an AI agent its own real, authenticated email address — on the shared agents.e2a.dev domain, or on a domain you verify yourself — that it can send from, receive to, and reply in-thread on. The inbox belongs to the agent rather than to a human whose mailbox the agent reads, so recipients can tell agent mail apart from yours and revoking the agent never touches anyone's personal mail. The agent reaches that inbox over MCP tools, a signed webhook, a WebSocket stream, REST polling, or the TypeScript and Python SDKs.",
+      "Yes. e2a gives an AI agent its own dedicated, two-way email address on the shared agents.e2a.dev domain or on a domain you verify yourself. The inbox belongs to the agent rather than to a human whose mailbox the agent reads, so recipients can tell agent mail apart from yours and revoking the agent never touches anyone's personal mail. The agent reaches that inbox over MCP tools, a signed webhook, a WebSocket stream, REST polling, or the TypeScript and Python SDKs.",
   },
   {
     question: "How do you verify an email actually came from an AI agent?",
@@ -162,7 +162,7 @@ const FAQ: FaqEntry[] = [
   {
     question: "Is there an open-source email API for AI agents?",
     answer:
-      "Yes — e2a is Apache-2.0, and the whole stack is public at github.com/tokencanopy/e2a: the Go server and SMTP relay, the TypeScript and Python SDKs, the CLI, the MCP server, and the dashboard. You can self-host it against your own Postgres and your own outbound SMTP relay, and every feature works the same way there. The hosted service at e2a.dev runs that same open-source server image, so choosing hosted is a deployment decision rather than a different product.",
+      "Yes. e2a is Apache-2.0, and the whole stack is public at github.com/tokencanopy/e2a: the Go server and SMTP relay, the TypeScript and Python SDKs, the CLI, the MCP server, and the dashboard. You can self-host it against your own Postgres and outbound SMTP relay. The hosted service at e2a.dev runs the same open-source server image and manages the operating infrastructure for you.",
   },
   {
     question: "How do you stop an AI agent from sending an email without approval?",
@@ -368,7 +368,7 @@ export default function Home() {
           </p>
           <p
             className="mx-auto mb-7 text-[13px] leading-[1.55]"
-            style={{ color: "var(--fg-subtle)", maxWidth: 660 }}
+            style={{ color: "var(--fg-muted)", maxWidth: 660 }}
           >
             For developers, agent-native teams, and businesses building email
             into their products and workflows.

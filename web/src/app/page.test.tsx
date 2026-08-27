@@ -56,11 +56,11 @@ describe("Landing page", () => {
         /Use e2a as a hosted service or run the Apache-2\.0 stack yourself\./i,
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /For developers, agent-native teams, and businesses building email into their products and workflows\./i,
-      ),
-    ).toBeInTheDocument();
+    const audience = screen.getByText(
+      /For developers, agent-native teams, and businesses building email into their products and workflows\./i,
+    );
+    expect(audience).toBeInTheDocument();
+    expect(audience).toHaveStyle({ color: "var(--fg-muted)" });
     expect(
       screen.getByRole("link", { name: /What is an email API for AI agents\?/i }),
     ).toHaveAttribute("href", "/email-api-for-ai-agents");
@@ -263,6 +263,9 @@ describe("FAQ and structured data", () => {
     expect(
       screen.getByText(/The inbox belongs to the agent rather than to a human/),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/real, authenticated email address/i),
+    ).not.toBeInTheDocument();
   });
 
   it("emits a valid FAQPage whose answers match the visible ones", () => {

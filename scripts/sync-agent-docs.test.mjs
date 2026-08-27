@@ -105,6 +105,29 @@ test("sync inlines every corpus source into llms-full.txt", async () => {
   );
 });
 
+test("agent answer surfaces describe domain evidence without identity overclaims", async () => {
+  for (const path of [
+    "../plugins/e2a/docs/auth.md",
+    "../plugins/e2a/docs/llms.txt",
+    "../web/public/auth.md",
+    "../web/public/llms.txt",
+    "../web/public/llms-full.txt",
+  ]) {
+    const body = await readFile(new URL(path, import.meta.url), "utf8");
+    assert.doesNotMatch(
+      body,
+      /authenticated email address|verified email inbox|sender verification|end-to-end-verified email address|identity claim e2a stands behind/i,
+      `${path} contains an identity overclaim`,
+    );
+  }
+  const llms = await readFile(
+    new URL("../plugins/e2a/docs/llms.txt", import.meta.url),
+    "utf8",
+  );
+  assert.match(llms, /structured inbound domain evidence/i);
+  assert.match(llms, /not a person, mailbox, or message content/i);
+});
+
 test("check reports a stale llms-full.txt without rewriting it", async () => {
   const repoRoot = await fixture();
   await syncAgentDocs({ repoRoot, check: false, log: () => {} });
