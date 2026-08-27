@@ -383,9 +383,13 @@ const contentDispositionHeaderPrefix = "Content-Disposition: "
 // attachment filename.
 //
 // MIME parameter values are ASCII-only. A non-ASCII filename must be
-// encoded per RFC 2231 as filename*=utf-8''<percent-encoded>, otherwise the
-// raw UTF-8 bytes land in a header field — an 8-bit value in a place that
-// only permits 7-bit, which receivers are free to mangle or reject.
+// encoded per RFC 2231 as:
+//
+//	filename*=utf-8''<percent-encoded>
+//
+// otherwise the raw UTF-8 bytes land in a header field, an 8-bit value in
+// a place that only permits 7-bit, which receivers are free to mangle or
+// reject.
 // mime.FormatMediaType applies that encoding, and quotes or escapes values
 // that merely contain specials, so it handles both cases.
 //

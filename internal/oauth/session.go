@@ -21,11 +21,11 @@ import (
 //     doesn't know about agents at all — this rides as session
 //     extension data.
 type Session struct {
-	UserID     string                              `json:"user_id"`
-	AgentEmail string                              `json:"agent_email,omitempty"`
-	Subject    string                              `json:"subject"`
-	Username   string                              `json:"username,omitempty"`
-	ExpiresAtMap map[fosite.TokenType]time.Time    `json:"expires_at,omitempty"`
+	UserID       string                         `json:"user_id"`
+	AgentEmail   string                         `json:"agent_email,omitempty"`
+	Subject      string                         `json:"subject"`
+	Username     string                         `json:"username,omitempty"`
+	ExpiresAtMap map[fosite.TokenType]time.Time `json:"expires_at,omitempty"`
 }
 
 // SetExpiresAt records the expiry for a given token type. fosite calls

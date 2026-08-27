@@ -27,9 +27,9 @@
 //
 // The intended call graph at request time looks like:
 //
-//   incoming request → agent handler → oauth.Provider methods
-//                                    → fosite → Storage (this pkg)
-//                                            → pgxpool → Postgres
+//	incoming request -> agent handler -> oauth.Provider methods
+//	                                   -> fosite -> Storage (this pkg)
+//	                                             -> pgxpool -> Postgres
 //
 // Storage implements the fosite-defined interfaces (OAuth2Storage,
 // PKCERequestStorage, ClientManager, TokenRevocationStorage). The

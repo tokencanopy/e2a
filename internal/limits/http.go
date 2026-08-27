@@ -23,8 +23,8 @@ type LimitErrorBody struct {
 	// favor of bytes-everywhere.
 	Limit      int    `json:"limit"`
 	Current    int    `json:"current"`
-	PlanCode   string `json:"plan_code"`  // opaque label from account_limits
-	UpgradeURL string `json:"upgrade_url"`// optional URL to surface in the dashboard
+	PlanCode   string `json:"plan_code"`   // opaque label from account_limits
+	UpgradeURL string `json:"upgrade_url"` // optional URL to surface in the dashboard
 }
 
 // WriteLimitError writes a 402 Payment Required response with the
