@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Loft — the e2a design system. Standalone, buildable React component library.",
   "license": "Apache-2.0",
+  "author": "TokenCanopy <josh@tokencanopy.com>",
+  "homepage": "https://github.com/tokencanopy/e2a/tree/main/design-system",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tokencanopy/e2a",
+    "directory": "design-system"
+  },
+  "bugs": "https://github.com/tokencanopy/e2a/issues",
   "type": "module",
   "sideEffects": [
     "*.css"
