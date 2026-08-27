@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Eyebrow } from "./Eyebrow";
+import { Eyebrow } from "@e2a/ui";
 
 export type PageShellProps = {
   eyebrow?: string;

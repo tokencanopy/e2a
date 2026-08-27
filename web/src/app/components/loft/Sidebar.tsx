@@ -4,9 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useAuth } from "../AuthProvider";
+import { useTheme } from "../ThemeProvider";
 import { usePendingCount } from "../hooks/usePendingCount";
 import { useUnreadCount } from "../hooks/useUnreadCount";
-import { ThemeToggle } from "./ThemeToggle";
+import { ThemeToggle } from "@e2a/ui";
 import { TokenCanopyGlyph } from "./TokenCanopyBadge";
 
 type IconKey = "plus" | "grid" | "user" | "clock" | "globe" | "key" | "settings" | "msg" | "shield" | "card" | "doc" | "trash" | "chart";
@@ -252,6 +253,7 @@ export function Sidebar({
   const { user, signOut } = useAuth();
   const pendingCount = usePendingCount();
   const unreadCount = useUnreadCount();
+  const { theme, setTheme } = useTheme();
 
   return (
     <aside
@@ -376,7 +378,7 @@ export function Sidebar({
         {/* Theme toggle — light / dark / system, persisted to localStorage
             by ThemeProvider. */}
         <div className="mt-2.5">
-          <ThemeToggle />
+          <ThemeToggle value={theme} onChange={setTheme} className="w-full" />
         </div>
 
         {/* User card */}

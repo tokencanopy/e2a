@@ -13,7 +13,7 @@ import { useMemo, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { PageShell } from "../../components/loft/PageShell";
-import { Chip } from "../../components/loft/Chip";
+import { Chip } from "@e2a/ui";
 import { InfoTip } from "../../components/loft/InfoTip";
 import { metricsKey } from "../../../lib/swrKeys";
 import { TrendChart, type TrendPoint } from "./_components/TrendChart";

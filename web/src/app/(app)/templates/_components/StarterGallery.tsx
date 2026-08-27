@@ -1,7 +1,6 @@
 "use client";
 
-import { Chip } from "../../../components/loft/Chip";
-import { Button } from "../../../components/loft/Button";
+import { Button, Chip } from "@e2a/ui";
 import type { StarterTemplateView } from "../_lib/types";
 import { UseStarterButton } from "./UseStarterButton";
 
