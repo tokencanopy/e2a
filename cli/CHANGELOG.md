@@ -85,8 +85,10 @@ ahead. A future schedule exits `0` with `status=scheduled`: the message is
 durably queued for future submission, so do not retry. `scheduled_at` in
 `--json` output is the future submission time — a "not before" bound, not an
 exact fire time. Direct self-send cannot be scheduled (permanent request
-error) unless a review hold takes precedence — held sends drop the schedule
-and send on approval. Trashing the message before provider submission starts
+error) unless a review hold takes precedence — a schedule caught by a hold
+survives it: the held message keeps its `send_at`, and approving it submits
+at that instant if it is still in the future, or immediately if it has
+already passed. Trashing the message before provider submission starts
 cancels the send; restoring it before the send time re-arms it, restoring at
 or after that time restores the message but leaves the send canceled.
 

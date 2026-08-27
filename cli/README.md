@@ -225,8 +225,10 @@ Scheduled sending via `--send-at` is **beta and may change before it is
 declared stable**.
 A future schedule exits `0` with `status=scheduled`; it is durably queued, so
 do not retry. Direct self-send cannot be scheduled and returns a permanent
-request error unless a review hold takes precedence (held sends drop the
-schedule). Trashing the message before provider submission starts prevents
+request error unless a review hold takes precedence — a schedule caught by a
+hold survives it: the held message keeps its `send_at`, and approving it
+submits at that instant if it is still in the future, or immediately if it
+has already passed. Trashing the message before provider submission starts prevents
 submission (an in-flight submission returns `409 send_in_progress`); restoring it before the
 send time re-arms it, while restoring at or after that time restores the
 message but leaves the send canceled.
