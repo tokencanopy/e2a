@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { DNSRecord } from "./Field";
+import { DNSRecord } from "./DnsRecord";
 
 // Regression guard for the Domains DNS-records overflow bug: a long, unbreakable
 // value (e.g. a DKIM public key) rendered in the copyable <code> used to push

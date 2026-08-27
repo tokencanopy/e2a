@@ -6,8 +6,7 @@
 // reverse-chronological in the artboard, but for an email-client
 // reading flow the conversation reads oldest→newest top→bottom.
 
-import { Chip, Dot } from "@e2a/ui";
-import { CounterpartyAvatar } from "./CounterpartyAvatar";
+import { Avatar, Chip, Dot } from "@e2a/ui";
 import { ThreadBubble } from "./ThreadBubble";
 import { PendingCallout } from "./PendingCallout";
 import { formatRelativeAge } from "../../../lib/relativeTime";
@@ -156,7 +155,7 @@ export function ThreadDetail({
             color: "var(--fg-muted)",
           }}
         >
-          <CounterpartyAvatar
+          <Avatar
             email={thread.counterparty.email}
             name={thread.counterparty.name}
             size={20}

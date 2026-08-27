@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { DNSRecord as DNSRecordField } from "../../../components/Field";
+import { DNSRecord as DNSRecordField } from "../../../components/DnsRecord";
 import type {
   DomainInfo,
   DNSRecord,

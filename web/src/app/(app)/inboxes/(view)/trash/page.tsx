@@ -13,7 +13,7 @@ import {
   restoreMessage,
   purgeMessage,
 } from "../../../../components/onboarding/api";
-import { CounterpartyAvatar } from "../../../../components/messages/CounterpartyAvatar";
+import { Avatar } from "@e2a/ui";
 import { formatRelativeAge } from "../../../../../lib/relativeTime";
 import {
   agentTrashKey,
@@ -122,7 +122,7 @@ function AgentTrashContent() {
                   borderBottom: "1px solid var(--border-sub)",
                 }}
               >
-                <CounterpartyAvatar email={counterparty} size={22} />
+                <Avatar email={counterparty} size={22} />
                 <div className="min-w-0 flex-1">
                   <div
                     className="truncate"

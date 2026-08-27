@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { DNSRecord as DNSRecordField } from "../../../components/Field";
+import { DNSRecord as DNSRecordField } from "../../../components/DnsRecord";
 import { Chip, Dot } from "@e2a/ui";
 import {
   verifyDomain,

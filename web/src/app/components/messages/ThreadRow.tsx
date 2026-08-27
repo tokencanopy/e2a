@@ -5,7 +5,7 @@
 // render bold. Clicking opens the conversation full-width.
 
 import { useState } from "react";
-import { CounterpartyAvatar } from "./CounterpartyAvatar";
+import { Avatar } from "@e2a/ui";
 import { MessageStatusChip, deriveStatusChip } from "./MessageStatusChip";
 import { formatRelativeAge } from "../../../lib/relativeTime";
 import { formatScheduledSend } from "../../../lib/scheduledTime";
@@ -78,7 +78,7 @@ export function ThreadRow({
         cursor: "pointer",
       }}
     >
-      <CounterpartyAvatar
+      <Avatar
         email={thread.counterparty.email}
         name={thread.counterparty.name}
         size={26}
