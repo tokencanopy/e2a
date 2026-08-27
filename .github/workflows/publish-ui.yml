@@ -1,0 +1,54 @@
+name: Publish UI
+
+# Dedicated tag (ui-v*), matching the CLI/SDK publish-tag convention: the
+# product "v*" tag must never drive a package publish. @e2a/ui has no
+# intra-repo published deps, so its tag is independent of ts-sdk-v* / cli-v*.
+on:
+  push:
+    tags: ["ui-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a running publish
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build --workspace @e2a/ui
+      - run: npm run typecheck --workspace @e2a/ui
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node 24 ships with npm >= 11, which is the floor npm's trusted-publisher
+      # OIDC flow requires (docs.npmjs.com/trusted-publishers: "npm CLI 11.5.1
+      # or later and Node 22.14.0 or higher"). Node 20 + npm 10.x silently
+      # skips the OIDC handshake and surfaces a misleading 404 PUT error
+      # (npm/cli#9088, #8730).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci
+      - run: npm run build --workspace @e2a/ui
+
+      - name: Publish to npm
+        run: npm publish --workspace @e2a/ui --access public --provenance
