@@ -219,6 +219,31 @@ func TestBuildPendingApprovalEvent(t *testing.T) {
 	}
 }
 
+func TestBuildPendingApprovalEvent_CarriesScheduledAt(t *testing.T) {
+	a := &API{}
+	agent := &identity.AgentIdentity{ID: "bot@x.example.com", UserID: "u_1"}
+	future := time.Now().Add(2 * time.Hour)
+	msg := &identity.Message{ID: "pend_1", ScheduledAt: &future}
+	req := outbound.SendRequest{To: []string{"alice@example.com"}, Subject: "review me"}
+	ev := a.buildPendingApprovalEvent(agent, msg, req, "send")
+	pdata := ev.Data.(map[string]interface{})
+	if pdata["scheduled_at"] != &future {
+		t.Errorf("scheduled_at = %v, want %v", pdata["scheduled_at"], &future)
+	}
+}
+
+func TestBuildPendingApprovalEvent_OmitsScheduledAtForImmediateSend(t *testing.T) {
+	a := &API{}
+	agent := &identity.AgentIdentity{ID: "bot@x.example.com", UserID: "u_1"}
+	msg := &identity.Message{ID: "pend_1"}
+	req := outbound.SendRequest{To: []string{"alice@example.com"}, Subject: "review me"}
+	ev := a.buildPendingApprovalEvent(agent, msg, req, "send")
+	pdata := ev.Data.(map[string]interface{})
+	if _, ok := pdata["scheduled_at"]; ok {
+		t.Errorf("scheduled_at should be omitted for an immediate send, got %v", pdata["scheduled_at"])
+	}
+}
+
 func TestBuildPendingApprovalEventUsesProvidedExactHoldTransition(t *testing.T) {
 	transition := messagelifecycle.MessageLifecycleTransition{ID: "mlt_exact", MessageID: "msg_pending", ReasonCode: messagelifecycle.ReasonReviewHoldCreated}
 	agent := &identity.AgentIdentity{ID: "bot@example.test", UserID: "user_owner"}
@@ -273,6 +298,27 @@ func TestBuildApprovedEvent(t *testing.T) {
 	localData := a.buildApprovedEvent(agent, sent, "u_reviewer").Data.(map[string]interface{})
 	if _, ok := localData["provider_message_id"]; ok {
 		t.Errorf("providerless loopback review event leaked provider_message_id: %v", localData)
+	}
+}
+
+func TestBuildApprovedEvent_CarriesScheduledAt(t *testing.T) {
+	a := &API{}
+	agent := &identity.AgentIdentity{ID: "bot@x.example.com", UserID: "u_1"}
+	future := time.Now().Add(2 * time.Hour)
+	sent := &identity.Message{ID: "msg_a", Type: "send", ScheduledAt: &future}
+	data := a.buildApprovedEvent(agent, sent, "u_reviewer").Data.(map[string]interface{})
+	if data["scheduled_at"] != &future {
+		t.Errorf("scheduled_at = %v, want %v", data["scheduled_at"], &future)
+	}
+}
+
+func TestBuildApprovedEvent_OmitsScheduledAtForImmediateSend(t *testing.T) {
+	a := &API{}
+	agent := &identity.AgentIdentity{ID: "bot@x.example.com", UserID: "u_1"}
+	sent := &identity.Message{ID: "msg_a", Type: "send"}
+	data := a.buildApprovedEvent(agent, sent, "u_reviewer").Data.(map[string]interface{})
+	if _, ok := data["scheduled_at"]; ok {
+		t.Errorf("scheduled_at should be omitted for an immediate send, got %v", data["scheduled_at"])
 	}
 }
 
