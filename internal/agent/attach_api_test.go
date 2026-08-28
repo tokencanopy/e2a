@@ -167,10 +167,16 @@ func TestAttachExternalPrincipal_SecurityGates(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("oversized body status = %d, want 400", resp.StatusCode)
 	}
-	// external_ref with control characters.
+	// external_ref with a C0 control character.
 	resp = attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "bad\x01ref", u.ID))
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("control-char ref status = %d, want 400", resp.StatusCode)
+		t.Fatalf("C0-control ref status = %d, want 400", resp.StatusCode)
+	}
+	// external_ref with a C1 control character (U+0085 NEL) — §10.3 "no
+	// control characters" spans C1 (0x80–0x9f), matching Hub's \p{Cc} check.
+	resp = attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "badref", u.ID))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("C1-control ref status = %d, want 400", resp.StatusCode)
 	}
 	// external_ref over 128 code points.
 	resp = attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, strings.Repeat("r", 129), u.ID))
@@ -234,5 +240,79 @@ func TestProvisionUser_ExternalIssuerCreatesMapping(t *testing.T) {
 	mapped, err := store.GetUserByExternalPrincipal(context.Background(), attachTestIssuer, "principal-7")
 	if err != nil || mapped == nil || mapped.ID != out["user_id"] {
 		t.Fatalf("mapping after provision = (%+v, %v), want user %s", mapped, err, out["user_id"])
+	}
+}
+
+// provisionSignedRequest posts a signed provision body and returns the
+// response.
+func provisionSignedRequest(t *testing.T, server *httptest.Server, secret string, body []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("POST", server.URL+"/api/internal/users/provision", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	req.Header.Set("X-E2A-Internal-Signature", hex.EncodeToString(mac.Sum(nil)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestProvisionUser_RejectsMismatchedIssuer is N1: a provision that
+// carries an external_issuer NOT byte-equal to the configured delegated
+// issuer must 400 invalid_issuer and create no user or mapping — a
+// trailing-slash issuer would otherwise produce a permanently
+// unauthenticatable mapping (attach requires exact equality, so the
+// verified token's issuer would never match).
+func TestProvisionUser_RejectsMismatchedIssuer(t *testing.T) {
+	server, store := setupAttachAPI(t, attachTestIssuer)
+
+	body, err := json.Marshal(map[string]string{
+		"external_issuer": attachTestIssuer + "/", // trailing slash != configured
+		"external_ref":    "principal-9",
+		"email":           "grace@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := provisionSignedRequest(t, server, attachTestSecret, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mismatched-issuer provision status = %d, want 400", resp.StatusCode)
+	}
+	if got := decodeAttachJSON(t, resp)["error"]; got != "invalid_issuer" {
+		t.Fatalf("code = %q, want invalid_issuer", got)
+	}
+	// Nothing was written: neither the (bad-issuer, ref) mapping nor a user
+	// for the email.
+	if m, err := store.GetUserByExternalPrincipal(context.Background(), attachTestIssuer+"/", "principal-9"); err != nil || m != nil {
+		t.Fatalf("no mapping must exist after a rejected provision, got (%+v, %v)", m, err)
+	}
+	// The email is still free — a rejected provision left no user row.
+	if _, _, err := store.ProvisionUser(context.Background(), "principal-9b", "grace@example.com", "", ""); err != nil {
+		t.Fatalf("email must remain free after a rejected provision: %v", err)
+	}
+}
+
+// TestProvisionUser_RejectsExternalIssuerWithoutConfiguredIssuer: when no
+// delegated issuer is configured, any external_issuer is a mismatch
+// (fail-closed — no unauthenticatable mapping can be created).
+func TestProvisionUser_RejectsExternalIssuerWithoutConfiguredIssuer(t *testing.T) {
+	server, _ := setupAttachAPI(t, "") // no delegated issuer configured
+
+	body, err := json.Marshal(map[string]string{
+		"external_issuer": attachTestIssuer,
+		"external_ref":    "principal-x",
+		"email":           "heidi@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := provisionSignedRequest(t, server, attachTestSecret, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 invalid_issuer when no issuer configured", resp.StatusCode)
 	}
 }

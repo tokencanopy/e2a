@@ -77,12 +77,21 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		writeProvisionError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if len(req.ExternalRef) == 0 || len(req.ExternalRef) > 128 {
+	// external_ref becomes the mapping subject when external_issuer is
+	// present, so it carries the §10.3 bound (1..128 code points, <=512
+	// UTF-8 bytes, no control characters) — the same validator attach uses.
+	if !validExternalRef(req.ExternalRef) {
 		writeProvisionError(w, http.StatusBadRequest, "invalid_external_ref")
 		return
 	}
-	if req.ExternalIssuer != "" && !validExternalIssuer(req.ExternalIssuer) {
-		writeProvisionError(w, http.StatusBadRequest, "invalid_external_issuer")
+	// When present, external_issuer must byte-equal the one configured
+	// delegated issuer — exactly as attach requires. Without this gate a
+	// trailing-slash (or otherwise-off) issuer would provision a mapping
+	// that a verified delegated token, whose issuer is byte-compared, could
+	// never match. An unset configured issuer makes every external_issuer a
+	// mismatch (fail-closed: no unauthenticatable mapping).
+	if req.ExternalIssuer != "" && req.ExternalIssuer != a.delegatedIssuer {
+		writeProvisionError(w, http.StatusBadRequest, "invalid_issuer")
 		return
 	}
 	email := identity.NormalizeEmail(req.Email)
@@ -212,23 +221,19 @@ func (a *API) handleAttachExternalPrincipal(w http.ResponseWriter, r *http.Reque
 
 // validExternalRef bounds a delegated external reference: 1..128 code
 // points, at most 512 UTF-8 bytes, valid UTF-8, no control characters.
+// "Control characters" spans C0 (below 0x20), DEL (0x7f), and C1
+// (0x80–0x9f) — the full Unicode Cc category, matching Hub's \p{Cc}
+// client-side check and §10.3.
 func validExternalRef(s string) bool {
 	if s == "" || len(s) > 512 || !utf8.ValidString(s) {
 		return false
 	}
 	n := 0
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return false
 		}
 		n++
 	}
 	return n <= 128
-}
-
-// validExternalIssuer bounds a provisioning external issuer: 1..512 code
-// points and at most 2048 UTF-8 bytes.
-func validExternalIssuer(s string) bool {
-	return s != "" && len(s) <= 2048 && utf8.ValidString(s) &&
-		utf8.RuneCountInString(s) <= 512
 }
