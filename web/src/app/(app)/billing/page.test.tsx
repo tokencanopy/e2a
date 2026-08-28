@@ -77,7 +77,7 @@ describe("BillingPage", () => {
     );
     expect(screen.getByText("Inboxes")).toBeInTheDocument();
     expect(screen.getByText("Domains")).toBeInTheDocument();
-    expect(screen.getByText("Messages this month")).toBeInTheDocument();
+    expect(screen.getByText("Sends this month")).toBeInTheDocument();
     expect(screen.getByText("Storage")).toBeInTheDocument();
 
     // Spot-check formatted numbers — message count uses thousands
