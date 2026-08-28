@@ -92,6 +92,9 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     recordCovered("messages.getMetrics");
   });
 
+  // Account-wide aggregation scans the shared account's cohort window, so its
+  // runtime grows with staging data even without a per-agent breakdown. Keep
+  // the live-test budget explicit rather than inheriting Vitest's 5s default.
   it("account.metrics() aggregates across the account", async () => {
     const flat = await client.account.metrics();
 
@@ -105,14 +108,13 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     }
 
     recordCovered("account.metrics");
-  });
+  }, 30_000);
 
-  // Split from the flat read, and the only test in this suite carrying an
-  // explicit timeout. group_by=agent fans the aggregate out per agent, so its
-  // cost scales with how many agents the account owns — unbounded and
-  // environment-dependent. Two of these calls in one test exceeded vitest's 5s
-  // default on a populated account while passing comfortably on a small one.
-  // Do not "tidy" this back to the default: it will pass locally and fail the
+  // Split from the flat read. group_by=agent adds a per-agent fan-out, so its
+  // cost also scales with how many agents the account owns. Both account-wide
+  // reads are environment-dependent and carry explicit budgets: they pass
+  // quickly on a small account but can exceed Vitest's 5s default on staging.
+  // Do not "tidy" either back to the default: it will pass locally and fail the
   // release pipeline.
   it("account.metrics({ groupBy: 'agent' }) partitions the account total", async () => {
     const grouped = await client.account.metrics({ groupBy: "agent" });
