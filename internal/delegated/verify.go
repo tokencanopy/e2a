@@ -69,8 +69,9 @@ func NewVerifier(ctx context.Context, cfg Config, metrics RefreshMetrics, opts .
 	for _, opt := range opts {
 		opt(v)
 	}
-	// go-oidc reads its HTTP client from the context.
-	go v.discoverWithRetry(oidcClientContext(ctx, v.httpClient))
+	// go-oidc reads its HTTP client from the context; the discovery client
+	// caps the one response go-oidc reads for us (maxDiscoveryBytes).
+	go v.discoverWithRetry(oidcClientContext(ctx, discoveryClient(v.httpClient)))
 	return v, nil
 }
 

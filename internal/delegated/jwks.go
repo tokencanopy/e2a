@@ -23,6 +23,76 @@ func oidcClientContext(ctx context.Context, c *http.Client) context.Context {
 	return oidc.ClientContext(ctx, c)
 }
 
+// maxDiscoveryBytes caps the OIDC discovery document go-oidc reads for
+// us. The JWKS fetch has its own explicit MaxJWKSBytes cap; this bounds
+// the one response go-oidc reads on our behalf so an oversized (or
+// hostile) discovery document cannot be buffered unbounded.
+const maxDiscoveryBytes = 65536
+
+// errResponseTooLarge is returned by a capped body once it delivers more
+// than its byte budget, surfacing as a read error to whatever is reading
+// the response (here, go-oidc's discovery parser).
+var errResponseTooLarge = errors.New("delegated: response body over cap")
+
+// cappingTransport bounds the response body of every request it carries.
+// It is used only for the discovery client; the JWKS fetch caps its own
+// body with an explicit io.LimitReader.
+type cappingTransport struct {
+	base http.RoundTripper
+	max  int64
+}
+
+func (t *cappingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	resp.Body = &cappedBody{inner: resp.Body, max: t.max}
+	return resp, nil
+}
+
+// cappedBody fails a read once the cumulative bytes read exceed max, so a
+// body of at most max bytes reads to EOF normally while a larger one
+// surfaces errResponseTooLarge instead of being silently truncated.
+type cappedBody struct {
+	inner io.ReadCloser
+	max   int64
+	read  int64
+}
+
+func (b *cappedBody) Read(p []byte) (int, error) {
+	n, err := b.inner.Read(p)
+	b.read += int64(n)
+	if b.read > b.max {
+		return n, errResponseTooLarge
+	}
+	return n, err
+}
+
+func (b *cappedBody) Close() error { return b.inner.Close() }
+
+// discoveryClient wraps c with a body-capping transport for the OIDC
+// discovery fetch. c is the verifier's own client (its timeout is
+// preserved); nil falls back to a default client.
+func discoveryClient(c *http.Client) *http.Client {
+	var base http.RoundTripper
+	timeout := FetchTimeout
+	if c != nil {
+		base = c.Transport
+		if c.Timeout > 0 {
+			timeout = c.Timeout
+		}
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &cappingTransport{base: base, max: maxDiscoveryBytes},
+	}
+}
+
 // RefreshMetrics is the narrow observability seam for key-refresh
 // outcomes. telemetry.Metrics satisfies it; nil disables emission.
 // Outcome values are a closed set: success, key_absent, transport_error,
@@ -103,11 +173,15 @@ func (v *Verifier) discoverWithRetry(ctx context.Context) {
 			log.Printf("[delegated] issuer discovered: %s", v.cfg.IssuerURL)
 			// Prime the cache best-effort; a failure here is just the
 			// cold-cache state the request path already handles.
+			primed := false
 			if keys, ferr := v.fetchJWKS(jwksURI); ferr == nil {
 				v.cache.mu.Lock()
 				v.cache.keys = keys
 				v.cache.lastSuccess = v.now()
 				v.cache.mu.Unlock()
+				primed = true
+			}
+			if primed {
 				v.emitRefresh("success")
 			}
 			return
@@ -139,6 +213,21 @@ func (v *Verifier) discoverWithRetry(ctx context.Context) {
 // rate limit, transport/parse failure, discovery not ready, cache too
 // stale) or errUnknownKid (a successful refresh proves the issuer does
 // not publish this kid).
+//
+// The cache has three regimes for a KNOWN kid, keyed on the age since the
+// last successful keyset fetch:
+//
+//   - fresh (age <= KeysFreshFor): served directly, no refresh — the
+//     600s window §10.7's key-retention math turns over on;
+//   - stale grace (KeysFreshFor < age <= KeysFreshFor+KeysStaleGrace): a
+//     rate-limited singleflight refresh is ATTEMPTED; a known kid is
+//     served only if that refresh fails (a removed/rotated-out key stops
+//     verifying as soon as a refresh succeeds);
+//   - expired (age > KeysFreshFor+KeysStaleGrace): even a known kid is
+//     verifier-unavailable until a refresh succeeds.
+//
+// An UNKNOWN kid is never served from cache at any age: it always forces
+// the one refresh, and a successful refresh without the key is 401.
 func (v *Verifier) keyForKid(ctx context.Context, kid string) (jose.JSONWebKey, error) {
 	uriPtr := v.jwksURI.Load()
 	if uriPtr == nil {
@@ -147,26 +236,37 @@ func (v *Verifier) keyForKid(ctx context.Context, kid string) (jose.JSONWebKey, 
 	now := v.now()
 	v.cache.mu.Lock()
 	key, known := v.cache.keys[kid]
-	withinGrace := !v.cache.lastSuccess.IsZero() &&
-		now.Sub(v.cache.lastSuccess) <= KeysFreshFor+KeysStaleGrace
+	haveGood := !v.cache.lastSuccess.IsZero()
+	age := now.Sub(v.cache.lastSuccess)
 	v.cache.mu.Unlock()
-	if known && withinGrace {
+
+	// Fresh known kid: authoritative, no issuer contact.
+	if known && haveGood && age <= KeysFreshFor {
 		return key, nil
 	}
-	// Unknown kid (any cache age) or a cache past the stale grace: one
-	// singleflight, rate-limited refresh decides the request's fate. An
-	// unknown key is never verified from stale state.
-	if err := v.refresh(ctx, *uriPtr); err != nil {
-		return jose.JSONWebKey{}, err
+
+	// Past the fresh window, or an unknown kid: attempt one singleflight,
+	// rate-limited refresh. An unknown kid is never verified from stale
+	// state, and a known kid past 600s must re-confirm against the issuer.
+	refreshErr := v.refresh(ctx, *uriPtr)
+	if refreshErr == nil {
+		v.cache.mu.Lock()
+		key, known = v.cache.keys[kid]
+		v.cache.mu.Unlock()
+		if !known {
+			v.emitRefresh("key_absent")
+			return jose.JSONWebKey{}, errUnknownKid
+		}
+		return key, nil
 	}
-	v.cache.mu.Lock()
-	key, known = v.cache.keys[kid]
-	v.cache.mu.Unlock()
-	if !known {
-		v.emitRefresh("key_absent")
-		return jose.JSONWebKey{}, errUnknownKid
+
+	// Refresh failed. A previously-known kid may still serve, but only
+	// inside the stale grace window; past it, or for an unknown kid, the
+	// refresh failure stands (ErrUnavailable).
+	if known && haveGood && age <= KeysFreshFor+KeysStaleGrace {
+		return key, nil
 	}
-	return key, nil
+	return jose.JSONWebKey{}, refreshErr
 }
 
 // refresh performs (or joins) one JWKS refresh. The leader takes the
@@ -221,23 +321,27 @@ func (v *Verifier) refresh(ctx context.Context, uri string) error {
 
 	keys, ferr := v.fetchJWKS(uri)
 
+	// Decide the outcome under the lock, but emit the metric after
+	// unlocking — a Prometheus Inc must never run while cache.mu is held.
+	var outcome string
 	v.cache.mu.Lock()
 	v.cache.lastAttemptErr = ferr
 	if ferr != nil {
 		v.cache.cooldownUntil = v.now().Add(RefreshCooldown)
 		if errors.Is(ferr, errJWKSMalformed) {
-			v.emitRefresh("parse_error")
+			outcome = "parse_error"
 		} else {
-			v.emitRefresh("transport_error")
+			outcome = "transport_error"
 		}
 	} else {
 		v.cache.keys = keys
 		v.cache.lastSuccess = v.now()
-		v.emitRefresh("success")
+		outcome = "success"
 	}
 	v.cache.refreshing = nil
 	close(ch)
 	v.cache.mu.Unlock()
+	v.emitRefresh(outcome)
 	if ferr != nil {
 		return fmt.Errorf("%w: key refresh failed", ErrUnavailable)
 	}

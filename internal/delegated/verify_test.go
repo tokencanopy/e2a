@@ -773,19 +773,40 @@ func TestJWKSFreshAndStaleWindows(t *testing.T) {
 	clock := &fakeClock{now: time.Now()}
 	v := newTestVerifier(t, is, clock, nil)
 
-	// Kill the issuer's JWKS endpoint: from here on only the cache serves.
-	is.setStatus(http.StatusInternalServerError)
-
 	known := func() string { return mint(t, clock, is.srv.URL, rsaKey, nil) }
 
-	// Within the fresh window a known key verifies with no fetch.
+	// Kill the issuer's JWKS endpoint: from here on only the cache serves,
+	// and every attempted refresh fails (a 500). Record the baseline fetch
+	// count so we can prove exactly WHEN a refresh is attempted — the fresh
+	// window (600s) must be distinguishable from the stale grace (900s).
+	is.setStatus(http.StatusInternalServerError)
+	baseFetches := is.jwksCalls.Load()
+
+	// Within the fresh window (<=600s) a known key verifies with NO refresh
+	// attempt: the cache is authoritative, so the issuer is never touched.
 	clock.Advance(599 * time.Second)
 	if _, err := v.Verify(context.Background(), known()); err != nil {
 		t.Fatalf("fresh known key should verify during issuer outage: %v", err)
 	}
+	if got := is.jwksCalls.Load(); got != baseFetches {
+		t.Fatalf("a fresh known key must not trigger a refresh: %d fetches, want %d", got, baseFetches)
+	}
 
-	// Within the stale grace (600..900s) a known key still verifies.
-	clock.Advance(300 * time.Second) // age 899s
+	// Just past the fresh window a refresh MUST be attempted (this is the
+	// 600s turnover §10.7's retention math depends on). The refresh fails
+	// (issuer down), so a known kid still serves out of the stale grace —
+	// but the fetch was made.
+	clock.Advance(2 * time.Second) // age 601s
+	if _, err := v.Verify(context.Background(), known()); err != nil {
+		t.Fatalf("stale-but-known key should still verify on a failed refresh: %v", err)
+	}
+	if got := is.jwksCalls.Load(); got != baseFetches+1 {
+		t.Fatalf("crossing the 600s fresh window must attempt exactly one refresh: %d fetches, want %d", got, baseFetches+1)
+	}
+
+	// Still within the stale grace (600..900s): a known key keeps verifying
+	// even though refreshes keep failing (rate-limited / cooldown).
+	clock.Advance(298 * time.Second) // age 899s
 	if _, err := v.Verify(context.Background(), known()); err != nil {
 		t.Fatalf("stale known key within grace should verify: %v", err)
 	}
@@ -801,6 +822,39 @@ func TestJWKSFreshAndStaleWindows(t *testing.T) {
 	clock.Advance(11 * time.Second) // clear cooldown + refill
 	if _, err := v.Verify(context.Background(), known()); err != nil {
 		t.Fatalf("recovered issuer should verify again: %v", err)
+	}
+}
+
+// TestJWKSRotatedOutKeyStopsVerifyingOnRefresh proves the fresh-window
+// turnover matters for a removed/compromised key: while fresh it still
+// verifies from cache, but past 600s the attempted refresh SUCCEEDS with
+// the key gone, so it immediately becomes an unknown kid (401) rather
+// than lingering to the 900s stale bound.
+func TestJWKSRotatedOutKeyStopsVerifyingOnRefresh(t *testing.T) {
+	is, rsaKey, ecKey := newIssuerServer(t)
+	clock := &fakeClock{now: time.Now()}
+	v := newTestVerifier(t, is, clock, nil)
+
+	rsaTok := func() string { return mint(t, clock, is.srv.URL, rsaKey, nil) }
+
+	// Fresh: the RSA key verifies.
+	if _, err := v.Verify(context.Background(), rsaTok()); err != nil {
+		t.Fatalf("fresh key should verify: %v", err)
+	}
+
+	// Rotate the RSA key OUT (issuer now publishes only the EC key), issuer
+	// healthy. While still fresh, the cache keeps verifying the old key.
+	is.setKeys([]jose.JSONWebKey{{Key: ecKey.Public(), KeyID: "ec-1", Algorithm: "ES256", Use: "sig"}})
+	clock.Advance(599 * time.Second)
+	if _, err := v.Verify(context.Background(), rsaTok()); err != nil {
+		t.Fatalf("within the fresh window a cached key still verifies: %v", err)
+	}
+
+	// Past 600s the refresh succeeds and the rotated-out key is gone: 401,
+	// not served from the stale grace.
+	clock.Advance(2 * time.Second) // age 601s
+	if _, err := v.Verify(context.Background(), rsaTok()); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("rotated-out key past the fresh window must be invalid (401), got %v", err)
 	}
 }
 
@@ -891,6 +945,46 @@ func buildOversizedKeySet(n int) []byte {
 	}
 	out, _ := json.Marshal(map[string]any{"keys": keys})
 	return out
+}
+
+// TestDiscoveryBodyCapped proves an oversized OIDC discovery document is
+// not read unbounded. The doc is OTHERWISE valid (correct issuer +
+// jwks_uri, and a live JWKS), so without the cap discovery would succeed
+// and the token would verify; with the cap the discovery read fails, so
+// discovery never completes and delegated tokens stay 503.
+func TestDiscoveryBodyCapped(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		// Valid fields plus a padded member go-oidc ignores; the whole
+		// document is deliberately over maxDiscoveryBytes.
+		pad := strings.Repeat("x", maxDiscoveryBytes+1024)
+		_, _ = w.Write([]byte(`{"issuer":"` + base + `","jwks_uri":"` + base + `/jwks","pad":"` + pad + `"}`))
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: rsaKey.Public(), KeyID: "rsa-1", Algorithm: "RS256", Use: "sig"},
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := &fakeClock{now: time.Now()}
+	v, err := NewVerifier(ctx, testConfig(srv.URL), nil, WithClock(clock.Now))
+	if err != nil {
+		t.Fatalf("construction must not fail on issuer transport: %v", err)
+	}
+	tok := mint(t, clock, srv.URL, rsaKey, nil)
+	if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("an oversized discovery document must leave the verifier unavailable, got %v", err)
+	}
 }
 
 func TestVerifierNotReadyIsUnavailable(t *testing.T) {
