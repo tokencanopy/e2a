@@ -134,7 +134,7 @@ async function createAgent(label: string): Promise<string> {
   return c.body.email;
 }
 async function delAgent(email: string): Promise<void> {
-  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
 }
 async function createHook(events: string[]): Promise<CreateWebhookResponse> {
   const r = await client.post<CreateWebhookResponse>("/v1/webhooks", {

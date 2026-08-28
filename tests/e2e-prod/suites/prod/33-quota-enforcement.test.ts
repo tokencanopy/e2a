@@ -103,7 +103,7 @@ test("prod quota: agent-count cap (5) is enforced with full LimitExceededDetails
     info(SUITE, "agent-cap-trip", `cap tripped after ${created.length} successful creates`);
   } finally {
     for (const email of created) {
-      const d = await q.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+      const d = await q.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
       if (![200, 204, 404].includes(d.status)) {
         fail(SUITE, "agent-cleanup-failed", `delete agent ${email} returned ${d.status}: ${d.raw.slice(0, 200)} — MANUAL CLEANUP MAY BE NEEDED (would strand the account at cap on the next run)`);
       }

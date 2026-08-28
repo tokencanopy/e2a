@@ -94,7 +94,7 @@ async function createAgent(label: string): Promise<string> {
 }
 
 async function delAgent(email: string): Promise<void> {
-  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
 }
 
 // pollEvent mirrors suites/21-webhook-events.test.ts's helper (kept local —

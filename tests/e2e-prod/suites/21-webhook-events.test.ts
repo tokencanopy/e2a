@@ -231,7 +231,7 @@ async function createHook(events: string[]): Promise<CreateWebhookResponse> {
 }
 
 async function delAgent(email: string): Promise<void> {
-  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
 }
 async function delHook(id: string): Promise<void> {
   await client.delete(`/v1/webhooks/${encodeURIComponent(id)}?confirm=DELETE`);

@@ -53,7 +53,7 @@ test("quota: agent-count cap is enforced (402 limit_exceeded)", { skip }, async 
     assert.ok(created.length >= 1, "at least one create succeeded before the cap");
   } finally {
     for (const email of created) {
-      await q!.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+      await q!.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
     }
   }
 });
