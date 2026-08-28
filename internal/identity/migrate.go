@@ -174,6 +174,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, 
 	if err != nil {
 		return fmt.Errorf("load applied migrations: %w", err)
 	}
+	compatibilityRepairs := migrationFilenameCompatibilityRepairs(applied, files)
 	recognizeMigrationFilenameAliases(applied, files)
 
 	// Defensive: warn about migrations recorded in schema_migrations
@@ -187,6 +188,21 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, 
 		if !applied[f] {
 			pending = append(pending, f)
 		}
+	}
+	if mode == ModeVerify && len(compatibilityRepairs) > 0 {
+		return fmt.Errorf(
+			"verify mode: rollback compatibility repair pending for %s — set E2A_MIGRATION_MODE=auto to record the legacy filename marker(s) without replaying migration SQL",
+			strings.Join(compatibilityRepairs, ", "),
+		)
+	}
+	if len(compatibilityRepairs) > 0 {
+		if err := recordMigrationFilenames(ctx, conn, compatibilityRepairs); err != nil {
+			return fmt.Errorf("repair rollback compatibility migration markers: %w", err)
+		}
+		for _, legacy := range compatibilityRepairs {
+			applied[legacy] = true
+		}
+		log.Printf("[migrate] repaired %d rollback compatibility migration marker(s)", len(compatibilityRepairs))
 	}
 
 	if len(pending) == 0 {
@@ -282,6 +298,21 @@ func recognizeMigrationFilenameAliases(applied map[string]bool, files []string) 
 	}
 }
 
+// migrationFilenameCompatibilityRepairs returns legacy tracker names that are
+// missing even though their current aliases are already recorded. The current
+// record proves the migration body ran; inserting only the legacy marker makes
+// a rollback binary skip the same body without replaying any SQL.
+func migrationFilenameCompatibilityRepairs(applied map[string]bool, files []string) []string {
+	repairs := make([]string, 0, len(migrationFilenameAliases))
+	for _, current := range files {
+		legacy, ok := migrationFilenameAliases[current]
+		if ok && applied[current] && !applied[legacy] {
+			repairs = append(repairs, legacy)
+		}
+	}
+	return repairs
+}
+
 func currentMigrationFilenameForLegacy(legacy string) (string, bool) {
 	for current, candidate := range migrationFilenameAliases {
 		if candidate == legacy {
@@ -297,6 +328,33 @@ func migrationFilenamesToRecord(current string) []string {
 		return []string{current}
 	}
 	return []string{current, legacy}
+}
+
+func recordMigrationFilenames(ctx context.Context, conn *pgxpool.Conn, filenames []string) error {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tracker tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := recordMigrationFilenamesTx(ctx, tx, filenames); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tracker tx: %w", err)
+	}
+	return nil
+}
+
+func recordMigrationFilenamesTx(ctx context.Context, tx pgx.Tx, filenames []string) error {
+	for _, filename := range filenames {
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+			filename,
+		); err != nil {
+			return fmt.Errorf("record migration %s: %w", filename, err)
+		}
+	}
+	return nil
 }
 
 // hasNoTransactionDirective scans the leading comment block of a
@@ -459,15 +517,7 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 		if err := validateConcurrentIndexPostcondition(ctx, conn, string(body)); err != nil {
 			return fmt.Errorf("verify migration %s: %w", name, err)
 		}
-		for _, filename := range migrationFilenamesToRecord(name) {
-			if _, err := conn.Exec(ctx,
-				"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-				filename,
-			); err != nil {
-				return fmt.Errorf("record migration %s: %w", filename, err)
-			}
-		}
-		return nil
+		return recordMigrationFilenames(ctx, conn, migrationFilenamesToRecord(name))
 	}
 
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
@@ -479,13 +529,8 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 	if _, err := tx.Exec(ctx, string(body)); err != nil {
 		return fmt.Errorf("exec migration: %w", err)
 	}
-	for _, filename := range migrationFilenamesToRecord(name) {
-		if _, err := tx.Exec(ctx,
-			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-			filename,
-		); err != nil {
-			return fmt.Errorf("record migration %s: %w", filename, err)
-		}
+	if err := recordMigrationFilenamesTx(ctx, tx, migrationFilenamesToRecord(name)); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

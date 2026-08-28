@@ -182,6 +182,168 @@ func TestFreshRenamedMigrationRecordsLegacyFilenameForRollback(t *testing.T) {
 	}
 }
 
+func TestRunMigrationsRepairsCurrentOnlyAliasMarkers(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	expectedNames := make([]string, 0, len(renamedB1Migrations)*2)
+	fsEntries := make(map[string]string, len(renamedB1Migrations))
+	for _, migration := range renamedB1Migrations {
+		expectedNames = append(expectedNames, migration.legacyName, migration.currentName)
+		fsEntries[migration.currentName] = "THIS MUST NOT EXECUTE;"
+	}
+	restoreMigrationRecords(t, pool, expectedNames)
+	if _, err := pool.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = ANY($1)",
+		expectedNames,
+	); err != nil {
+		t.Fatalf("clear migration records: %v", err)
+	}
+	for _, migration := range renamedB1Migrations {
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO schema_migrations (filename) VALUES ($1)",
+			migration.currentName,
+		); err != nil {
+			t.Fatalf("seed current migration record %s: %v", migration.currentName, err)
+		}
+	}
+
+	err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeVerify)
+	if err == nil || !strings.Contains(err.Error(), "rollback compatibility") {
+		t.Fatalf("verify current-only aliases error = %v, want rollback compatibility repair", err)
+	}
+	for _, migration := range renamedB1Migrations {
+		var legacyCount int
+		if err := pool.QueryRow(ctx,
+			"SELECT count(*) FROM schema_migrations WHERE filename = $1",
+			migration.legacyName,
+		).Scan(&legacyCount); err != nil {
+			t.Fatalf("read legacy migration record %s: %v", migration.legacyName, err)
+		}
+		if legacyCount != 0 {
+			t.Fatalf("verify mode must not repair %s, got %d rows", migration.legacyName, legacyCount)
+		}
+	}
+
+	if err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeAuto); err != nil {
+		t.Fatalf("auto mode should repair current-only aliases without replay: %v", err)
+	}
+	for _, migration := range renamedB1Migrations {
+		var pairCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM schema_migrations
+			WHERE filename IN ($1, $2)
+		`, migration.currentName, migration.legacyName).Scan(&pairCount); err != nil {
+			t.Fatalf("read repaired migration pair %s: %v", migration.currentName, err)
+		}
+		if pairCount != 2 {
+			t.Fatalf("migration pair %s / %s count = %d, want 2", migration.currentName, migration.legacyName, pairCount)
+		}
+	}
+}
+
+func TestRunMigrationsRepairsMixedAliasTrackerStates(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	expectedNames := make([]string, 0, len(renamedB1Migrations)*2)
+	fsEntries := make(map[string]string, len(renamedB1Migrations))
+	for _, migration := range renamedB1Migrations {
+		expectedNames = append(expectedNames, migration.legacyName, migration.currentName)
+		fsEntries[migration.currentName] = "SELECT 1;"
+	}
+	restoreMigrationRecords(t, pool, expectedNames)
+	if _, err := pool.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = ANY($1)",
+		expectedNames,
+	); err != nil {
+		t.Fatalf("clear migration records: %v", err)
+	}
+
+	// Exercise none, legacy-only, current-only, and both tracker states in one
+	// invocation, with the remaining pairs repeating the asymmetric states.
+	for i, migration := range renamedB1Migrations {
+		switch i % 4 {
+		case 1:
+			_, _ = pool.Exec(ctx, "INSERT INTO schema_migrations (filename) VALUES ($1)", migration.legacyName)
+		case 2:
+			_, _ = pool.Exec(ctx, "INSERT INTO schema_migrations (filename) VALUES ($1)", migration.currentName)
+		case 3:
+			_, _ = pool.Exec(ctx, "INSERT INTO schema_migrations (filename) VALUES ($1), ($2)", migration.currentName, migration.legacyName)
+		}
+	}
+
+	if err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeAuto); err != nil {
+		t.Fatalf("repair mixed alias tracker states: %v", err)
+	}
+	for i, migration := range renamedB1Migrations {
+		var currentCount, legacyCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE filename=$1), count(*) FILTER (WHERE filename=$2)
+			FROM schema_migrations
+			WHERE filename IN ($1, $2)
+		`, migration.currentName, migration.legacyName).Scan(&currentCount, &legacyCount); err != nil {
+			t.Fatalf("read mixed migration pair %s: %v", migration.currentName, err)
+		}
+		if legacyCount != 1 {
+			t.Fatalf("legacy marker %s count = %d, want 1", migration.legacyName, legacyCount)
+		}
+		if i%4 == 1 && currentCount != 0 {
+			t.Fatalf("legacy-only upgrade must not fabricate current marker %s", migration.currentName)
+		}
+		if i%4 != 1 && currentCount != 1 {
+			t.Fatalf("current marker %s count = %d, want 1", migration.currentName, currentCount)
+		}
+	}
+}
+
+func TestNoTransactionAliasTrackerRecordsAtomically(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	migration := renamedB1Migrations[0]
+	expectedNames := []string{migration.currentName, migration.legacyName}
+	restoreMigrationRecords(t, pool, expectedNames)
+	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE filename = ANY($1)", expectedNames); err != nil {
+		t.Fatalf("clear migration records: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION reject_legacy_alias_marker() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.filename = '109_sending_protection_policy.sql' THEN
+				RAISE EXCEPTION 'synthetic tracker interruption';
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		CREATE TRIGGER reject_legacy_alias_marker
+		BEFORE INSERT ON schema_migrations
+		FOR EACH ROW EXECUTE FUNCTION reject_legacy_alias_marker();
+	`); err != nil {
+		t.Fatalf("install tracker interruption fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DROP TRIGGER IF EXISTS reject_legacy_alias_marker ON schema_migrations")
+		_, _ = pool.Exec(context.Background(), "DROP FUNCTION IF EXISTS reject_legacy_alias_marker()")
+	})
+
+	fsys := stubFS(map[string]string{
+		migration.currentName: "-- e2a:no-transaction\nSELECT 1",
+	})
+	if err := identity.RunMigrations(ctx, pool, fsys, identity.ModeAuto); err == nil {
+		t.Fatal("expected synthetic alias tracker interruption")
+	}
+	var recorded int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM schema_migrations WHERE filename = ANY($1)",
+		expectedNames,
+	).Scan(&recorded); err != nil {
+		t.Fatalf("read interrupted tracker rows: %v", err)
+	}
+	if recorded != 0 {
+		t.Fatalf("interrupted no-transaction tracker recorded %d alias rows, want 0", recorded)
+	}
+}
+
 func TestMigrationsRewriteLegacySendingJobsWithImmutableAttribution(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
