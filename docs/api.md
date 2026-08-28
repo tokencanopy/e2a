@@ -264,11 +264,16 @@ GA unless its heading or prose says `(beta)`.
 - **Capacity limits — the permanent `402` / `429` split.** Two different limits
   can block a write, and they are **permanently distinct** — branch on the HTTP
   status:
-  - **`402 limit_exceeded`** is a **quota** (a stock/flow cap): monthly-message
-    allowance, storage bytes, agent/domain counts. A retry alone will not clear
-    it — surface an upgrade/quota path. `error.details` is a `LimitExceededDetails`
-    whose `resource` (`agents | domains | messages_month | storage_bytes`) keys the
-    cap to `usage.<resource>` / `limits.max_<resource>` on `GET /v1/account`.
+  - **`402 limit_exceeded`** is a **quota** (a stock/flow cap): the send
+    allowance, storage bytes, agent/domain counts. Message-flow allowances
+    count **outbound recipient-deliveries** — a message to N distinct
+    recipients consumes N units, and received mail is free and unmetered.
+    A retry alone will not clear it — surface an upgrade/quota path.
+    `error.details` is a `LimitExceededDetails` whose `resource`
+    (`agents | domains | messages_month | storage_bytes | messages_day`) keys
+    the cap to `usage.<resource>` / `limits.max_<resource>` on
+    `GET /v1/account` (`messages_day` — a per-UTC-day send cap some accounts
+    carry — has no AccountView field; it clears when the UTC day rolls over).
   - **`429 rate_limited`** is a **throughput / request-rate** limit (e.g. the
     per-agent send rate). It is transient and retry-able: wait
     `error.details.retry_after_seconds` (mirrored on the `Retry-After` header),

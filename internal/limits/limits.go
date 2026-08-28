@@ -27,6 +27,14 @@ type Limits struct {
 	MaxMessagesMonth int    `json:"max_messages_month"`
 	MaxStorageBytes  int64  `json:"max_storage_bytes"`
 	UpgradeURL       string `json:"upgrade_url"`
+	// MaxMessagesDay is the per-UTC-day outbound recipient-delivery cap.
+	// nil = no daily policy (the self-host default and every paid tier);
+	// 0 = hard-block, consistent with the other caps. Provisioned by the
+	// hosted sidecar for bare Free accounts (any add-on lifts it). Excluded
+	// from JSON like OutboundFooterEnabled: the public limits payloads
+	// (GET /v1/account, the 402 envelope) are unchanged — the cap surfaces
+	// only through the 402 open-set resource "messages_day".
+	MaxMessagesDay *int `json:"-"`
 	// OutboundFooterEnabled is a feature entitlement, not a cap: whether
 	// outbound mail from this account carries the operator-configured
 	// footer (config `outbound_footer:` block; the feature's master switch
@@ -46,6 +54,10 @@ type Defaults struct {
 	MaxDomains       int
 	MaxMessagesMonth int
 	MaxStorageBytes  int64
+	// MaxMessagesDay is the row-less fallback for the per-day send cap.
+	// nil (the config default when `limits.max_messages_day` is unset)
+	// means no daily policy — self-host behavior is untouched.
+	MaxMessagesDay *int
 	// OutboundFooterEnabled is the row-less fallback for the outbound
 	// footer entitlement, wired from `outbound_footer.default_enabled`.
 	OutboundFooterEnabled bool
@@ -66,11 +78,23 @@ type Enforcer interface {
 	// domain, or *LimitExceededError if they have already hit the cap.
 	CheckDomainCreate(ctx context.Context, userID string) error
 
-	// CheckMessageSend returns nil if the user may send/receive another
-	// message this calendar month, or *LimitExceededError if they have
-	// already hit the cap. Counts inbound+outbound in the current UTC
-	// month against MaxMessagesMonth.
-	CheckMessageSend(ctx context.Context, userID string) error
+	// CheckMessageSend returns nil if the user may send `units` more
+	// outbound recipient-deliveries (a message to N distinct recipients is
+	// N units), or *LimitExceededError otherwise. The month-flow check is
+	// `used + units > MaxMessagesMonth` against the current UTC month's
+	// outbound recipient-delivery count — for units == 1 this is exactly
+	// the historical `used >= max` semantics. Storage is checked after the
+	// flow cap. Inbound mail is free and unmetered; the inbound path uses
+	// CheckInboundMessage instead.
+	CheckMessageSend(ctx context.Context, userID string, units int) error
+
+	// CheckInboundMessage returns nil if the user may receive another
+	// message, or *LimitExceededError when the storage cap is exhausted.
+	// Inbound mail is free and unmetered — a recipient's flow-quota state
+	// must never bounce a stranger's mail — so this checks ONLY the
+	// storage stock cap (the one physical resource an inbound message
+	// consumes).
+	CheckInboundMessage(ctx context.Context, userID string) error
 
 	// Invalidate evicts the user's cached Limits so the next Get/Check
 	// re-reads from the database. Called by the limits-invalidate HTTP

@@ -28,7 +28,7 @@ class LimitsCapsView(BaseModel):
     """ # noqa: E501
     max_agents: StrictInt
     max_domains: StrictInt
-    max_messages_month: StrictInt
+    max_messages_month: StrictInt = Field(description="Monthly send allowance in outbound recipient-deliveries: a message to N distinct recipients consumes N units. Received mail is free and does not count. Resets at the start of each calendar month (UTC). Checked against usage.messages_month.")
     max_storage_bytes: StrictInt = Field(description="Storage-quota cap in bytes, checked against usage.storage_bytes (see its doc for what is counted).")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["max_agents", "max_domains", "max_messages_month", "max_storage_bytes"]

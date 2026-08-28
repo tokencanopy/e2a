@@ -176,11 +176,13 @@ func TestSMTPInboundMetric_RejectedQuota(t *testing.T) {
 	if _, err := store.CreateAgent(ctx, agentEmail, domain, "", "", "", user.ID); err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	// max_messages_month=0 trips CheckMessageSend immediately (same setup as
-	// TestRelay_RcptTo_Rejects552WhenOverCap).
+	// max_storage_bytes=0 trips CheckInboundMessage immediately (same setup
+	// as TestRelay_RcptTo_Rejects552WhenStorageExhausted). Flow caps are
+	// outbound-only and never reject inbound mail, so storage is the only
+	// resource that can produce rejected_quota here.
 	lstore := limits.NewStore(pool)
 	if err := lstore.Upsert(ctx, user.ID, limits.Limits{
-		PlanCode: "free_test", MaxAgents: 100, MaxDomains: 100, MaxMessagesMonth: 0, MaxStorageBytes: 1 << 40,
+		PlanCode: "free_test", MaxAgents: 100, MaxDomains: 100, MaxMessagesMonth: 100_000, MaxStorageBytes: 0,
 	}); err != nil {
 		t.Fatalf("Upsert limits: %v", err)
 	}

@@ -640,7 +640,7 @@ export class AgentsApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "LimitExceededEnvelope", ""
             ) as LimitExceededEnvelope;
-            throw new ApiException<LimitExceededEnvelope>(response.httpStatusCode, "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.&lt;resource&gt; / limits.max_&lt;resource&gt;. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.", body, response.headers);
+            throw new ApiException<LimitExceededEnvelope>(response.httpStatusCode, "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over).", body, response.headers);
         }
         if (isCodeInRange("429", response.httpStatusCode)) {
             const body: RateLimitedEnvelope = ObjectSerializer.deserialize(
@@ -1021,7 +1021,7 @@ export class AgentsApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "LimitExceededEnvelope", ""
             ) as LimitExceededEnvelope;
-            throw new ApiException<LimitExceededEnvelope>(response.httpStatusCode, "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.&lt;resource&gt; / limits.max_&lt;resource&gt;. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.", body, response.headers);
+            throw new ApiException<LimitExceededEnvelope>(response.httpStatusCode, "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over).", body, response.headers);
         }
         if (isCodeInRange("429", response.httpStatusCode)) {
             const body: RateLimitedEnvelope = ObjectSerializer.deserialize(

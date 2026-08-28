@@ -698,6 +698,7 @@ func main() {
 			MaxAgents:        cfg.Limits.MaxAgents,
 			MaxDomains:       cfg.Limits.MaxDomains,
 			MaxMessagesMonth: cfg.Limits.MaxMessagesMonth,
+			MaxMessagesDay:   cfg.Limits.MaxMessagesDay,
 			MaxStorageBytes:  cfg.Limits.MaxStorageBytes,
 			// Row-less fallback for the outbound-footer entitlement — the
 			// `outbound_footer:` block's default_enabled, not `limits:`.
@@ -714,12 +715,19 @@ func main() {
 	// otherwise an expires-to-approve hold ships unfootered while the identical
 	// human-approved hold does not.
 	hitlWorker.SetOutboundFooterResolver(api.OutboundFooterForAccount)
-	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
-	// month a scheduled send actually fires (accept-time enforcement can't know a
-	// future fire month). Over-cap → refuse terminally; a transient lookup error
-	// fails open so a glitch never drops a legitimate send.
-	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
-		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
+	// TTL auto-approve releases held drafts that were never metered at accept;
+	// give the sweep the same flow-cap re-check the human approve funnel runs.
+	hitlWorker.SetQuotaCheck(func(ctx context.Context, userID string, units int) error {
+		return enforcer.CheckMessageSend(ctx, userID, units)
+	})
+	// Fire-time flow-cap gate for deferred-settlement sends (scheduled +
+	// review-released): enforce the caps in the window the send actually
+	// fires, with the claim's real recipient-unit count. Monthly over-cap →
+	// terminal refusal; daily over-cap → deferral to next UTC midnight; a
+	// transient lookup error fails open so a glitch never drops a legitimate
+	// send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string, units int) (string, bool, error) {
+		return scheduledSendQuotaResult(enforcer.CheckMessageSend(ctx, userID, units))
 	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
@@ -1064,18 +1072,23 @@ func main() {
 	<-riverDone
 }
 
-// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
-// fire-time concern for scheduled messages. The message is already persisted,
-// so a later storage-cap breach must not cancel it; only the monthly message
-// cap for the month in which it fires is terminal.
-func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+// scheduledSendQuotaResult narrows the general send-limit check to the
+// fire-time concern for deferred-settlement messages (scheduled and
+// review-released). The message is already persisted, so a later storage-cap
+// breach must not cancel it; only the FLOW caps matter at fire time, and the
+// exceeded resource stem is returned so the caller can distinguish terminal
+// monthly exhaustion from a recoverable daily deferral.
+func scheduledSendQuotaResult(err error) (resource string, over bool, retErr error) {
 	if err == nil {
-		return false, nil
+		return "", false, nil
 	}
 	if limitErr, ok := limits.IsLimitExceeded(err); ok {
-		return limitErr.Resource == "messages_month", nil
+		if limitErr.Resource == "messages_month" || limitErr.Resource == "messages_day" {
+			return limitErr.Resource, true, nil
+		}
+		return "", false, nil
 	}
-	return false, err
+	return "", false, err
 }
 
 // isTerminal reports whether f is an interactive terminal rather than a pipe or

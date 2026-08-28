@@ -13,13 +13,31 @@ import (
 )
 
 type UsageEvent struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	AgentID   string    `json:"agent_id"`
-	Domain    string    `json:"domain"`
-	Direction string    `json:"direction"`
-	EventType string    `json:"event_type"`
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	AgentID   string `json:"agent_id"`
+	Domain    string `json:"domain"`
+	Direction string `json:"direction"`
+	EventType string `json:"event_type"`
+	// Units is how many recipient-deliveries this event represents: one row
+	// per metered message, `units` recipients. Inbound is one unit per row
+	// (the SMTP session already fans out per resolved recipient); outbound is
+	// the deduplicated to ∪ cc ∪ bcc count. Values < 1 are normalized to 1 on
+	// write so a caller bug can never record a free or negative message.
+	Units     int       `json:"units"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// normalizeUnits pins the metering floor: every metered message is at least
+// one unit. The recipient count can never legitimately be zero (the API
+// requires >=1 To recipient and loopback is exactly one), so <1 here is a
+// caller bug — metering 1 keeps the account billed rather than silently
+// under-counting.
+func normalizeUnits(units int) int {
+	if units < 1 {
+		return 1
+	}
+	return units
 }
 
 type UsageSummary struct {
@@ -48,10 +66,11 @@ func (s *Store) RecordUsageEvent(ctx context.Context, event *UsageEvent) error {
 	if event.EventType == "" {
 		event.EventType = "message"
 	}
+	event.Units = normalizeUnits(event.Units)
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO usage_events (id, user_id, agent_id, domain, direction, event_type, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		event.ID, event.UserID, event.AgentID, event.Domain, event.Direction, event.EventType, event.CreatedAt,
+		`INSERT INTO usage_events (id, user_id, agent_id, domain, direction, event_type, units, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		event.ID, event.UserID, event.AgentID, event.Domain, event.Direction, event.EventType, event.Units, event.CreatedAt,
 	)
 	return err
 }
@@ -66,7 +85,8 @@ func (s *Store) RecordUsageEventTx(ctx context.Context, tx pgx.Tx, event *UsageE
 	if event.EventType == "" {
 		event.EventType = "message"
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO usage_events (id,user_id,agent_id,domain,direction,event_type,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, event.ID, event.UserID, event.AgentID, event.Domain, event.Direction, event.EventType, event.CreatedAt)
+	event.Units = normalizeUnits(event.Units)
+	_, err := tx.Exec(ctx, `INSERT INTO usage_events (id,user_id,agent_id,domain,direction,event_type,units,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, event.ID, event.UserID, event.AgentID, event.Domain, event.Direction, event.EventType, event.Units, event.CreatedAt)
 	return err
 }
 
@@ -84,12 +104,13 @@ func (s *Store) GetUsageSummary(ctx context.Context, userID, bucketDate string) 
 	return sum, nil
 }
 
-func (s *Store) IncrementUsageSummary(ctx context.Context, userID, bucketDate, direction string) error {
+func (s *Store) IncrementUsageSummary(ctx context.Context, userID, bucketDate, direction string, units int) error {
+	units = normalizeUnits(units)
 	inbound, outbound := 0, 0
 	if direction == "inbound" {
-		inbound = 1
+		inbound = units
 	} else {
-		outbound = 1
+		outbound = units
 	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO usage_summaries (user_id, bucket_date, inbound_count, outbound_count, total_count)
@@ -103,12 +124,13 @@ func (s *Store) IncrementUsageSummary(ctx context.Context, userID, bucketDate, d
 	return err
 }
 
-func (s *Store) IncrementUsageSummaryTx(ctx context.Context, tx pgx.Tx, userID, bucketDate, direction string) error {
+func (s *Store) IncrementUsageSummaryTx(ctx context.Context, tx pgx.Tx, userID, bucketDate, direction string, units int) error {
+	units = normalizeUnits(units)
 	inbound, outbound := 0, 0
 	if direction == "inbound" {
-		inbound = 1
+		inbound = units
 	} else {
-		outbound = 1
+		outbound = units
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO usage_summaries (user_id,bucket_date,inbound_count,outbound_count,total_count) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (user_id,bucket_date) DO UPDATE SET inbound_count=usage_summaries.inbound_count+$3,outbound_count=usage_summaries.outbound_count+$4,total_count=usage_summaries.total_count+$5`, userID, bucketDate, inbound, outbound, inbound+outbound)
 	return err
@@ -184,8 +206,10 @@ func (s *Store) CountDomainsByUser(ctx context.Context, userID string) (int, err
 	return count, err
 }
 
-// MessagesThisMonth returns the user's inbound+outbound message count
+// MessagesThisMonth returns the user's OUTBOUND recipient-delivery count
 // for the current UTC calendar month, summed from usage_summaries.
+// Inbound mail is recorded (inbound_count feeds analytics and dashboards)
+// but is free and unmetered — it does not consume the monthly allowance.
 // Returns 0 with no error if the user has no rows yet. The reference is
 // time.Now().UTC() so server clocks crossing midnight UTC roll the
 // counter consistently with the daily bucket_date written by
@@ -195,11 +219,28 @@ func (s *Store) MessagesThisMonth(ctx context.Context, userID string) (int, erro
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 	var count int
 	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(total_count), 0)
+		`SELECT COALESCE(SUM(outbound_count), 0)
 		   FROM usage_summaries
 		  WHERE user_id = $1 AND bucket_date >= $2`,
 		userID, monthStart,
 	).Scan(&count)
+	return count, err
+}
+
+// MessagesToday returns the user's OUTBOUND recipient-delivery count for
+// the current UTC day, for the optional per-day send cap. Returns 0 with
+// no error if the user has no row for today. Shares CurrentDate()'s UTC
+// bucketing with IncrementUsageSummary so the day rolls consistently.
+func (s *Store) MessagesToday(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT outbound_count FROM usage_summaries
+		  WHERE user_id = $1 AND bucket_date = $2`,
+		userID, CurrentDate(),
+	).Scan(&count)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
 	return count, err
 }
 

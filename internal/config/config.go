@@ -416,7 +416,14 @@ type LimitsConfig struct {
 	MaxAgents        int    `yaml:"max_agents"`
 	MaxDomains       int    `yaml:"max_domains"`
 	MaxMessagesMonth int    `yaml:"max_messages_month"`
-	MaxStorageBytes  int64  `yaml:"max_storage_bytes"`
+	// MaxMessagesDay is the optional per-UTC-day outbound send cap applied
+	// to users without an account_limits row. Unset/absent (the default)
+	// means no daily policy — self-host behavior is untouched. 0 hard-blocks
+	// all sends, consistent with the other caps. Hosted deployments set it
+	// to the Free tier's daily allowance; the billing sidecar overrides it
+	// per account via the max_messages_day column.
+	MaxMessagesDay  *int  `yaml:"max_messages_day"`
+	MaxStorageBytes int64 `yaml:"max_storage_bytes"`
 	// CacheTTLSeconds controls how long resolved Limits are cached
 	// in-process. The cache covers the account_limits read only; current
 	// usage counts are always live. Set to 0 to disable caching
@@ -715,6 +722,11 @@ func Load(path string) (*Config, error) {
 // running with any of these weakens approval tokens and derived encryption keys
 // and approve HITL messages.
 func (c *Config) Validate() error {
+	// A negative daily cap is always a mistake (it would silently 402 every
+	// send); 0 is a legal hard-block and absent/nil means no daily policy.
+	if c.Limits.MaxMessagesDay != nil && *c.Limits.MaxMessagesDay < 0 {
+		return fmt.Errorf("config: limits.max_messages_day is %d; must be >= 0 (omit the key for no daily cap)", *c.Limits.MaxMessagesDay)
+	}
 	if c.IsProduction() {
 		if c.Signing.HMACSecret == "" {
 			return errors.New("config: signing.hmac_secret (or E2A_HMAC_SECRET) must be set when env=production")

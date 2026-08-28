@@ -15,6 +15,9 @@ type Counter interface {
 	CountAgentsByUser(ctx context.Context, userID string) (int, error)
 	CountDomainsByUser(ctx context.Context, userID string) (int, error)
 	MessagesThisMonth(ctx context.Context, userID string) (int, error)
+	// MessagesToday returns the current UTC day's outbound
+	// recipient-delivery count, for the optional per-day cap.
+	MessagesToday(ctx context.Context, userID string) (int, error)
 	GetStorageBytes(ctx context.Context, userID string) (int64, error)
 }
 
@@ -124,6 +127,7 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 			MaxAgents:             e.defaults.MaxAgents,
 			MaxDomains:            e.defaults.MaxDomains,
 			MaxMessagesMonth:      e.defaults.MaxMessagesMonth,
+			MaxMessagesDay:        e.defaults.MaxMessagesDay,
 			MaxStorageBytes:       e.defaults.MaxStorageBytes,
 			OutboundFooterEnabled: e.defaults.OutboundFooterEnabled,
 		}
@@ -218,12 +222,19 @@ func (e *DBEnforcer) CheckDomainCreate(ctx context.Context, userID string) error
 	return nil
 }
 
-// CheckMessageSend enforces both the month-flow cap and the storage
-// stock cap. Either being exceeded blocks the operation. The flow cap
-// is checked first because it's the cheaper read; if both would fail,
-// the user sees "messages_month" as the reason, which is the easier one
-// to explain ("you sent N this month").
-func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string) error {
+// CheckMessageSend enforces the month-flow cap and the storage stock
+// cap for an outbound send of `units` recipient-deliveries. Either
+// being exceeded blocks the operation. The flow cap is checked first
+// because it's the cheaper read; if both would fail, the user sees
+// "messages_month" as the reason, which is the easier one to explain
+// ("you sent N this month"). The flow comparison is
+// `used + units > max` — the whole message is rejected when it would
+// cross the cap (no partial sends), and for units == 1 this reduces to
+// the historical `used >= max`.
+func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string, units int) error {
+	if units < 1 {
+		units = 1
+	}
 	lim, err := e.Get(ctx, userID)
 	if err != nil {
 		return err
@@ -232,12 +243,30 @@ func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string) error 
 	if err != nil {
 		return err
 	}
-	if msgCount >= lim.MaxMessagesMonth {
+	if msgCount+units > lim.MaxMessagesMonth {
 		return &LimitExceededError{
 			Resource: "messages_month",
 			Limit:    lim.MaxMessagesMonth,
 			Current:  msgCount,
 			Limits:   lim,
+		}
+	}
+	// Optional per-day cap (usage-based pricing v1). nil = no daily policy —
+	// the self-host default and every paid shape — so the extra count read
+	// only happens for accounts that actually carry the cap. Resets at UTC
+	// midnight with the usage_summaries bucket_date.
+	if lim.MaxMessagesDay != nil {
+		dayCount, err := e.counter.MessagesToday(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if dayCount+units > *lim.MaxMessagesDay {
+			return &LimitExceededError{
+				Resource: "messages_day",
+				Limit:    *lim.MaxMessagesDay,
+				Current:  dayCount,
+				Limits:   lim,
+			}
 		}
 	}
 	storage, err := e.counter.GetStorageBytes(ctx, userID)
@@ -251,6 +280,31 @@ func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string) error 
 		// safeInt64ToInt so we don't roll over on unusual targets; the
 		// real value is also surfaced verbatim in the Limits field for
 		// callers that need bytes-accurate access.
+		return &LimitExceededError{
+			Resource: "storage_bytes",
+			Limit:    safeInt64ToInt(lim.MaxStorageBytes),
+			Current:  safeInt64ToInt(storage),
+			Limits:   lim,
+		}
+	}
+	return nil
+}
+
+// CheckInboundMessage enforces ONLY the storage stock cap for an inbound
+// delivery. Message-flow caps are outbound-only (usage-based pricing v1):
+// a recipient's exhausted send allowance must never bounce a stranger's
+// inbound mail. Storage remains checked because an inbound message
+// physically consumes the account's storage budget.
+func (e *DBEnforcer) CheckInboundMessage(ctx context.Context, userID string) error {
+	lim, err := e.Get(ctx, userID)
+	if err != nil {
+		return err
+	}
+	storage, err := e.counter.GetStorageBytes(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if storage >= lim.MaxStorageBytes {
 		return &LimitExceededError{
 			Resource: "storage_bytes",
 			Limit:    safeInt64ToInt(lim.MaxStorageBytes),

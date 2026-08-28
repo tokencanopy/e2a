@@ -28,7 +28,7 @@ class LimitsUsageView(BaseModel):
     """ # noqa: E501
     agents: StrictInt
     domains: StrictInt
-    messages_month: StrictInt
+    messages_month: StrictInt = Field(description="Outbound recipient-deliveries consumed this UTC calendar month: each distinct recipient of each sent message counts one. Received mail is free and never appears here.")
     storage_bytes: StrictInt = Field(description="Bytes of retained message content counted against the storage quota: per message, RAW MIME plus any retained outbound body and attachment columns, including content retained after terminal transitions.")
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["agents", "domains", "messages_month", "storage_bytes"]

@@ -309,14 +309,17 @@ func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not found"}
 	}
 
-	// Reject at SMTP envelope time if the recipient's owner has hit the
-	// message-flow or storage cap. 552 (mailbox quota exceeded, RFC 5321
-	// §4.2.2) tells the upstream MTA to bounce the message back to the
-	// original sender with a deliverable error rather than retry. We
-	// fail open on enforcer errors (DB hiccup) so a transient outage
-	// doesn't lose mail — the storage trigger is the safety net.
+	// Reject at SMTP envelope time ONLY when the recipient's owner has hit
+	// the storage cap. Message-flow caps are outbound-only (usage-based
+	// pricing v1): inbound mail is free and unmetered, and a recipient's
+	// exhausted send allowance must never bounce a stranger's mail. 552
+	// (mailbox quota exceeded, RFC 5321 §4.2.2) tells the upstream MTA to
+	// bounce the message back to the original sender with a deliverable
+	// error rather than retry. We fail open on enforcer errors (DB hiccup)
+	// so a transient outage doesn't lose mail — the storage trigger is the
+	// safety net.
 	if s.relay.enforcer != nil && agent.UserID != "" {
-		if err := s.relay.enforcer.CheckMessageSend(ctx, agent.UserID); err != nil {
+		if err := s.relay.enforcer.CheckInboundMessage(ctx, agent.UserID); err != nil {
 			if le, ok := limits.IsLimitExceeded(err); ok {
 				log.Printf("[%s] [%s] rejecting %s: limit exceeded (%s)", s.id, logredact.AddressDomain(s.from), to, le.Resource)
 				s.relay.recordSMTPInbound("rejected_quota", 0)
@@ -735,7 +738,9 @@ func (srv *Server) processInbound(ctx context.Context, in inboundInput, hook pos
 	// per attempt. Post-persist + the worker's already-processed no-op gate ⇒ once per
 	// delivered message. Mirrors the outbound send path.
 	if agent.UserID != "" {
-		srv.usage.RecordAndCheck(ctx, agent.UserID, agent.ID, agent.Domain, "inbound")
+		// One unit per delivered copy: the SMTP session already fanned out per
+		// resolved recipient, so each agent's delivery is its own metered unit.
+		srv.usage.RecordAndCheck(ctx, agent.UserID, agent.ID, agent.Domain, "inbound", 1)
 	}
 
 	// Append the screening audit rows (gate + scan violations) best-effort. Soft-ref
