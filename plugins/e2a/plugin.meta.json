@@ -3,7 +3,7 @@
 
   "name": "e2a",
   "displayName": "e2a",
-  "version": "0.9.2",
+  "version": "0.9.4",
   "license": "Apache-2.0",
   "homepage": "https://e2a.dev",
   "repository": "https://github.com/tokencanopy/e2a",
@@ -19,9 +19,9 @@
 
   "descriptions": {
     "$comment": "Three variants ship today. `manifest` omits HITL; both marketplace variants mention it. See docs/design/2026-08-09-agent-plugins-conformance.md — unifying them is a copy decision, deliberately not made by this migration. The MCP tool count must match mcp/tool-names.v1.json; the validator checks numeric claims.",
-    "manifest": "Authenticated email gateway for AI agents — per-agent inboxes, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
-    "marketplaceLong": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
-    "marketplaceShort": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log."
+    "manifest": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+    "marketplaceLong": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+    "marketplaceShort": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log."
   },
 
   "mcp": {
@@ -30,19 +30,19 @@
   },
 
   "codexInterface": {
-    "shortDescription": "Authenticated email for AI agents",
-    "longDescription": "Bundles the hosted e2a MCP server and five stable skills for setup, application integration, inbox operation, diagnosis, and evaluation — with SPF/DKIM verification, custom domains, attachments, and a replayable event log.",
+    "shortDescription": "Open-source email API for applications and AI agents",
+    "longDescription": "Bundles the hosted e2a MCP server and five stable skills for setup, application integration, inbox operation, diagnosis, and evaluation — with structured inbound domain evidence, custom domains, attachments, and a replayable event log.",
     "developerName": "TokenCanopy",
     "category": "Productivity"
   },
 
   "marketplaces": {
     "claude": {
-      "blurb": "e2a plugins for Claude Code — authenticated email for AI agents",
+      "blurb": "e2a plugins for Claude Code — open-source email API for applications and AI agents",
       "category": "productivity"
     },
     "cursor": {
-      "blurb": "e2a — authenticated email gateway for AI agents (MCP configuration and canonical docs).",
+      "blurb": "e2a — open-source email API for applications and AI agents (MCP configuration and canonical docs).",
       "extraKeyword": "cursor"
     },
     "agents": {

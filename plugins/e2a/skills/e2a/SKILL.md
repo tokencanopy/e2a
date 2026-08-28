@@ -1,14 +1,14 @@
 ---
 name: e2a
 description: "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior."
-version: 27
+version: 29
 ---
 
 # Using e2a
 
-<!-- version: 27 -->
+<!-- version: 29 -->
 
-e2a is an authenticated email gateway for AI agents. It gives an agent a real email address (`agent@agents.e2a.dev` or `agent@your-domain.com`), verifies sender identity (SPF/DKIM), and threads conversations.
+e2a is the open-source email API for applications and AI agents. This operate-well skill focuses on agent-owned inboxes: it gives an agent a real two-way address (`agent@agents.localhost` or `agent@example.com`), evaluates SPF, DKIM, and DMARC as structured evidence about the From domain, and threads conversations. That evidence does not prove a person, mailbox, or message content.
 
 ## How this fits
 
@@ -25,7 +25,7 @@ The mental model below holds regardless of surface. Tool descriptions teach the 
 
 Six load-bearing facts. Internalize these before you start calling tools.
 
-1. **An agent is an email address.** `support-bot@agents.e2a.dev` is an agent. When you send mail, the recipient sees a message FROM that address — not from "the user." When you list messages, you are reading the agent's own inbox, not the user's personal mail. You are not a secretary; you are the mailbox owner.
+1. **An agent is an email address.** `support-bot@agents.localhost` is an agent. When you send mail, the recipient sees a message FROM that address — not from "the user." When you list messages, you are reading the agent's own inbox, not the user's personal mail. You are not a secretary; you are the mailbox owner.
 
 2. **Replies preserve threads; new sends do not.** `reply_to_message` carries the `In-Reply-To` and `References` headers from the original message, so the response lands in the same email thread. A fresh `send_message` creates a new thread every time. If a user (or an inbound message) is asking you to respond to something specific, reply with the original `message_id` — even when you could synthesize an equivalent body as a new send. Thread fragmentation is the #1 visible symptom of getting this wrong.
 

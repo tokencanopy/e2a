@@ -41,6 +41,44 @@ test("the e2a skill description is quoted YAML", async () => {
   assert.match(source, /^description: "(?:[^"\\]|\\.)*"$/m);
 });
 
+test("plugin discovery surfaces use the canonical email API category", async () => {
+  const canonical = /open-source email API for applications and AI agents/i;
+  const stale = /authenticated email gateway|authenticated email for AI agents|real, authenticated email inbox|verifies sender identity/i;
+
+  const meta = JSON.parse(await readFile("plugins/e2a/plugin.meta.json", "utf8"));
+  for (const [key, description] of Object.entries(meta.descriptions)) {
+    if (key === "$comment") continue;
+    if (typeof description === "string") assert.match(description, canonical);
+  }
+  assert.match(meta.codexInterface.shortDescription, canonical);
+  assert.match(meta.marketplaces.claude.blurb, canonical);
+  assert.match(meta.marketplaces.cursor.blurb, canonical);
+
+  for (const file of [
+    "plugins/e2a/README.md",
+    "plugins/e2a/skills/e2a/SKILL.md",
+    "plugins/e2a/plugin.json",
+    "plugins/e2a/.claude-plugin/plugin.json",
+    "plugins/e2a/.codex-plugin/plugin.json",
+    "plugins/e2a/.cursor-plugin/plugin.json",
+  ]) {
+    const source = await readFile(file, "utf8");
+    assert.match(source, canonical, file);
+    assert.doesNotMatch(source, stale, file);
+  }
+
+  for (const file of [
+    ".claude-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    ".cursor-plugin/marketplace.json",
+  ]) {
+    const marketplace = JSON.parse(await readFile(file, "utf8"));
+    const plugin = marketplace.plugins.find((candidate) => candidate.name === "e2a");
+    assert.ok(plugin, `${file} is missing e2a`);
+    assert.match(plugin.description, canonical, file);
+  }
+});
+
 test("the e2a skill teaches concise multipart email composition", async () => {
   const source = await readFile("plugins/e2a/skills/e2a/SKILL.md", "utf8");
 

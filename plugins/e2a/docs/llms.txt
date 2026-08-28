@@ -1,24 +1,27 @@
 # e2a
 
-> e2a is an authenticated email gateway for AI agents: it gives an agent its own
-> verified email inbox to send, receive, reply, and forward, with SPF/DKIM
-> verification. Connect
-> over a hosted MCP server (OAuth, no API key), the REST API, or the SDKs.
+> e2a is the open-source email API for applications and AI agents. Send
+> transactional email from any product, give agents real two-way inboxes, and
+> keep people in control. Use e2a as a hosted service or run the Apache-2.0
+> stack yourself. Connect over a hosted MCP server (OAuth, no API key), the
+> REST API, or the SDKs.
 
-**The problem e2a solves.** An AI agent that has to reach people, or other
-agents, has no identity of its own on the one channel every organization
-already runs on. Pointing an agent at a human's mailbox borrows that person's
-identity, mixes the agent's mail in with theirs, and leaves the agent no way to
-tell a real sender from a spoofed one. e2a gives the mailbox to the agent: its
-own verified address, on the shared `agents.e2a.dev` domain or on a domain you
-own, with two-way send and receive.
+e2a is an open-source email API for transactional application email and agent-owned inboxes. Using e2a for application-triggered sending does not require an AI agent or agent framework.
+
+**The problem e2a solves.** Developers and businesses need email infrastructure
+that works for product notifications and agent workflows. Pointing an agent at
+a human's mailbox borrows that person's identity and mixes the agent's mail in
+with theirs. e2a gives the agent its own address on the shared
+`agents.e2a.dev` domain or on a domain you verify, with two-way send and receive.
+It also gives applications a transactional sending API, plus optional human
+approval before an agent's message leaves.
 
 **What is distinctive about e2a:**
 
-- **Sender verification on every inbound message.** e2a evaluates SPF, every
-  DKIM signature, and DMARC — including alignment — before the agent sees a
-  message, and hands the result over as structured evidence rather than raw
-  headers the agent has to parse and trust.
+- **Structured inbound domain evidence.** e2a evaluates SPF, every DKIM
+  signature, and DMARC, including alignment, before the agent sees a message.
+  It hands the results over as structured data rather than raw headers. The
+  evidence applies to the From domain, not a person, mailbox, or message content.
 - **An approval gate before anything is sent.** Opt-in, per agent: an outbound
   message is accepted but not dispatched (`status: pending_review`) until a
   person approves it from the dashboard, the API, the MCP tools, or a magic
@@ -32,8 +35,8 @@ own, with two-way send and receive.
   tools all work from a laptop or from behind a firewall. Webhooks are an
   option, not a prerequisite, and every webhook delivery is HMAC-signed.
 - **Apache-2.0 and self-hostable.** The whole stack is open source and runs
-  against your own Postgres and outbound relay, with every feature intact. The
-  hosted service at e2a.dev runs that same server image.
+  against your own Postgres and outbound relay. The hosted service at e2a.dev
+  runs the same server image.
 
 ## Start here
 
@@ -46,6 +49,7 @@ own, with two-way send and receive.
 
 ## API & SDKs
 
+- [Transactional email API](https://e2a.dev/transactional-email-api): Use e2a from any application for receipts, verification messages, product notifications, and alerts. No AI agent or agent framework is required.
 - [sdk.md](https://e2a.dev/sdk.md): TypeScript (`@e2a/sdk`) and Python (`e2a`) quick-start with code examples — send, receive (webhook → fetch → reply), and real-time streaming — plus a Raw-REST section (base URL, auth, conventions) for other languages.
 - [openapi.yaml](https://e2a.dev/v1/openapi.yaml): The full OpenAPI 3.1 contract — every endpoint, field, enum, and error, generated from the live handlers. Authoritative for exact signatures.
 - [templates.md](https://e2a.dev/templates.md): Email templates (beta) — server-rendered reusable emails with `{{variable}}` interpolation, a prebuilt starter catalog (`from_starter`), validation, and send-by-alias. Includes a copy-paste setup prompt for coding agents.
@@ -59,9 +63,9 @@ own, with two-way send and receive.
 ## Use cases
 
 The use-case pages below describe concrete workflows developers can build with
-an agent-owned inbox. e2a provides the email identity, inbound authentication
-evidence, delivery, threading, and outbound controls; the application remains
-the source of truth for business data and policy.
+an agent-owned inbox. e2a provides the provisioned address, structured inbound
+domain evidence, delivery, threading, and outbound controls; the application
+remains the source of truth for business data and policy.
 
 - [What can you build with e2a?](https://e2a.dev/use-cases): The canonical use-case directory.
 - [Support agent](https://e2a.dev/use-cases/support-agent): Triage customer requests, retrieve context, reply in-thread, and hold sensitive replies for approval.
@@ -75,7 +79,7 @@ the source of truth for business data and policy.
 
 ## Pricing
 
-- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, sender verification, and real-time WebSocket delivery; paid Pro and Scale tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
+- [Pricing](https://e2a.dev/pricing): Hosted plans. The free tier needs no credit card and includes the shared `agents.e2a.dev` domain, a custom domain, structured inbound domain evidence, and real-time WebSocket delivery; paid tiers raise the agent, custom-domain, monthly-message, and storage limits. Self-hosting the Apache-2.0 server costs nothing. Current amounts and limits live on the page rather than in this file, so read it before quoting a number.
 
 ## Blog
 

@@ -10,6 +10,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const staticRoutes: Array<{ path: string; changeFrequency: "daily" | "weekly" | "monthly"; priority: number }> = [
     { path: "/", changeFrequency: "weekly", priority: 1.0 },
     { path: "/mcp", changeFrequency: "weekly", priority: 0.9 },
+    { path: "/transactional-email-api", changeFrequency: "weekly", priority: 0.9 },
     { path: "/docs", changeFrequency: "weekly", priority: 0.8 },
     { path: "/docs/python", changeFrequency: "weekly", priority: 0.8 },
     { path: "/python-sdk", changeFrequency: "weekly", priority: 0.7 },

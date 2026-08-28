@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { SuccessPanel } from "./SuccessPanel";
 import type { AgentData } from "../../../components/types";
 
-const agent: AgentData = { domain: "agents.e2a.dev", email: "my-agent@agents.e2a.dev" };
+const agent: AgentData = { domain: "agents.localhost", email: "my-agent@agents.localhost" };
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
@@ -27,7 +27,14 @@ describe("SuccessPanel", () => {
   it("announces the created inbox with its email address", () => {
     render(<SuccessPanel agent={agent} />);
     expect(screen.getByText("Inbox created!")).toBeInTheDocument();
-    expect(screen.getByText("my-agent@agents.e2a.dev")).toBeInTheDocument();
+    expect(screen.getByText("my-agent@agents.localhost")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Connect your application or agent" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "API Keys" })).toHaveAttribute(
+      "href",
+      "/api-keys",
+    );
   });
 
   it("sends a test email to the new inbox and shows the delivered state", async () => {
@@ -35,17 +42,17 @@ describe("SuccessPanel", () => {
     render(<SuccessPanel agent={agent} />);
 
     await userEvent.click(
-      screen.getByRole("button", { name: /Send a test email to my-agent@agents\.e2a\.dev/ }),
+      screen.getByRole("button", { name: /Send a test email to my-agent@agents\.localhost/ }),
     );
 
     expect(
-      await screen.findByText(/Test email is on its way to my-agent@agents\.e2a\.dev/),
+      await screen.findByText(/Test email is on its way to my-agent@agents\.localhost/),
     ).toBeInTheDocument();
     expect(mockFetch).toHaveBeenCalledWith(
-      "/v1/agents/my-agent%40agents.e2a.dev/test",
+      "/v1/agents/my-agent%40agents.localhost/test",
       expect.objectContaining({ method: "POST", credentials: "include" }),
     );
-    expect(screen.getByText(/Connect your agent below to receive it/)).toBeInTheDocument();
+    expect(screen.getByText(/Connect your application or agent below to receive it/)).toBeInTheDocument();
   });
 
   it("surfaces the server error and returns to the idle state on failure", async () => {

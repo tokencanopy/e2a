@@ -1,4 +1,5 @@
 import {
+  FREE_OFFER_ID,
   ORGANIZATION_ID,
   SOFTWARE_ID,
   blogPosting,
@@ -21,6 +22,14 @@ describe("structured data", () => {
     });
   });
 
+  it("describes domain evidence without claiming an authenticated mailbox", () => {
+    const description = String(organization().description);
+    expect(description).toMatch(/open-source email API for applications and AI agents/i);
+    expect(description).toMatch(/structured SPF, DKIM, and DMARC evidence/i);
+    expect(description).toMatch(/From domain, not a person, mailbox, or content/i);
+    expect(description).not.toMatch(/authenticated email address|verified inbox/i);
+  });
+
   it("gives the product a stable @id the pricing page can attach Offers to", () => {
     // The pricing page ships from a different repo and hangs its paid-tier
     // Offer nodes off this @id. Drop it and that reference dangles, leaving
@@ -38,9 +47,11 @@ describe("structured data", () => {
     // page so structured data cannot drift away from billing.
     expect(softwareApplication("desc").offers).toEqual({
       "@type": "Offer",
+      "@id": FREE_OFFER_ID,
       price: "0",
       priceCurrency: "USD",
     });
+    expect(FREE_OFFER_ID).toMatch(/#offer-free$/);
   });
 
   it("builds a BlogPosting with absolute URLs and an ISO publish date", () => {

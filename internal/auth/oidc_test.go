@@ -880,6 +880,22 @@ func TestOIDCLoginCarriesInboxThreadReturnToInResumeCookie(t *testing.T) {
 	}
 }
 
+func TestOIDCLoginCarriesGetStartedReturnToInResumeCookie(t *testing.T) {
+	fx := setupOIDC(t)
+
+	returnTo := "/get-started?step=address"
+	tx := beginOIDCLoginRaw(t, fx, "/api/auth/oidc/login?return_to="+url.QueryEscape(returnTo))
+
+	cookie := findCookie(tx.cookies, "e2a_oidc_resume")
+	if cookie == nil {
+		t.Fatal("resume cookie not set for sender setup return_to login")
+	}
+	resume := decodeResumeCookieValue(t, cookie)
+	if resume.ReturnTo != returnTo {
+		t.Errorf("resume return_to = %q, want %q", resume.ReturnTo, returnTo)
+	}
+}
+
 // TestOIDCLoginRejectsReturnToOutsideAllowList applies the legacy door's
 // exact reject list (TestHandleLogin_RejectsReturnToOutsideAllowList):
 // every value the allow-list refuses must 400 the login, before any
@@ -889,6 +905,8 @@ func TestOIDCLoginRejectsReturnToOutsideAllowList(t *testing.T) {
 
 	bad := []string{
 		"/dashboard",                         // unrelated dashboard route
+		"/get-started/other",                 // sender setup allow-list is exact
+		"/get-started/../dashboard",          // sender setup path traversal
 		"/reviews/other",                     // review allow-list is exact
 		"/reviews/../dashboard",              // review path traversal
 		"/inboxes/messages/view",             // inbox allow-list is exact

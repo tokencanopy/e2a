@@ -57,6 +57,11 @@ describe("sitemap", () => {
     }
   });
 
+  it("includes the transactional email API page", () => {
+    delete process.env[ENV_KEY];
+    expect(urls()).toContain("http://localhost:3000/transactional-email-api");
+  });
+
   it("includes the use-case hub and every published use-case page", () => {
     delete process.env[ENV_KEY];
     const found = urls();
