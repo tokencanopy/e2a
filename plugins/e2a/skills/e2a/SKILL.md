@@ -1,14 +1,14 @@
 ---
 name: e2a
 description: "Use when operating an already-connected e2a inbox over MCP: reading, composing, sending, replying, forwarding, handling attachments, managing contacts/outreach, scheduling mail, or using templates. Teaches correct threading, conversation correlation, concise multipart composition, and accepted/pending-review no-retry behavior."
-version: 28
+version: 29
 ---
 
 # Using e2a
 
-<!-- version: 28 -->
+<!-- version: 29 -->
 
-e2a is the open-source email API for AI agents. It gives an agent a real two-way address (`agent@agents.localhost` or `agent@example.com`), evaluates SPF, DKIM, and DMARC as structured evidence about the From domain, and threads conversations. That evidence does not prove a person, mailbox, or message content.
+e2a is the open-source email API for applications and AI agents. This operate-well skill focuses on agent-owned inboxes: it gives an agent a real two-way address (`agent@agents.localhost` or `agent@example.com`), evaluates SPF, DKIM, and DMARC as structured evidence about the From domain, and threads conversations. That evidence does not prove a person, mailbox, or message content.
 
 ## How this fits
 

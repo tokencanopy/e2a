@@ -127,6 +127,8 @@ test("agent answer surfaces describe domain evidence without identity overclaims
   );
   assert.match(llms, /structured inbound domain evidence/i);
   assert.match(llms, /not a person, mailbox, or message content/i);
+  assert.match(llms, /transactional application email and agent-owned inboxes/i);
+  assert.match(llms, /does not require an AI agent or agent framework/i);
   assert.doesNotMatch(llms, /paid Pro and Scale tiers/i);
 });
 

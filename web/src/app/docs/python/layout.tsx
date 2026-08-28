@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import { SITE_URL } from "../../../lib/site";
 
-const TITLE = "Python SDK docs — send email from your AI agent";
+const TITLE = "Python SDK docs — send transactional email with e2a";
 const DESC =
-  "Python SDK guide for e2a. Install the e2a package, send transactional email, receive mail with structured domain evidence, use WebSocket delivery, and thread conversations across agents and humans.";
+  "Python SDK guide for e2a. Send transactional email from any application without an agent framework, or receive mail with structured domain evidence, WebSocket delivery, and threaded conversations.";
 
 export const metadata: Metadata = {
   title: { absolute: TITLE },

@@ -163,13 +163,14 @@ export default function DocsPage() {
         {/* The lede is the extractable answer: what the docs cover and where
             the exhaustive reference lives. */}
         <p className="text-[17px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
-          e2a is the open-source email API for AI agents. It sends transactional
-          email, gives agents real two-way inboxes, and delivers structured SPF,
-          DKIM, and DMARC evidence for inbound mail over MCP, a signed webhook, a
-          WebSocket stream, or REST. The evidence applies to the From domain,
-          not a person or mailbox. These pages cover how to connect, authenticate
-          API calls, and work with email threads; the exhaustive endpoint
-          reference is the{" "}
+          e2a is the open-source email API for applications and AI agents. Any
+          product can send transactional email over HTTP or an SDK; agent-native
+          systems can also receive through real two-way inboxes over MCP, a
+          signed webhook, a WebSocket stream, or REST. Inbound mail includes
+          structured SPF, DKIM, and DMARC evidence that applies to the From
+          domain, not a person or mailbox. These pages cover how to connect,
+          authenticate API calls, and work with email threads; the exhaustive
+          endpoint reference is the{" "}
           <Link href="/api-docs" style={{ color: "var(--fg)", textDecoration: "underline" }}>
             API reference
           </Link>

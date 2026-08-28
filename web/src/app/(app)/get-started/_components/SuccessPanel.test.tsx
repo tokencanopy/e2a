@@ -28,6 +28,13 @@ describe("SuccessPanel", () => {
     render(<SuccessPanel agent={agent} />);
     expect(screen.getByText("Inbox created!")).toBeInTheDocument();
     expect(screen.getByText("my-agent@agents.e2a.dev")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Connect your application or agent" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "API Keys" })).toHaveAttribute(
+      "href",
+      "/api-keys",
+    );
   });
 
   it("sends a test email to the new inbox and shows the delivered state", async () => {
@@ -45,7 +52,7 @@ describe("SuccessPanel", () => {
       "/v1/agents/my-agent%40agents.e2a.dev/test",
       expect.objectContaining({ method: "POST", credentials: "include" }),
     );
-    expect(screen.getByText(/Connect your agent below to receive it/)).toBeInTheDocument();
+    expect(screen.getByText(/Connect your application or agent below to receive it/)).toBeInTheDocument();
   });
 
   it("surfaces the server error and returns to the idle state on failure", async () => {

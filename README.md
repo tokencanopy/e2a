@@ -5,9 +5,9 @@
   <img src="assets/e2a-wordmark-light.svg" width="320" alt="e2a">
 </picture>
 
-### The open-source email API for AI agents.
+### The open-source email API for applications and AI agents.
 
-### Send transactional email, give agents real two-way inboxes, and keep people in control.
+### Send transactional email from any product, give agents real two-way inboxes, and keep people in control.
 
 Use e2a as a hosted service or run the Apache-2.0 stack yourself. Built for developers, agent-native teams, and businesses adding email to products and workflows.
 
@@ -36,7 +36,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 > [!IMPORTANT]
 > **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, delivery metrics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
-e2a is the **open-source email API for AI agents**. Send transactional email, give agents real two-way inboxes, and keep people in control. Inbound mail arrives with structured SPF, DKIM, and DMARC evidence; outbound mail goes through an HTTP API with an optional human-in-the-loop approval gate. Use the hosted service or run the Apache-2.0 stack yourself.
+e2a is the **open-source email API for applications and AI agents**. Any product can send transactional email over HTTP, TypeScript, or Python; agent-native systems can also use real two-way inboxes. Inbound mail arrives with structured SPF, DKIM, and DMARC evidence, and outbound mail can use an optional human-in-the-loop approval gate. Use the hosted service or run the Apache-2.0 stack yourself. No AI agent or agent framework is required for application-triggered sending.
 
 **Four ways to plug an agent in:**
 

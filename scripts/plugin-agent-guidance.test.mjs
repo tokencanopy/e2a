@@ -42,7 +42,7 @@ test("the e2a skill description is quoted YAML", async () => {
 });
 
 test("plugin discovery surfaces use the canonical email API category", async () => {
-  const canonical = /open-source email API for AI agents/i;
+  const canonical = /open-source email API for applications and AI agents/i;
   const stale = /authenticated email gateway|authenticated email for AI agents|real, authenticated email inbox|verifies sender identity/i;
 
   const meta = JSON.parse(await readFile("plugins/e2a/plugin.meta.json", "utf8"));

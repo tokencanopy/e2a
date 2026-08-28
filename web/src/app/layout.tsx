@@ -44,9 +44,9 @@ const fraunces = localFont({
   display: "swap",
 });
 
-const ROOT_TITLE = "e2a | The open-source email API for AI agents";
+const ROOT_TITLE = "e2a | The open-source email API for applications and AI agents";
 const ROOT_DESC =
-  "Send transactional email, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.";
+  "Send transactional email from any product, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),

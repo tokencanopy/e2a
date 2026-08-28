@@ -24,7 +24,7 @@ describe("structured data", () => {
 
   it("describes domain evidence without claiming an authenticated mailbox", () => {
     const description = String(organization().description);
-    expect(description).toMatch(/open-source email API for AI agents/i);
+    expect(description).toMatch(/open-source email API for applications and AI agents/i);
     expect(description).toMatch(/structured SPF, DKIM, and DMARC evidence/i);
     expect(description).toMatch(/From domain, not a person, mailbox, or content/i);
     expect(description).not.toMatch(/authenticated email address|verified inbox/i);

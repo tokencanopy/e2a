@@ -10,15 +10,15 @@ import { metadata } from "./layout";
 describe("root metadata", () => {
   it("uses the canonical open-source email API positioning", () => {
     expect(metadata.title).toMatchObject({
-      default: "e2a | The open-source email API for AI agents",
+      default: "e2a | The open-source email API for applications and AI agents",
     });
     expect(metadata.description).toBe(
-      "Send transactional email, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.",
+      "Send transactional email from any product, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.",
     );
     expect(metadata.openGraph).toMatchObject({
-      title: "e2a | The open-source email API for AI agents",
+      title: "e2a | The open-source email API for applications and AI agents",
       description:
-        "Send transactional email, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.",
+        "Send transactional email from any product, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.",
     });
   });
 });

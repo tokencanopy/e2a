@@ -1,7 +1,8 @@
 # e2a plugin
 
-The open-source email API for AI agents. Send transactional email, give agents
-real two-way inboxes, and keep people in control. Installing this plugin
+The open-source email API for applications and AI agents. Send transactional
+email from any product, give agents real two-way inboxes, and keep people in
+control. Installing this plugin
 registers the hosted **e2a MCP server** (`https://api.e2a.dev/mcp`,
 Streamable HTTP + OAuth 2.1) and five stable skills for setup, application
 integration, diagnosis, evaluation, and everyday inbox operation. Installing core supplies

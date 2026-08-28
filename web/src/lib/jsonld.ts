@@ -36,7 +36,7 @@ export function organization(): JsonLdNode {
     url: SITE_URL,
     logo: abs("/logo-wordmark.svg"),
     description:
-      "e2a is the open-source email API for AI agents. It sends transactional email, gives agents real two-way inboxes, and returns structured SPF, DKIM, and DMARC evidence for inbound mail. That evidence applies to the From domain, not a person, mailbox, or content.",
+      "e2a is the open-source email API for applications and AI agents. It sends transactional email from any product, gives agents real two-way inboxes, and returns structured SPF, DKIM, and DMARC evidence for inbound mail. That evidence applies to the From domain, not a person, mailbox, or content.",
     sameAs: [
       "https://github.com/tokencanopy/e2a",
       "https://www.npmjs.com/package/@e2a/sdk",

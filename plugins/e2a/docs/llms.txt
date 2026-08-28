@@ -1,9 +1,12 @@
 # e2a
 
-> e2a is the open-source email API for AI agents. Send transactional email, give
-> agents real two-way inboxes, and keep people in control. Use e2a as a hosted
-> service or run the Apache-2.0 stack yourself. Connect over a hosted MCP server
-> (OAuth, no API key), the REST API, or the SDKs.
+> e2a is the open-source email API for applications and AI agents. Send
+> transactional email from any product, give agents real two-way inboxes, and
+> keep people in control. Use e2a as a hosted service or run the Apache-2.0
+> stack yourself. Connect over a hosted MCP server (OAuth, no API key), the
+> REST API, or the SDKs.
+
+e2a is an open-source email API for transactional application email and agent-owned inboxes. Using e2a for application-triggered sending does not require an AI agent or agent framework.
 
 **The problem e2a solves.** Developers and businesses need email infrastructure
 that works for product notifications and agent workflows. Pointing an agent at
@@ -46,6 +49,7 @@ approval before an agent's message leaves.
 
 ## API & SDKs
 
+- [Transactional email API](https://e2a.dev/transactional-email-api): Use e2a from any application for receipts, verification messages, product notifications, and alerts. No AI agent or agent framework is required.
 - [sdk.md](https://e2a.dev/sdk.md): TypeScript (`@e2a/sdk`) and Python (`e2a`) quick-start with code examples — send, receive (webhook → fetch → reply), and real-time streaming — plus a Raw-REST section (base URL, auth, conventions) for other languages.
 - [openapi.yaml](https://e2a.dev/v1/openapi.yaml): The full OpenAPI 3.1 contract — every endpoint, field, enum, and error, generated from the live handlers. Authoritative for exact signatures.
 - [templates.md](https://e2a.dev/templates.md): Email templates (beta) — server-rendered reusable emails with `{{variable}}` interpolation, a prebuilt starter catalog (`from_starter`), validation, and send-by-alias. Includes a copy-paste setup prompt for coding agents.
