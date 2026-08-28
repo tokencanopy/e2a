@@ -60,6 +60,14 @@ describe("contacts commands", () => {
       ]);
   });
 
+  it("normalizes CRLF to LF inside a quoted multi-line field instead of leaking a raw CR", async () => {
+    const { parseCSV } = await import("../commands/contacts.js");
+    expect(parseCSV('email,notes\r\na@x.com,"two\r\nlines"\r\n')).toEqual([
+      ["email", "notes"],
+      ["a@x.com", "two\nlines"],
+    ]);
+  });
+
   it("dry-run previews CSV without calling the API", async () => {
     const dir = await mkdtemp(join(tmpdir(), "e2a-contacts-"));
     const path = join(dir, "contacts.csv");
