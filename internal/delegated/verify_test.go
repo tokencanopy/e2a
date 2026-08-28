@@ -306,6 +306,38 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+// TestClassifyToleratesOtherHeaderMembers is the §10.4 no-fallthrough
+// invariant at the classification seam: an at+jwt whose OTHER protected
+// header members are oversized or oddly typed (a 129-char kid, a
+// non-string alg, a numeric kid) is still delegated-owned. Applying the
+// verification-time byte/type pins during classification would misroute
+// such a token to a non-delegated credential path — the exact bug this
+// guards. The verification-time pins still reject these tokens later, but
+// as delegated 401s (see TestVerifyRejections), never as API-key probes.
+func TestClassifyToleratesOtherHeaderMembers(t *testing.T) {
+	hdr := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return b64seg(b) + ".eyJhIjoxfQ.c2ln"
+	}
+	cases := []struct {
+		name   string
+		bearer string
+	}{
+		{"kid over 128 bytes", hdr(map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": strings.Repeat("k", 129)})},
+		{"alg is an object", hdr(map[string]any{"typ": "at+jwt", "alg": map[string]any{"x": 1}, "kid": "k1"})},
+		{"kid is a number", hdr(map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": 5})},
+		{"alg over 16 bytes", hdr(map[string]any{"typ": "at+jwt", "alg": strings.Repeat("R", 17), "kid": "k1"})},
+		{"unknown array member", hdr(map[string]any{"typ": "at+jwt", "crit": []string{"a", "b"}})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !Classify(len(tc.bearer)+7, tc.bearer) {
+				t.Fatalf("at+jwt with an odd OTHER header member must stay delegated-owned")
+			}
+		})
+	}
+}
+
 func TestClassifyHeaderSizeBoundary(t *testing.T) {
 	// Decoded protected header of exactly MaxProtectedHeaderBytes is
 	// classifiable; one byte more is not.

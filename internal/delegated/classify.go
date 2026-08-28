@@ -83,6 +83,40 @@ func parseProtectedHeader(token string) (protectedHeader, bool) {
 	return hdr, true
 }
 
+// peekProtectedTyp reads ONLY the protected header's `typ`, tolerant of
+// every other member. It is the classification-time parse: it enforces
+// the structural preconditions (three non-empty segments, a decodable
+// JSON-object header under the decoded-size cap) but deliberately does
+// NOT apply the verification-time pins on `alg`/`kid` or their byte caps.
+// Those pins belong to parseProtectedHeader (verification only): applying
+// them here would let an at+jwt with an oversized or oddly-typed OTHER
+// header member (a 129-char kid, a non-string alg) escape delegated
+// ownership and fall through to another credential path, violating the
+// §10.4 dispatch invariant. A non-string or absent `typ` yields "".
+func peekProtectedTyp(token string) (string, bool) {
+	seg, _, _, ok := splitCompact(token)
+	if !ok {
+		return "", false
+	}
+	raw, ok := decodeSegment(seg, MaxProtectedHeaderBytes)
+	if !ok {
+		return "", false
+	}
+	// Decode `typ` only; unknown members are ignored regardless of their
+	// type or size (json ignores fields absent from the target struct).
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	var hdr struct {
+		Typ string `json:"typ"`
+	}
+	if err := dec.Decode(&hdr); err != nil {
+		return "", false
+	}
+	if dec.More() {
+		return "", false
+	}
+	return hdr.Typ, true
+}
+
 // Classify reports whether this bearer credential is delegated-owned: a
 // compact JWT, within the raw header/compact/segment limits, whose
 // protected header carries exactly typ "at+jwt".
@@ -90,10 +124,10 @@ func parseProtectedHeader(token string) (protectedHeader, bool) {
 // The decision is parse-only — no signature, network, or configuration is
 // consulted, so ownership is identical whether the verifier is enabled,
 // disabled, or unavailable. A positively classified token must never
-// reach any other credential path. A credential that fails these
-// preconditions (oversized, wrong segment shape, undecodable header, any
-// other typ) is NOT delegated-owned and keeps today's precedence in the
-// caller.
+// reach any other credential path. Classification reads only `typ` and is
+// tolerant of every other header member; the verification-time pins
+// (alg/kid caps, strict typing) run later in Verify and reject a bad
+// token as a delegated 401, never by handing it back to another path.
 //
 // rawAuthorizationLen is the length of the full Authorization header
 // value, including the "Bearer " prefix, so the raw-header cap covers
@@ -102,9 +136,9 @@ func Classify(rawAuthorizationLen int, bearer string) bool {
 	if rawAuthorizationLen > MaxAuthorizationBytes {
 		return false
 	}
-	hdr, ok := parseProtectedHeader(bearer)
+	typ, ok := peekProtectedTyp(bearer)
 	if !ok {
 		return false
 	}
-	return hdr.Typ == TokenType
+	return typ == TokenType
 }

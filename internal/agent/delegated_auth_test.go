@@ -37,6 +37,53 @@ func atJWTBearer(t *testing.T) string {
 	return enc(hdr) + "." + enc(payload) + "." + enc([]byte("sig"))
 }
 
+// atJWTBearerWithHeader builds a compact JWT with a caller-supplied
+// protected header (garbage signature) so tests can craft odd header
+// members while keeping typ "at+jwt".
+func atJWTBearerWithHeader(t *testing.T, header map[string]any) string {
+	t.Helper()
+	hdr, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"sub": "principal-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc(hdr) + "." + enc(payload) + "." + enc([]byte("sig"))
+}
+
+// TestDelegatedOwnershipToleratesOddHeaderMembers is the M1 dispatch
+// proof: an at+jwt with an oversized/oddly-typed OTHER header member is
+// still delegated-owned — it must reject as a delegated 401, never fall
+// through to the agent-JWT/OAuth/API-key paths. The verifier is disabled
+// (nil) to prove ownership is decided by classification alone.
+func TestDelegatedOwnershipToleratesOddHeaderMembers(t *testing.T) {
+	f := newAgentIDFixture(t) // agent auth READY
+	metrics := &delegatedMetricsRecorder{}
+	f.api.SetMetrics(metrics)
+
+	for _, tc := range []struct {
+		name   string
+		header map[string]any
+	}{
+		{"kid over 128 bytes", map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": strings.Repeat("k", 129)}},
+		{"alg is an object", map[string]any{"typ": "at+jwt", "alg": map[string]any{"x": 1}, "kid": "k1"}},
+		{"kid is a number", map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := atJWTBearerWithHeader(t, tc.header)
+			if _, err := f.api.AuthenticatePrincipal(bearerRequest(t, tok)); err == nil {
+				t.Fatal("odd-header at+jwt must not authenticate via any path")
+			}
+			if got := metrics.last(t); got != "invalid_token" {
+				t.Fatalf("category = %q, want invalid_token (delegated-owned, not API-key)", got)
+			}
+		})
+	}
+}
+
 // stubDelegatedVerifier returns a fixed outcome for every Verify call.
 type stubDelegatedVerifier struct {
 	claims *delegated.Claims
