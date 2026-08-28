@@ -129,7 +129,7 @@ func TestMigrationsRewriteLegacySendingJobsWithImmutableAttribution(t *testing.T
 		t.Fatalf("schedule legacy job: %v", err)
 	}
 
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatalf("read sending budget migration: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestSendingBudgetMigrationDoesNotDeadlockSourceFirstJobCancellation(t *test
 	if err != nil {
 		t.Fatalf("build real River cancellation client: %v", err)
 	}
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestSendingBudgetMigrationLeavesPostSnapshotLegacyJobForResolver(t *testing
 	if err := migrationConn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&migrationPID); err != nil {
 		t.Fatalf("read migration backend pid: %v", err)
 	}
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatalf("read sending budget migration: %v", err)
 	}
