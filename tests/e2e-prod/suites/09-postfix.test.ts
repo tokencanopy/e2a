@@ -18,7 +18,7 @@ after(async () => {
 const MAX_CLEANUP_RETRY_MS = 2_000;
 
 async function deleteStressProbeAgent(email: string): Promise<void> {
-  const path = `/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`;
+  const path = `/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`;
   let result = await client.delete(path);
   if (result.status === 429) {
     const retryAfterSeconds = Number(result.headers["retry-after"]);
