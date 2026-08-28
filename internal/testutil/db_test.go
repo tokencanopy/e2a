@@ -18,6 +18,109 @@ import (
 
 const testDBErrorChildEnv = "E2A_TEST_DB_ERROR_CHILD"
 
+func TestTruncateAll_CleansSendingProtectionNoFKState(t *testing.T) {
+	pool := TestDB(t)
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE sending_protection_runtime_policy SET generation=9, activated_by='schema-test';
+		UPDATE sending_protection_runtime_attestation SET revision=9, active_billing_digest='sha256:synthetic', active_billing_contract=1, updated_by='schema-test';
+		INSERT INTO sending_protection_policy_events (generation,prior_generation,prior_policy_sha256,new_policy_sha256,actor,reason) VALUES (9,0,repeat('a',64),repeat('b',64),'schema-test','synthetic');
+		INSERT INTO sending_operator_recipient_versions (logical_version,commitment_key_id,recipient_commitment,created_by) VALUES (9,repeat('a',64),repeat('b',64),'schema-test');
+		INSERT INTO sending_ramp_grandfathering (singleton,policy_generation,completed_at,completed_by) VALUES (true,0,now(),'schema-test');
+		INSERT INTO account_sending_control_events (id,account_ref,old_state,new_state,reason,actor,expires_at) VALUES ('control_cleanup','usr_cleanup','active','paused','synthetic','schema-test',now()+interval '90 days');
+		INSERT INTO sending_provider_operations (operation_id,source_account_ref,policy_subject_ref,purpose,expires_at) VALUES ('op_cleanup','usr_cleanup','usr_cleanup','customer_message',now()+interval '30 days');
+		INSERT INTO sending_budget_counters (scope,scope_id,day,daily_limit) VALUES ('account_daily','usr_cleanup',CURRENT_DATE,1);
+		INSERT INTO sending_budget_reservations (operation_id,submission_attempt,source_account_ref,policy_subject_ref,purpose,day,units,probation,state) VALUES ('op_cleanup',1,'usr_cleanup','usr_cleanup','customer_message',CURRENT_DATE,1,false,'reserved');
+		INSERT INTO sending_protection_notice_events (id,kind,reason_code,budget_scope,ledger_day,expires_at) VALUES ('notice_cleanup','global_guardrail','global_budget_exhausted','global_all',CURRENT_DATE,now()+interval '30 days');
+		INSERT INTO sending_protection_notice_deliveries (event_id,audience) VALUES ('notice_cleanup','operator');
+		INSERT INTO sending_feedback_correlations (correlation_id,operation_id,submission_attempt,source_account_ref,policy_subject_ref,purpose,tenant_mode) VALUES ('corr_cleanup','op_cleanup',1,'usr_cleanup','usr_cleanup','customer_message','none');
+		INSERT INTO sending_feedback_recipients (correlation_id,recipient_hmac,hmac_key_version) VALUES ('corr_cleanup',decode(repeat('ab',32),'hex'),1);
+		INSERT INTO sending_feedback_events (provider_event_id,correlation_id,provider_occurred_at) VALUES ('feedback_cleanup','corr_cleanup',now());
+	`); err != nil {
+		t.Fatalf("seed sending-protection cleanup state: %v", err)
+	}
+
+	if err := truncateAll(ctx, pool); err != nil {
+		t.Fatalf("truncate sending-protection state: %v", err)
+	}
+
+	for _, table := range []string{
+		"sending_protection_policy_events",
+		"sending_operator_recipient_versions",
+		"sending_ramp_grandfathering",
+		"account_sending_control_events",
+		"sending_provider_operations",
+		"sending_budget_counters",
+		"sending_budget_reservations",
+		"sending_protection_notice_events",
+		"sending_protection_notice_deliveries",
+		"sending_feedback_correlations",
+		"sending_feedback_recipients",
+		"sending_feedback_events",
+	} {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&count); err != nil || count != 0 {
+			t.Errorf("%s rows after cleanup=%d err=%v", table, count, err)
+		}
+	}
+
+	var generation, revision int64
+	var policyHash, activeDigest, rollbackDigest string
+	var activeContract, rollbackContract int
+	if err := pool.QueryRow(ctx, `SELECT generation,policy_sha256 FROM sending_protection_runtime_policy WHERE singleton`).Scan(&generation, &policyHash); err != nil {
+		t.Fatalf("read reset runtime policy: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT revision,active_billing_digest,active_billing_contract,rollback_billing_digest,rollback_billing_contract FROM sending_protection_runtime_attestation WHERE singleton`).Scan(&revision, &activeDigest, &activeContract, &rollbackDigest, &rollbackContract); err != nil {
+		t.Fatalf("read reset attestation: %v", err)
+	}
+	if generation != 0 || policyHash != "198d8cfb3220b6094a3b8dfe13cb0e2ff97c512ad87ae14609e580ae335c9ce6" {
+		t.Errorf("runtime policy reset=(generation=%d hash=%q)", generation, policyHash)
+	}
+	if revision != 0 || activeDigest != "" || activeContract != 0 || rollbackDigest != "" || rollbackContract != 0 {
+		t.Errorf("runtime attestation reset=(%d,%q,%d,%q,%d)", revision, activeDigest, activeContract, rollbackDigest, rollbackContract)
+	}
+}
+
+func TestTruncateAll_CleansOperatorRegistryWithoutExclusiveTableLock(t *testing.T) {
+	pool := TestDB(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_operator_recipient_versions
+		    (logical_version,commitment_key_id,recipient_commitment,created_by)
+		VALUES (10,repeat('a',64),repeat('b',64),'schema-lock-test')
+	`); err != nil {
+		t.Fatalf("seed operator registry: %v", err)
+	}
+
+	reader, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin registry reader: %v", err)
+	}
+	defer reader.Rollback(ctx) //nolint:errcheck
+	var before int
+	if err := reader.QueryRow(ctx, `SELECT count(*) FROM sending_operator_recipient_versions`).Scan(&before); err != nil || before != 1 {
+		t.Fatalf("registry rows before cleanup=%d err=%v", before, err)
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	if err := truncateAll(cleanupCtx, pool); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			t.Fatalf("operator registry cleanup requested an exclusive lock: %v", err)
+		}
+		t.Fatalf("operator registry cleanup failed: %v", err)
+	}
+	if err := reader.Rollback(ctx); err != nil {
+		t.Fatalf("rollback registry reader: %v", err)
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_operator_recipient_versions`).Scan(&after); err != nil || after != 0 {
+		t.Fatalf("registry rows after cleanup=%d err=%v", after, err)
+	}
+}
+
 func TestTruncateAll_CleansInboundIntakeWithoutExclusiveTableLock(t *testing.T) {
 	pool := TestDB(t)
 	ctx := context.Background()
