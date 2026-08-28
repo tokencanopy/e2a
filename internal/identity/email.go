@@ -20,6 +20,27 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+// UniqueRecipientCount returns the number of distinct recipients across the
+// given address lists, normalized via NormalizeEmail (lower-case + trim) so
+// "Alice@x.com" in To and "alice@x.com" in CC count once. Empty entries are
+// skipped. This is THE canonical recipient-unit primitive: outbound metering
+// (one recipient-delivery per unit), the accept-time cap pre-check, the
+// fire-time quota gate, and the sendramp reservation must all count with this
+// one function — two normalizers that ever disagree would desynchronize the
+// metered units from the persisted message_recipients rows.
+func UniqueRecipientCount(lists ...[]string) int {
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, recipient := range list {
+			recipient = NormalizeEmail(recipient)
+			if recipient != "" {
+				seen[recipient] = struct{}{}
+			}
+		}
+	}
+	return len(seen)
+}
+
 // NormalizeMailboxAddress returns the canonical addr-spec from an RFC 5322
 // mailbox value. Suppression checks receive both bare addresses and display-
 // name forms from outbound request shapes, but storage keys contain only the

@@ -17,16 +17,18 @@ import (
 	"github.com/tokencanopy/e2a/internal/ws"
 )
 
-// Integration test for the SMTP-level enforcement path: when the
-// recipient's owner has hit a message-flow or storage cap, RCPT TO
-// must be rejected with SMTP 552 ("mailbox quota exceeded") so the
-// upstream MTA bounces the message back to the original sender.
+// Integration tests for the SMTP-level enforcement path. Usage-based
+// pricing v1: message-flow caps are OUTBOUND-only — a recipient's
+// exhausted send allowance must never bounce a stranger's inbound mail.
+// Only the STORAGE cap still rejects at RCPT time, with SMTP 552
+// ("mailbox quota exceeded") so the upstream MTA bounces the message
+// back to the original sender.
 //
 // This is the inbound counterpart to the HTTP 402 wiring tests in
 // internal/agent/. Skipped under -short because it needs a real DB
 // and an actual SMTP socket bind.
 
-func TestRelay_RcptTo_Rejects552WhenOverCap(t *testing.T) {
+func TestRelay_RcptTo_Rejects552WhenStorageExhausted(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping SMTP integration test under -short")
 	}
@@ -53,15 +55,16 @@ func TestRelay_RcptTo_Rejects552WhenOverCap(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
-	// Block the user via account_limits — max_messages_month=0 makes
-	// the next CheckMessageSend trip immediately.
+	// Block the user via account_limits — max_storage_bytes=0 makes the
+	// next CheckInboundMessage trip immediately (storage 0 >= cap 0). The
+	// flow cap is deliberately generous: it must play no part here.
 	lstore := limits.NewStore(pool)
 	if err := lstore.Upsert(ctx, user.ID, limits.Limits{
 		PlanCode:         "free_test",
 		MaxAgents:        100,
 		MaxDomains:       100,
-		MaxMessagesMonth: 0,
-		MaxStorageBytes:  1 << 40,
+		MaxMessagesMonth: 100_000,
+		MaxStorageBytes:  0,
 	}); err != nil {
 		t.Fatalf("Upsert limits: %v", err)
 	}
@@ -128,7 +131,7 @@ func TestRelay_RcptTo_Rejects552WhenOverCap(t *testing.T) {
 	}
 	err = c.Rcpt(agentEmail)
 	if err == nil {
-		t.Fatal("RCPT TO succeeded; expected 552 cap rejection")
+		t.Fatal("RCPT TO succeeded; expected 552 storage-cap rejection")
 	}
 	// net/smtp error message looks like "552 5.2.2 mailbox quota exceeded".
 	msg := err.Error()
@@ -217,5 +220,74 @@ func TestRelay_RcptTo_AcceptsWhenUnderCap(t *testing.T) {
 	}
 	if err := c.Rcpt(agentEmail); err != nil {
 		t.Errorf("RCPT TO under-cap returned %v; want nil (accepted)", err)
+	}
+}
+
+// TestRelay_RcptTo_AcceptsWhenFlowCapExhausted pins the usage-based
+// pricing v1 semantics: an exhausted message-flow allowance (outbound
+// quota) must NOT bounce inbound mail. max_messages_month=0 blocks every
+// outbound send for this account, yet RCPT TO must still succeed because
+// only the storage cap guards the inbound path.
+func TestRelay_RcptTo_AcceptsWhenFlowCapExhausted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SMTP integration test under -short")
+	}
+	pool := testutil.TestDB(t)
+	ctx := context.Background()
+	store := identity.NewStore(pool)
+	user, _ := store.CreateOrGetUser(ctx, "relay-flow@test.com", "Test", "google-relay-flow@test.com")
+	if _, err := store.ClaimOrCreateDomain(ctx, "relay-flow.example.com", user.ID); err != nil {
+		t.Fatalf("ClaimOrCreateDomain: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE domains SET verified = true WHERE domain = $1`, "relay-flow.example.com"); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	agentEmail := "bot@relay-flow.example.com"
+	if _, err := store.CreateAgent(ctx, agentEmail, "relay-flow.example.com", "", "https://example.com/w", "cloud", user.ID); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	// Flow cap exhausted (0 = hard-block for sends), storage generous.
+	lstore := limits.NewStore(pool)
+	if err := lstore.Upsert(ctx, user.ID, limits.Limits{
+		PlanCode:  "free_test",
+		MaxAgents: 100, MaxDomains: 100, MaxMessagesMonth: 0, MaxStorageBytes: 1 << 40,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	port, _ := freePort()
+	cfg := &config.Config{SMTP: config.SMTPConfig{ListenAddr: "127.0.0.1:" + port, Domain: "test.relay"}, Env: "development"}
+	server := relay.NewServer(cfg, store, usage.NewNoopUsageTracker(), ws.NewHub())
+	enf := limits.NewEnforcer(lstore, usage.NewStore(pool),
+		limits.Defaults{PlanCode: "default", MaxAgents: 1, MaxDomains: 1, MaxMessagesMonth: 1, MaxStorageBytes: 1}, 0)
+	server.SetEnforcer(enf)
+
+	go func() { _ = server.ListenAndServe() }()
+	t.Cleanup(func() { _ = server.Close() })
+	deadline := time.Now().Add(2 * time.Second)
+	var conn net.Conn
+	var err error
+	for time.Now().Before(deadline) {
+		conn, err = net.Dial("tcp", cfg.SMTP.ListenAddr)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("server never accepted on %s: %v", cfg.SMTP.ListenAddr, err)
+	}
+
+	c, err := smtp.Dial(cfg.SMTP.ListenAddr)
+	if err != nil {
+		t.Fatalf("smtp.Dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Mail("sender@elsewhere.test"); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := c.Rcpt(agentEmail); err != nil {
+		t.Fatalf("RCPT TO rejected (%v); an exhausted flow cap must not bounce inbound mail", err)
 	}
 }

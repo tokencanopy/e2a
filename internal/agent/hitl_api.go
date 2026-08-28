@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
@@ -73,6 +74,38 @@ type ApproveOverrides = approveRequest
 // On a nil-error return the local loopback or async enqueue has committed;
 // the idempotency key must be Completed (cached), never Released. For queued delivery
 // idemCompleteTx is invoked inside the approve-and-enqueue transaction.
+// checkApproveQuota re-checks the outbound flow + storage caps when a held
+// draft is released into the send pipeline. Returns a 402 OutboundError whose
+// Details mirror the httpapi LimitExceededDetails shape (resource / limit /
+// current / plan_code / upgrade_url). A transient enforcer error fails open —
+// the external path is re-checked with real units at worker claim time, and a
+// glitch must not strand a reviewer's approval.
+func (a *API) checkApproveQuota(ctx context.Context, userID string) *OutboundError {
+	if a.enforcer == nil {
+		return nil
+	}
+	err := a.enforcer.CheckMessageSend(ctx, userID, 1)
+	if err == nil {
+		return nil
+	}
+	if le, ok := limits.IsLimitExceeded(err); ok {
+		return &OutboundError{
+			Status: http.StatusPaymentRequired,
+			Code:   "limit_exceeded",
+			Msg:    fmt.Sprintf("cannot approve: %s cap reached (%d/%d)", le.Resource, le.Current, le.Limit),
+			Details: map[string]any{
+				"resource":    le.Resource,
+				"limit":       int64(le.Limit),
+				"current":     int64(le.Current),
+				"plan_code":   le.Limits.PlanCode,
+				"upgrade_url": le.Limits.UpgradeURL,
+			},
+		}
+	}
+	log.Printf("[api] approve quota check failed (failing open): %v", err)
+	return nil
+}
+
 func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expectedAgentEmail string, ovr ApproveOverrides, idemCompleteTx ApproveIdemCompleter) (*identity.Message, *OutboundError) {
 	edits, err := ovr.toEdit()
 	if err != nil {
@@ -95,6 +128,17 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 	}
 	if !agent.DomainVerified {
 		return nil, &OutboundError{Status: http.StatusForbidden, Code: "domain_not_verified", Msg: "agent domain must be verified before sending"}
+	}
+	// Flow-cap re-check at approve time. Held drafts are not metered at
+	// accept, so the account's usage can fill (or its caps shrink) while a
+	// draft sits in review — without this, approving a backlog of holds
+	// would bypass every send cap. A 1-unit probe is exact for the loopback
+	// path (single-recipient by construction) and a cheap early refusal for
+	// the external path, whose authoritative units-aware re-check runs at
+	// worker claim time (ClaimSend). On refusal nothing below has run: the
+	// hold stays pending_review, same semantics as the suppression check.
+	if oerr := a.checkApproveQuota(ctx, userID); oerr != nil {
+		return nil, oerr
 	}
 
 	// Composed-message hard cap. A reviewer's edits (new subject/body/attachments)

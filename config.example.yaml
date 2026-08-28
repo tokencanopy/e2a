@@ -281,7 +281,15 @@ limits:
   plan_code: "default"
   max_agents: 1000000
   max_domains: 1000000
+  # Message-flow allowances count OUTBOUND recipient-deliveries: a message
+  # sent to N distinct recipients consumes N units; received mail is free
+  # and unmetered (it never consumes the allowance).
   max_messages_month: 1000000000
+  # Optional per-UTC-day send cap for users without an account_limits row.
+  # ABSENT (the default) = no daily policy; 0 = block all sends. Hosted
+  # deployments set this to the free tier's daily allowance and let the
+  # billing provisioner override it per account.
+  # max_messages_day: 100
   max_storage_bytes: 1125899906842624  # 1 PiB — effectively unbounded
   cache_ttl_seconds: 60
   # Shared HMAC secret used to authenticate /api/internal/limits/invalidate.

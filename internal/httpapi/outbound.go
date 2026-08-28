@@ -54,7 +54,7 @@ func (s *Server) errorEnvelopeResponse() *huma.Response {
 // the AccountView usage/limits field stems) instead of a bare `any`.
 func (s *Server) limitExceededResponse() *huma.Response {
 	return s.jsonResponse(reflect.TypeOf(LimitExceededEnvelope{}), "LimitExceededEnvelope",
-		"Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.")
+		"Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over).")
 }
 
 // rateLimitedResponse is the typed 429 response for the throughput-limited write
@@ -405,7 +405,8 @@ func (s *Server) handleTestSend(ctx context.Context, in *AddressParam) (*sendOut
 		return nil, NewError(http.StatusForbidden, "domain_not_verified", "agent domain must be verified before sending test email")
 	}
 	if s.deps.EnforceMessageSend != nil {
-		if err := s.deps.EnforceMessageSend(ctx, user.ID); err != nil {
+		// Test sends go to the agent's own address: exactly one recipient-unit.
+		if err := s.deps.EnforceMessageSend(ctx, user.ID, 1); err != nil {
 			if env, ok := limitEnvelope(err); ok {
 				return nil, env
 			}
@@ -1032,7 +1033,11 @@ func (s *Server) deliver(ctx context.Context, user *identity.User, ag *identity.
 			return 0, SendResultView{}, NewError(http.StatusForbidden, "domain_not_verified", "agent domain must be verified before sending")
 		}
 		if s.deps.EnforceMessageSend != nil {
-			if err := s.deps.EnforceMessageSend(ctx, user.ID); err != nil {
+			// Units = the deduplicated recipient set of the prepared request,
+			// counted with the same normalizer the metering write uses, so the
+			// pre-check and the terminal meter agree on what this send costs.
+			units := identity.UniqueRecipientCount(req.To, req.CC, req.BCC)
+			if err := s.deps.EnforceMessageSend(ctx, user.ID, units); err != nil {
 				if env, ok := limitEnvelope(err); ok {
 					return 0, SendResultView{}, env
 				}

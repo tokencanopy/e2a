@@ -61,22 +61,34 @@ type outboundSendStore struct {
 	store  *identity.Store
 	outbox webhookpub.Outbox
 	usage  usage.UsageTracker
-	// overQuota, when set, is consulted at FIRE time for SCHEDULED sends only:
-	// it reports whether the owning account is over its monthly message cap in
-	// the fire month. A send scheduled into a later month was never counted
-	// against that month's cap (accept-time enforcement can't know the fire
-	// month), so this closes the "schedule into a future month to bypass quota"
-	// gap. nil disables the gate (tests / plans without limits). The wrapper
-	// returns (false, err) on a transient lookup failure so a quota-check glitch
-	// never drops a legitimate send (fail open).
-	overQuota func(ctx context.Context, userID string) (bool, error)
+	// overQuota, when set, is consulted at FIRE time for DEFERRED-SETTLEMENT
+	// sends — scheduled sends AND review-released sends (human approve, TTL
+	// auto-approve). Neither shape is finally quota-checked at accept: a send
+	// scheduled into a later month was never counted against that month's cap,
+	// and a held draft can sit in review while the account's usage fills — so
+	// both are re-checked with the claim's real recipient-unit count when the
+	// worker claims them. It returns the exceeded resource stem
+	// ("messages_month" | "messages_day") so the caller can pick the outcome:
+	// monthly exhaustion is terminal (the month is over for this account),
+	// daily exhaustion snoozes to the next UTC midnight. nil disables the gate
+	// (tests / plans without limits). The wrapper returns ("", false, err) on
+	// a transient lookup failure so a quota-check glitch never drops a
+	// legitimate send (fail open).
+	overQuota func(ctx context.Context, userID string, units int) (resource string, over bool, err error)
 }
 
-// SetScheduledSendQuota installs the fire-time monthly-cap gate for scheduled
-// sends (see outboundSendStore.overQuota). Wired in main from the limits
-// enforcer; left nil in tests and plan-agnostic setups.
-func (a *outboundSendStore) SetScheduledSendQuota(f func(ctx context.Context, userID string) (bool, error)) {
+// SetScheduledSendQuota installs the fire-time flow-cap gate for
+// deferred-settlement sends (see outboundSendStore.overQuota). Wired in main
+// from the limits enforcer; left nil in tests and plan-agnostic setups.
+func (a *outboundSendStore) SetScheduledSendQuota(f func(ctx context.Context, userID string, units int) (resource string, over bool, err error)) {
 	a.overQuota = f
+}
+
+// nextUTCMidnight returns the first instant of the next UTC day after t —
+// when the messages_day window resets and a daily-cap-deferred send may fire.
+func nextUTCMidnight(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
 }
 
 // NewOutboundSendStore builds the outboundsend.Store adapter for main.go.
@@ -143,17 +155,31 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 	if err != nil || p == nil {
 		return nil, err
 	}
-	// Fire-time monthly-cap gate for scheduled sends: a send scheduled into a
-	// future month was never counted against that month's cap, so enforce it now
-	// and refuse terminally (email.failed via MarkFailed) rather than deliver an
-	// uncapped send. Immediate sends are already gated at accept and skip this.
-	if p.ScheduledAt != nil && a.overQuota != nil {
-		over, qerr := a.overQuota(ctx, p.UserID)
+	// Fire-time flow-cap gate for deferred-settlement sends: scheduled sends
+	// (a send scheduled into a future month was never counted against that
+	// month's cap) and review-released sends (accept-time checks ran when the
+	// draft was submitted; usage may have filled while it sat in review).
+	// Immediate sends are already gated at accept and skip this. Monthly
+	// exhaustion refuses terminally (email.failed via MarkFailed); daily
+	// exhaustion releases the claim and defers to the next UTC midnight
+	// (outboundsend.DailyQuotaDeferredError → River snooze), because the
+	// daily window recovers in hours, not weeks.
+	if (p.ScheduledAt != nil || p.ReviewedAt != nil) && a.overQuota != nil {
+		units := identity.UniqueRecipientCount(p.Recipients)
+		resource, over, qerr := a.overQuota(ctx, p.UserID, units)
 		if qerr != nil {
-			log.Printf("[outbound-send:%s] scheduled-send quota check failed, proceeding (fail open): %v", p.ID, qerr)
+			log.Printf("[outbound-send:%s] fire-time quota check failed, proceeding (fail open): %v", p.ID, qerr)
 		} else if over {
+			if resource == "messages_day" {
+				if relErr := a.store.ReleaseOutboundSendClaim(ctx, p.ID, jobID); relErr != nil {
+					return nil, fmt.Errorf("release outbound send claim after daily-cap deferral: %w", relErr)
+				}
+				retryAt := nextUTCMidnight(time.Now().UTC())
+				log.Printf("[outbound-send:%s] daily send cap exhausted at fire time, deferring to %s", p.ID, retryAt.Format(time.RFC3339))
+				return nil, &outboundsend.DailyQuotaDeferredError{RetryAt: retryAt}
+			}
 			if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
-				"scheduled send canceled: monthly message limit exceeded at send time",
+				"send canceled: monthly send limit exceeded at send time",
 				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
 				return nil, failErr
 			}
@@ -258,6 +284,11 @@ func (a *outboundSendStore) finalizeSentTx(ctx context.Context, tx pgx.Tx, info 
 // lifecycle, and event publication. The accept-time cap pre-check remains the
 // quota gate; this write is accounting, but an accounting failure must roll the
 // terminal transaction back so the reconciler can converge without undercount.
+//
+// The metered unit is one recipient-delivery: the deduplicated to ∪ cc ∪ bcc
+// set of the terminally sent message (identity.UniqueRecipientCount). The
+// suppression guard is all-or-nothing before provider I/O, so any message
+// reaching this point had its full recipient set accepted upstream.
 func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *identity.OutboundSentInfo) error {
 	if a.usage == nil {
 		return nil
@@ -266,7 +297,8 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 	if !ok {
 		return fmt.Errorf("outbound usage tracker lacks transaction support")
 	}
-	_, err := tracker.RecordAndCheckTx(ctx, tx, info.UserID, info.Message.AgentID, info.Domain, "outbound")
+	units := identity.UniqueRecipientCount(info.Message.ToRecipients, info.Message.CC, info.Message.BCC)
+	_, err := tracker.RecordAndCheckTx(ctx, tx, info.UserID, info.Message.AgentID, info.Domain, "outbound", units)
 	return err
 }
 

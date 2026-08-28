@@ -225,10 +225,23 @@ type RateGate interface {
 // internal/identity in the binary. ClaimSend atomically checks that the message
 // and agent are live and persists delivery_status='sending' for the stamped River
 // job before provider I/O begins.
+// DailyQuotaDeferredError is returned by Store.ClaimSend when the owning
+// account's per-day send cap is exhausted at fire time. The store has already
+// released the send claim; the worker snoozes the job until RetryAt (the next
+// UTC midnight, when the daily window resets) instead of failing the message.
+type DailyQuotaDeferredError struct {
+	RetryAt time.Time
+}
+
+func (e *DailyQuotaDeferredError) Error() string {
+	return fmt.Sprintf("daily send cap exhausted; deferred until %s", e.RetryAt.Format(time.RFC3339))
+}
+
 type Store interface {
 	// ClaimSend returns nil when the message is gone, trashed, terminal, or owned
-	// by a different River job.
-	// (agent-delete cascade / TTL) — the worker treats that as a no-op.
+	// by a different River job. It returns *DailyQuotaDeferredError (claim
+	// released) when the account's daily send cap is exhausted at fire time.
+	// (agent-delete cascade / TTL) — the worker treats a nil job as a no-op.
 	ClaimSend(ctx context.Context, messageID string, jobID int64) (*SendJob, error)
 	// ReleaseSend clears a side-effect-free attempt before River backoff.
 	ReleaseSend(ctx context.Context, messageID string, jobID int64) error
@@ -326,6 +339,17 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	observedAt := jobObservationTime(job)
 	j, err := w.store.ClaimSend(ctx, job.Args.MessageID, job.ID)
 	if err != nil {
+		// Daily-cap deferral: the store already released the claim; park the
+		// job until the messages_day window resets (next UTC midnight). Not a
+		// failure — the send fires unchanged tomorrow.
+		var dqd *DailyQuotaDeferredError
+		if errors.As(err, &dqd) {
+			delay := time.Until(dqd.RetryAt)
+			if delay < time.Minute {
+				delay = time.Minute
+			}
+			return river.JobSnooze(delay)
+		}
 		return err // DB error — retryable
 	}
 	if j == nil {

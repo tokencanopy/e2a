@@ -303,6 +303,12 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 		writeMagicMessage(w, supErr.Status, "Cannot send", html.EscapeString(supErr.Msg))
 		return
 	}
+	// Flow-cap re-check — same rationale as ApprovePendingCore: the hold was
+	// never metered at accept, so approve time is the enforcement point.
+	if qerr := a.checkApproveQuota(r.Context(), userID); qerr != nil {
+		writeMagicMessage(w, qerr.Status, "Cannot send", html.EscapeString(qerr.Msg))
+		return
+	}
 	if uerr := prepareManagedUnsubscribe(r.Context(), a.unsubscribeIssuer, a.fromDomain, userID, agent, &sendReq, true); uerr != nil {
 		writeMagicMessage(w, uerr.Status, "Cannot send", html.EscapeString(uerr.Msg))
 		return

@@ -161,7 +161,7 @@ type LimitExceededDetails struct {
 	// Resource is an OPEN set (evolving response-side vocabulary): a new
 	// capped resource means a new value here, and that must not break
 	// spec-generated clients.
-	Resource   string `json:"resource" doc:"The AccountView usage/limits field stem the cap applies to. Key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes."`
+	Resource   string `json:"resource" doc:"The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC)."`
 	Limit      int64  `json:"limit" doc:"The cap that was hit (matches limits.max_<resource>)."`
 	Current    int64  `json:"current" doc:"The account's usage at the time the cap was hit (matches usage.<resource>)."`
 	PlanCode   string `json:"plan_code,omitempty" doc:"The account's plan label."`

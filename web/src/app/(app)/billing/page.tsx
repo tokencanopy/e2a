@@ -115,7 +115,7 @@ function formatPrice(cents: number): string {
 const QUOTA_DIMS: { label: string; format: (p: PlanEntry) => string }[] = [
   { label: "Inboxes", format: (p) => formatNumber(p.max_agents) },
   { label: "Domains", format: (p) => formatNumber(p.max_domains) },
-  { label: "Messages / mo", format: (p) => formatNumber(p.max_messages_month) },
+  { label: "Sends / mo", format: (p) => formatNumber(p.max_messages_month) },
   { label: "Storage", format: (p) => formatBytes(p.max_storage_bytes) },
 ];
 
@@ -657,7 +657,7 @@ export default function BillingPage() {
               pct={pct(data.usage.domains, data.limits.max_domains)}
             />
             <UsageRow
-              label="Messages this month"
+              label="Sends this month"
               current={formatNumber(data.usage.messages_month)}
               limit={formatNumber(data.limits.max_messages_month)}
               pct={pct(data.usage.messages_month, data.limits.max_messages_month)}

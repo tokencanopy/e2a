@@ -1,0 +1,16 @@
+-- 110_account_limits_max_messages_day.sql
+--
+-- Per-day outbound send cap (usage-based pricing v1). Deliberately NULLABLE —
+-- the first nullable cap in account_limits, and the nullability is the
+-- contract: NULL means "no daily policy" (self-host rows, paid tiers, Free
+-- accounts with add-ons), so every existing row keeps today's behavior with
+-- no backfill. 0 hard-blocks all sends, consistent with the "no
+-- 0-means-unlimited escape hatch" convention of the other caps. The hosted
+-- sidecar writes 100 for bare Free accounts; row-less accounts get the
+-- operator default from the config `limits:` block.
+--
+-- Counted like max_messages_month: outbound recipient-deliveries, from
+-- usage_summaries.outbound_count, bucketed per UTC day.
+--
+-- ADD COLUMN with no DEFAULT is metadata-only; existing rows read NULL.
+ALTER TABLE account_limits ADD COLUMN IF NOT EXISTS max_messages_day INTEGER;

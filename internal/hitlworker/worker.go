@@ -22,6 +22,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/inboundpolicy"
 	"github.com/tokencanopy/e2a/internal/inboundscreen"
+	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/loopback"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
@@ -89,6 +90,9 @@ type Worker struct {
 	// Optional and fail-closed: nil (self-host default, feature off) means the
 	// sweep never appends a footer.
 	footerResolver func(ctx context.Context, userID string) bool
+	// quotaCheck re-checks the flow caps before a TTL auto-approve releases a
+	// hold (see SetQuotaCheck). nil disables the check.
+	quotaCheck func(ctx context.Context, userID string, units int) error
 	// inboundScreen runs the agent's inbound protection over the loopback
 	// inbound leg of a TTL-auto-approved self-send — the same engine
 	// construction (heuristics + optional Gemini) the relay uses for SMTP
@@ -113,6 +117,17 @@ func (w *Worker) SetOutboundEnqueuer(e OutboundEnqueuer) { w.outboundEnq = e }
 
 func (w *Worker) SetManagedUnsubscribeIssuer(i ManagedUnsubscribeIssuer) { w.unsubscribeIssuer = i }
 func (w *Worker) SetWebSocketHub(h WebSocketHub)                         { w.wsHub = h }
+
+// SetQuotaCheck installs the flow-cap re-check consulted before a TTL
+// auto-approve releases a hold into delivery. Held drafts are not metered at
+// accept, so expiry time is the enforcement point — exactly like the human
+// approve funnel's checkApproveQuota. The func returns a
+// *limits.LimitExceededError-shaped error when over cap; a transient error is
+// treated as fail-open by the caller. Wired in main from the limits enforcer;
+// nil (tests, self-host without limits) disables the check.
+func (w *Worker) SetQuotaCheck(f func(ctx context.Context, userID string, units int) error) {
+	w.quotaCheck = f
+}
 
 // SetOutboundFooterResolver wires the per-account outbound-footer decision for
 // TTL auto-approved sends. See the footerResolver field for semantics.
@@ -245,6 +260,22 @@ func (w *Worker) autoApprove(ctx context.Context, c identity.ExpirationCandidate
 	if w.outboundEnq == nil {
 		log.Printf("[hitl-worker] auto-approve %s: outbound delivery queue unavailable", c.MessageID)
 		return
+	}
+	// Flow-cap re-check before releasing the hold into delivery (see
+	// SetQuotaCheck). Over-cap → terminal auto-reject with the quota reason:
+	// the hold's TTL has already expired, so leaving it pending would just
+	// re-fire this sweep forever. A transient check error fails open — the
+	// external path is re-checked at worker claim time, and loopback is a
+	// single unit.
+	if w.quotaCheck != nil {
+		if qerr := w.quotaCheck(ctx, agent.UserID, 1); qerr != nil {
+			if le, ok := limits.IsLimitExceeded(qerr); ok {
+				log.Printf("[hitl-worker] auto-approve %s: %s cap reached (%d/%d) — rejecting", c.MessageID, le.Resource, le.Current, le.Limit)
+				w.autoReject(ctx, c.MessageID, fmt.Sprintf("auto-approve refused: %s limit exceeded (%d/%d)", le.Resource, le.Current, le.Limit))
+				return
+			}
+			log.Printf("[hitl-worker] auto-approve %s: quota check failed (failing open): %v", c.MessageID, qerr)
+		}
 	}
 	// Hand external delivery to QueueOutbound. false means this is a self-send,
 	// which uses the local loopback path below.
@@ -477,8 +508,10 @@ func (w *Worker) autoApproveLoopback(ctx context.Context, agent *identity.AgentI
 	// External sends are metered by the outbound worker after provider success.
 	// Loopback is terminal here and persisted both a Sent and an Inbox copy, so
 	// account for both directions after the transaction commits.
+	// Loopback is guaranteed single-recipient (loopback.IsSelfSend rejects
+	// CC/BCC and multi-To), so each leg is exactly one recipient-delivery unit.
 	for _, direction := range []string{"outbound", "inbound"} {
-		if _, err := w.usage.RecordAndCheck(ctx, agent.UserID, agent.ID, agent.Domain, direction); err != nil {
+		if _, err := w.usage.RecordAndCheck(ctx, agent.UserID, agent.ID, agent.Domain, direction, 1); err != nil {
 			log.Printf("[hitl-worker] %s usage recording error: %v", direction, err)
 		}
 	}

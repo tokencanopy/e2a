@@ -15,6 +15,9 @@ import { HttpFile } from '../http/http.js';
 export class LimitsCapsView {
     'maxAgents': number;
     'maxDomains': number;
+    /**
+    * Monthly send allowance in outbound recipient-deliveries: a message to N distinct recipients consumes N units. Received mail is free and does not count. Resets at the start of each calendar month (UTC). Checked against usage.messages_month.
+    */
     'maxMessagesMonth': number;
     /**
     * Storage-quota cap in bytes, checked against usage.storage_bytes (see its doc for what is counted).
