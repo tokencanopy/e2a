@@ -322,7 +322,11 @@ func currentMigrationFilenameForLegacy(legacy string) (string, bool) {
 	return "", false
 }
 
-func migrationFilenamesToRecord(current string) []string {
+// EquivalentMigrationFilenames returns every tracker filename that proves the
+// given current migration has run. The current name is always first; a legacy
+// alias follows when a previously released binary used a different filename.
+// Callers receive a new slice and may modify it safely.
+func EquivalentMigrationFilenames(current string) []string {
 	legacy, ok := migrationFilenameAliases[current]
 	if !ok {
 		return []string{current}
@@ -517,7 +521,7 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 		if err := validateConcurrentIndexPostcondition(ctx, conn, string(body)); err != nil {
 			return fmt.Errorf("verify migration %s: %w", name, err)
 		}
-		return recordMigrationFilenames(ctx, conn, migrationFilenamesToRecord(name))
+		return recordMigrationFilenames(ctx, conn, EquivalentMigrationFilenames(name))
 	}
 
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
@@ -529,7 +533,7 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 	if _, err := tx.Exec(ctx, string(body)); err != nil {
 		return fmt.Errorf("exec migration: %w", err)
 	}
-	if err := recordMigrationFilenamesTx(ctx, tx, migrationFilenamesToRecord(name)); err != nil {
+	if err := recordMigrationFilenamesTx(ctx, tx, EquivalentMigrationFilenames(name)); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
