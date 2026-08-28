@@ -884,7 +884,7 @@ func (s *Server) requirePrincipal(ctx context.Context) (*identity.Principal, err
 		// store outage) are 503, not 401: the credential was never judged,
 		// so no challenge fires (the challenge wrapper keys on 401 alone).
 		if errors.Is(err, identity.ErrAuthUnavailable) {
-			return nil, NewError(http.StatusServiceUnavailable, "internal_error", "authentication temporarily unavailable")
+			return nil, NewError(http.StatusServiceUnavailable, "auth_unavailable", "authentication temporarily unavailable")
 		}
 		return nil, NewError(http.StatusUnauthorized, "unauthorized", "authentication required")
 	}

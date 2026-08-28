@@ -85,8 +85,8 @@ func TestAuthAvailabilityWireSplit(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.Error.Code != "internal_error" {
-			t.Fatalf("code = %q, want internal_error (generic availability envelope)", body.Error.Code)
+		if body.Error.Code != "auth_unavailable" {
+			t.Fatalf("code = %q, want auth_unavailable (dedicated availability code)", body.Error.Code)
 		}
 	})
 }
