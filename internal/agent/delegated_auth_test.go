@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/telemetry"
@@ -94,6 +95,94 @@ func (s *stubDelegatedVerifier) Verify(context.Context, string) (*delegated.Clai
 	return s.claims, s.err
 }
 
+// statefulDelegatedVerifier mimics the delegated verifier's stateful JWKS
+// burst bucket: the FIRST Verify of an unknown-kid token consumes the
+// burst token, refreshes, finds the kid absent and returns a 401-class
+// ErrInvalidToken; a SECOND Verify within the cooldown is rate-limited to
+// a 503-class ErrUnavailable. So the outcome depends on how many times
+// the token is verified — which is exactly why a request must Verify
+// once.
+type statefulDelegatedVerifier struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *statefulDelegatedVerifier) Verify(context.Context, string) (*delegated.Claims, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.calls == 1 {
+		return nil, fmt.Errorf("%w: unknown kid after refresh", delegated.ErrInvalidToken)
+	}
+	return nil, fmt.Errorf("%w: refresh rate limited", delegated.ErrUnavailable)
+}
+
+func (s *statefulDelegatedVerifier) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// TestDelegatedAuthResolvesOncePerRequest is the M2 guard: within one
+// request the credential must be resolved exactly once, so a stateful
+// verifier cannot flip a 401 into a 503 across the rate-limit middleware,
+// the handler, and the WWW-Authenticate challenge re-run. A per-request
+// auth memo (agent.WithAuthMemo, installed by the httpapi request
+// pipeline) collapses all three to one Verify.
+func TestDelegatedAuthResolvesOncePerRequest(t *testing.T) {
+	f := newAgentIDFixture(t)
+	metrics := &delegatedMetricsRecorder{}
+	f.api.SetMetrics(metrics)
+	verifier := &statefulDelegatedVerifier{}
+	f.api.SetDelegatedVerifier(verifier)
+
+	req := agent.WithAuthMemo(bearerRequest(t, atJWTBearer(t)))
+
+	// Simulate the production sequence for a failing delegated request:
+	// rate-limit middleware resolve, handler resolve, challenge re-run.
+	_, err1 := f.api.AuthenticatePrincipal(req)
+	challenge := f.api.WWWAuthenticateChallenge(req)
+	_, err2 := f.api.AuthenticatePrincipal(req)
+
+	if got := verifier.count(); got != 1 {
+		t.Fatalf("Verify called %d times, want exactly 1 per request", got)
+	}
+	if errors.Is(err1, identity.ErrAuthUnavailable) || errors.Is(err2, identity.ErrAuthUnavailable) {
+		t.Fatalf("a single-Verify failure must stay 401-class, got err1=%v err2=%v", err1, err2)
+	}
+	if err1 == nil || err2 == nil {
+		t.Fatal("both resolutions must report the same (invalid) outcome")
+	}
+	if challenge != `Bearer realm="e2a"` {
+		t.Fatalf("challenge = %q, want the bare Bearer challenge (a 503-class re-Verify would drop it)", challenge)
+	}
+	// One failure, one metric — not one per re-resolution.
+	if got := metrics.count(); got != 1 {
+		t.Fatalf("delegated failure metric emitted %d times, want 1", got)
+	}
+}
+
+// TestDelegatedAuthWithoutMemoDoubleResolves documents the bug the memo
+// fixes: with no per-request memo, a second resolution re-runs Verify and
+// the stateful verifier flips the outcome from 401-class to 503-class.
+func TestDelegatedAuthWithoutMemoDoubleResolves(t *testing.T) {
+	f := newAgentIDFixture(t)
+	f.api.SetDelegatedVerifier(&statefulDelegatedVerifier{})
+
+	// No WithAuthMemo: each call resolves independently.
+	_, err1 := f.api.AuthenticatePrincipal(bearerRequest(t, atJWTBearer(t)))
+	// A distinct request object shares the same verifier — the second
+	// Verify is what the missing memo would have caused on ONE request.
+	_, err2 := f.api.AuthenticatePrincipal(bearerRequest(t, atJWTBearer(t)))
+
+	if errors.Is(err1, identity.ErrAuthUnavailable) {
+		t.Fatal("first resolution should be 401-class")
+	}
+	if !errors.Is(err2, identity.ErrAuthUnavailable) {
+		t.Fatal("second resolution flips to 503-class — the exact bug the memo prevents")
+	}
+}
+
 // delegatedMetricsRecorder captures the delegated failure categories.
 type delegatedMetricsRecorder struct {
 	telemetry.NoOp
@@ -115,6 +204,12 @@ func (m *delegatedMetricsRecorder) last(t *testing.T) string {
 		t.Fatal("no delegated auth failure recorded")
 	}
 	return m.categories[len(m.categories)-1]
+}
+
+func (m *delegatedMetricsRecorder) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.categories)
 }
 
 // acquireAgentAccessToken runs the real autonomous flow (e2a_agt_ key →

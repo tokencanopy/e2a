@@ -508,8 +508,11 @@ func New(deps Deps) *Server {
 	// handlers, legacy fallback). No-op when deps.Metrics is nil.
 	root.Use(requestMetrics(deps.Metrics))
 	root.Use(securityHeaders)
-	root.Use(authChallenge(deps.AuthChallenge))
+	// withRawRequest installs the per-request auth memo; authChallenge must
+	// run INSIDE it so the challenge builder's request carries that memo and
+	// reuses the already-resolved outcome instead of re-authenticating.
 	root.Use(withRawRequest)
+	root.Use(authChallenge(deps.AuthChallenge))
 
 	config := huma.DefaultConfig("e2a API", APIVersion)
 	// Reject bodies that are not valid UTF-8 BEFORE JSON decoding. This must
@@ -830,8 +833,15 @@ type reqCtxKey struct{}
 // the auth path. Storing the request in its own derived context is the
 // standard bridge; only headers/cookies are read downstream, so the
 // pre-derivation request is equivalent for authentication.
+//
+// It also installs a one-shot per-request auth memo (agent.WithAuthMemo)
+// so the credential is resolved exactly once across the rate-limit
+// middleware, the handler, and the WWW-Authenticate challenge re-run —
+// the stashed request and every RequestFromContext consumer then share
+// that memo (the stateful delegated verifier must not run twice).
 func withRawRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = agent.WithAuthMemo(r)
 		ctx := context.WithValue(r.Context(), reqCtxKey{}, r)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

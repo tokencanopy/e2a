@@ -825,7 +825,28 @@ func (a *API) authenticateUser(r *http.Request) (*identity.User, error) {
 	return p.User, nil
 }
 
+// authenticatePrincipal resolves the request credential to a principal.
+// When the request carries a one-shot auth memo (WithAuthMemo, installed
+// by the v1 request pipeline), the resolution is computed once and reused
+// for every later call within the same request — the rate-limit
+// middleware, the handler, and the 401 challenge re-run all share it.
+// This keeps the stateful delegated verifier from running more than once
+// per request (see WithAuthMemo).
 func (a *API) authenticatePrincipal(r *http.Request) (*identity.Principal, error) {
+	memo, _ := r.Context().Value(authMemoKey{}).(*authMemo)
+	if memo != nil && memo.done {
+		return memo.p, memo.err
+	}
+	p, err := a.resolvePrincipalOnce(r)
+	if memo != nil {
+		memo.done, memo.p, memo.err = true, p, err
+	}
+	return p, err
+}
+
+// resolvePrincipalOnce is the actual credential-resolution path: the
+// token-kind dispatch that authenticatePrincipal memoizes per request.
+func (a *API) resolvePrincipalOnce(r *http.Request) (*identity.Principal, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		bearer := stripBearerScheme(authHeader)
