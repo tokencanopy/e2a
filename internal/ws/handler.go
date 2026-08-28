@@ -104,6 +104,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rawEmail string)
 		return
 	}
 
+	// API-key only, by design: the WebSocket handshake does not run the
+	// token-kind dispatch, so a delegated at+jwt is never classified or
+	// verified here. The native console polls over REST and never opens a
+	// socket, so delegated tokens have no reason to reach this path.
 	principal, err := h.store.GetPrincipalByAPIKey(r.Context(), token)
 	if err != nil || principal == nil || principal.User == nil {
 		// A genuinely unknown/revoked/expired key surfaces as pgx.ErrNoRows

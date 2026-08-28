@@ -105,16 +105,21 @@ delegated:
   max_token_lifetime_seconds: 120          # bound on exp - iat
   clock_skew_seconds: 5                    # tolerated iat-future / exp-past drift
   # Context claims every token must carry as bounded nonempty strings;
-  # allowed_values (optional) closes a claim to a value set.
+  # allowed_values (optional) closes a claim to a value set. These claim
+  # NAMES and role VALUES are your issuer's identity policy — not shipped
+  # with any default — so set them to your deployment's own claims. The
+  # generic placeholders below are illustrative only; enabling the
+  # verifier with an empty required_claims or forbidden_claims list is a
+  # startup error.
   required_claims:
-    - name: workspace_id
-    - name: membership_id
-    - name: workspace_role
-      allowed_values: [owner, admin, member]
+    - name: tenant_id
+    - name: seat_id
+    - name: seat_role
+      allowed_values: [admin, member]
   # Claims that must be absent entirely (present-as-null still rejects):
-  # the issuer's machine-credential claim names, so a non-human token can
+  # your issuer's machine-credential claim names, so a non-human token can
   # never pass the human-token policy.
-  forbidden_claims: [client_id, credential_id, runtime_id, sponsor_id]
+  forbidden_claims: [service_client_id, robot_id]
 
 # — Internal user provisioning ———————————————————————————————————————————————
 # Optional, off by default, internal-only (not part of the public /v1 API or

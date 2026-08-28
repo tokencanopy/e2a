@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,6 +34,34 @@ func baseConfigWithDelegated(d DelegatedConfig, env string) *Config {
 		Signing:   SigningConfig{HMACSecret: strings.Repeat("x", 64)},
 		Trash:     TrashConfig{RetentionDays: 30},
 		Delegated: d,
+	}
+}
+
+// TestLoadDelegatedEnabledForcesExplicitClaimPolicy proves the emptied
+// claim defaults are load-bearing (N10): enabling the verifier with
+// issuer/audience/authorized_party/scope but NO required/forbidden claim
+// lists is a startup error — OSS ships no operator-specific claim policy
+// to silently fall back on.
+func TestLoadDelegatedEnabledForcesExplicitClaimPolicy(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+env: "development"
+signing:
+  hmac_secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+delegated:
+  enabled: true
+  issuer_url: "https://issuer.example.test/oidc"
+  audience: "https://api.example.test"
+  authorized_party: "example-console"
+  required_scope: "account"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(cfgPath); err == nil {
+		t.Fatal("enabling delegated with no required/forbidden claim lists must fail to load")
+	} else if !strings.Contains(err.Error(), "required_claims") && !strings.Contains(err.Error(), "forbidden_claims") {
+		t.Fatalf("error should name the missing claim lists, got: %v", err)
 	}
 }
 

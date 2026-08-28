@@ -498,20 +498,17 @@ func Load(path string) (*Config, error) {
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
 		Trash:      TrashConfig{RetentionDays: 30},
-		// Delegated verification is off by default; these defaults are the
-		// generic policy shape so an enabling deployment only has to supply
-		// its issuer/audience/authorized-party/scope values. All of them
-		// remain overridable in yaml.
+		// Delegated verification is off by default. Only protocol-level
+		// values are defaulted (algorithm allowlist, lifetime, skew); the
+		// required/forbidden CLAIM lists are deployment identity policy
+		// (§10.3 "deployment data") and are deliberately NOT defaulted, so
+		// OSS ships no operator-specific claim names or role values. An
+		// enabling deployment must state its own claim policy — the enabled
+		// validation rejects empty required/forbidden lists.
 		Delegated: DelegatedConfig{
 			AllowedAlgorithms:       []string{"RS256", "ES256"},
 			MaxTokenLifetimeSeconds: 120,
 			ClockSkewSeconds:        5,
-			RequiredClaims: []DelegatedClaimConfig{
-				{Name: "workspace_id"},
-				{Name: "membership_id"},
-				{Name: "workspace_role", AllowedValues: []string{"owner", "admin", "member"}},
-			},
-			ForbiddenClaims: []string{"client_id", "credential_id", "runtime_id", "sponsor_id"},
 		},
 		Env: "development",
 	}
