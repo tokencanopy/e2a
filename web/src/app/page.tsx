@@ -7,7 +7,7 @@ import { Eyebrow } from "@e2a/ui";
 import { JsonLd } from "./components/JsonLd";
 import { TokenCanopyBadge } from "./components/loft/TokenCanopyBadge";
 import { faqPage, type FaqEntry } from "../lib/jsonld";
-import { SIGN_IN_URL } from "../lib/site";
+import { PRICING_PATH, SIGN_IN_URL } from "../lib/site";
 
 // Agent onboarding surfaces: install the plugin in a coding agent, or point
 // any MCP runtime at the hosted server. Application integrations use the SDK
@@ -241,6 +241,18 @@ export default function Home() {
                 Start
               </a>
               <NavMenu label="Product" items={PRODUCT_LINKS} />
+              {/* Hosted-only: /pricing is served by the deployment's proxy from
+                  outside this app (see PRICING_PATH in lib/site). Unset means
+                  no pricing page exists — render nothing rather than a 404. */}
+              {PRICING_PATH && (
+                <a
+                  href={PRICING_PATH}
+                  className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  Pricing
+                </a>
+              )}
               <NavMenu label="Resources" items={RESOURCE_LINKS} />
               {SOCIAL_LINKS.map((s) => (
                 <a
