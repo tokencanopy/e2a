@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/testutil"
@@ -51,6 +52,133 @@ func TestEmbeddedMigrationNumbersAreUniqueFrom108(t *testing.T) {
 		}
 		seen[number] = name
 		lastNumber = number
+	}
+}
+
+var renamedB1Migrations = []struct {
+	legacyName  string
+	currentName string
+}{
+	{"109_sending_protection_policy.sql", "112_sending_protection_policy.sql"},
+	{"110_sending_budget_ledger.sql", "113_sending_budget_ledger.sql"},
+	{"111_sending_feedback_provenance.sql", "114_sending_feedback_provenance.sql"},
+	{"112_sending_controls_foreign_key.sql", "115_sending_controls_foreign_key.sql"},
+	{"113_sending_message_holds.sql", "116_sending_message_holds.sql"},
+	{"114_sending_suppression_provenance.sql", "117_sending_suppression_provenance.sql"},
+	{"115_sending_protection_validate_constraints.sql", "118_sending_protection_validate_constraints.sql"},
+}
+
+func TestRunMigrationsRecognizesRenamedB1Migrations(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	expectedNames := make([]string, 0, len(renamedB1Migrations)*2)
+	fsEntries := make(map[string]string, len(renamedB1Migrations))
+	for _, migration := range renamedB1Migrations {
+		expectedNames = append(expectedNames, migration.legacyName, migration.currentName)
+		fsEntries[migration.currentName] = "THIS MUST NOT EXECUTE;"
+	}
+	restoreMigrationRecords(t, pool, expectedNames)
+	for _, migration := range renamedB1Migrations {
+		if _, err := pool.Exec(ctx,
+			"DELETE FROM schema_migrations WHERE filename = $1",
+			migration.currentName,
+		); err != nil {
+			t.Fatalf("clear current migration record %s: %v", migration.currentName, err)
+		}
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+			migration.legacyName,
+		); err != nil {
+			t.Fatalf("seed legacy migration record %s: %v", migration.legacyName, err)
+		}
+	}
+
+	// A database upgraded through v1.8.2 already ran B1 under the legacy
+	// filenames. The collision-free names must be treated as applied without
+	// replaying any migration body.
+	if err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeAuto); err != nil {
+		t.Fatalf("renamed B1 migrations should be skipped from legacy records: %v", err)
+	}
+	if err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeVerify); err != nil {
+		t.Fatalf("verify mode should recognize renamed B1 migrations: %v", err)
+	}
+
+	for _, migration := range renamedB1Migrations {
+		var currentCount int
+		if err := pool.QueryRow(ctx,
+			"SELECT count(*) FROM schema_migrations WHERE filename = $1",
+			migration.currentName,
+		).Scan(&currentCount); err != nil {
+			t.Fatalf("read current migration record %s: %v", migration.currentName, err)
+		}
+		if currentCount != 0 {
+			t.Fatalf("upgrade compatibility must not fabricate %s record, got %d", migration.currentName, currentCount)
+		}
+	}
+}
+
+func TestFreshRenamedMigrationRecordsLegacyFilenameForRollback(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+
+	expectedNames := make([]string, 0, len(renamedB1Migrations)*2)
+	fsEntries := make(map[string]string, len(renamedB1Migrations))
+	for _, migration := range renamedB1Migrations {
+		expectedNames = append(expectedNames, migration.legacyName, migration.currentName)
+		fsEntries[migration.currentName] = "SELECT 1;"
+	}
+	restoreMigrationRecords(t, pool, expectedNames)
+	if _, err := pool.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = ANY($1)",
+		expectedNames,
+	); err != nil {
+		t.Fatalf("clear migration records: %v", err)
+	}
+
+	if err := identity.RunMigrations(ctx, pool, stubFS(fsEntries), identity.ModeAuto); err != nil {
+		t.Fatalf("apply renamed B1 migration: %v", err)
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT filename
+		FROM schema_migrations
+		WHERE filename = ANY($1)
+		ORDER BY filename
+	`, expectedNames)
+	if err != nil {
+		t.Fatalf("read migration compatibility records: %v", err)
+	}
+	defer rows.Close()
+	var recordedNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan migration compatibility record: %v", err)
+		}
+		recordedNames = append(recordedNames, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migration compatibility records: %v", err)
+	}
+	if len(recordedNames) != len(renamedB1Migrations)*2 {
+		t.Fatalf("migration records = %v, want all legacy and current filenames", recordedNames)
+	}
+	seen := make(map[string]bool, len(recordedNames))
+	for _, name := range recordedNames {
+		seen[name] = true
+	}
+	for _, migration := range renamedB1Migrations {
+		if !seen[migration.legacyName] || !seen[migration.currentName] {
+			t.Fatalf("migration records = %v, missing rollback pair %s / %s", recordedNames, migration.legacyName, migration.currentName)
+		}
+	}
+
+	legacyEntries := make(map[string]string, len(renamedB1Migrations))
+	for _, migration := range renamedB1Migrations {
+		legacyEntries[migration.legacyName] = "THIS MUST NOT EXECUTE;"
+	}
+	if err := identity.RunMigrations(ctx, pool, stubFS(legacyEntries), identity.ModeVerify); err != nil {
+		t.Fatalf("legacy binary view should see rollback filenames applied: %v", err)
 	}
 }
 
@@ -129,7 +257,7 @@ func TestMigrationsRewriteLegacySendingJobsWithImmutableAttribution(t *testing.T
 		t.Fatalf("schedule legacy job: %v", err)
 	}
 
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatalf("read sending budget migration: %v", err)
 	}
@@ -205,7 +333,7 @@ func TestSendingBudgetMigrationDoesNotDeadlockSourceFirstJobCancellation(t *test
 	if err != nil {
 		t.Fatalf("build real River cancellation client: %v", err)
 	}
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +580,7 @@ func TestSendingBudgetMigrationLeavesPostSnapshotLegacyJobForResolver(t *testing
 	if err := migrationConn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&migrationPID); err != nil {
 		t.Fatalf("read migration backend pid: %v", err)
 	}
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatalf("read sending budget migration: %v", err)
 	}
@@ -836,6 +964,42 @@ func stubFS(files map[string]string) fstest.MapFS {
 		fsys[name] = &fstest.MapFile{Data: []byte(body)}
 	}
 	return fsys
+}
+
+func restoreMigrationRecords(t *testing.T, pool *pgxpool.Pool, names []string) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx,
+		"SELECT filename FROM schema_migrations WHERE filename = ANY($1)",
+		names,
+	)
+	if err != nil {
+		t.Fatalf("snapshot migration records: %v", err)
+	}
+	var existing []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatalf("scan migration record: %v", err)
+		}
+		existing = append(existing, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("iterate migration records: %v", err)
+	}
+	rows.Close()
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			"DELETE FROM schema_migrations WHERE filename = ANY($1)", names)
+		for _, name := range existing {
+			_, _ = pool.Exec(context.Background(),
+				"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+				name)
+		}
+	})
 }
 
 func TestParseMigrationMode(t *testing.T) {

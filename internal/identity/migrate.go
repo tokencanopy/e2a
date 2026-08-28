@@ -86,6 +86,22 @@ const e2aMigrationLockID int64 = 0x65325F4D49475200
 // this directive (the CONCURRENTLY statement).
 const noTransactionDirective = "e2a:no-transaction"
 
+// migrationFilenameAliases preserves upgrade and rollback compatibility for
+// migrations that were merged with colliding numeric slots. The map is
+// current filename -> legacy filename. Existing databases keep the legacy
+// tracker row and treat the current filename as applied in memory; fresh
+// databases record both names so an older binary does not replay the legacy
+// file after rollback.
+var migrationFilenameAliases = map[string]string{
+	"112_sending_protection_policy.sql":               "109_sending_protection_policy.sql",
+	"113_sending_budget_ledger.sql":                   "110_sending_budget_ledger.sql",
+	"114_sending_feedback_provenance.sql":             "111_sending_feedback_provenance.sql",
+	"115_sending_controls_foreign_key.sql":            "112_sending_controls_foreign_key.sql",
+	"116_sending_message_holds.sql":                   "113_sending_message_holds.sql",
+	"117_sending_suppression_provenance.sql":          "114_sending_suppression_provenance.sql",
+	"118_sending_protection_validate_constraints.sql": "115_sending_protection_validate_constraints.sql",
+}
+
 var (
 	createConcurrentIndexMarker = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b`)
 	createConcurrentIndexTarget = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*)(?:\.(?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*))?)`)
@@ -158,6 +174,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, 
 	if err != nil {
 		return fmt.Errorf("load applied migrations: %w", err)
 	}
+	recognizeMigrationFilenameAliases(applied, files)
 
 	// Defensive: warn about migrations recorded in schema_migrations
 	// that no longer exist in the embedded FS (rename/delete since
@@ -244,10 +261,42 @@ func warnOrphans(applied map[string]bool, files []string) {
 		fileSet[f] = true
 	}
 	for name := range applied {
+		if current, ok := currentMigrationFilenameForLegacy(name); ok && fileSet[current] {
+			continue
+		}
 		if !fileSet[name] {
 			log.Printf("[migrate] WARN: %s recorded in schema_migrations but not in embedded migrations/ — possible rename or deletion", name)
 		}
 	}
+}
+
+func recognizeMigrationFilenameAliases(applied map[string]bool, files []string) {
+	fileSet := make(map[string]bool, len(files))
+	for _, name := range files {
+		fileSet[name] = true
+	}
+	for current, legacy := range migrationFilenameAliases {
+		if fileSet[current] && applied[legacy] {
+			applied[current] = true
+		}
+	}
+}
+
+func currentMigrationFilenameForLegacy(legacy string) (string, bool) {
+	for current, candidate := range migrationFilenameAliases {
+		if candidate == legacy {
+			return current, true
+		}
+	}
+	return "", false
+}
+
+func migrationFilenamesToRecord(current string) []string {
+	legacy, ok := migrationFilenameAliases[current]
+	if !ok {
+		return []string{current}
+	}
+	return []string{current, legacy}
 }
 
 // hasNoTransactionDirective scans the leading comment block of a
@@ -410,11 +459,13 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 		if err := validateConcurrentIndexPostcondition(ctx, conn, string(body)); err != nil {
 			return fmt.Errorf("verify migration %s: %w", name, err)
 		}
-		if _, err := conn.Exec(ctx,
-			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-			name,
-		); err != nil {
-			return fmt.Errorf("record migration: %w", err)
+		for _, filename := range migrationFilenamesToRecord(name) {
+			if _, err := conn.Exec(ctx,
+				"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+				filename,
+			); err != nil {
+				return fmt.Errorf("record migration %s: %w", filename, err)
+			}
 		}
 		return nil
 	}
@@ -428,11 +479,13 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 	if _, err := tx.Exec(ctx, string(body)); err != nil {
 		return fmt.Errorf("exec migration: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-		name,
-	); err != nil {
-		return fmt.Errorf("record migration: %w", err)
+	for _, filename := range migrationFilenamesToRecord(name) {
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+			filename,
+		); err != nil {
+			return fmt.Errorf("record migration %s: %w", filename, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

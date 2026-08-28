@@ -22,13 +22,13 @@ func TestSendingProtectionMigrationsAreIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
 	for _, name := range []string{
-		"109_sending_protection_policy.sql",
-		"110_sending_budget_ledger.sql",
-		"111_sending_feedback_provenance.sql",
-		"112_sending_controls_foreign_key.sql",
-		"113_sending_message_holds.sql",
-		"114_sending_suppression_provenance.sql",
-		"115_sending_protection_validate_constraints.sql",
+		"112_sending_protection_policy.sql",
+		"113_sending_budget_ledger.sql",
+		"114_sending_feedback_provenance.sql",
+		"115_sending_controls_foreign_key.sql",
+		"116_sending_message_holds.sql",
+		"117_sending_suppression_provenance.sql",
+		"118_sending_protection_validate_constraints.sql",
 	} {
 		migration, err := migrations.FS.ReadFile(name)
 		if err != nil {
@@ -62,7 +62,7 @@ func TestOperatorRecipientRegistryRejectsTruncate(t *testing.T) {
 }
 
 func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T) {
-	budgetBytes, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	budgetBytes, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T)
 		}
 	}
 
-	controlsBytes, err := migrations.FS.ReadFile("112_sending_controls_foreign_key.sql")
+	controlsBytes, err := migrations.FS.ReadFile("115_sending_controls_foreign_key.sql")
 	if err != nil {
 		t.Fatalf("read controls FK migration: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T)
 		}
 	}
 
-	feedbackBytes, err := migrations.FS.ReadFile("111_sending_feedback_provenance.sql")
+	feedbackBytes, err := migrations.FS.ReadFile("114_sending_feedback_provenance.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T)
 		t.Fatal("account outcomes FK must be named, NOT VALID, and installed in migration 111's bounded tail")
 	}
 
-	messagesBytes, err := migrations.FS.ReadFile("113_sending_message_holds.sql")
+	messagesBytes, err := migrations.FS.ReadFile("116_sending_message_holds.sql")
 	if err != nil {
 		t.Fatalf("read messages hot-DDL migration: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T)
 		t.Fatal("messages hot-DDL migration must contain no other strong-table work")
 	}
 
-	suppressionsBytes, err := migrations.FS.ReadFile("114_sending_suppression_provenance.sql")
+	suppressionsBytes, err := migrations.FS.ReadFile("117_sending_suppression_provenance.sql")
 	if err != nil {
 		t.Fatalf("read suppressions hot-DDL migration: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestSendingProtectionHotTableDDLIsEndLoadedBoundedAndNotValid(t *testing.T)
 		t.Fatal("suppressions hot-DDL migration must contain no other strong-table work")
 	}
 
-	validationBytes, err := migrations.FS.ReadFile("115_sending_protection_validate_constraints.sql")
+	validationBytes, err := migrations.FS.ReadFile("118_sending_protection_validate_constraints.sql")
 	if err != nil {
 		t.Fatalf("read validation migration: %v", err)
 	}
@@ -210,11 +210,11 @@ func testSendingBudgetMigrationDoesNotDeadlockAccountDeletionOrder(t *testing.T,
 	if err := jobs.Migrate(ctx, pool); err != nil {
 		t.Fatalf("migrate River schema: %v", err)
 	}
-	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	migration, err := migrations.FS.ReadFile("113_sending_budget_ledger.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	controlsMigration, err := migrations.FS.ReadFile("112_sending_controls_foreign_key.sql")
+	controlsMigration, err := migrations.FS.ReadFile("115_sending_controls_foreign_key.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestSendingProtectionAccountFKFirstApplyLockWaitIsBounded(t *testing.T) {
 		hotRead    string
 	}{
 		{
-			"controls", "112_sending_controls_foreign_key.sql",
+			"controls", "115_sending_controls_foreign_key.sql",
 			`ALTER TABLE account_sending_controls DROP CONSTRAINT IF EXISTS account_sending_controls_user_id_fkey`,
 			`INSERT INTO users (id,email,name,google_subject)
 			 VALUES ('usr_first_apply_hot','owner@first-apply-hot.test','Owner','sub-first-apply-hot');
@@ -442,7 +442,7 @@ func TestSendingProtectionAccountFKFirstApplyLockWaitIsBounded(t *testing.T) {
 			`SELECT count(*) FROM messages WHERE id='msg_first_apply_hot'`,
 		},
 		{
-			"outcomes", "111_sending_feedback_provenance.sql",
+			"outcomes", "114_sending_feedback_provenance.sql",
 			`DROP TABLE account_sending_outcomes_daily`,
 			`INSERT INTO users (id,email,name,google_subject)
 			 VALUES ('usr_first_apply_hot','owner@first-apply-hot.test','Owner','sub-first-apply-hot');
@@ -459,7 +459,7 @@ func TestSendingProtectionAccountFKFirstApplyLockWaitIsBounded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			validation, err := migrations.FS.ReadFile("115_sending_protection_validate_constraints.sql")
+			validation, err := migrations.FS.ReadFile("118_sending_protection_validate_constraints.sql")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -585,11 +585,11 @@ func TestSendingProtectionAccountFKFirstApplyLockWaitIsBounded(t *testing.T) {
 func TestSendingControlsFKTailRemovesOnlyOrphans(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
-	migration, err := migrations.FS.ReadFile("112_sending_controls_foreign_key.sql")
+	migration, err := migrations.FS.ReadFile("115_sending_controls_foreign_key.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	validation, err := migrations.FS.ReadFile("115_sending_protection_validate_constraints.sql")
+	validation, err := migrations.FS.ReadFile("118_sending_protection_validate_constraints.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,8 +649,8 @@ func TestSendingProtectionHotTableAlterLockWaitIsBounded(t *testing.T) {
 		table     string
 		migration string
 	}{
-		{"messages", "messages", "113_sending_message_holds.sql"},
-		{"suppressions", "suppressions", "114_sending_suppression_provenance.sql"},
+		{"messages", "messages", "116_sending_message_holds.sql"},
+		{"suppressions", "suppressions", "117_sending_suppression_provenance.sql"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := testutil.TestDB(t)
@@ -690,7 +690,7 @@ func TestSendingProtectionHotTableAlterLockWaitIsBounded(t *testing.T) {
 }
 
 func TestSendingProtectionConstraintValidationAllowsNormalDML(t *testing.T) {
-	validation, err := migrations.FS.ReadFile("115_sending_protection_validate_constraints.sql")
+	validation, err := migrations.FS.ReadFile("118_sending_protection_validate_constraints.sql")
 	if err != nil {
 		t.Fatalf("read validation migration: %v", err)
 	}

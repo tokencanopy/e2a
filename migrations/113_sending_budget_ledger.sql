@@ -1,4 +1,4 @@
--- 110_sending_budget_ledger.sql
+-- 113_sending_budget_ledger.sql
 -- Expand-only account controls, provider-operation/budget ledger, and notice outbox.
 
 -- Freeze the exact pre-migration legacy River inventory before any per-kind
