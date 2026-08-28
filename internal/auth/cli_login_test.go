@@ -190,6 +190,36 @@ func TestHandleLogin_EncodesInboxThreadReturnToInOAuthState(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_EncodesGetStartedReturnToInOAuthState(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+
+	returnTo := "/get-started?step=address"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/login?return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	w := httptest.NewRecorder()
+
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusFound, w.Body.String())
+	}
+	loc, _ := url.Parse(w.Result().Header.Get("Location"))
+	stateParam := loc.Query().Get("state")
+	stateJSON, _ := base64.URLEncoding.DecodeString(stateParam)
+	var state struct {
+		ReturnTo string `json:"rt"`
+	}
+	if err := json.Unmarshal(stateJSON, &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.ReturnTo != returnTo {
+		t.Errorf("return_to = %q, want %q", state.ReturnTo, returnTo)
+	}
+}
+
 // TestHandleLogin_RejectsReturnToOutsideAllowList: every value the
 // allow-list refuses must produce 400 rather than silently strip — a
 // silent strip would land the user on /dashboard, leaving the original
@@ -199,6 +229,8 @@ func TestHandleLogin_RejectsReturnToOutsideAllowList(t *testing.T) {
 
 	bad := []string{
 		"/dashboard",                         // unrelated dashboard route
+		"/get-started/other",                 // sender setup allow-list is exact
+		"/get-started/../dashboard",          // sender setup path traversal
 		"/reviews/other",                     // review allow-list is exact
 		"/reviews/../dashboard",              // review path traversal
 		"/inboxes/messages/view",             // inbox allow-list is exact

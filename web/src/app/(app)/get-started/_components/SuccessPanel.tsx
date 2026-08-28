@@ -150,9 +150,9 @@ function ApiKeyNote() {
     <div className="mb-6 p-4 border border-border rounded-lg text-sm text-muted">
       <p>
         <span className="font-medium text-foreground">Application API.</span>{" "}
-        Create an{" "}
+        Create a key on the{" "}
         <a href="/api-keys" className="text-accent hover:underline">API Keys</a>{" "}
-        and use it with the HTTP API, TypeScript SDK, or Python SDK. The CLI can
+        page and use it with the HTTP API, TypeScript SDK, or Python SDK. The CLI can
         also create and save a key automatically via{" "}
         <code className="bg-surface px-1 py-0.5 rounded border border-border">e2a login</code>.
         {" "}Full docs:{" "}

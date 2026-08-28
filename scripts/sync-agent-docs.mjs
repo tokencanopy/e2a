@@ -30,10 +30,11 @@ export const LLMS_FULL_SOURCES = [
 
 const LLMS_FULL_HEADER = `# e2a — full documentation
 
-> e2a is the open-source email API for AI agents. Send transactional email, give
-> agents real two-way inboxes, and keep people in control. Use e2a as a hosted
-> service or run the Apache-2.0 stack yourself. Connect over a hosted MCP server
-> (OAuth 2.1, no API key), the REST API, or the TypeScript/Python SDKs.
+> e2a is the open-source email API for applications and AI agents. Send
+> transactional email from any product, give agents real two-way inboxes, and
+> keep people in control. Use e2a as a hosted service or run the Apache-2.0
+> stack yourself. Connect over a hosted MCP server (OAuth 2.1, no API key), the
+> REST API, or the TypeScript/Python SDKs.
 
 This file inlines the full e2a documentation set so it can be read in one
 fetch. The per-document originals are linked above each section, and the

@@ -100,6 +100,7 @@ test("sync inlines every corpus source into llms-full.txt", async () => {
     assert.ok(full.includes(`<!-- source: ${url} -->`), `missing marker for ${url}`);
     assert.ok(full.includes(body.trim()), `missing body of ${source}`);
   }
+  assert.match(full, /open-source email API for applications and AI agents/i);
   await assert.doesNotReject(
     syncAgentDocs({ repoRoot, check: true, log: () => {} }),
   );

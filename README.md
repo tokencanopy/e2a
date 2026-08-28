@@ -25,7 +25,7 @@ Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **
 
 **`/v1` is now generally available** — shipped in [**v1.5.0**](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0).
 
-[Hosted (e2a.dev)](https://e2a.dev) · [Quickstart](#quickstart) · [Examples](#working-examples) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
+[Hosted (e2a.dev)](https://e2a.dev) · [Transactional email API](https://e2a.dev/transactional-email-api) · [Agent quickstart](#quickstart) · [Examples](#working-examples) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
 
 <a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a, the open-source email API for AI agents | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
 

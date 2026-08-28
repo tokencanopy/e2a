@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { JsonLd } from "../components/JsonLd";
-import { SITE_URL } from "../../lib/site";
+import { PRICING_PATH, SITE_URL } from "../../lib/site";
 import {
   breadcrumbs,
   faqPage,
@@ -61,6 +61,10 @@ const CAPABILITIES = [
 ] as const;
 
 export default function TransactionalEmailApiPage() {
+  return <TransactionalEmailApiPageContent pricingPath={PRICING_PATH} />;
+}
+
+export function TransactionalEmailApiPageContent({ pricingPath }: { pricingPath: string }) {
   return (
     <div
       className="min-h-screen"
@@ -89,10 +93,10 @@ export default function TransactionalEmailApiPage() {
             e2a
           </Link>
           <div className="flex items-center gap-4 text-[13px]">
-            <Link href="/email-api-for-ai-agents" style={{ color: "var(--fg-muted)" }}>
+            <Link href="/email-api-for-ai-agents" className="hidden sm:inline" style={{ color: "var(--fg-muted)" }}>
               Agent inboxes
             </Link>
-            <Link href="/api-docs" style={{ color: "var(--fg-muted)" }}>
+            <Link href="/api-docs" className="hidden sm:inline" style={{ color: "var(--fg-muted)" }}>
               API docs
             </Link>
             <Link
@@ -138,6 +142,22 @@ export default function TransactionalEmailApiPage() {
             >
               Read the API docs
             </Link>
+            {pricingPath && (
+              <Link
+                href={pricingPath}
+                className="inline-flex items-center px-4 py-2.5 text-[14px] font-medium"
+                style={{ color: "var(--fg-muted)" }}
+              >
+                View pricing
+              </Link>
+            )}
+            <a
+              href="https://github.com/tokencanopy/e2a"
+              className="inline-flex items-center px-4 py-2.5 text-[14px] font-medium"
+              style={{ color: "var(--fg-muted)" }}
+            >
+              View source
+            </a>
           </div>
         </section>
 

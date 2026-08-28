@@ -111,6 +111,21 @@ describe("(app) layout — auth gates", () => {
     );
   });
 
+  it("preserves the application sender setup step through sign-in", async () => {
+    mockAuth = { user: null, loading: false };
+    window.history.replaceState(null, "", "/get-started?step=address");
+
+    render(<AppLayout><div>page content</div></AppLayout>);
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Sign in with Google" }))
+        .toHaveAttribute(
+          "href",
+          "/api/auth/login?return_to=%2Fget-started%3Fstep%3Daddress",
+        ),
+    );
+  });
+
   it("renders children on the authenticated app surface", () => {
     const { container } = render(<AppLayout><div>page content</div></AppLayout>);
     expect(screen.getByText("page content")).toBeInTheDocument();

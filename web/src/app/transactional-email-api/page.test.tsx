@@ -1,5 +1,8 @@
 import { render, screen } from "@testing-library/react";
-import TransactionalEmailApiPage, { metadata } from "./page";
+import TransactionalEmailApiPage, {
+  metadata,
+  TransactionalEmailApiPageContent,
+} from "./page";
 
 jest.mock("next/link", () => {
   return function MockLink({
@@ -31,7 +34,33 @@ describe("transactional email API page", () => {
     expect(
       screen.getAllByRole("link", { name: /Create a sender/i })[0],
     ).toHaveAttribute("href", "/get-started?step=address");
+    expect(screen.queryByRole("link", { name: "View pricing" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View source" })).toHaveAttribute(
+      "href",
+      "https://github.com/tokencanopy/e2a",
+    );
     expect(metadata.description).toMatch(/receipts, verification messages, product notifications, and alerts/i);
+  });
+
+  it("keeps secondary navigation out of the 320px mobile row", () => {
+    render(<TransactionalEmailApiPage />);
+    for (const name of ["Agent inboxes", "API docs"]) {
+      expect(screen.getByRole("link", { name })).toHaveClass("hidden", "sm:inline");
+    }
+    expect(screen.getByRole("link", { name: "Create sender" })).not.toHaveClass("hidden");
+  });
+
+  it("links pricing only when the deployment provides a pricing route", () => {
+    const { rerender } = render(
+      <TransactionalEmailApiPageContent pricingPath="" />,
+    );
+    expect(screen.queryByRole("link", { name: "View pricing" })).not.toBeInTheDocument();
+
+    rerender(<TransactionalEmailApiPageContent pricingPath="/pricing" />);
+    expect(screen.getByRole("link", { name: "View pricing" })).toHaveAttribute(
+      "href",
+      "/pricing",
+    );
   });
 
   it("explains the existing agent resource to application developers", () => {
