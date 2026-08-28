@@ -166,14 +166,14 @@ func boundedUTF8(s string, maxCodePoints, maxBytes int) bool {
 		utf8.RuneCountInString(s) <= maxCodePoints
 }
 
-// boundedASCII reports whether s is nonempty printable-range ASCII (0x20
-// or above, below 0x80) within maxBytes.
+// boundedASCII reports whether s is nonempty printable ASCII (0x20
+// through 0x7e — DEL and C0 controls excluded) within maxBytes.
 func boundedASCII(s string, maxBytes int) bool {
 	if s == "" || len(s) > maxBytes {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] > 0x7f {
+		if s[i] < 0x20 || s[i] > 0x7e {
 			return false
 		}
 	}

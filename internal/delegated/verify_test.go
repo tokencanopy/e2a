@@ -295,6 +295,7 @@ func TestClassify(t *testing.T) {
 		{"not json header", 30, b64seg([]byte("hello")) + ".eyJhIjoxfQ.c2ln", false},
 		{"api key shape", 40, "e2a_acct_0123456789abcdef", false},
 		{"oauth token shape", 40, "ate2a_0123456789abcdef", false},
+		{"raw authorization at cap", MaxAuthorizationBytes, valid, true},
 		{"raw authorization over cap", MaxAuthorizationBytes + 1, valid, false},
 	}
 	for _, tc := range cases {
@@ -643,6 +644,121 @@ func TestVerifyClaimsObjectShape(t *testing.T) {
 }
 
 // --- JWKS cache and refresh policy ---
+
+// TestVerifyPerClaimLimitWiring proves checkClaims applies the subject
+// bound to jti and each required context claim (not only sub): each
+// accepts at exactly 128 code points / 512 UTF-8 bytes (via
+// supplementary-plane runes) and rejects at 129.
+func TestVerifyPerClaimLimitWiring(t *testing.T) {
+	is, rsaKey, _ := newIssuerServer(t)
+	clock := &fakeClock{now: time.Now()}
+	v := newTestVerifier(t, is, clock, nil)
+	issuer := is.srv.URL
+
+	supp := func(n int) string { return strings.Repeat("\U00020000", n) } // 4 bytes each
+
+	for _, claim := range []string{"jti", "membership_id", "workspace_id"} {
+		t.Run(claim+" at 128 supplementary code points", func(t *testing.T) {
+			tok := mint(t, clock, issuer, rsaKey, func(s *tokenSpec) { s.set[claim] = supp(128) })
+			if _, err := v.Verify(context.Background(), tok); err != nil {
+				t.Fatalf("%s at 128 cp / 512 bytes must verify: %v", claim, err)
+			}
+		})
+		t.Run(claim+" at 129 supplementary code points", func(t *testing.T) {
+			tok := mint(t, clock, issuer, rsaKey, func(s *tokenSpec) { s.set[claim] = supp(129) })
+			if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("%s at 129 cp must reject, got %v", claim, err)
+			}
+		})
+	}
+}
+
+// TestJWKSAcceptanceAtLimits exercises the JWKS caps at their limit (not
+// only over it): exactly 32 keys, a keyset body of exactly 65536 bytes,
+// and a kid of exactly 128 ASCII bytes are all accepted.
+func TestJWKSAcceptanceAtLimits(t *testing.T) {
+	t.Run("32 keys accepted", func(t *testing.T) {
+		is, _, _ := newIssuerServer(t)
+		clock := &fakeClock{now: time.Now()}
+		v := newTestVerifier(t, is, clock, nil)
+
+		signKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filler, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys := []jose.JSONWebKey{{Key: signKey.Public(), KeyID: "sign-32", Algorithm: "RS256", Use: "sig"}}
+		for i := 0; len(keys) < MaxJWKSKeys; i++ {
+			keys = append(keys, jose.JSONWebKey{Key: filler.Public(), KeyID: fmt.Sprintf("f-%03d", i), Algorithm: "RS256", Use: "sig"})
+		}
+		is.setKeys(keys) // exactly 32
+		tok := mint(t, clock, is.srv.URL, signKey, func(s *tokenSpec) {
+			s.header = map[string]any{"kid": "sign-32"}
+			s.key = signKey
+		})
+		if _, err := v.Verify(context.Background(), tok); err != nil {
+			t.Fatalf("a 32-key keyset must be accepted: %v", err)
+		}
+	})
+
+	t.Run("keyset body at 65536 bytes accepted", func(t *testing.T) {
+		is, _, _ := newIssuerServer(t)
+		clock := &fakeClock{now: time.Now()}
+		v := newTestVerifier(t, is, clock, nil)
+
+		signKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: signKey.Public(), KeyID: "pad-key", Algorithm: "RS256", Use: "sig"},
+		}}
+		base, err := json.Marshal(set)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Pad with whitespace right after the opening brace to reach exactly
+		// MaxJWKSBytes; JSON ignores structural whitespace.
+		if len(base) >= MaxJWKSBytes || base[0] != '{' {
+			t.Fatalf("unexpected keyset shape (%d bytes)", len(base))
+		}
+		padded := append([]byte{'{'}, append([]byte(strings.Repeat(" ", MaxJWKSBytes-len(base))), base[1:]...)...)
+		if len(padded) != MaxJWKSBytes {
+			t.Fatalf("padded body is %d bytes, want %d", len(padded), MaxJWKSBytes)
+		}
+		is.setRawJWKS(padded)
+		tok := mint(t, clock, is.srv.URL, signKey, func(s *tokenSpec) {
+			s.header = map[string]any{"kid": "pad-key"}
+			s.key = signKey
+		})
+		if _, err := v.Verify(context.Background(), tok); err != nil {
+			t.Fatalf("a keyset body at exactly %d bytes must be accepted: %v", MaxJWKSBytes, err)
+		}
+	})
+
+	t.Run("kid at 128 bytes accepted", func(t *testing.T) {
+		is, _, _ := newIssuerServer(t)
+		clock := &fakeClock{now: time.Now()}
+		v := newTestVerifier(t, is, clock, nil)
+
+		signKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kid := strings.Repeat("k", MaxKidBytes) // exactly 128
+		is.setKeys([]jose.JSONWebKey{{Key: signKey.Public(), KeyID: kid, Algorithm: "RS256", Use: "sig"}})
+		tok := mint(t, clock, is.srv.URL, signKey, func(s *tokenSpec) {
+			s.header = map[string]any{"kid": kid}
+			s.key = signKey
+		})
+		if _, err := v.Verify(context.Background(), tok); err != nil {
+			t.Fatalf("a 128-byte kid must be accepted: %v", err)
+		}
+	})
+}
 
 func TestJWKSRotationUnknownKidRefresh(t *testing.T) {
 	is, rsaKey, _ := newIssuerServer(t)
