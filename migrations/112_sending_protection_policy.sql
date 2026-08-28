@@ -1,4 +1,4 @@
--- 109_sending_protection_policy.sql
+-- 112_sending_protection_policy.sql
 -- Expand-only sending-protection policy authority. Runtime behavior remains disabled.
 
 CREATE TABLE IF NOT EXISTS sending_protection_runtime_policy (
