@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"golang.org/x/text/language"
 )
@@ -1231,6 +1232,19 @@ func grantConsentedScope(ar fosite.AuthorizeRequester, scope string) {
 }
 
 func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWriter, r *http.Request, ar fosite.AuthorizeRequester, userID, agentEmail, scope string) error {
+	// Same per-user agent cap the REST create path enforces (see
+	// EnforceAgentCreate in agents_write.go); this auto-create path had no
+	// enforcement at all before this check.
+	if a.enforcer != nil {
+		if err := a.enforcer.CheckAgentCreate(ctx, userID); err != nil {
+			if limErr, ok := limits.IsLimitExceeded(err); ok {
+				http.Error(w, limErr.Error(), http.StatusPaymentRequired)
+				return nil
+			}
+			return fmt.Errorf("check agent create: %w", err)
+		}
+	}
+
 	pool := a.oauthStorage.Pool()
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
