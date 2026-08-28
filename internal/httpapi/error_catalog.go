@@ -80,6 +80,7 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "events_log_disabled", Status: "501", Family: "availability"},
 	{Code: "limits_unavailable", Status: "503", Family: "availability", Retryable: true, DetailsSchema: "RetryAfterDetails"},
 	{Code: "inbound_mx_check_failed", Status: "503", Family: "availability", Retryable: true},
+	{Code: "auth_unavailable", Status: "503", Family: "availability", Retryable: true},
 	{Code: "internal_error", Status: "5xx", Family: "server", Retryable: true},
 	{Code: "method_not_allowed", Status: "405", Family: "server"},
 	{Code: "unsupported_media_type", Status: "415", Family: "server", FallbackOnly: true},

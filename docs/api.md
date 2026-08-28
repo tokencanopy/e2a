@@ -353,6 +353,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `events_log_disabled` | 501 | The events log is disabled on this deployment (expected on some hosted configurations). Not retryable. |
 | `limits_unavailable` | 503 | The limits subsystem is not available — transient, retryable. |
 | `inbound_mx_check_failed` | 503 | DNS could not be queried while validating an inherited subdomain inbox — transient, retryable. |
+| `auth_unavailable` | 503 | An auth backend could not judge the credential (e.g. a delegated-token verifier not yet ready, or the identity store) — transient, retryable. The credential itself was neither accepted nor rejected. |
 | **Server / fallback** | | |
 | `internal_error` | 5xx | Server-side failure; safe to retry with backoff unless the message says otherwise. |
 | `method_not_allowed` | 405 | Fallback code (wrong HTTP method on a real route). |

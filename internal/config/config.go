@@ -47,6 +47,7 @@ type Config struct {
 	Database         DatabaseConfig         `yaml:"database"`
 	OAuth            OAuthConfig            `yaml:"oauth"`
 	OIDC             OIDCConfig             `yaml:"oidc"`
+	Delegated        DelegatedConfig        `yaml:"delegated"`
 	Provisioning     ProvisioningConfig     `yaml:"provisioning"`
 	Signing          SigningConfig          `yaml:"signing"`
 	OutboundSMTP     OutboundSMTPConfig     `yaml:"outbound_smtp"`
@@ -192,6 +193,57 @@ type OIDCConfig struct {
 
 type SigningConfig struct {
 	HMACSecret string `yaml:"hmac_secret"`
+}
+
+// DelegatedClaimConfig names one required context claim on delegated
+// tokens and, optionally, the closed set of values it may carry.
+type DelegatedClaimConfig struct {
+	Name          string   `yaml:"name"`
+	AllowedValues []string `yaml:"allowed_values"`
+}
+
+// delegatedReservedClaims are the registered/validation claim names the
+// delegated verifier already owns; configuring one as a required or
+// forbidden claim is a policy contradiction and fails Validate.
+var delegatedReservedClaims = map[string]struct{}{
+	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "iat": {}, "nbf": {},
+	"jti": {}, "azp": {}, "scope": {}, "typ": {}, "alg": {},
+}
+
+// DelegatedConfig enables verification of externally issued OAuth 2.0
+// access tokens (RFC 9068 `at+jwt`) minted by one configured OIDC
+// issuer, mapped to local users via external_principal_mappings. Off by
+// default; when disabled, delegated-owned tokens are still never handed
+// to any other credential path — they just always fail authentication.
+// Every value here is deployment data: nothing operator-specific lives
+// in source or defaults.
+type DelegatedConfig struct {
+	// Enabled turns the verifier on. Override with E2A_DELEGATED_ENABLED.
+	Enabled bool `yaml:"enabled"`
+	// IssuerURL is the discovery base and the exact byte-for-byte `iss`
+	// comparison value — no alias or trailing-slash normalization. Must
+	// be https when env=production.
+	IssuerURL string `yaml:"issuer_url"`
+	// Audience is the exact single-string `aud` (array claims are
+	// rejected even when they contain this value).
+	Audience string `yaml:"audience"`
+	// AuthorizedParty is the exact required `azp` claim value.
+	AuthorizedParty string `yaml:"authorized_party"`
+	// RequiredScope is the exact singleton scope string the token must
+	// carry — the whole claim, not a member of a set.
+	RequiredScope string `yaml:"required_scope"`
+	// AllowedAlgorithms is the closed signature-algorithm allowlist. Only
+	// RS256 and ES256 are supported.
+	AllowedAlgorithms []string `yaml:"allowed_algorithms"`
+	// MaxTokenLifetimeSeconds bounds exp - iat.
+	MaxTokenLifetimeSeconds int `yaml:"max_token_lifetime_seconds"`
+	// ClockSkewSeconds admits an iat up to this far in the future and an
+	// exp up to this far in the past; it never relaxes the lifetime rule.
+	ClockSkewSeconds int `yaml:"clock_skew_seconds"`
+	// RequiredClaims must each be present as bounded nonempty strings.
+	RequiredClaims []DelegatedClaimConfig `yaml:"required_claims"`
+	// ForbiddenClaims must be absent entirely (null still rejects).
+	ForbiddenClaims []string `yaml:"forbidden_claims"`
 }
 
 // ProvisioningConfig gates the internal user-provisioning endpoint
@@ -446,7 +498,19 @@ func Load(path string) (*Config, error) {
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
 		Trash:      TrashConfig{RetentionDays: 30},
-		Env:        "development",
+		// Delegated verification is off by default. Only protocol-level
+		// values are defaulted (algorithm allowlist, lifetime, skew); the
+		// required/forbidden CLAIM lists are deployment identity policy
+		// (§10.3 "deployment data") and are deliberately NOT defaulted, so
+		// OSS ships no operator-specific claim names or role values. An
+		// enabling deployment must state its own claim policy — the enabled
+		// validation rejects empty required/forbidden lists.
+		Delegated: DelegatedConfig{
+			AllowedAlgorithms:       []string{"RS256", "ES256"},
+			MaxTokenLifetimeSeconds: 120,
+			ClockSkewSeconds:        5,
+		},
+		Env: "development",
 	}
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -513,6 +577,11 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_OIDC_USER_ID_CLAIM"); v != "" {
 		cfg.OIDC.UserIDClaim = v
+	}
+	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Delegated.Enabled = b
+		}
 	}
 	if v := os.Getenv("E2A_PROVISIONING_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -704,6 +773,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
 		}
 	}
+	if c.Delegated.Enabled {
+		if err := c.validateDelegated(); err != nil {
+			return err
+		}
+	}
 	if c.Provisioning.Enabled {
 		if c.Provisioning.Secret == "" {
 			return errors.New("config: provisioning.enabled requires the provisioning secret (E2A_PROVISIONING_SECRET) to be set")
@@ -737,6 +811,118 @@ func (c *Config) Validate() error {
 		if err != nil || addr.Address != v {
 			return fmt.Errorf("config: notifications.reply_to must be a bare email address (got %q)", v)
 		}
+	}
+	return nil
+}
+
+// validateDelegated enforces the enabled delegated-verifier policy at
+// startup: a malformed static configuration must never boot, while
+// issuer NETWORK unavailability is deliberately not checked here — the
+// verifier discovers in the background and delegated auth degrades to
+// 503 until the issuer answers.
+func (c *Config) validateDelegated() error {
+	d := &c.Delegated
+	var missing []string
+	if d.IssuerURL == "" {
+		missing = append(missing, "issuer_url")
+	}
+	if d.Audience == "" {
+		missing = append(missing, "audience")
+	}
+	if d.AuthorizedParty == "" {
+		missing = append(missing, "authorized_party")
+	}
+	if d.RequiredScope == "" {
+		missing = append(missing, "required_scope")
+	}
+	if len(d.AllowedAlgorithms) == 0 {
+		missing = append(missing, "allowed_algorithms")
+	}
+	if len(d.RequiredClaims) == 0 {
+		missing = append(missing, "required_claims")
+	}
+	if len(d.ForbiddenClaims) == 0 {
+		missing = append(missing, "forbidden_claims")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("config: delegated.enabled requires %s to be set", strings.Join(missing, ", "))
+	}
+	issuerURL, err := absoluteHTTPURL(d.IssuerURL)
+	if err != nil || issuerURL.RawQuery != "" || issuerURL.Fragment != "" {
+		return errors.New("config: delegated.issuer_url must be an absolute http(s) issuer URL without query or fragment")
+	}
+	if c.IsProduction() && issuerURL.Scheme != "https" {
+		return errors.New("config: delegated.issuer_url must use https when env=production")
+	}
+	if strings.ContainsAny(d.RequiredScope, " \t\r\n") {
+		return errors.New("config: delegated.required_scope must be a single scope token")
+	}
+	seenAlgs := map[string]struct{}{}
+	for _, alg := range d.AllowedAlgorithms {
+		if alg != "RS256" && alg != "ES256" {
+			return fmt.Errorf("config: delegated.allowed_algorithms contains unsupported algorithm %q (RS256 and ES256 are supported)", alg)
+		}
+		if _, dup := seenAlgs[alg]; dup {
+			return fmt.Errorf("config: delegated.allowed_algorithms lists %q twice", alg)
+		}
+		seenAlgs[alg] = struct{}{}
+	}
+	if d.MaxTokenLifetimeSeconds <= 0 {
+		return errors.New("config: delegated.max_token_lifetime_seconds must be positive")
+	}
+	if d.ClockSkewSeconds < 0 {
+		return errors.New("config: delegated.clock_skew_seconds must be nonnegative")
+	}
+	required := map[string]struct{}{}
+	for _, rc := range d.RequiredClaims {
+		if err := validateDelegatedClaimName(rc.Name, "required_claims"); err != nil {
+			return err
+		}
+		if _, dup := required[rc.Name]; dup {
+			return fmt.Errorf("config: delegated.required_claims lists %q twice", rc.Name)
+		}
+		required[rc.Name] = struct{}{}
+		seenVals := map[string]struct{}{}
+		for _, av := range rc.AllowedValues {
+			if av == "" {
+				return fmt.Errorf("config: delegated.required_claims %q has an empty allowed value", rc.Name)
+			}
+			if _, dup := seenVals[av]; dup {
+				return fmt.Errorf("config: delegated.required_claims %q lists allowed value %q twice", rc.Name, av)
+			}
+			seenVals[av] = struct{}{}
+		}
+	}
+	forbidden := map[string]struct{}{}
+	for _, name := range d.ForbiddenClaims {
+		if err := validateDelegatedClaimName(name, "forbidden_claims"); err != nil {
+			return err
+		}
+		if _, dup := forbidden[name]; dup {
+			return fmt.Errorf("config: delegated.forbidden_claims lists %q twice", name)
+		}
+		forbidden[name] = struct{}{}
+		if _, overlap := required[name]; overlap {
+			return fmt.Errorf("config: claim %q cannot be both required and forbidden", name)
+		}
+	}
+	return nil
+}
+
+// validateDelegatedClaimName rejects empty, oversized (>128 bytes),
+// non-ASCII, control-character, and reserved claim names in the
+// delegated claim lists.
+func validateDelegatedClaimName(name, list string) error {
+	if name == "" || len(name) > 128 {
+		return fmt.Errorf("config: delegated.%s claim names must be 1..128 bytes", list)
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < 0x20 || name[i] > 0x7f {
+			return fmt.Errorf("config: delegated.%s claim name %q must be printable ASCII", list, name)
+		}
+	}
+	if _, reserved := delegatedReservedClaims[name]; reserved {
+		return fmt.Errorf("config: delegated.%s must not list the reserved claim %q — the verifier already owns it", list, name)
 	}
 	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/agentauth"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -218,6 +219,8 @@ type API struct {
 	internalAPISecret     string                // optional; when empty, /api/internal/* endpoints return 503
 	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
+	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
+	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
@@ -574,6 +577,14 @@ func (a *API) ConfigureProvisioning(enabled bool, secret string) {
 	a.provisioningSecret = secret
 }
 
+// SetDelegatedIssuer wires the configured delegated issuer URL
+// (config delegated.issuer_url) that the external-principal attach
+// endpoint byte-compares request issuers against. Deliberately separate
+// from the verifier being enabled: mappings can be populated ahead of
+// flipping delegated verification on. Empty (the default) keeps attach
+// returning 503 delegated_verifier_not_configured.
+func (a *API) SetDelegatedIssuer(issuer string) { a.delegatedIssuer = issuer }
+
 // SetBillingHookURL wires in the URL of an external billing service's
 // user-event endpoint. When the user deletes their account, the API
 // HMAC-signs a JSON payload and POSTs it there so the billing service
@@ -684,6 +695,13 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	// deliberately not advertised in OpenAPI. Off by default — 503s
 	// unless provisioning.enabled + the provisioning secret are set.
 	r.HandleFunc("/api/internal/users/provision", a.handleProvisionUser).Methods("POST")
+
+	// Internal machine-to-machine endpoint: attach an external OIDC
+	// (issuer, subject) pair to an EXISTING user for delegated-token
+	// authentication (reconciliation of accounts that predate delegated
+	// provisioning). Same HMAC boundary as provisioning; additionally
+	// 503s until a delegated issuer is configured.
+	r.HandleFunc("/api/internal/users/external-principals/attach", a.handleAttachExternalPrincipal).Methods("POST")
 
 	// HITL magic-link pages (/v1/approve, /v1/reject) are NOT registered on
 	// this mux: the chi root (internal/httpapi) owns every /v1/* path and
@@ -807,10 +825,41 @@ func (a *API) authenticateUser(r *http.Request) (*identity.User, error) {
 	return p.User, nil
 }
 
+// authenticatePrincipal resolves the request credential to a principal.
+// When the request carries a one-shot auth memo (WithAuthMemo, installed
+// by the v1 request pipeline), the resolution is computed once and reused
+// for every later call within the same request — the rate-limit
+// middleware, the handler, and the 401 challenge re-run all share it.
+// This keeps the stateful delegated verifier from running more than once
+// per request (see WithAuthMemo).
 func (a *API) authenticatePrincipal(r *http.Request) (*identity.Principal, error) {
+	memo, _ := r.Context().Value(authMemoKey{}).(*authMemo)
+	if memo != nil && memo.done {
+		return memo.p, memo.err
+	}
+	p, err := a.resolvePrincipalOnce(r)
+	if memo != nil {
+		memo.done, memo.p, memo.err = true, p, err
+	}
+	return p, err
+}
+
+// resolvePrincipalOnce is the actual credential-resolution path: the
+// token-kind dispatch that authenticatePrincipal memoizes per request.
+func (a *API) resolvePrincipalOnce(r *http.Request) (*identity.Principal, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		bearer := stripBearerScheme(authHeader)
+		// Token-kind dispatch, first check: a compact JWT whose protected
+		// header says typ "at+jwt" is delegated-owned. The classification is
+		// parse-only (header bytes under exact size limits, no signature or
+		// network) and deliberately unconditional — disabled, unavailable,
+		// malformed, or invalid delegated tokens never fall through to the
+		// agent-JWT, OAuth, or API-key paths. Everything not positively
+		// classified keeps today's precedence exactly.
+		if delegated.Classify(len(authHeader), bearer) {
+			return a.principalFromDelegatedToken(r, bearer)
+		}
 		// auth.md agent access token (Slice 5b-2): an RS256 JWT we minted,
 		// resolving to an agent-scoped principal. Checked before the API-key
 		// path since a JWT is never a valid API key. A bearer that looks like
@@ -943,6 +992,13 @@ func (a *API) principalFromOAuthToken(r *http.Request, bearer string) (*identity
 // metadata document lands, add `resource_metadata="<url>"` here so MCP
 // clients can auto-discover the authorization server.
 func (a *API) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	// Availability failures (delegated verifier not ready, identity-store
+	// outage) are 503, not 401 — they say nothing about the credential, so
+	// no Bearer challenge is advertised.
+	if errors.Is(err, identity.ErrAuthUnavailable) {
+		http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("WWW-Authenticate", a.authChallenge(r, err))
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 }

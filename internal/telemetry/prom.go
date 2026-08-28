@@ -41,6 +41,8 @@ type Prom struct {
 	wsConnects         prometheus.Counter
 	wsDisconnects      *prometheus.CounterVec
 	wsRejected         *prometheus.CounterVec
+	delegatedFailures  *prometheus.CounterVec
+	delegatedRefresh   *prometheus.CounterVec
 	wsDrained          prometheus.Counter
 	wsSendFailures     prometheus.Counter
 	wsActive           prometheus.Gauge
@@ -102,7 +104,11 @@ var (
 	whNotifyOutcomeSet = set("sent", "permanent", "outage", "retryable", "skipped")
 	wsReasonSet        = set("replaced", "ping_timeout", "client_close", "error", "shutdown")
 	wsRejectSet        = set("unauthorized", "not_found", "forbidden", "upgrade_failed", "internal_error")
-	inboundSet         = set("processed", "noop", "failed_recipient_gone",
+	// Delegated-auth labels are category-only by contract: never subjects,
+	// issuer response text, token data, or per-check detail.
+	delegatedFailSet    = set("invalid_token", "unknown_subject", "verifier_unavailable", "identity_store_failure")
+	delegatedRefreshSet = set("success", "key_absent", "transport_error", "parse_error", "rate_limited")
+	inboundSet          = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
 	stateSet = set("available", "running", "retryable", "scheduled")
@@ -371,6 +377,14 @@ func NewProm(build string) *Prom {
 			Name: "e2a_contact_due_events_total",
 			Help: "contact.due outreach wake-ups, by outcome.",
 		}, []string{"outcome"}),
+		delegatedFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_delegated_auth_failures_total",
+			Help: "Delegated-token authentication failures by category (invalid_token, unknown_subject, verifier_unavailable, identity_store_failure).",
+		}, []string{"category"}),
+		delegatedRefresh: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_delegated_jwks_refresh_total",
+			Help: "Delegated-verifier JWKS refresh outcomes (success, key_absent, transport_error, parse_error, rate_limited).",
+		}, []string{"outcome"}),
 		notifyMissed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_notify_missed_total",
 			Help: "Fallback-poll wakeups that LISTEN/NOTIFY missed.",
@@ -387,6 +401,7 @@ func NewProm(build string) *Prom {
 		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
+		p.delegatedFailures, p.delegatedRefresh,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
 		p.threadResolution, p.threadHeaderParse, p.threadNull, p.threadViolations, p.threadRelationship,
@@ -499,6 +514,14 @@ func (p *Prom) SetWSActive(n int) { p.wsActive.Set(float64(n)) }
 
 func (p *Prom) WSHandshakeRejected(reason string) {
 	p.wsRejected.WithLabelValues(enum(wsRejectSet, reason)).Inc()
+}
+
+func (p *Prom) DelegatedAuthFailure(category string) {
+	p.delegatedFailures.WithLabelValues(enum(delegatedFailSet, category)).Inc()
+}
+
+func (p *Prom) DelegatedJWKSRefresh(outcome string) {
+	p.delegatedRefresh.WithLabelValues(enum(delegatedRefreshSet, outcome)).Inc()
 }
 
 func (p *Prom) WebhookFirstAttemptLatency(seconds float64) { p.whFirstTryLat.Observe(seconds) }
