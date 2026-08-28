@@ -6118,6 +6118,8 @@ func (s *Store) GetDashboardStats(ctx context.Context, userID string, windowDays
 
 	// 1) Today's usage and yesterday's baseline. LEFT JOIN trick keeps
 	// the query a single row even when one or both buckets are absent.
+	// Unit note (usage-based pricing v1): outbound_count is in RECIPIENT-
+	// DELIVERIES (a message to N recipients contributes N), not messages.
 	var todayInbound, todayOutbound, yesterdayInbound, yesterdayOutbound int
 	err := s.pool.QueryRow(ctx,
 		`SELECT

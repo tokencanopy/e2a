@@ -88,3 +88,39 @@ func TestWorkerAutoApproveQuotaTransientErrorFailsOpen(t *testing.T) {
 		t.Errorf("status = %q, want %q (transient quota error must fail open)", status, identity.MessageStatusReviewExpiredApproved)
 	}
 }
+
+// TestWorkerAutoApproveDailyCapLeavesHoldPending pins the resource-aware
+// sweep: a messages_day over-cap must NOT destroy the hold — the daily
+// window resets at UTC midnight and the sweep re-fires, so the hold stays
+// pending_review to be released tomorrow.
+func TestWorkerAutoApproveDailyCapLeavesHoldPending(t *testing.T) {
+	w, store, pool, smtpDone := setupWorker(t)
+	ctx := context.Background()
+
+	agent := prepareAgent(t, store, "quota-day", identity.HITLExpirationApprove)
+	msg, err := store.CreatePendingOutboundMessage(ctx, agent.ID,
+		[]string{"alice@example.com"}, nil, nil,
+		"Held at daily cap", "body", "", nil,
+		"send", "", "", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backdateExpiry(t, pool, msg.ID)
+
+	w.SetQuotaCheck(func(context.Context, string, int) error {
+		return &limits.LimitExceededError{Resource: "messages_day", Limit: 100, Current: 100}
+	})
+
+	w.RunOnce(ctx)
+
+	if msgs := smtpDone(); len(msgs) != 0 {
+		t.Fatalf("daily-capped auto-approve submitted %d SMTP messages, want zero", len(msgs))
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM messages WHERE id = $1`, msg.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != identity.MessageStatusPendingReview {
+		t.Errorf("status = %q, want %q (hold preserved until the UTC day resets)", status, identity.MessageStatusPendingReview)
+	}
+}

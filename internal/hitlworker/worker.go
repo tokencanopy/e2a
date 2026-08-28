@@ -262,14 +262,24 @@ func (w *Worker) autoApprove(ctx context.Context, c identity.ExpirationCandidate
 		return
 	}
 	// Flow-cap re-check before releasing the hold into delivery (see
-	// SetQuotaCheck). Over-cap → terminal auto-reject with the quota reason:
-	// the hold's TTL has already expired, so leaving it pending would just
-	// re-fire this sweep forever. A transient check error fails open — the
-	// external path is re-checked at worker claim time, and loopback is a
-	// single unit.
+	// SetQuotaCheck). Resource-aware, per design §4.7:
+	//   - messages_day  → SKIP, leaving the hold pending: the daily window
+	//     resets at UTC midnight and this sweep re-fires, so the hold is
+	//     released tomorrow instead of destroyed today. Terminally rejecting
+	//     on a cap that recovers in hours would burn one held draft per
+	//     sweep for the rest of the day.
+	//   - messages_month / storage_bytes → terminal auto-reject with the
+	//     quota reason: those don't recover on a sweep timescale, and
+	//     leaving the hold pending would re-fire this sweep forever.
+	// A transient check error fails open — the external path is re-checked
+	// at worker claim time, and loopback is a single unit.
 	if w.quotaCheck != nil {
 		if qerr := w.quotaCheck(ctx, agent.UserID, 1); qerr != nil {
 			if le, ok := limits.IsLimitExceeded(qerr); ok {
+				if le.Resource == "messages_day" {
+					log.Printf("[hitl-worker] auto-approve %s: daily send cap reached (%d/%d) — leaving hold pending until the UTC day resets", c.MessageID, le.Current, le.Limit)
+					return
+				}
 				log.Printf("[hitl-worker] auto-approve %s: %s cap reached (%d/%d) — rejecting", c.MessageID, le.Resource, le.Current, le.Limit)
 				w.autoReject(ctx, c.MessageID, fmt.Sprintf("auto-approve refused: %s limit exceeded (%d/%d)", le.Resource, le.Current, le.Limit))
 				return

@@ -32,19 +32,22 @@ func TestCheckApproveQuota(t *testing.T) {
 
 	t.Run("nil_enforcer_allows", func(t *testing.T) {
 		a := &API{}
-		if oerr := a.checkApproveQuota(ctx, "u1"); oerr != nil {
+		if oerr := a.checkApproveQuota(ctx, "u1", 1); oerr != nil {
 			t.Fatalf("nil enforcer: got %+v, want nil", oerr)
 		}
 	})
 
-	t.Run("under_cap_allows", func(t *testing.T) {
+	t.Run("under_cap_allows_and_forwards_real_units", func(t *testing.T) {
 		enf := &quotaFakeEnforcer{}
 		a := &API{enforcer: enf}
-		if oerr := a.checkApproveQuota(ctx, "u1"); oerr != nil {
+		// The approve probe must charge the merged draft's real recipient
+		// count, not a fixed 1 — a 50-recipient draft near the cap otherwise
+		// gets an untruthful "accepted".
+		if oerr := a.checkApproveQuota(ctx, "u1", 7); oerr != nil {
 			t.Fatalf("under cap: got %+v, want nil", oerr)
 		}
-		if enf.units != 1 {
-			t.Errorf("probe units = %d, want 1", enf.units)
+		if enf.units != 7 {
+			t.Errorf("probe units = %d, want 7 (real merged recipient count)", enf.units)
 		}
 	})
 
@@ -54,7 +57,7 @@ func TestCheckApproveQuota(t *testing.T) {
 			Limits: limits.Limits{PlanCode: "free", UpgradeURL: "https://e2a.dev/api/billing/portal"},
 		}}
 		a := &API{enforcer: enf}
-		oerr := a.checkApproveQuota(ctx, "u1")
+		oerr := a.checkApproveQuota(ctx, "u1", 1)
 		if oerr == nil {
 			t.Fatal("over cap: got nil, want 402")
 		}
@@ -75,7 +78,7 @@ func TestCheckApproveQuota(t *testing.T) {
 	t.Run("transient_error_fails_open", func(t *testing.T) {
 		enf := &quotaFakeEnforcer{sendErr: errors.New("db down")}
 		a := &API{enforcer: enf}
-		if oerr := a.checkApproveQuota(ctx, "u1"); oerr != nil {
+		if oerr := a.checkApproveQuota(ctx, "u1", 1); oerr != nil {
 			t.Fatalf("transient error: got %+v, want nil (fail open)", oerr)
 		}
 	})

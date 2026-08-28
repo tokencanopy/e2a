@@ -722,6 +722,11 @@ func Load(path string) (*Config, error) {
 // running with any of these weakens approval tokens and derived encryption keys
 // and approve HITL messages.
 func (c *Config) Validate() error {
+	// A negative daily cap is always a mistake (it would silently 402 every
+	// send); 0 is a legal hard-block and absent/nil means no daily policy.
+	if c.Limits.MaxMessagesDay != nil && *c.Limits.MaxMessagesDay < 0 {
+		return fmt.Errorf("config: limits.max_messages_day is %d; must be >= 0 (omit the key for no daily cap)", *c.Limits.MaxMessagesDay)
+	}
 	if c.IsProduction() {
 		if c.Signing.HMACSecret == "" {
 			return errors.New("config: signing.hmac_secret (or E2A_HMAC_SECRET) must be set when env=production")

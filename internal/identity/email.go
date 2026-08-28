@@ -21,18 +21,22 @@ func NormalizeEmail(email string) string {
 }
 
 // UniqueRecipientCount returns the number of distinct recipients across the
-// given address lists, normalized via NormalizeEmail (lower-case + trim) so
-// "Alice@x.com" in To and "alice@x.com" in CC count once. Empty entries are
-// skipped. This is THE canonical recipient-unit primitive: outbound metering
-// (one recipient-delivery per unit), the accept-time cap pre-check, the
-// fire-time quota gate, and the sendramp reservation must all count with this
-// one function — two normalizers that ever disagree would desynchronize the
-// metered units from the persisted message_recipients rows.
+// given address lists, normalized via NormalizeMailboxAddress (addr-spec
+// extraction + lower-case + trim) so "Bob <b@x.com>" in To and "b@x.com" in
+// CC count once, as do case variants. Empty entries are skipped. This is THE
+// canonical recipient-unit primitive: outbound metering (one
+// recipient-delivery per unit), the accept-time cap pre-check, the approve
+// probe, and the fire-time quota gate must all count with this one function —
+// counting raw request strings would over-charge display-name duplicates at
+// accept relative to the compose-normalized set the terminal meter and the
+// SMTP envelope actually see. For already-normalized bare addresses (the
+// terminal meter's stored to/cc/bcc, the claim's envelope recipients) this is
+// byte-identical to NormalizeEmail.
 func UniqueRecipientCount(lists ...[]string) int {
 	seen := make(map[string]struct{})
 	for _, list := range lists {
 		for _, recipient := range list {
-			recipient = NormalizeEmail(recipient)
+			recipient = NormalizeMailboxAddress(recipient)
 			if recipient != "" {
 				seen[recipient] = struct{}{}
 			}

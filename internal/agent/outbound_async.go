@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"sort"
 	"strconv"
@@ -91,6 +92,15 @@ func nextUTCMidnight(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
 }
 
+// dailyDeferJitter maps a message ID to a stable offset in [0, 1h) so a
+// daily-cap-deferred backlog wakes spread across the first hour of the new
+// UTC day rather than all at once.
+func dailyDeferJitter(messageID string) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(messageID))
+	return time.Duration(h.Sum32()%3600) * time.Second
+}
+
 // NewOutboundSendStore builds the outboundsend.Store adapter for main.go.
 func NewOutboundSendStore(store *identity.Store, outbox webhookpub.Outbox, usageTracker usage.UsageTracker) *outboundSendStore {
 	return &outboundSendStore{store: store, outbox: outbox, usage: usageTracker}
@@ -171,10 +181,33 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 			log.Printf("[outbound-send:%s] fire-time quota check failed, proceeding (fail open): %v", p.ID, qerr)
 		} else if over {
 			if resource == "messages_day" {
+				// Bounded deferral, mirroring the worker's outage/ramp horizon:
+				// past SendRetryHorizon (from max(accept, scheduled) — the same
+				// anchor pastRetryHorizon uses) the message is terminally failed
+				// instead of snoozing forever. Without this bound, an account
+				// whose daily cap is 0 (a deliberate hard block) or persistently
+				// exhausted would strand messages in 'accepted' limbo with no
+				// email.failed and no signal to the caller.
+				anchor := p.CreatedAt
+				if p.ScheduledAt != nil && p.ScheduledAt.After(anchor) {
+					anchor = *p.ScheduledAt
+				}
+				if !anchor.IsZero() && time.Since(anchor) > outboundsend.SendRetryHorizon {
+					if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+						"daily_send_cap_timeout: daily send limit still exceeded past the retry horizon",
+						delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); failErr != nil {
+						return nil, failErr
+					}
+					return nil, nil
+				}
 				if relErr := a.store.ReleaseOutboundSendClaim(ctx, p.ID, jobID); relErr != nil {
 					return nil, fmt.Errorf("release outbound send claim after daily-cap deferral: %w", relErr)
 				}
-				retryAt := nextUTCMidnight(time.Now().UTC())
+				// Deterministic per-message jitter spreads the deferred backlog
+				// over the first hour after the UTC reset instead of re-racing
+				// the cap in one thundering herd at exactly 00:00:00Z (the rate
+				// gate's rateJitter precedent).
+				retryAt := nextUTCMidnight(time.Now().UTC()).Add(dailyDeferJitter(p.ID))
 				log.Printf("[outbound-send:%s] daily send cap exhausted at fire time, deferring to %s", p.ID, retryAt.Format(time.RFC3339))
 				return nil, &outboundsend.DailyQuotaDeferredError{RetryAt: retryAt}
 			}

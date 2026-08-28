@@ -30,3 +30,27 @@ func TestUniqueRecipientCount(t *testing.T) {
 		})
 	}
 }
+
+// Display-name and angle-bracket forms must collapse onto their addr-spec:
+// the accept-time pre-check counts request strings, the terminal meter counts
+// compose-normalized addresses — they must agree on what a send costs.
+func TestUniqueRecipientCount_MailboxForms(t *testing.T) {
+	cases := []struct {
+		name string
+		to   []string
+		cc   []string
+		want int
+	}{
+		{"display_name_dupe", []string{"Bob <b@x.test>"}, []string{"b@x.test"}, 1},
+		{"angle_only_dupe", []string{"<b@x.test>"}, []string{"b@x.test"}, 1},
+		{"display_name_distinct", []string{"Bob <b@x.test>"}, []string{"Carol <c@x.test>"}, 2},
+		{"case_in_display_form", []string{"Bob <B@X.test>"}, []string{"b@x.test"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UniqueRecipientCount(tc.to, tc.cc); got != tc.want {
+				t.Errorf("UniqueRecipientCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

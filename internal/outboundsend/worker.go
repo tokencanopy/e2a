@@ -70,11 +70,11 @@ const rateErrorSnoozeInterval = time.Minute
 // the window-boundary race — cannot hot-loop the queue.
 const rateMinSnooze = 250 * time.Millisecond
 
-// sendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
+// SendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
 // outage-snoozing job stops deferring and is declared terminally failed. 72h matches
 // the industry MTA retry horizon (and the webhook deliverer's envelope) — long enough
 // to ride out a multi-hour regional SES incident, not forever.
-const sendRetryHorizon = 72 * time.Hour
+const SendRetryHorizon = 72 * time.Hour
 
 // OutboundSendArgs drives one outbound send. Args carry only the message id; the
 // worker re-reads the messages row (the source of truth) each attempt.
@@ -99,7 +99,7 @@ type SendJob struct {
 	RawMessage   []byte // composed MIME
 	SentAs       string // From identity decided at accept ("own_address"|"relay")
 	// AcceptedAt is messages.created_at — the outage tail's clock, so a job that has
-	// been snoozing through an outage past sendRetryHorizon can be terminated.
+	// been snoozing through an outage past SendRetryHorizon can be terminated.
 	AcceptedAt time.Time
 	// ScheduledAt is messages.scheduled_at for a scheduled send (zero for an
 	// immediate one). The retry horizon is measured from max(AcceptedAt,
@@ -137,7 +137,7 @@ func (j *SendJob) pastRetryHorizon() bool {
 	if j.ScheduledAt.After(start) {
 		start = j.ScheduledAt
 	}
-	return !start.IsZero() && time.Since(start) > sendRetryHorizon
+	return !start.IsZero() && time.Since(start) > SendRetryHorizon
 }
 
 // submissionAnchor is this job's acceptance→terminal SLI baseline — see the
@@ -421,7 +421,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 					return err
 				}
 				_ = w.ramp.Release(ctx, j.MessageID)
-				return river.JobCancel(fmt.Errorf("sending ramp unavailable past %s horizon: %w", sendRetryHorizon, rerr))
+				return river.JobCancel(fmt.Errorf("sending ramp unavailable past %s horizon: %w", SendRetryHorizon, rerr))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after ramp-check failure: %w", err)
@@ -437,7 +437,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 				if err := w.ramp.Release(ctx, j.MessageID); err != nil {
 					return fmt.Errorf("release ramp reservation after timeout: %w", err)
 				}
-				return river.JobCancel(fmt.Errorf("sending ramp deferred past %s horizon", sendRetryHorizon))
+				return river.JobCancel(fmt.Errorf("sending ramp deferred past %s horizon", SendRetryHorizon))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after ramp deferral: %w", err)
@@ -473,7 +473,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 				if w.ramp != nil && j.rampEligible() {
 					_ = w.ramp.Release(ctx, j.MessageID)
 				}
-				return river.JobCancel(fmt.Errorf("send rate gate unavailable past %s horizon: %w", sendRetryHorizon, rerr))
+				return river.JobCancel(fmt.Errorf("send rate gate unavailable past %s horizon: %w", SendRetryHorizon, rerr))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate-gate failure: %w", err)
@@ -491,7 +491,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 						return fmt.Errorf("release ramp reservation after send-rate timeout: %w", err)
 					}
 				}
-				return river.JobCancel(fmt.Errorf("send rate deferred past %s horizon", sendRetryHorizon))
+				return river.JobCancel(fmt.Errorf("send rate deferred past %s horizon", SendRetryHorizon))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
@@ -588,7 +588,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	// Provider outage (relay unreachable) — snooze WITHOUT burning an attempt so a
 	// multi-hour SES incident defers instead of exhausting MaxSendAttempts and
 	// mass-firing false email.failed (§8 circuit breaker). Bounded by the retry
-	// horizon: once the accept is older than sendRetryHorizon, give up terminally
+	// horizon: once the accept is older than SendRetryHorizon, give up terminally
 	// (provenance 'local': the provider never confirmed a rejection).
 	if out.Outage {
 		if j.pastRetryHorizon() {
@@ -598,7 +598,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if w.ramp != nil && j.rampEligible() {
 				_ = w.ramp.Release(ctx, j.MessageID)
 			}
-			return fmt.Errorf("outbound send failed (provider outage past %s horizon): %w", sendRetryHorizon, out.Err)
+			return fmt.Errorf("outbound send failed (provider outage past %s horizon): %w", SendRetryHorizon, out.Err)
 		}
 		if err := w.store.RecordTemporaryFailure(ctx, j.MessageID, job.ID, job.Attempt, observedAt, out.Err.Error()); err != nil {
 			return fmt.Errorf("record outbound provider outage and release claim: %w", err)
